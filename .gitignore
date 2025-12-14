@@ -1,0 +1,45 @@
+# Rust
+target/
+debug/
+release/
+*.rs.bk
+*.rlib
+*.prof*
+.idea/
+*.log
+.env*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.tmp
+
+# Build artifacts
+Cargo.lock
+
+# Test coverage
+coverage/
+*.gcda
+*.gcno
+
+# Documentation
+/book/
+
+# Local configuration
+.env.local
+.env.*.local
+
+
+
+# Added by cargo
+
+/target
+repomix-output.xml
+spec-kit

@@ -1,0 +1,71 @@
+[package]
+name = "aikit"
+version = "0.1.0"
+edition = "2021"
+authors = ["@aroff"]
+description = "AIKIT - Rust Spec Kit CLI Complete Reimplementation"
+license = "MIT"
+
+[dependencies]
+# CLI framework for interactive TUI
+tui-framework = { path = "../cli-framework" }
+
+# Command-line argument parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# HTTP client for GitHub API
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+
+# ZIP archive handling
+zip = "0.6"
+
+# JSON serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Git operations
+git2 = "0.18"
+
+# Error handling
+anyhow = "1.0"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# TUI rendering (via cli-framework, but may need direct access)
+ratatui = "0.27"
+crossterm = "0.28"
+
+# Directory traversal
+walkdir = "2"
+
+# Tool detection
+which = "6.0"
+
+# Temporary directories
+tempfile = "3.10"
+
+# TTY detection
+atty = "0.2"
+
+# TOML parsing
+toml = "0.8"
+
+# Date/time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# YAML frontmatter parsing
+yaml-front-matter = "0.1"
+serde_yaml = "0.9"
+
+[dev-dependencies]
+# Testing utilities
+mockito = "1.2"
+tempfile = "3.10"
+which = "6.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

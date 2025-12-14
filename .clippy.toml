@@ -1,0 +1,3 @@
+# Clippy configuration for AIKIT
+msrv = "1.75"
+
