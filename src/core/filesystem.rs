@@ -8,10 +8,12 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// .aikit/ directory manager
+#[allow(dead_code)]
 pub struct AikDirectory {
     base_path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl AikDirectory {
     /// Create a new .aikit/ directory manager
     pub fn new(base_path: PathBuf) -> Self {
@@ -130,10 +132,9 @@ impl AikDirectory {
                 return Ok(());
             }
 
-            let mut entries = fs::read_dir(dir)?;
-            let mut _has_content = false;
+            let entries = fs::read_dir(dir)?;
 
-            while let Some(entry) = entries.next() {
+            for entry in entries {
                 let entry = entry?;
                 let path = entry.path();
 
@@ -141,12 +142,12 @@ impl AikDirectory {
                     remove_empty_dirs(&path)?;
                     // Check again after recursive cleanup
                     if path.exists() && fs::read_dir(&path)?.next().is_some() {
-                        has_content = true;
+                        // Directory still has content, keep it
                     } else if path.exists() {
                         fs::remove_dir(path)?;
                     }
                 } else {
-                    has_content = true;
+                    // File exists, directory has content
                 }
             }
 
@@ -178,10 +179,12 @@ impl AikDirectory {
 }
 
 /// .gitignore management for .aikit/ directory
+#[allow(dead_code)]
 pub struct GitIgnoreManager {
     gitignore_path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl GitIgnoreManager {
     /// Create a new .gitignore manager
     pub fn new(project_root: &Path) -> Self {

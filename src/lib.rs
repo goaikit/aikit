@@ -4,6 +4,8 @@
 //! enabling the creation, distribution, and installation of reusable content
 //! (prompts, templates, scripts, configurations) across different AI agents.
 
+#![allow(dead_code)]
+
 pub mod cli;
 pub mod core;
 pub mod fs;

@@ -43,13 +43,13 @@ pub fn execute(_args: CheckArgs) -> Result<()> {
 
     // Check all agents
     for agent in get_agent_configs() {
-        let result = check_agent_tool(&agent);
-        let status = if result.is_ide_based {
+        let status = if !agent.requires_cli {
             "IDE-based, no CLI check".to_string()
-        } else if result.available {
-            format!("✓ Found at {}", result.path.as_ref().unwrap().display())
         } else {
-            "✗ Not found".to_string()
+            match check_agent_tool(&agent) {
+                Ok(_) => "✓ Tool available".to_string(),
+                Err(_) => "✗ Tool not found".to_string(),
+            }
         };
         items.push(TreeItem::new(format!("{}: {}", agent.name, status)));
     }

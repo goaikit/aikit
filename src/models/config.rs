@@ -23,9 +23,8 @@ pub struct AikConfig {
     pub preferences: UserPreferences,
 }
 
-impl AikConfig {
-    /// Create default configuration
-    pub fn default() -> Self {
+impl Default for AikConfig {
+    fn default() -> Self {
         Self {
             version: "1.0".to_string(),
             install_dir: ".aikit".to_string(),
@@ -34,7 +33,9 @@ impl AikConfig {
             preferences: UserPreferences::default(),
         }
     }
+}
 
+impl AikConfig {
     /// Load configuration from file
     pub fn load(path: &PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
@@ -134,12 +135,6 @@ impl AikConfig {
         );
 
         agents
-    }
-}
-
-impl Default for AikConfig {
-    fn default() -> Self {
-        Self::default()
     }
 }
 

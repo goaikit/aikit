@@ -23,6 +23,7 @@ impl ScriptVariant {
     }
 
     /// Get the file extension for this script variant
+    #[allow(dead_code)]
     pub fn extension(&self) -> &'static str {
         match self {
             Self::Sh => "sh",
@@ -246,6 +247,7 @@ pub fn get_agent_configs() -> Vec<AgentConfig> {
 
 impl AgentConfig {
     /// Check if agent supports package installation
+    #[allow(dead_code)]
     pub fn supports_packages(&self) -> bool {
         // All agents in the current configuration support packages
         // In the future, this could be a configuration field
@@ -253,11 +255,13 @@ impl AgentConfig {
     }
 
     /// Get the namespace prefix for package commands
+    #[allow(dead_code)]
     pub fn get_namespace_prefix(&self, package_name: &str) -> String {
         format!("{}.{}", package_name, self.key)
     }
 
     /// Generate package command content for this agent
+    #[allow(dead_code)]
     pub fn generate_package_command(
         &self,
         package_name: &str,
@@ -298,6 +302,7 @@ impl AgentConfig {
     }
 
     /// Apply agent-specific overrides to package content
+    #[allow(dead_code)]
     pub fn apply_overrides(
         &self,
         content: &str,
@@ -319,6 +324,7 @@ impl AgentConfig {
     }
 
     /// Get the full path for a package command file
+    #[allow(dead_code)]
     pub fn get_package_command_path(
         &self,
         package_name: &str,
@@ -368,6 +374,7 @@ pub fn validate_agent_key(key: &str) -> Result<(), String> {
 }
 
 /// Get all agent keys
+#[allow(dead_code)]
 pub fn get_all_agent_keys() -> Vec<String> {
     get_agent_configs().iter().map(|a| a.key.clone()).collect()
 }
@@ -376,6 +383,7 @@ pub fn get_all_agent_keys() -> Vec<String> {
 ///
 /// Represents user's agent selection (interactive or CLI argument).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum AgentSelection {
     /// Agent key selected
     Selected(String),

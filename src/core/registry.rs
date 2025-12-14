@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 /// Registry manager for coordinating local and remote registries
 pub struct RegistryManager {
+    #[allow(dead_code)]
     config: RegistryConfig,
     local: LocalRegistry,
     remotes: Vec<RemoteRegistry>,
@@ -68,6 +69,7 @@ impl RegistryManager {
     }
 
     /// Refresh a remote registry
+    #[allow(dead_code)]
     async fn refresh_remote(
         &self,
         remote: &mut RemoteRegistry,

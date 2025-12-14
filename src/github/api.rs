@@ -11,12 +11,14 @@ use reqwest::Client;
 use std::time::Duration;
 
 /// GitHub API client
+#[allow(dead_code)]
 pub struct GitHubClient {
     client: Client,
     base_url: String,
     token: Option<String>,
 }
 
+#[allow(dead_code)]
 impl GitHubClient {
     /// Create a new GitHub API client
     pub fn new(token: Option<String>) -> Result<Self> {

@@ -6,7 +6,7 @@
 use crate::models::package::InstalledPackage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Package lock file entry
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,7 +126,7 @@ pub struct LockManager {
 
 impl LockManager {
     /// Create a new lock manager
-    pub fn new(aikit_dir: &PathBuf) -> Self {
+    pub fn new(aikit_dir: &Path) -> Self {
         let lock_file_path = aikit_dir.join("packages.lock");
         let lock = PackageLock::load_from_file(&lock_file_path).unwrap_or_default();
 
