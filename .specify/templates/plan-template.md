@@ -31,7 +31,11 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+**CLI-First**: Verify feature exposes command-line interface with proper text I/O protocol
+**Template-Driven**: Confirm self-contained implementation with clear scope boundaries
+**Cross-Platform**: Ensure no platform-exclusive dependencies or assumptions
+**Test-First**: Demonstrate TDD approach with failing tests written before implementation
+**User-Centric**: Validate progressive disclosure and comprehensive error handling
 
 ## Project Structure
 

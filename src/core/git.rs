@@ -1,138 +1,269 @@
-//! Git repository operations
+//! GitHub integration for package distribution
 //!
-//! This module handles Git repository initialization and detection.
+//! This module handles GitHub API interactions for package discovery,
+//! downloading, and publishing.
 
-use anyhow::{Context, Result};
-use std::path::Path;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
-/// Initialize a Git repository at the given path
-pub fn init_git_repo<P: AsRef<Path>>(path: P) -> Result<()> {
-    let path = path.as_ref();
-    git2::Repository::init(path)
-        .with_context(|| format!("Failed to initialize git repository at {}", path.display()))?;
-    Ok(())
+/// GitHub API client for package operations
+pub struct GitHubClient {
+    client: Client,
+    token: Option<String>,
 }
 
-/// Check if a Git repository exists at the given path
-pub fn is_git_repo<P: AsRef<Path>>(path: P) -> bool {
-    let path = path.as_ref();
-    git2::Repository::open(path).is_ok()
+impl GitHubClient {
+    /// Create a new GitHub client
+    pub fn new(token: Option<String>) -> Self {
+        Self {
+            client: Client::new(),
+            token,
+        }
+    }
+
+    /// Get package.toml from a GitHub repository
+    pub async fn get_package_manifest(
+        &self,
+        owner: &str,
+        repo: &str,
+        ref_: Option<&str>,
+    ) -> Result<PackageManifest, Box<dyn std::error::Error>> {
+        let ref_param = ref_.unwrap_or("main");
+        let url = format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/package.toml",
+            owner, repo, ref_param
+        );
+
+        let mut request = self.client.get(&url);
+
+        if let Some(token) = &self.token {
+            request = request.header("Authorization", format!("token {}", token));
+        }
+
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(format!("Failed to fetch package.toml: HTTP {}", response.status()).into());
+        }
+
+        let content = response.text().await?;
+        let manifest: PackageManifest = toml::from_str(&content)?;
+
+        Ok(manifest)
+    }
+
+    /// Download repository archive (ZIP)
+    pub async fn download_archive(
+        &self,
+        owner: &str,
+        repo: &str,
+        ref_: Option<&str>,
+        dest: &PathBuf,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let ref_param = ref_.unwrap_or("main");
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/zipball/{}",
+            owner, repo, ref_param
+        );
+
+        let mut request = self.client.get(&url);
+
+        if let Some(token) = &self.token {
+            request = request.header("Authorization", format!("token {}", token));
+            request = request.header("User-Agent", "AIKIT-Package-Manager/1.0");
+        }
+
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(format!("Failed to download archive: HTTP {}", response.status()).into());
+        }
+
+        let bytes = response.bytes().await?;
+        std::fs::write(dest, bytes)?;
+
+        Ok(())
+    }
+
+    /// Search repositories for packages
+    pub async fn search_repositories(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<RepositoryInfo>, Box<dyn std::error::Error>> {
+        // First try searching for repos with package.toml files
+        let package_search = format!("{} filename:package.toml", query);
+        let url = format!(
+            "https://api.github.com/search/repositories?q={}&per_page={}&sort=stars&order=desc",
+            urlencoding::encode(&package_search),
+            limit
+        );
+
+        let mut request = self.client.get(&url);
+        if let Some(token) = &self.token {
+            request = request.header("Authorization", format!("token {}", token));
+            request = request.header("User-Agent", "AIKIT-Package-Manager/1.0");
+        }
+
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            return Err(format!("Package search failed: HTTP {}", response.status()).into());
+        }
+
+        let search_result: SearchResult = response.json().await?;
+        let mut results = search_result.items;
+
+        // If we didn't find enough results, also search for AI-related repositories
+        if results.len() < limit {
+            let ai_search = format!(
+                "{} AI agent OR AI assistant OR LLM tool OR language model",
+                query
+            );
+            let url2 = format!(
+                "https://api.github.com/search/repositories?q={}&per_page={}&sort=stars&order=desc",
+                urlencoding::encode(&ai_search),
+                limit - results.len()
+            );
+
+            let mut request2 = self.client.get(&url2);
+            if let Some(token) = &self.token {
+                request2 = request2.header("Authorization", format!("token {}", token));
+                request2 = request2.header("User-Agent", "AIKIT-Package-Manager/1.0");
+            }
+
+            if let Ok(response2) = request2.send().await {
+                if response2.status().is_success() {
+                    if let Ok(search_result2) = response2.json::<SearchResult>().await {
+                        // Filter out duplicates and add new results
+                        let existing_names: std::collections::HashSet<_> =
+                            results.iter().map(|r| &r.full_name).collect();
+
+                        let new_results: Vec<_> = search_result2
+                            .items
+                            .into_iter()
+                            .filter(|r| !existing_names.contains(&r.full_name))
+                            .collect();
+
+                        results.extend(new_results);
+                    }
+                }
+            }
+        }
+
+        // Limit results
+        results.truncate(limit);
+        Ok(results)
+    }
+
+    /// Create a GitHub release
+    pub async fn create_release(
+        &self,
+        owner: &str,
+        repo: &str,
+        release: &ReleaseInfo,
+    ) -> Result<ReleaseResponse, Box<dyn std::error::Error>> {
+        if self.token.is_none() {
+            return Err("GitHub token required for creating releases".into());
+        }
+
+        let url = format!("https://api.github.com/repos/{}/{}/releases", owner, repo);
+
+        let response = self
+            .client
+            .post(&url)
+            .header(
+                "Authorization",
+                format!("token {}", self.token.as_ref().unwrap()),
+            )
+            .header("User-Agent", "AIKIT-Package-Manager/1.0")
+            .json(release)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("Failed to create release: HTTP {}", response.status()).into());
+        }
+
+        let release_response: ReleaseResponse = response.json().await?;
+        Ok(release_response)
+    }
 }
 
-/// Create initial commit in Git repository
-pub fn create_initial_commit<P: AsRef<Path>>(path: P) -> Result<()> {
-    let path_ref = path.as_ref();
-    let path_display = path_ref.display().to_string();
-    let repo = git2::Repository::open(path_ref)
-        .with_context(|| format!("Failed to open git repository at {}", path_display))?;
-
-    let mut index = repo.index().context("Failed to get repository index")?;
-    index.add_all(["*"].iter(), git2::IndexAddOption::DEFAULT, None)?;
-    index.write().context("Failed to write index")?;
-
-    let tree_id = index.write_tree().context("Failed to write tree")?;
-    let tree = repo.find_tree(tree_id).context("Failed to find tree")?;
-
-    let sig =
-        git2::Signature::now("AIKIT", "aikit@example.com").context("Failed to create signature")?;
-
-    repo.commit(Some("HEAD"), &sig, &sig, "Initial commit", &tree, &[])
-        .context("Failed to create commit")?;
-
-    Ok(())
+impl Default for GitHubClient {
+    fn default() -> Self {
+        Self::new(None)
+    }
 }
 
-/// Validate branch name against GitHub's constraints
-///
-/// GitHub branch names must:
-/// - Not be longer than 244 bytes (UTF-8 encoded)
-/// - Not contain certain special characters
-/// - Not be empty
-/// - Not start with a dot or slash
-/// - Not contain consecutive dots
-/// - Not end with a dot or slash
-/// - Not contain sequences like `..`, `@{`, `\`, or spaces
-pub fn validate_branch_name(branch_name: &str) -> Result<(), String> {
-    if branch_name.is_empty() {
-        return Err("Branch name cannot be empty".to_string());
-    }
-
-    // Check length (244 bytes in UTF-8)
-    if branch_name.len() > 244 {
-        return Err(format!(
-            "Branch name '{}' exceeds GitHub's 244-byte limit ({} bytes)",
-            branch_name,
-            branch_name.len()
-        ));
-    }
-
-    // Check for invalid starting characters
-    if branch_name.starts_with('.') || branch_name.starts_with('/') {
-        return Err("Branch name cannot start with '.' or '/'".to_string());
-    }
-
-    // Check for invalid ending characters
-    if branch_name.ends_with('.') || branch_name.ends_with('/') {
-        return Err("Branch name cannot end with '.' or '/'".to_string());
-    }
-
-    // Check for invalid sequences
-    if branch_name.contains("..") {
-        return Err("Branch name cannot contain '..'".to_string());
-    }
-
-    if branch_name.contains("@{") {
-        return Err("Branch name cannot contain '@{{'".to_string());
-    }
-
-    if branch_name.contains('\\') {
-        return Err("Branch name cannot contain '\\'".to_string());
-    }
-
-    if branch_name.contains(' ') {
-        return Err("Branch name cannot contain spaces".to_string());
-    }
-
-    // Check for consecutive dots (already covered by ".." but be explicit)
-    if branch_name.contains("...") {
-        return Err("Branch name cannot contain consecutive dots".to_string());
-    }
-
-    Ok(())
+/// Package manifest from package.toml
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageManifest {
+    pub package: PackageInfo,
+    #[serde(default)]
+    pub commands: std::collections::HashMap<String, CommandInfo>,
+    #[serde(default)]
+    pub artifacts: std::collections::HashMap<String, String>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackageInfo {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    #[serde(default)]
+    pub authors: Vec<String>,
+}
 
-    #[test]
-    fn test_is_git_repo() {
-        let temp_dir = TempDir::new().unwrap();
-        assert!(!is_git_repo(temp_dir.path()));
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandInfo {
+    pub description: String,
+    pub template: Option<String>,
+}
 
-        init_git_repo(temp_dir.path()).unwrap();
-        assert!(is_git_repo(temp_dir.path()));
-    }
+/// GitHub repository information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepositoryInfo {
+    pub id: u64,
+    pub name: String,
+    pub full_name: String,
+    pub description: Option<String>,
+    pub html_url: String,
+    pub owner: OwnerInfo,
+    pub updated_at: String,
+    pub stargazers_count: u32,
+    pub forks_count: u32,
+}
 
-    #[test]
-    fn test_validate_branch_name() {
-        // Valid names
-        assert!(validate_branch_name("main").is_ok());
-        assert!(validate_branch_name("feature/123").is_ok());
-        let max_length_name = "a".repeat(244);
-        assert!(validate_branch_name(&max_length_name).is_ok()); // Max length
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnerInfo {
+    pub login: String,
+    pub id: u64,
+}
 
-        // Invalid names
-        assert!(validate_branch_name("").is_err());
-        assert!(validate_branch_name(&"a".repeat(245)).is_err()); // Too long
-        assert!(validate_branch_name(".hidden").is_err()); // Starts with dot
-        assert!(validate_branch_name("/root").is_err()); // Starts with slash
-        assert!(validate_branch_name("branch.").is_err()); // Ends with dot
-        assert!(validate_branch_name("branch/").is_err()); // Ends with slash
-        assert!(validate_branch_name("branch..name").is_err()); // Contains ..
-        assert!(validate_branch_name("branch@{").is_err()); // Contains @{
-        assert!(validate_branch_name("branch\\name").is_err()); // Contains backslash
-        assert!(validate_branch_name("branch name").is_err()); // Contains space
-    }
+/// GitHub search result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub total_count: u32,
+    pub incomplete_results: bool,
+    pub items: Vec<RepositoryInfo>,
+}
+
+/// Release creation information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseInfo {
+    pub tag_name: String,
+    pub name: String,
+    pub body: String,
+    pub draft: bool,
+    pub prerelease: bool,
+}
+
+/// Release creation response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReleaseResponse {
+    pub id: u64,
+    pub tag_name: String,
+    pub name: String,
+    pub body: String,
+    pub html_url: String,
+    pub upload_url: String,
 }
