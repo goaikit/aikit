@@ -1,50 +1,66 @@
-# [PROJECT_NAME] Constitution
-<!-- Example: Spec Constitution, TaskFlow Constitution, etc. -->
+<!--
+SYNC IMPACT REPORT - Constitution Amendment 2025-12-14
+======================================================
+
+Version change: template → 1.0.0 (MAJOR: First formal constitution with all core principles established)
+
+Modified principles: None (all principles newly established)
+- I. CLI-First: Added
+- II. Template-Driven: Added
+- III. Cross-Platform: Added
+- IV. Test-First (NON-NEGOTIABLE): Added
+- V. User-Centric: Added
+
+Added sections:
+- Technology Standards
+- Development Workflow
+
+Removed sections: None
+
+Templates requiring updates:
+✅ .specify/templates/tasks-template.md - Updated test requirements from OPTIONAL to MANDATORY per Test-First principle
+✅ .specify/templates/plan-template.md - Added specific constitution check criteria aligned with all 5 principles
+
+Follow-up TODOs: None - All placeholders resolved, no deferred items
+-->
+
+# AIKIT Constitution
 
 ## Core Principles
 
-### [PRINCIPLE_1_NAME]
-<!-- Example: I. Library-First -->
-[PRINCIPLE_1_DESCRIPTION]
-<!-- Example: Every feature starts as a standalone library; Libraries must be self-contained, independently testable, documented; Clear purpose required - no organizational-only libraries -->
+### I. CLI-First
+Every component exposes functionality via command-line interface; Text I/O protocol enforced (stdin/args → stdout, errors → stderr); Support both JSON structured output and human-readable formats for all commands; Commands must be composable via standard Unix pipes and redirection.
 
-### [PRINCIPLE_2_NAME]
-<!-- Example: II. CLI Interface -->
-[PRINCIPLE_2_DESCRIPTION]
-<!-- Example: Every library exposes functionality via CLI; Text in/out protocol: stdin/args → stdout, errors → stderr; Support JSON + human-readable formats -->
+### II. Template-Driven
+All project setup and configuration through downloadable, versioned templates; Templates must be self-contained, independently testable, and documented; Each template serves a clear, specific purpose with explicit scope boundaries; Template selection and customization must be user-guided with sensible defaults.
 
-### [PRINCIPLE_3_NAME]
-<!-- Example: III. Test-First (NON-NEGOTIABLE) -->
-[PRINCIPLE_3_DESCRIPTION]
-<!-- Example: TDD mandatory: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced -->
+### III. Cross-Platform
+Native support for Windows, macOS, and Linux operating systems; Automatic detection and adaptation to platform-specific conventions; Support for both Bash and PowerShell scripting environments; Platform-specific binaries and installation methods provided; No platform-exclusive features or dependencies.
 
-### [PRINCIPLE_4_NAME]
-<!-- Example: IV. Integration Testing -->
-[PRINCIPLE_4_DESCRIPTION]
-<!-- Example: Focus areas requiring integration tests: New library contract tests, Contract changes, Inter-service communication, Shared schemas -->
+### IV. Test-First (NON-NEGOTIABLE)
+TDD mandatory for all new functionality: Tests written → User approved → Tests fail → Then implement; Red-Green-Refactor cycle strictly enforced; Integration tests required for CLI commands, template downloads, and cross-platform compatibility; Test coverage must include error paths and edge cases.
 
-### [PRINCIPLE_5_NAME]
-<!-- Example: V. Observability, VI. Versioning & Breaking Changes, VII. Simplicity -->
-[PRINCIPLE_5_DESCRIPTION]
-<!-- Example: Text I/O ensures debuggability; Structured logging required; Or: MAJOR.MINOR.BUILD format; Or: Start simple, YAGNI principles -->
+### V. User-Centric
+Design prioritizes developer experience and time-to-value; One-command project setup with intelligent defaults; Comprehensive error messages with actionable recovery steps; Progressive disclosure of complexity - simple commands for common cases, advanced options for power users; Documentation and troubleshooting guides must be accessible without leaving the terminal.
 
-## [SECTION_2_NAME]
-<!-- Example: Additional Constraints, Security Requirements, Performance Standards, etc. -->
+## Technology Standards
 
-[SECTION_2_CONTENT]
-<!-- Example: Technology stack requirements, compliance standards, deployment policies, etc. -->
+**Language**: Rust 1.70+ for all core functionality with stable channel enforcement
+**Distribution**: Pre-compiled binaries for all supported platforms with automated releases
+**Dependencies**: Minimal external dependencies; security audit required for all crates
+**Build System**: Cargo with standardized workspace structure and cross-compilation support
+**Packaging**: GitHub releases with checksums and automated platform detection
 
-## [SECTION_3_NAME]
-<!-- Example: Development Workflow, Review Process, Quality Gates, etc. -->
+## Development Workflow
 
-[SECTION_3_CONTENT]
-<!-- Example: Code review requirements, testing gates, deployment approval process, etc. -->
+**Version Control**: Git with protected main branch and feature branch workflow
+**Code Review**: All changes require review; PRs must demonstrate compliance with constitution principles
+**Testing Gates**: Unit tests required; integration tests for CLI commands; cross-platform testing for releases
+**Release Process**: Automated via GitHub Actions with semantic versioning (MAJOR.MINOR.PATCH)
+**Documentation**: README-driven development; all features must be documented with usage examples
 
 ## Governance
-<!-- Example: Constitution supersedes all other practices; Amendments require documentation, approval, migration plan -->
 
-[GOVERNANCE_RULES]
-<!-- Example: All PRs/reviews must verify compliance; Complexity must be justified; Use [GUIDANCE_FILE] for runtime development guidance -->
+Constitution supersedes all other practices and takes precedence over individual preferences; Amendments require justification, documentation, and demonstration of improved outcomes; Complexity must be explicitly justified with rejected simpler alternatives; Runtime development guidance maintained in `.specify/` directory; All PRs must verify constitution compliance through automated checks.
 
-**Version**: [CONSTITUTION_VERSION] | **Ratified**: [RATIFICATION_DATE] | **Last Amended**: [LAST_AMENDED_DATE]
-<!-- Example: Version: 2.1.1 | Ratified: 2025-06-13 | Last Amended: 2025-07-16 -->
+**Version**: 1.0.0 | **Ratified**: 2025-12-14 | **Last Amended**: 2025-12-14

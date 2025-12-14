@@ -36,6 +36,9 @@ coverage/
 .env.local
 .env.*.local
 
+# AIKIT package directory
+.aikit/
+
 
 
 # Added by cargo

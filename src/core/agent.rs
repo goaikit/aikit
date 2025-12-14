@@ -23,6 +23,7 @@ impl ScriptVariant {
     }
 
     /// Get the file extension for this script variant
+    #[allow(dead_code)]
     pub fn extension(&self) -> &'static str {
         match self {
             Self::Sh => "sh",
@@ -244,6 +245,96 @@ pub fn get_agent_configs() -> Vec<AgentConfig> {
     ]
 }
 
+impl AgentConfig {
+    /// Check if agent supports package installation
+    #[allow(dead_code)]
+    pub fn supports_packages(&self) -> bool {
+        // All agents in the current configuration support packages
+        // In the future, this could be a configuration field
+        true
+    }
+
+    /// Get the namespace prefix for package commands
+    #[allow(dead_code)]
+    pub fn get_namespace_prefix(&self, package_name: &str) -> String {
+        format!("{}.{}", package_name, self.key)
+    }
+
+    /// Generate package command content for this agent
+    #[allow(dead_code)]
+    pub fn generate_package_command(
+        &self,
+        package_name: &str,
+        _command_name: &str,
+        description: &str,
+        script_template: &str,
+    ) -> String {
+        let namespaced_command = self.get_namespace_prefix(package_name);
+
+        match self.output_format {
+            OutputFormat::Markdown => {
+                format!(
+                    "# {}\n\n**Description**: {}\n\n**Command**: `{}`\n\n**Arguments**: {}\n\n---\n\n{}",
+                    namespaced_command,
+                    description,
+                    namespaced_command,
+                    self.arg_placeholder,
+                    script_template
+                )
+            }
+            OutputFormat::Toml => {
+                format!(
+                    "command = \"{}\"\ndescription = \"{}\"\nargs = \"{}\"\nscript = \"\"\"\n{}\n\"\"\"",
+                    namespaced_command, description, self.arg_placeholder, script_template
+                )
+            }
+            OutputFormat::AgentMd => {
+                format!(
+                    "# {}\n\n{}\n\nCommand: {}\nArgs: {}\n\n```bash\n{}\n```",
+                    namespaced_command,
+                    description,
+                    namespaced_command,
+                    self.arg_placeholder,
+                    script_template
+                )
+            }
+        }
+    }
+
+    /// Apply agent-specific overrides to package content
+    #[allow(dead_code)]
+    pub fn apply_overrides(
+        &self,
+        content: &str,
+        overrides: &std::collections::HashMap<String, String>,
+    ) -> String {
+        let mut result = content.to_string();
+
+        // Apply agent-specific argument placeholder
+        result = result.replace("{args}", &self.arg_placeholder);
+        result = result.replace("$ARGUMENTS", &self.arg_placeholder);
+        result = result.replace("{{args}}", &self.arg_placeholder);
+
+        // Apply custom overrides
+        for (key, value) in overrides {
+            result = result.replace(key, value);
+        }
+
+        result
+    }
+
+    /// Get the full path for a package command file
+    #[allow(dead_code)]
+    pub fn get_package_command_path(
+        &self,
+        package_name: &str,
+        command_name: &str,
+    ) -> std::path::PathBuf {
+        std::path::PathBuf::from(&self.output_dir)
+            .join(format!("{}-{}.md", package_name, command_name))
+    }
+}
+
 /// Get agent configuration by key
 pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
     get_agent_configs()
@@ -283,6 +374,7 @@ pub fn validate_agent_key(key: &str) -> Result<(), String> {
 }
 
 /// Get all agent keys
+#[allow(dead_code)]
 pub fn get_all_agent_keys() -> Vec<String> {
     get_agent_configs().iter().map(|a| a.key.clone()).collect()
 }
@@ -291,6 +383,7 @@ pub fn get_all_agent_keys() -> Vec<String> {
 ///
 /// Represents user's agent selection (interactive or CLI argument).
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum AgentSelection {
     /// Agent key selected
     Selected(String),

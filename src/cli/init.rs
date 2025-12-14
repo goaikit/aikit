@@ -3,9 +3,9 @@
 //! This module implements the project initialization command.
 
 use crate::core::agent::{get_agent_config, ScriptVariant};
-use crate::core::git;
 use crate::core::template::ProjectPath;
 use crate::fs::permissions;
+use crate::git;
 use crate::github::api::GitHubClient;
 use anyhow::{Context, Result};
 use clap::Args;
@@ -59,16 +59,20 @@ pub async fn execute(args: InitArgs) -> Result<()> {
     // Resolve project path
     let is_here = args.here || args.project_name.as_deref() == Some(".");
     let project_path = if is_here {
-        ProjectPath::new(std::env::current_dir()?, true)
+        ProjectPath::new(std::env::current_dir()?)
     } else {
         let project_name = args
             .project_name
             .ok_or_else(|| anyhow::anyhow!("PROJECT_NAME is required unless --here is used"))?;
-        ProjectPath::new(project_name, false)
+        ProjectPath::new(project_name.into())
     };
 
     // Check for non-empty directory and prompt if needed
-    if is_here && !project_path.is_empty && !args.force {
+    let path_is_empty = !project_path.path.exists()
+        || std::fs::read_dir(&project_path.path)
+            .map(|mut dir| dir.next().is_none())
+            .unwrap_or(true);
+    if is_here && !path_is_empty && !args.force {
         // Prompt for confirmation
         eprint!("Directory is not empty. Files will be merged. Continue? [y/N]: ");
         use std::io::{self, Write};
@@ -84,9 +88,12 @@ pub async fn execute(args: InitArgs) -> Result<()> {
     }
 
     // Validate project path
-    project_path
-        .validate(args.force)
-        .map_err(|e| anyhow::anyhow!("Project path validation failed: {}", e))?;
+    if !args.force && project_path.path.exists() && project_path.path.is_file() {
+        return Err(anyhow::anyhow!(
+            "Path '{}' exists and is a file, not a directory",
+            project_path.path.display()
+        ));
+    }
 
     // Resolve agent selection
     let agent_key = if let Some(ai) = args.ai {
@@ -134,8 +141,7 @@ pub async fn execute(args: InitArgs) -> Result<()> {
 
     // Check agent tools if required
     if !args.ignore_agent_tools && agent_config.requires_cli {
-        let tool_result = crate::core::tools::check_agent_tool(&agent_config);
-        if !tool_result.available {
+        if let Err(_e) = crate::core::tools::check_agent_tool(&agent_config) {
             return Err(anyhow::anyhow!(
                 "Agent '{}' requires CLI tool '{}' but it was not found.\n\
                 Install it or use --ignore-agent-tools to skip this check.\n\
@@ -151,7 +157,7 @@ pub async fn execute(args: InitArgs) -> Result<()> {
     }
 
     // Create project directory if needed
-    if !is_here && !project_path.exists {
+    if !is_here && !project_path.path.exists() {
         std::fs::create_dir_all(&project_path.path).with_context(|| {
             format!("Failed to create directory {}", project_path.path.display())
         })?;
@@ -171,23 +177,43 @@ pub async fn execute(args: InitArgs) -> Result<()> {
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("Release missing 'assets' array"))?;
 
-    let template_asset =
-        crate::core::template::select_template_asset(assets, &agent_key, script_variant)
-            .context("Failed to find matching template asset")?;
+    // Convert assets to Vec<String> (URLs)
+    let asset_urls: Vec<String> = assets
+        .iter()
+        .filter_map(|asset| {
+            asset["browser_download_url"]
+                .as_str()
+                .map(|s| s.to_string())
+        })
+        .collect();
+
+    // Convert ScriptVariant to string
+    let script_variant_str = match script_variant {
+        ScriptVariant::Sh => "sh",
+        ScriptVariant::Ps => "ps",
+    };
+
+    let template_url =
+        crate::core::template::select_template_asset(&asset_urls, &agent_key, script_variant_str)
+            .ok_or_else(|| anyhow::anyhow!("Failed to find matching template asset"))?;
 
     // Download the template zip
     let zip_data = github_client
-        .download_file(&template_asset.download_url)
+        .download_file(&template_url)
         .await
         .context("Failed to download template")?;
 
     // Extract and flatten ZIP to target directory
     // If --here and directory not empty, merge files instead of overwriting
-    if is_here && !project_path.is_empty {
+    let path_is_empty = !project_path.path.exists()
+        || std::fs::read_dir(&project_path.path)
+            .map(|mut dir| dir.next().is_none())
+            .unwrap_or(true);
+    if is_here && !path_is_empty {
         // Extract to temp first, then merge
         let temp_dir = tempfile::tempdir()?;
         crate::core::template::extract_and_flatten_zip(&zip_data, temp_dir.path())
-            .context("Failed to extract template to temp")?;
+            .map_err(|e| anyhow::anyhow!("Failed to extract template to temp: {}", e))?;
 
         // Merge files from temp to target
         merge_directory_contents(temp_dir.path(), &project_path.path)
@@ -195,7 +221,7 @@ pub async fn execute(args: InitArgs) -> Result<()> {
     } else {
         // Direct extraction for new directories
         crate::core::template::extract_and_flatten_zip(&zip_data, &project_path.path)
-            .context("Failed to extract template")?;
+            .map_err(|e| anyhow::anyhow!("Failed to extract template: {}", e))?;
     }
 
     // Create agent-specific command file directory
