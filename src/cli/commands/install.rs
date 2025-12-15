@@ -6,6 +6,7 @@
 //! - remove: Remove installed package
 //! - list: List installed packages
 
+use crate::github::api::GitHubClient as GitHubApiClient;
 use clap::{Args, Subcommand};
 use toml;
 
@@ -31,6 +32,10 @@ pub struct InstallArgs {
     /// Specific version to install
     #[arg(short, long)]
     pub version: Option<String>,
+
+    /// GitHub token (can also be set via GITHUB_TOKEN or GH_TOKEN env var)
+    #[arg(long)]
+    pub token: Option<String>,
 
     /// Force reinstall if already installed
     #[arg(long)]
@@ -101,35 +106,51 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), Box<dyn std::error
 
     println!("Fetching package manifest from {}/{}...", owner, repo);
 
-    // Initialize GitHub client
-    let github = GitHubClient::new(None);
+    // Initialize GitHub client with token resolution
+    let github = GitHubClient::new(GitHubApiClient::resolve_token(args.token.clone()));
 
     // Get package manifest
-    let manifest = github.get_package_manifest(&owner, &repo, Some(&version)).await
+    let manifest = github
+        .get_package_manifest(&owner, &repo, Some(&version))
+        .await
         .map_err(|e| format!("Failed to fetch package manifest: {}", e))?;
 
     // Validate package
     // Convert PackageManifest to TOML string for parsing
     let manifest_toml = toml::to_string(&manifest)?;
     let package = crate::models::package::Package::from_toml_str(&manifest_toml)?;
-    package.validate().map_err(|e| format!("Package validation failed: {}", e))?;
+    package
+        .validate()
+        .map_err(|e| format!("Package validation failed: {}", e))?;
 
     // Check if already installed
     let registry_path = aik_dir.registry_path();
-    let mut registry = LocalRegistry::load_from_file(&registry_path)
-        .unwrap_or_else(|_| LocalRegistry::new());
+    let mut registry =
+        LocalRegistry::load_from_file(&registry_path).unwrap_or_else(|_| LocalRegistry::new());
 
     if registry.is_installed(&package.package.name) && !args.force {
-        return Err(format!("Package '{}' is already installed. Use --force to reinstall.", package.package.name).into());
+        return Err(format!(
+            "Package '{}' is already installed. Use --force to reinstall.",
+            package.package.name
+        )
+        .into());
     }
 
-    println!("Downloading package {} v{}...", package.package.name, package.package.version);
+    println!(
+        "Downloading package {} v{}...",
+        package.package.name, package.package.version
+    );
 
     // Download package archive
     let temp_dir = tempfile::tempdir()?;
-    let archive_path = temp_dir.path().join(format!("{}-{}.zip", package.package.name, package.package.version));
+    let archive_path = temp_dir.path().join(format!(
+        "{}-{}.zip",
+        package.package.name, package.package.version
+    ));
 
-    github.download_archive(&owner, &repo, Some(&version), &archive_path).await
+    github
+        .download_archive(&owner, &repo, Some(&version), &archive_path)
+        .await
         .map_err(|e| format!("Failed to download package: {}", e))?;
 
     // Extract and install package
@@ -142,7 +163,10 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), Box<dyn std::error
         package: package.package.clone(),
         installed_at: chrono::Utc::now(),
         source_url: args.source.clone(),
-        install_path: format!("packages/{}-{}", package.package.name, package.package.version),
+        install_path: format!(
+            "packages/{}-{}",
+            package.package.name, package.package.version
+        ),
     };
 
     registry.add_package(installed);
@@ -163,21 +187,32 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), Box<dyn std::error
     println!("Generating agent commands...");
     generate_agent_commands(&package, &aik_dir)?;
 
-    println!("✅ Package '{}' v{} installed successfully!", package.package.name, package.package.version);
-    println!("📦 Installed to: .aikit/packages/{}-{}", package.package.name, package.package.version);
+    println!(
+        "✅ Package '{}' v{} installed successfully!",
+        package.package.name, package.package.version
+    );
+    println!(
+        "📦 Installed to: .aikit/packages/{}-{}",
+        package.package.name, package.package.version
+    );
 
     Ok(())
 }
 
 /// Parse GitHub URL and extract owner, repo, and version
-fn parse_github_url(source: &str, version: Option<&str>) -> Result<(String, String, String), Box<dyn std::error::Error>> {
+fn parse_github_url(
+    source: &str,
+    version: Option<&str>,
+) -> Result<(String, String, String), Box<dyn std::error::Error>> {
     // Handle various GitHub URL formats:
     // https://github.com/owner/repo
     // https://github.com/owner/repo/releases/download/v1.0.0/package.zip
     // github.com/owner/repo
     // owner/repo
 
-    let url = source.trim_start_matches("https://").trim_start_matches("http://");
+    let url = source
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
 
     let path = if url.starts_with("github.com/") {
         url.strip_prefix("github.com/").unwrap()
@@ -185,7 +220,9 @@ fn parse_github_url(source: &str, version: Option<&str>) -> Result<(String, Stri
         // Assume owner/repo format
         url
     } else {
-        return Err("Invalid GitHub URL format. Expected: github.com/owner/repo or owner/repo".into());
+        return Err(
+            "Invalid GitHub URL format. Expected: github.com/owner/repo or owner/repo".into(),
+        );
     };
 
     let parts: Vec<&str> = path.split('/').collect();
@@ -299,14 +336,18 @@ pub async fn execute_update(args: UpdateArgs) -> Result<(), Box<dyn std::error::
     }
 
     let registry_path = aik_dir.registry_path();
-    let mut registry = LocalRegistry::load_from_file(&registry_path)
-        .unwrap_or_else(|_| LocalRegistry::new());
+    let mut registry =
+        LocalRegistry::load_from_file(&registry_path).unwrap_or_else(|_| LocalRegistry::new());
 
     // Check if package is installed
-    let installed_package = registry.get_package(&args.package)
+    let installed_package = registry
+        .get_package(&args.package)
         .ok_or_else(|| format!("Package '{}' is not installed", args.package))?;
 
-    println!("Checking for updates to '{}' (current: {})...", args.package, installed_package.package.version);
+    println!(
+        "Checking for updates to '{}' (current: {})...",
+        args.package, installed_package.package.version
+    );
 
     // For now, we need the GitHub URL to check for updates
     // In a full implementation, we'd query the registry or GitHub API
@@ -336,8 +377,8 @@ pub async fn execute_remove(args: RemoveArgs) -> Result<(), Box<dyn std::error::
     }
 
     let registry_path = aik_dir.registry_path();
-    let mut registry = LocalRegistry::load_from_file(&registry_path)
-        .unwrap_or_else(|_| LocalRegistry::new());
+    let mut registry =
+        LocalRegistry::load_from_file(&registry_path).unwrap_or_else(|_| LocalRegistry::new());
 
     // Check if package is installed
     if !registry.is_installed(&args.package) {
@@ -346,7 +387,10 @@ pub async fn execute_remove(args: RemoveArgs) -> Result<(), Box<dyn std::error::
 
     // Confirm removal unless forced
     if !args.force {
-        println!("Are you sure you want to remove package '{}'?", args.package);
+        println!(
+            "Are you sure you want to remove package '{}'?",
+            args.package
+        );
         println!("This will delete all associated files and commands. (y/N): ");
 
         // For now, assume yes in automated context
@@ -354,7 +398,8 @@ pub async fn execute_remove(args: RemoveArgs) -> Result<(), Box<dyn std::error::
     }
 
     // Get installed package info to determine version
-    let installed_package = registry.get_package(&args.package)
+    let installed_package = registry
+        .get_package(&args.package)
         .ok_or_else(|| format!("Package '{}' not found in registry", args.package))?;
 
     // Remove package files
@@ -386,7 +431,8 @@ fn remove_agent_commands(package_name: &str) -> Result<(), Box<dyn std::error::E
                 let filename = entry.file_name().to_string_lossy().to_string();
 
                 // Check if this is a command file for this package
-                if filename.starts_with(&format!("{}.", package_name)) && filename.ends_with(".md") {
+                if filename.starts_with(&format!("{}.", package_name)) && filename.ends_with(".md")
+                {
                     fs::remove_file(entry.path())?;
                 }
             }
@@ -409,8 +455,8 @@ pub async fn execute_list(args: ListArgs) -> Result<(), Box<dyn std::error::Erro
     }
 
     let registry_path = aik_dir.registry_path();
-    let registry = LocalRegistry::load_from_file(&registry_path)
-        .unwrap_or_else(|_| LocalRegistry::new());
+    let registry =
+        LocalRegistry::load_from_file(&registry_path).unwrap_or_else(|_| LocalRegistry::new());
 
     let packages = if let Some(author) = &args.author {
         registry.packages_by_author(author)
@@ -425,25 +471,30 @@ pub async fn execute_list(args: ListArgs) -> Result<(), Box<dyn std::error::Erro
 
     if args.detailed {
         println!("Installed packages:");
-        println!("{:<25} {:<12} {:<15} {}", "Name", "Version", "Author", "Description");
+        println!(
+            "{:<25} {:<12} {:<15} {}",
+            "Name", "Version", "Author", "Description"
+        );
         println!("{}", "-".repeat(80));
 
         for package in packages {
-            let author = package.package.authors.first().unwrap_or(&"Unknown".to_string()).clone();
-            println!("{:<25} {:<12} {:<15} {}",
-                package.package.name,
-                package.package.version,
-                author,
-                package.package.description
+            let author = package
+                .package
+                .authors
+                .first()
+                .unwrap_or(&"Unknown".to_string())
+                .clone();
+            println!(
+                "{:<25} {:<12} {:<15} {}",
+                package.package.name, package.package.version, author, package.package.description
             );
         }
     } else {
         println!("Installed packages:");
         for package in packages {
-            println!("  {} v{} - {}",
-                package.package.name,
-                package.package.version,
-                package.package.description
+            println!(
+                "  {} v{} - {}",
+                package.package.name, package.package.version, package.package.description
             );
         }
     }
