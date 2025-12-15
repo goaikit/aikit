@@ -195,6 +195,7 @@ jobs:
 
       - name: Check built binary
         id: check-binary
+        shell: bash
         run: |
           BIN_PATH=target/${{ matrix.target }}/release/${{ matrix.binary-name }}
           if [ -f "$BIN_PATH" ]; then
