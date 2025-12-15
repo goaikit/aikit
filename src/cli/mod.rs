@@ -4,9 +4,8 @@
 
 mod check;
 mod init;
-mod template_package;  // Old template zip archive builder (used by release command)
 mod release;
-mod version;
+mod template_package; // Old template zip archive builder (used by release command)
 
 // Package management commands (init, build, publish)
 mod commands {
@@ -21,11 +20,16 @@ use clap::{Parser, Subcommand};
 /// AIKIT - Rust Spec Kit CLI Complete Reimplementation
 #[derive(Parser)]
 #[command(name = "aikit")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "AIKIT - Rust Spec Kit CLI", long_about = None)]
 pub struct Cli {
     /// Enable debug output (verbose diagnostic information)
     #[arg(long, global = true)]
     pub debug: bool,
+
+    /// Show version information
+    #[arg(long, action = clap::ArgAction::Version)]
+    pub version: (),
 
     #[command(subcommand)]
     command: Commands,
@@ -37,8 +41,6 @@ enum Commands {
     Init(init::InitArgs),
     /// Check installed tools and AI agent CLIs
     Check(check::CheckArgs),
-    /// Display version information
-    Version(version::VersionArgs),
     /// Install package from GitHub URL
     Install(commands::install::InstallArgs),
     /// Update installed package
@@ -72,43 +74,32 @@ pub fn run() -> Result<()> {
     match cli.command {
         Commands::Init(args) => rt.block_on(init::execute(args))?,
         Commands::Check(args) => check::execute(args)?,
-        Commands::Version(args) => rt.block_on(version::execute(args))?,
-        Commands::Install(args) => {
-            rt.block_on(commands::install::execute_install(args))
-                .map_err(|e| anyhow::anyhow!("{}", e))?
-        }
-        Commands::Update(args) => {
-            rt.block_on(commands::install::execute_update(args))
-                .map_err(|e| anyhow::anyhow!("{}", e))?
-        }
-        Commands::Remove(args) => {
-            rt.block_on(commands::install::execute_remove(args))
-                .map_err(|e| anyhow::anyhow!("{}", e))?
-        }
-        Commands::List(args) => {
-            rt.block_on(commands::install::execute_list(args))
-                .map_err(|e| anyhow::anyhow!("{}", e))?
-        }
-        Commands::Search(args) => {
-            rt.block_on(commands::search::execute_search(args))
-                .map_err(|e| anyhow::anyhow!("{}", e))?
-        }
-        Commands::Package(cmd) => {
-            match cmd {
-                commands::package::PackageCommands::Init(args) => {
-                    rt.block_on(commands::package::execute_init(args))
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
-                }
-                commands::package::PackageCommands::Build(args) => {
-                    rt.block_on(commands::package::execute_build(args))
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
-                }
-                commands::package::PackageCommands::Publish(args) => {
-                    rt.block_on(commands::package::execute_publish(args))
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
-                }
-            }
-        }
+        Commands::Install(args) => rt
+            .block_on(commands::install::execute_install(args))
+            .map_err(|e| anyhow::anyhow!("{}", e))?,
+        Commands::Update(args) => rt
+            .block_on(commands::install::execute_update(args))
+            .map_err(|e| anyhow::anyhow!("{}", e))?,
+        Commands::Remove(args) => rt
+            .block_on(commands::install::execute_remove(args))
+            .map_err(|e| anyhow::anyhow!("{}", e))?,
+        Commands::List(args) => rt
+            .block_on(commands::install::execute_list(args))
+            .map_err(|e| anyhow::anyhow!("{}", e))?,
+        Commands::Search(args) => rt
+            .block_on(commands::search::execute_search(args))
+            .map_err(|e| anyhow::anyhow!("{}", e))?,
+        Commands::Package(cmd) => match cmd {
+            commands::package::PackageCommands::Init(args) => rt
+                .block_on(commands::package::execute_init(args))
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+            commands::package::PackageCommands::Build(args) => rt
+                .block_on(commands::package::execute_build(args))
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+            commands::package::PackageCommands::Publish(args) => rt
+                .block_on(commands::package::execute_publish(args))
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+        },
         Commands::Release(args) => rt.block_on(release::execute(args))?,
     }
 
