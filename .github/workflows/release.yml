@@ -41,12 +41,16 @@ jobs:
             TAG_VERSION="v$VERSION"
           elif [ "${{ github.event_name }}" = "workflow_run" ]; then
             # When triggered via workflow_run, get the latest tag
-            TAG_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            # Fetch all tags first to ensure we have them
+            git fetch --tags --force
+            # Get the latest tag (most recent by date)
+            TAG_VERSION=$(git tag --sort=-creatordate | head -1)
             if [ -z "$TAG_VERSION" ]; then
               echo "Error: No tags found"
               exit 1
             fi
             VERSION="${TAG_VERSION#v}"
+            echo "Detected tag from workflow_run: $TAG_VERSION (version: $VERSION)"
           else
             TAG_VERSION="${{ github.ref_name }}"
             # Strip 'v' prefix
