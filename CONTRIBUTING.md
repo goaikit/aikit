@@ -24,7 +24,7 @@ We use GitHub to host code, to track issues and feature requests, as well as acc
 This project follows a specific structure to maintain consistency:
 
 ```
-aikit/
+./goaikit/aikit/
 ├── src/                      # Source code
 │   ├── cli/                  # CLI command implementations
 │   │   ├── check.rs         # Tool checking command
@@ -84,7 +84,7 @@ aikit/
 1. **Clone the repository**
 
    ```bash
-   git clone https://github.com/aroff/aikit.git
+   git clone https://github.com/goaikit/aikit.git
    cd aikit
    ```
 

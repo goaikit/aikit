@@ -1,0 +1,579 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  verify-version:
+    name: Verify Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.extract-version.outputs.version }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Extract version from tag or input
+        id: extract-version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+            TAG_VERSION="v$VERSION"
+          else
+            TAG_VERSION="${{ github.ref_name }}"
+            # Strip 'v' prefix
+            VERSION="${TAG_VERSION#v}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Tag version: $TAG_VERSION"
+          echo "Extracted version: $VERSION"
+
+      - name: Read version from Cargo.toml
+        id: cargo-version
+        run: |
+          CARGO_VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "cargo-version=$CARGO_VERSION" >> $GITHUB_OUTPUT
+          echo "Cargo.toml version: $CARGO_VERSION"
+
+      - name: Verify versions match
+        run: |
+          TAG_VER="${{ steps.extract-version.outputs.version }}"
+          CARGO_VER="${{ steps.cargo-version.outputs.cargo-version }}"
+
+          # Skip version verification for test/pre-release tags (containing hyphens)
+          if [[ "$TAG_VER" == *"-"* ]]; then
+            echo "⚠️  Skipping version verification for pre-release tag: $TAG_VER"
+            echo "Cargo.toml version: $CARGO_VER"
+          elif [ "$TAG_VER" != "$CARGO_VER" ]; then
+            echo "❌ Version mismatch!"
+            echo "Tag version: $TAG_VER"
+            echo "Cargo.toml version: $CARGO_VER"
+            exit 1
+          else
+            echo "✅ Versions match: $TAG_VER"
+          fi
+
+  build:
+    name: Build ${{ matrix.os }} binary
+    needs: verify-version
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary-name: aikit
+            archive-format: tar.gz
+            archive-name: aikit-x86_64-unknown-linux-gnu.tar.gz
+            use-cross: false
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary-name: aikit
+            archive-format: tar.gz
+            archive-name: aikit-x86_64-unknown-linux-musl.tar.gz
+            use-cross: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary-name: aikit.exe
+            archive-format: zip
+            archive-name: aikit-x86_64-pc-windows-msvc.zip
+            use-cross: false
+
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+          target: ${{ matrix.target }}
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Cache target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-${{ matrix.target }}-
+            ${{ runner.os }}-target-
+
+      - name: Clean disk space
+        shell: bash
+        run: |
+          # Remove large cargo registry files that aren't needed
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            # Windows commands (using bash on Windows)
+            rm -rf ~/.cargo/registry/src
+            # Show disk usage
+            df -h || echo "df not available on Windows"
+            du -sh ~/.cargo/* 2>/dev/null | sort -hr | head -5 || true
+          else
+            # Linux/macOS commands
+            rm -rf ~/.cargo/registry/src
+            # Clean system package cache
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get clean
+            fi
+            # Show disk usage
+            df -h
+            du -sh ~/.cargo/* 2>/dev/null | sort -hr | head -5 || true
+          fi
+
+      - name: Install cross-rs
+        if: matrix.use-cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build release binary (cross)
+        if: matrix.use-cross
+        run: cross build --release --verbose --target ${{ matrix.target }} --no-default-features --features "filesystem-storage,hot-reload"
+        env:
+          RUSTFLAGS: ""
+
+      - name: Build release binary (cargo)
+        if: ${{ !matrix.use-cross }}
+        run: cargo build --release --verbose --target ${{ matrix.target }}
+        env:
+          RUSTFLAGS: ""
+
+      - name: Create release directory
+        shell: bash
+        run: |
+          mkdir -p release
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp target/${{ matrix.target }}/release/${{ matrix.binary-name }} release/
+          else
+            cp target/${{ matrix.target }}/release/${{ matrix.binary-name }} release/
+          fi
+
+      - name: Create README for release
+        shell: bash
+        run: |
+          cat > release/README.md << 'EOF'
+          # AiKit ${{ needs.verify-version.outputs.version }}
+
+          ## Installation
+
+          ### Linux
+
+          Two Linux binaries are available:
+
+          | Binary | Best For |
+          |--------|----------|
+          | `aikit-x86_64-unknown-linux-musl.tar.gz` | Universal - containers, CI/CD, older distributions |
+          | `aikit-x86_64-unknown-linux-gnu.tar.gz` | FIPS/compliance environments requiring dynamic linking |
+
+          **Recommended (musl/static - works everywhere):**
+          ```bash
+          tar -xzf aikit-x86_64-unknown-linux-musl.tar.gz
+          sudo mv aikit /usr/local/bin/
+          aikit --version
+          ```
+
+          **For FIPS/compliance (glibc - requires glibc 2.38+):**
+          ```bash
+          tar -xzf aikit-x86_64-unknown-linux-gnu.tar.gz
+          sudo mv aikit /usr/local/bin/
+          aikit --version
+          ```
+
+          ### Windows
+          Extract the ZIP file and add to your PATH, or run from the extracted directory:
+          ```powershell
+          # Extract aikit-x86_64-pc-windows-msvc.zip
+          # Add to PATH or run from extracted directory
+          aikit.exe --version
+          ```
+
+          For more information, visit: https://github.com/goaikit/aikit
+          EOF
+
+      - name: Create archive
+        shell: bash
+        run: |
+          cd release
+          if [ "${{ matrix.archive-format }}" = "tar.gz" ]; then
+            tar -czf ../${{ matrix.archive-name }} *
+          else
+            # Use PowerShell Compress-Archive on Windows
+            if [ "${{ runner.os }}" = "Windows" ]; then
+              powershell -Command "Compress-Archive -Path * -DestinationPath ../${{ matrix.archive-name }} -Force"
+            else
+              zip -r ../${{ matrix.archive-name }} *
+            fi
+          fi
+          cd ..
+          ls -lh ${{ matrix.archive-name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive-name }}
+          path: ${{ matrix.archive-name }}
+          retention-days: 30
+
+  collect-artifacts:
+    name: Collect Release Artifacts
+    needs: [verify-version, build]
+    runs-on: ubuntu-latest
+    if: always() && needs.verify-version.result == 'success'
+
+    steps:
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aikit-x86_64-unknown-linux-gnu.tar.gz
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aikit-x86_64-pc-windows-msvc.zip
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Download Linux musl artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aikit-x86_64-unknown-linux-musl.tar.gz
+          path: ./artifacts
+        continue-on-error: true
+
+      - name: Verify artifacts
+        run: |
+          echo "Checking artifacts..."
+          ls -lh ./artifacts/ || echo "No artifacts found"
+          if [ -f "./artifacts/aikit-x86_64-unknown-linux-gnu.tar.gz" ]; then
+            echo "✅ Linux (glibc) binary found"
+          else
+            echo "⚠️  Linux (glibc) binary missing"
+          fi
+          if [ -f "./artifacts/aikit-x86_64-unknown-linux-musl.tar.gz" ]; then
+            echo "✅ Linux (musl/static) binary found"
+          else
+            echo "⚠️  Linux (musl/static) binary missing"
+          fi
+          if [ -f "./artifacts/aikit-x86_64-pc-windows-msvc.zip" ]; then
+            echo "✅ Windows binary found"
+          else
+            echo "⚠️  Windows binary missing"
+          fi
+
+      - name: Upload collected artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: ./artifacts
+          retention-days: 7
+
+  create-release:
+    name: Create GitHub Release
+    needs: [verify-version, collect-artifacts]
+    runs-on: ubuntu-latest
+    if: always() && needs.verify-version.result == 'success'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download collected artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: ./artifacts
+
+      - name: Prepare file list for release
+        id: prepare-files
+        run: |
+          # Build newline-separated list of files (required by softprops/action-gh-release)
+          FILES=""
+
+          if [ -f "artifacts/aikit-x86_64-unknown-linux-gnu.tar.gz" ]; then
+            FILES="artifacts/aikit-x86_64-unknown-linux-gnu.tar.gz"
+            echo "✅ Linux (glibc) artifact found"
+          else
+            echo "⚠️  Linux (glibc) artifact missing"
+          fi
+
+          if [ -f "artifacts/aikit-x86_64-unknown-linux-musl.tar.gz" ]; then
+            if [ -n "$FILES" ]; then
+              FILES="$FILES"$'\n'"artifacts/aikit-x86_64-unknown-linux-musl.tar.gz"
+            else
+              FILES="artifacts/aikit-x86_64-unknown-linux-musl.tar.gz"
+            fi
+            echo "✅ Linux (musl/static) artifact found"
+          else
+            echo "⚠️  Linux (musl/static) artifact missing"
+          fi
+
+          if [ -f "artifacts/aikit-x86_64-pc-windows-msvc.zip" ]; then
+            if [ -n "$FILES" ]; then
+              FILES="$FILES"$'\n'"artifacts/aikit-x86_64-pc-windows-msvc.zip"
+            else
+              FILES="artifacts/aikit-x86_64-pc-windows-msvc.zip"
+            fi
+            echo "✅ Windows artifact found"
+          else
+            echo "⚠️  Windows artifact missing"
+          fi
+
+          echo "Files to upload:"
+          echo "$FILES"
+
+          # Output as multiline string
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Delete existing releases if present
+        continue-on-error: true
+        run: |
+          TAG="${{ github.ref_name }}"
+
+          # Delete from main repository
+          echo "Checking for existing release ..."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists, deleting it..."
+            gh release delete "$TAG" --yes
+            sleep 2
+            # Verify deletion
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Warning: Release $TAG still exists in aikit repo after deletion attempt"
+              exit 1
+            else
+              echo "Confirmed: Release $TAG deleted from aikit repo"
+            fi
+          else
+            echo "No existing release found in repo aikit for $TAG"
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate release notes
+        id: release-notes
+        run: |
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          TAG="${{ github.ref_name }}"
+
+          # Get previous tag
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            echo "## Changes since $PREV_TAG" >> release_notes.md
+            echo "" >> release_notes.md
+            git log --pretty=format:"- %s (%h)" ${PREV_TAG}..${TAG} >> release_notes.md || echo "- Initial release" >> release_notes.md
+          else
+            echo "## Release $VERSION" >> release_notes.md
+            echo "" >> release_notes.md
+            echo "- Initial release" >> release_notes.md
+          fi
+
+          echo "" >> release_notes.md
+          echo "## Installation" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "Download the pre-built binary for your platform:" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "### Linux" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "- **Linux (glibc)**: \`aikit-x86_64-unknown-linux-gnu.tar.gz\` - for FIPS/compliance environments requiring dynamic linking" >> release_notes.md
+          echo "- **Linux (musl/static)**: \`aikit-x86_64-unknown-linux-musl.tar.gz\` - universal compatibility, containers, CI/CD (works on Ubuntu 20.04+, RHEL 8+, Alpine, etc.)" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "**Which Linux binary should I use?**" >> release_notes.md
+          echo "- Use **musl** for maximum compatibility (containers, CI/CD, older distributions)" >> release_notes.md
+          echo "- Use **glibc** only if you require dynamic linking for FIPS or compliance reasons" >> release_notes.md
+          echo "" >> release_notes.md
+
+          # Check if Windows artifact exists
+          if [ -f "artifacts/aikit-x86_64-pc-windows-msvc.zip" ]; then
+            echo "### Windows" >> release_notes.md
+            echo "" >> release_notes.md
+            echo "- **Windows**: \`aikit-x86_64-pc-windows-msvc.zip\`" >> release_notes.md
+          else
+            echo "### Windows" >> release_notes.md
+            echo "" >> release_notes.md
+            echo "- **Windows**: Not available in this release (build issue - see [Windows Build Issue](https://github.com/goaikit/aikit/blob/main/docs/WINDOWS_BUILD_ISSUE.md))" >> release_notes.md
+          fi
+
+          cat release_notes.md
+
+      - name: Create Release (as draft to allow asset uploads)
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ needs.verify-version.outputs.version }}
+          body_path: release_notes.md
+          files: ${{ steps.prepare-files.outputs.files }}
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: false
+          generate_release_notes: false
+
+      - name: Publish release (remove draft status)
+        run: |
+          TAG="${{ github.ref_name }}"
+          echo "Publishing release $TAG..."
+          gh release edit "$TAG" --draft=false
+          echo "Release $TAG is now published!"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  update-package-managers:
+    name: Update Package Managers
+    needs: [verify-version, create-release]
+    runs-on: ubuntu-latest
+    if: always() && needs.create-release.result == 'success'
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Checkout homebrew-cli repo
+        uses: actions/checkout@v4
+        with:
+          repository: goaikit/homebrew-cli
+          path: homebrew-cli
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout scoop-bucket repo
+        uses: actions/checkout@v4
+        with:
+          repository: goaikit/scoop-bucket
+          path: scoop-bucket
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get release metadata
+        id: release-info
+        run: |
+          echo "Getting release metadata for ${{ github.ref_name }}"
+
+          # Get release assets from the newly created release
+          ASSETS=$(gh release view ${{ github.ref_name }} --repo ${{ github.repository }} --json assets --jq '.assets')
+
+          echo "version=${{ needs.verify-version.outputs.version }}" >> $GITHUB_OUTPUT
+
+          # Linux GNU
+          LINUX_GNU_URL=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-unknown-linux-gnu.tar.gz") | .browser_download_url')
+          LINUX_GNU_HASH=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-unknown-linux-gnu.tar.gz") | .digest' | sed 's/sha256://')
+          echo "linux_gnu_url=$LINUX_GNU_URL" >> $GITHUB_OUTPUT
+          echo "linux_gnu_hash=$LINUX_GNU_HASH" >> $GITHUB_OUTPUT
+
+          # Linux MUSL
+          LINUX_MUSL_URL=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-unknown-linux-musl.tar.gz") | .browser_download_url')
+          LINUX_MUSL_HASH=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-unknown-linux-musl.tar.gz") | .digest' | sed 's/sha256://')
+          echo "linux_musl_url=$LINUX_MUSL_URL" >> $GITHUB_OUTPUT
+          echo "linux_musl_hash=$LINUX_MUSL_HASH" >> $GITHUB_OUTPUT
+
+          # Windows
+          WINDOWS_URL=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-pc-windows-msvc.zip") | .browser_download_url')
+          WINDOWS_HASH=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-pc-windows-msvc.zip") | .digest' | sed 's/sha256://')
+          echo "windows_url=$WINDOWS_URL" >> $GITHUB_OUTPUT
+          echo "windows_hash=$WINDOWS_HASH" >> $GITHUB_OUTPUT
+
+          echo "Release metadata extracted successfully"
+
+      - name: Update Homebrew formula
+        run: |
+          echo "Updating Homebrew formula to version ${{ steps.release-info.outputs.version }}"
+
+          cd homebrew-cli
+
+          # Update version
+          sed -i "s/version \".*\"/version \"${{ steps.release-info.outputs.version }}\"/" Formula/aikit.rb
+
+          # Update GNU URLs and hashes (first occurrence)
+          sed -i "0,/url \".*aikit-x86_64-unknown-linux-gnu.tar.gz\"/s|url \".*\"|url \"${{ steps.release-info.outputs.linux_gnu_url }}\"|" Formula/aikit.rb
+          sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.release-info.outputs.linux_gnu_hash }}\"/" Formula/aikit.rb
+
+          # Update MUSL URLs and hashes (second occurrence)
+          sed -i "s|url \".*aikit-x86_64-unknown-linux-musl.tar.gz\"|url \"${{ steps.release-info.outputs.linux_musl_url }}\"|" Formula/aikit.rb
+          sed -i "s/sha256 \"${{ steps.release-info.outputs.linux_gnu_hash }}\"/sha256 \"${{ steps.release-info.outputs.linux_musl_hash }}\"/" Formula/aikit.rb
+
+          echo "Homebrew formula updated"
+
+      - name: Update Scoop bucket
+        run: |
+          echo "Updating Scoop bucket to version ${{ steps.release-info.outputs.version }}"
+
+          cd scoop-bucket
+
+          # Update version, URL and hash using jq for safer JSON manipulation
+          jq --arg version "${{ steps.release-info.outputs.version }}" \
+             --arg url "${{ steps.release-info.outputs.windows_url }}" \
+             --arg hash "${{ steps.release-info.outputs.windows_hash }}" \
+             '.version = $version | .architecture."64bit".url = $url | .architecture."64bit".hash = $hash' \
+             bucket/aikit.json > bucket/aikit.json.tmp && mv bucket/aikit.json.tmp bucket/aikit.json
+
+          echo "Scoop bucket updated"
+
+      - name: Validate Homebrew formula
+        run: |
+          echo "Validating Homebrew formula..."
+          cd homebrew-cli
+          brew audit --strict Formula/aikit.rb || echo "Warning: Formula validation failed, but continuing..."
+
+      - name: Validate Scoop bucket
+        run: |
+          echo "Validating Scoop bucket..."
+          cd scoop-bucket
+          jq . bucket/aikit.json > /dev/null && echo "Scoop bucket JSON is valid"
+
+      - name: Commit and push Homebrew changes
+        run: |
+          cd homebrew-cli
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "No changes to commit for Homebrew"
+          else
+            git add Formula/aikit.rb
+            git commit -m "Update aikit to version ${{ steps.release-info.outputs.version }}"
+            git push origin main
+            echo "Homebrew formula updated and pushed"
+          fi
+
+      - name: Commit and push Scoop changes
+        run: |
+          cd scoop-bucket
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet; then
+            echo "No changes to commit for Scoop"
+          else
+            git add bucket/aikit.json
+            git commit -m "Update aikit to version ${{ steps.release-info.outputs.version }}"
+            git push origin main
+            echo "Scoop bucket updated and pushed"
+          fi

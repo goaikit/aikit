@@ -366,8 +366,8 @@ MIT License - See [LICENSE](LICENSE) file for details.
 
 ## Author
 
-Created by [@aroff](https://github.com/aroff)
+Created by [@aroff](https://github.com/goaikit)
 
 ---
 
-**Need help?** Open an issue on [GitHub](https://github.com/aroff/aikit/issues) or check the [documentation](https://github.com/aroff/aikit).
+**Need help?** Open an issue on [GitHub](https://github.com/goaikit/aikit/issues) or check the [documentation](https://github.com/goaikit/aikit).
