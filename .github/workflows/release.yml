@@ -176,9 +176,16 @@ jobs:
             du -sh ~/.cargo/* 2>/dev/null | sort -hr | head -5 || true
           fi
 
-      - name: Install cargo-zigbuild
+      - name: Install zig and cargo-zigbuild
         if: matrix.use-cross
         run: |
+          # Install zig
+          wget -q https://ziglang.org/download/0.12.0/zig-linux-x86_64-0.12.0.tar.xz
+          tar -xf zig-linux-x86_64-0.12.0.tar.xz
+          sudo mv zig-linux-x86_64-0.12.0 /opt/zig
+          sudo ln -s /opt/zig/zig /usr/local/bin/zig
+          zig version
+          # Install cargo-zigbuild
           cargo install cargo-zigbuild --locked
           rustup target add ${{ matrix.target }}
 
