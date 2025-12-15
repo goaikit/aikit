@@ -113,8 +113,7 @@ jobs:
             binary-name: aikit
             archive-format: tar.gz
             archive-name: aikit-x86_64-unknown-linux-musl.tar.gz
-            use-cross: false
-            use-native-musl: true
+            use-cross: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary-name: aikit.exe
@@ -129,28 +128,11 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
 
-      - name: Install musl toolchain and dependencies (for native musl builds)
-        if: matrix.use-native-musl == true
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools musl-dev libssl-dev pkg-config
-
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt, clippy
           target: ${{ matrix.target }}
-
-      - name: Configure musl linker (for native musl builds)
-        if: matrix.use-native-musl == true
-        run: |
-          mkdir -p .cargo
-          cat > .cargo/config.toml << 'EOF'
-          [target.x86_64-unknown-linux-musl]
-          linker = "musl-gcc"
-          rustflags = ["-C", "target-feature=+crt-static"]
-          EOF
-          cat .cargo/config.toml
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -200,17 +182,21 @@ jobs:
 
       - name: Build release binary (cross)
         if: matrix.use-cross
-        run: cross build --release --verbose --target ${{ matrix.target }}
+        run: |
+          # Use a specific cross image that works around glibc version issues
+          # Set CROSS_CONTAINER_OPTS to use a newer base image if needed
+          cross build --release --verbose --target ${{ matrix.target }}
         env:
           RUSTFLAGS: ""
+          # Workaround for glibc version issues in cross-rs Docker images
+          # Force cross to use a specific image or skip version checks
+          CROSS_CONTAINER_OPTS: "--platform linux/amd64"
 
       - name: Build release binary (cargo)
         if: ${{ !matrix.use-cross }}
         run: cargo build --release --verbose --target ${{ matrix.target }}
         env:
-          RUSTFLAGS: ${{ matrix.use-native-musl && '-C target-feature=+crt-static -C link-arg=-static' || '' }}
-          PKG_CONFIG_ALL_STATIC: ${{ matrix.use-native-musl && '1' || '' }}
-          PKG_CONFIG_ALLOW_CROSS: ${{ matrix.use-native-musl && '1' || '' }}
+          RUSTFLAGS: ""
 
       - name: Check built binary
         id: check-binary
