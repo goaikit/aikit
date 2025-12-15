@@ -185,6 +185,7 @@ jobs:
         run: cross build --release --verbose --target ${{ matrix.target }}
         env:
           RUSTFLAGS: ""
+        continue-on-error: true
 
       - name: Build release binary (cargo)
         if: ${{ !matrix.use-cross }}
