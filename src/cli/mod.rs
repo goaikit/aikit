@@ -39,9 +39,14 @@ enum Commands {
     Check(check::CheckArgs),
     /// Display version information
     Version(version::VersionArgs),
-    /// Package installation commands (install, update, remove, list)
-    #[command(subcommand)]
-    Install(commands::install::InstallCommands),
+    /// Install package from GitHub URL
+    Install(commands::install::InstallArgs),
+    /// Update installed package
+    Update(commands::install::UpdateArgs),
+    /// Remove installed package
+    Remove(commands::install::RemoveArgs),
+    /// List installed packages
+    List(commands::install::ListArgs),
     /// Search for packages in registries
     Search(commands::search::SearchArgs),
     /// Package management commands (init, build, publish)
@@ -68,25 +73,21 @@ pub fn run() -> Result<()> {
         Commands::Init(args) => rt.block_on(init::execute(args))?,
         Commands::Check(args) => check::execute(args)?,
         Commands::Version(args) => rt.block_on(version::execute(args))?,
-        Commands::Install(cmd) => {
-            match cmd {
-                commands::install::InstallCommands::Install(args) => {
-                    rt.block_on(commands::install::execute_install(args))
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
-                }
-                commands::install::InstallCommands::Update(args) => {
-                    rt.block_on(commands::install::execute_update(args))
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
-                }
-                commands::install::InstallCommands::Remove(args) => {
-                    rt.block_on(commands::install::execute_remove(args))
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
-                }
-                commands::install::InstallCommands::List(args) => {
-                    rt.block_on(commands::install::execute_list(args))
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
-                }
-            }
+        Commands::Install(args) => {
+            rt.block_on(commands::install::execute_install(args))
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+        }
+        Commands::Update(args) => {
+            rt.block_on(commands::install::execute_update(args))
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+        }
+        Commands::Remove(args) => {
+            rt.block_on(commands::install::execute_remove(args))
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+        }
+        Commands::List(args) => {
+            rt.block_on(commands::install::execute_list(args))
+                .map_err(|e| anyhow::anyhow!("{}", e))?
         }
         Commands::Search(args) => {
             rt.block_on(commands::search::execute_search(args))
