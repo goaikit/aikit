@@ -291,7 +291,7 @@ Contributors will be recognized in the project README and changelog. Thank you f
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the same license as the original project (MIT License).
+By contributing, you agree that your contributions will be licensed under the same license as the original project (Apache License, Version 2.0).
 
 ## Questions?
 

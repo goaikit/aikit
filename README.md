@@ -1,6 +1,6 @@
 # AIKIT - Universal Package Manager for AI Agent Extensions
 
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 **AIKIT has evolved!** Now a universal package manager for AI agent extensions, plus your favorite project templates. Create, share, and discover AI tools that work across Claude, Cursor, GitHub Copilot, and 17+ other AI assistants.
 
@@ -362,7 +362,7 @@ You can override the default with the `--script` option.
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) file for details.
+Apache License, Version 2.0 - See [LICENSE](LICENSE) file for details.
 
 ## Author
 

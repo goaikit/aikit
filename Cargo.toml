@@ -4,12 +4,9 @@ version = "0.1.0"
 edition = "2021"
 authors = ["@aroff"]
 description = "AIKIT - Rust Spec Kit CLI Complete Reimplementation"
-license = "MIT"
+license = "Apache-2.0"
 
 [dependencies]
-# CLI framework for interactive TUI
-tui-framework = { path = "../cli-framework" }
-
 # Command-line argument parsing
 clap = { version = "4.5", features = ["derive"] }
 
@@ -32,7 +29,7 @@ anyhow = "1.0"
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
-# TUI rendering (via cli-framework, but may need direct access)
+# TUI rendering
 ratatui = "0.27"
 crossterm = "0.28"
 
