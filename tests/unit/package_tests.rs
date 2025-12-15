@@ -95,10 +95,10 @@ mod tests {
         assert!(package_dir.join("templates").exists());
         assert!(package_dir.join("scripts").exists());
         assert!(package_dir.join("docs").exists());
-        assert!(package_dir.join("package.toml").exists());
+        assert!(package_dir.join("aikit.toml").exists());
 
-        // Verify package.toml content
-        let toml_content = std::fs::read_to_string(package_dir.join("package.toml")).unwrap();
+        // Verify aikit.toml content
+        let toml_content = std::fs::read_to_string(package_dir.join("aikit.toml")).unwrap();
         assert!(toml_content.contains("name = \"test-package\""));
         assert!(toml_content.contains("version = \"0.1.0\""));
     }

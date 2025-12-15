@@ -26,13 +26,13 @@ mod tests {
 
         // Verify structure
         assert!(package_dir.exists());
-        assert!(package_dir.join("package.toml").exists());
+        assert!(package_dir.join("aikit.toml").exists());
         assert!(package_dir.join("README.md").exists());
         assert!(package_dir.join("templates").exists());
         assert!(package_dir.join("templates").join("example.md").exists());
 
-        // Verify package.toml content
-        let toml_content = fs::read_to_string(package_dir.join("package.toml")).unwrap();
+        // Verify aikit.toml content
+        let toml_content = fs::read_to_string(package_dir.join("aikit.toml")).unwrap();
         assert!(toml_content.contains("name = \"test-workflow-pkg\""));
         assert!(toml_content.contains("description = \"Integration test package\""));
         assert!(toml_content.contains("authors = [\"Test Author\"]"));
@@ -43,7 +43,7 @@ mod tests {
         assert!(readme_content.contains("Integration test package"));
 
         // Load package back from disk
-        let loaded_package = Package::from_toml_file(&package_dir.join("package.toml")).unwrap();
+        let loaded_package = Package::from_toml_file(&package_dir.join("aikit.toml")).unwrap();
         assert_eq!(loaded_package.package.name, "test-workflow-pkg");
         assert_eq!(loaded_package.package.version, "0.1.0");
 
@@ -74,8 +74,8 @@ mod tests {
         // Note: This would normally be called via CLI, but we'll test the core logic
 
         // Verify that package.toml exists and is valid
-        assert!(package_dir.join("package.toml").exists());
-        let loaded_package = Package::from_toml_file(&package_dir.join("package.toml")).unwrap();
+        assert!(package_dir.join("aikit.toml").exists());
+        let loaded_package = Package::from_toml_file(&package_dir.join("aikit.toml")).unwrap();
         assert!(loaded_package.validate().is_ok());
 
         // The actual ZIP building would be tested in the CLI integration tests

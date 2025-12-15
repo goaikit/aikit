@@ -10,7 +10,7 @@ use clap::{Args, Subcommand};
 /// Package management subcommands
 #[derive(Debug, Subcommand)]
 pub enum PackageCommands {
-    /// Initialize a new package with package.toml
+    /// Initialize a new package with aikit.toml
     Init(PackageInitArgs),
     /// Build package for distribution
     Build(PackageBuildArgs),
@@ -67,7 +67,7 @@ pub struct PackagePublishArgs {
     #[arg(short, long)]
     pub package: Option<String>,
 
-    /// Version tag for the release (default: from package.toml)
+    /// Version tag for the release (default: from aikit.toml)
     #[arg(short, long)]
     pub tag: Option<String>,
 
@@ -100,7 +100,10 @@ pub async fn execute_init(args: PackageInitArgs) -> Result<(), Box<dyn std::erro
     // Check if directory already exists
     if package_path.exists() {
         if !args.yes {
-            println!("Directory '{}' already exists. Use --yes to overwrite.", package_name);
+            println!(
+                "Directory '{}' already exists. Use --yes to overwrite.",
+                package_name
+            );
             return Ok(());
         }
         fs::remove_dir_all(package_path)?;
@@ -114,18 +117,16 @@ pub async fn execute_init(args: PackageInitArgs) -> Result<(), Box<dyn std::erro
     fs::create_dir_all(package_path.join("scripts"))?;
     fs::create_dir_all(package_path.join("docs"))?;
 
-    // Create package.toml
-    let package = Package::create_template(
-        package_name.clone(),
-        args.description,
-        args.author,
-    );
+    // Create aikit.toml
+    let package = Package::create_template(package_name.clone(), args.description, args.author);
 
     // Validate package before writing
-    package.validate().map_err(|e| format!("Package validation failed: {}", e))?;
+    package
+        .validate()
+        .map_err(|e| format!("Package validation failed: {}", e))?;
 
-    // Write package.toml
-    package.to_toml_file(&package_path.join("package.toml"))?;
+    // Write aikit.toml
+    package.to_toml_file(&package_path.join("aikit.toml"))?;
 
     // Create example template
     let help_template = r#"# Help Command
@@ -156,7 +157,8 @@ No special configuration required.
     )?;
 
     // Create README
-    let readme_content = format!(r#"# {}
+    let readme_content = format!(
+        r#"# {}
 
 {}
 
@@ -190,14 +192,16 @@ aikit package validate
 ## License
 
 Specify your license here.
-"#, package_name, package.package.description, package_name, package_name, package_name);
+"#,
+        package_name, package.package.description, package_name, package_name, package_name
+    );
 
     fs::write(package_path.join("README.md"), readme_content)?;
 
     println!("✅ Package '{}' initialized successfully!", package_name);
     println!("📁 Created directory structure:");
     println!("  {}/", package_name);
-    println!("  ├── package.toml");
+    println!("  ├── aikit.toml");
     println!("  ├── README.md");
     println!("  ├── templates/");
     println!("  │   └── help.md");
@@ -206,7 +210,7 @@ Specify your license here.
     println!();
     println!("🚀 Next steps:");
     println!("  cd {}", package_name);
-    println!("  # Edit package.toml and templates as needed");
+    println!("  # Edit aikit.toml and templates as needed");
     println!("  aikit package build  # Build the package");
 
     Ok(())
@@ -219,16 +223,18 @@ pub async fn execute_build(args: PackageBuildArgs) -> Result<(), Box<dyn std::er
     use std::path::Path;
 
     let current_dir = std::env::current_dir()?;
-    let package_path = current_dir.join("package.toml");
+    let package_path = current_dir.join("aikit.toml");
 
-    // Check if package.toml exists
+    // Check if aikit.toml exists
     if !package_path.exists() {
-        return Err("package.toml not found. Run 'aikit package init' first.".into());
+        return Err("aikit.toml not found. Run 'aikit package init' first.".into());
     }
 
     // Load and validate package
     let package = Package::from_toml_file(&package_path)?;
-    package.validate().map_err(|e| format!("Package validation failed: {}", e))?;
+    package
+        .validate()
+        .map_err(|e| format!("Package validation failed: {}", e))?;
 
     // Create output directory
     fs::create_dir_all(&args.output)?;
@@ -251,9 +257,9 @@ fn build_package(
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     use std::fs::File;
     use std::io::Write;
+    use walkdir::WalkDir;
     use zip::write::ZipWriter;
     use zip::CompressionMethod;
-    use walkdir::WalkDir;
 
     let output_name = format!("{}-{}.zip", package.package.name, package.package.version);
     let output_path = std::path::Path::new(&args.output).join(output_name);
@@ -261,9 +267,12 @@ fn build_package(
     let file = File::create(&output_path)?;
     let mut zip = ZipWriter::new(file);
 
-    // Add package.toml
+    // Add aikit.toml
     let package_toml = package.to_toml_string()?;
-    zip.start_file("package.toml", zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated))?;
+    zip.start_file(
+        "aikit.toml",
+        zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated),
+    )?;
     std::io::Write::write_all(&mut zip, package_toml.as_bytes())?;
 
     // Collect and add artifacts
@@ -274,7 +283,10 @@ fn build_package(
     // Add README if it exists
     let readme_path = source_dir.join("README.md");
     if readme_path.exists() {
-        zip.start_file("README.md", zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated))?;
+        zip.start_file(
+            "README.md",
+            zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated),
+        )?;
         let content = std::fs::read_to_string(readme_path)?;
         std::io::Write::write_all(&mut zip, content.as_bytes())?;
     }
@@ -290,8 +302,8 @@ fn add_artifacts_to_zip(
     pattern: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use glob::Pattern;
-    use walkdir::WalkDir;
     use std::io::Write;
+    use walkdir::WalkDir;
 
     let glob_pattern = Pattern::new(pattern)?;
 
@@ -299,8 +311,8 @@ fn add_artifacts_to_zip(
         let entry = entry?;
         let path = entry.path();
 
-        // Skip directories and package.toml (already added)
-        if path.is_dir() || path.file_name() == Some(std::ffi::OsStr::new("package.toml")) {
+        // Skip directories and aikit.toml (already added)
+        if path.is_dir() || path.file_name() == Some(std::ffi::OsStr::new("aikit.toml")) {
             continue;
         }
 
@@ -312,7 +324,8 @@ fn add_artifacts_to_zip(
             let content = std::fs::read(path)?;
             zip.start_file(
                 path_str.as_ref(),
-                zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated)
+                zip::write::FileOptions::default()
+                    .compression_method(zip::CompressionMethod::Deflated),
             )?;
             std::io::Write::write_all(zip, &content)?;
         }
@@ -322,7 +335,10 @@ fn add_artifacts_to_zip(
 }
 
 /// Find package ZIP file in dist folder or user-specified path
-fn find_package_zip(package: &crate::models::package::Package, package_arg: Option<&str>) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+fn find_package_zip(
+    package: &crate::models::package::Package,
+    package_arg: Option<&str>,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let zip_name = format!("{}-{}.zip", package.package.name, package.package.version);
 
     // If custom path specified, use it
@@ -348,32 +364,46 @@ fn find_package_zip(package: &crate::models::package::Package, package_arg: Opti
 
 /// Execute package publish command
 pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::models::package::Package;
     use crate::core::git::{GitHubClient, ReleaseInfo};
-    use std::fs;
+    use crate::models::package::Package;
     use std::env;
+    use std::fs;
 
     let current_dir = std::env::current_dir()?;
 
-    // Check if package.toml exists
-    let package_path = current_dir.join("package.toml");
+    // Check if aikit.toml exists
+    let package_path = current_dir.join("aikit.toml");
     if !package_path.exists() {
-        return Err("package.toml not found. Run 'aikit package init' first.".into());
+        return Err("aikit.toml not found. Run 'aikit package init' first.".into());
     }
 
     // Load and validate package
     let package = Package::from_toml_file(&package_path)?;
-    package.validate().map_err(|e| format!("Package validation failed: {}", e))?;
+    package
+        .validate()
+        .map_err(|e| format!("Package validation failed: {}", e))?;
 
     // Find package ZIP file
     let zip_path = find_package_zip(&package, args.package.as_deref())?;
 
-    println!("🚀 Publishing {} v{} to {}/{}", package.package.name, package.package.version, args.repo, args.tag.as_ref().unwrap_or(&format!("v{}", package.package.version)));
+    println!(
+        "🚀 Publishing {} v{} to {}/{}",
+        package.package.name,
+        package.package.version,
+        args.repo,
+        args.tag
+            .as_ref()
+            .unwrap_or(&format!("v{}", package.package.version))
+    );
 
     // Get GitHub token
-    let token = args.token
+    let token = args
+        .token
         .or_else(|| env::var("GITHUB_TOKEN").ok())
-        .ok_or_else(|| "GitHub token required. Set GITHUB_TOKEN environment variable or use --token.".to_string())?;
+        .ok_or_else(|| {
+            "GitHub token required. Set GITHUB_TOKEN environment variable or use --token."
+                .to_string()
+        })?;
 
     // Initialize GitHub client
     let github = GitHubClient::new(Some(token));
@@ -387,39 +417,51 @@ pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std
     let repo = repo_parts[1];
 
     // Determine version tag
-    let tag = args.tag.unwrap_or_else(|| format!("v{}", package.package.version));
+    let tag = args
+        .tag
+        .unwrap_or_else(|| format!("v{}", package.package.version));
 
     // Create release if requested
     if !args.no_release {
         let title = args.title.unwrap_or_else(|| format!("Release {}", tag));
-        let notes = args.notes.unwrap_or_else(|| generate_release_notes(&package));
+        let notes = args
+            .notes
+            .unwrap_or_else(|| generate_release_notes(&package));
 
         let release_info = ReleaseInfo {
             tag_name: tag.clone(),
             name: title,
             body: notes,
             draft: false,
-            prerelease: package.package.version.contains("alpha") ||
-                       package.package.version.contains("beta") ||
-                       package.package.version.contains("rc"),
+            prerelease: package.package.version.contains("alpha")
+                || package.package.version.contains("beta")
+                || package.package.version.contains("rc"),
         };
 
         println!("📝 Creating GitHub release...");
-        let release = github.create_release(owner, repo, &release_info).await
+        let release = github
+            .create_release(owner, repo, &release_info)
+            .await
             .map_err(|e| format!("Failed to create release: {}", e))?;
 
         println!("✅ Release created: {}", release.html_url);
     }
 
     println!("📤 Upload functionality would be implemented here");
-    println!("💡 For now, manually upload {} to the GitHub release", zip_path.display());
+    println!(
+        "💡 For now, manually upload {} to the GitHub release",
+        zip_path.display()
+    );
 
     Ok(())
 }
 
 /// Generate release notes from package information
 fn generate_release_notes(package: &crate::models::package::Package) -> String {
-    let mut notes = format!("# {} v{}\n\n", package.package.name, package.package.version);
+    let mut notes = format!(
+        "# {} v{}\n\n",
+        package.package.name, package.package.version
+    );
 
     notes.push_str(&format!("{}\n\n", package.package.description));
 

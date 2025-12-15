@@ -9,6 +9,7 @@
 use crate::github::api::GitHubClient as GitHubApiClient;
 use clap::{Args, Subcommand};
 use toml;
+use atty;
 
 /// Installation management subcommands
 #[derive(Debug, Subcommand)]
@@ -44,6 +45,10 @@ pub struct InstallArgs {
     /// Skip .gitignore modification prompt
     #[arg(long)]
     pub yes: bool,
+
+    /// AI agent to install for (e.g., claude, copilot, cursor-agent)
+    #[arg(long)]
+    pub ai: Option<String>,
 }
 
 /// Arguments for update command
@@ -94,34 +99,62 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), Box<dyn std::error
         println!("Version: {}", version);
     }
 
-    // Create .aikit directory if it doesn't exist
-    let aik_dir = AikDirectory::new(PathBuf::from(".aikit"));
-    if !aik_dir.exists() {
-        println!("Creating .aikit directory...");
-        aik_dir.create()?;
-    }
+    // Find or create .aikit directory
+    let aik_dir = match AikDirectory::find() {
+        Ok(dir) => dir,
+        Err(_) => {
+            // .aikit not found, create it in current directory
+            let aik_dir = AikDirectory::new(PathBuf::from(".aikit"));
+            println!("Creating .aikit directory...");
+            aik_dir.create()?;
+            aik_dir
+        }
+    };
 
-    // Parse the source URL
-    let (owner, repo, version) = parse_github_url(&args.source, args.version.as_deref())?;
+    // Check if source is a local directory
+    let (package, archive_path) = if std::path::Path::new(&args.source).is_dir() {
+        // Local directory installation
+        println!("Installing from local directory: {}", args.source);
+        install_from_local_directory(&args.source)?
+    } else {
+        // Remote GitHub installation
+        let (owner, repo, version) = parse_github_url(&args.source, args.version.as_deref())?;
 
-    println!("Fetching package manifest from {}/{}...", owner, repo);
+        println!("Fetching package manifest from {}/{}...", owner, repo);
 
-    // Initialize GitHub client with token resolution
-    let github = GitHubClient::new(GitHubApiClient::resolve_token(args.token.clone()));
+        // Initialize GitHub client with token resolution
+        let github = GitHubClient::new(GitHubApiClient::resolve_token(args.token.clone()));
 
-    // Get package manifest
-    let manifest = github
-        .get_package_manifest(&owner, &repo, Some(&version))
-        .await
-        .map_err(|e| format!("Failed to fetch package manifest: {}", e))?;
+        // Get package manifest
+        let manifest = github
+            .get_package_manifest(&owner, &repo, Some(&version))
+            .await
+            .map_err(|e| format!("Failed to fetch package manifest: {}", e))?;
 
-    // Validate package
-    // Convert PackageManifest to TOML string for parsing
-    let manifest_toml = toml::to_string(&manifest)?;
-    let package = crate::models::package::Package::from_toml_str(&manifest_toml)?;
-    package
-        .validate()
-        .map_err(|e| format!("Package validation failed: {}", e))?;
+        // Convert PackageManifest to TOML string for parsing
+        let manifest_toml = toml::to_string(&manifest)?;
+        let package = crate::models::package::Package::from_toml_str(&manifest_toml)?;
+
+        // Download package archive
+        println!(
+            "Downloading package {} v{}...",
+            package.package.name, package.package.version
+        );
+
+        // Download package archive
+        let temp_dir = tempfile::tempdir()?;
+        let archive_path = temp_dir.path().join(format!(
+            "{}-{}.zip",
+            package.package.name, package.package.version
+        ));
+
+        github
+            .download_archive(&owner, &repo, Some(&version), &archive_path)
+            .await
+            .map_err(|e| format!("Failed to download package: {}", e))?;
+
+        (package, Some(archive_path))
+    };
 
     // Check if already installed
     let registry_path = aik_dir.registry_path();
@@ -136,26 +169,15 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), Box<dyn std::error
         .into());
     }
 
-    println!(
-        "Downloading package {} v{}...",
-        package.package.name, package.package.version
-    );
-
-    // Download package archive
-    let temp_dir = tempfile::tempdir()?;
-    let archive_path = temp_dir.path().join(format!(
-        "{}-{}.zip",
-        package.package.name, package.package.version
-    ));
-
-    github
-        .download_archive(&owner, &repo, Some(&version), &archive_path)
-        .await
-        .map_err(|e| format!("Failed to download package: {}", e))?;
-
     // Extract and install package
     println!("Installing package...");
-    install_package_from_archive(&package, &archive_path, &aik_dir, &args)?;
+    if let Some(archive_path) = archive_path {
+        // Remote installation - extract from downloaded archive
+        install_package_from_archive(&package, &archive_path, &aik_dir, &args)?;
+    } else {
+        // Local installation - copy directly from source directory
+        install_package_from_directory(&package, &args.source, &aik_dir, &args)?;
+    }
 
     // Update registry
     use crate::models::package::InstalledPackage;
@@ -183,9 +205,38 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), Box<dyn std::error
         }
     }
 
+    // Determine which agent(s) to generate commands for
+    let selected_agents = if let Some(ai_arg) = &args.ai {
+        // Validate agent key
+        crate::core::agent::validate_agent_key(ai_arg)
+            .map_err(|e| format!("Invalid agent '{}': {}", ai_arg, e))?;
+        vec![ai_arg.clone()]
+    } else if atty::is(atty::Stream::Stdin) {
+        // Interactive selection
+        match crate::tui::agent_select::select_agent_interactive()? {
+            crate::tui::agent_select::SelectionResult::Selected(key) => {
+                vec![key]
+            }
+            crate::tui::agent_select::SelectionResult::Cancelled => {
+                println!("Installation cancelled.");
+                return Ok(());
+            }
+        }
+    } else {
+        // Non-interactive: require --ai flag
+        return Err(
+            "AI agent not specified. Use --ai <agent> to specify an agent, or run in interactive mode.\n\
+             Available agents: claude, copilot, cursor-agent, gemini, qwen, opencode, codex, windsurf, kilocode, auggie, roo, codebuddy, qoder, amp, shai, q, bob"
+                .into(),
+        );
+    };
+
     // Generate agent commands
-    println!("Generating agent commands...");
-    generate_agent_commands(&package, &aik_dir)?;
+    println!("Generating agent commands for: {}", selected_agents.join(", "));
+    if let Err(e) = generate_agent_commands(&package, &aik_dir, &selected_agents) {
+        eprintln!("Warning: Failed to generate agent commands: {}", e);
+        // Don't fail the installation if command generation fails
+    }
 
     println!(
         "✅ Package '{}' v{} installed successfully!",
@@ -197,6 +248,41 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), Box<dyn std::error
     );
 
     Ok(())
+}
+
+/// Install package from local directory
+fn install_from_local_directory(source_path: &str) -> Result<(crate::models::package::Package, Option<std::path::PathBuf>), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::path::Path;
+
+    let source_dir = Path::new(source_path);
+
+    // Check if package.toml or aikit.toml exists
+    let package_toml_path = source_dir.join("package.toml");
+    let aikit_toml_path = source_dir.join("aikit.toml");
+
+    let toml_path = if package_toml_path.exists() {
+        package_toml_path
+    } else if aikit_toml_path.exists() {
+        aikit_toml_path
+    } else {
+        return Err(format!("package.toml or aikit.toml not found in directory: {}", source_path).into());
+    };
+
+    // Read and parse package file
+    let package_toml_content = fs::read_to_string(&toml_path)
+        .map_err(|e| format!("Failed to read {}: {}", toml_path.display(), e))?;
+
+    let package = crate::models::package::Package::from_toml_str(&package_toml_content)
+        .map_err(|e| format!("Failed to parse {}: {}", toml_path.display(), e))?;
+
+    // Validate package
+    package.validate()
+        .map_err(|e| format!("Package validation failed: {}", e))?;
+
+    // For local installation, we don't need to download an archive
+    // We'll install directly from the source directory
+    Ok((package, None))
 }
 
 /// Parse GitHub URL and extract owner, repo, and version
@@ -279,42 +365,154 @@ fn install_package_from_archive(
     Ok(())
 }
 
+/// Install package from local directory
+fn install_package_from_directory(
+    package: &crate::models::package::Package,
+    source_dir: &str,
+    aik_dir: &crate::core::filesystem::AikDirectory,
+    _args: &InstallArgs,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::path::Path;
+
+    let source_path = Path::new(source_dir);
+    let install_path = aik_dir
+        .packages_path()
+        .join(format!("{}-{}", package.package.name, package.package.version));
+
+    // Create package directory
+    fs::create_dir_all(&install_path)?;
+
+    // Copy only relevant files, excluding version control and build artifacts
+    copy_package_files(source_path, &install_path)?;
+
+    Ok(())
+}
+
+/// Copy package files, excluding version control and build directories
+fn copy_package_files(from: &std::path::Path, to: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use walkdir::WalkDir;
+
+    // Directories to exclude
+    let exclude_dirs = ["target", "build", "out", ".git", ".aikit", "node_modules", ".next", "dist"];
+
+    for entry in WalkDir::new(from).into_iter().filter_map(|e| e.ok()) {
+        let source_path = entry.path();
+        let relative_path = source_path.strip_prefix(from)?;
+
+        // Skip excluded directories
+        if let Some(dir_name) = relative_path.iter().next() {
+            if let Some(dir_str) = dir_name.to_str() {
+                if exclude_dirs.contains(&dir_str) {
+                    continue;
+                }
+            }
+        }
+
+        let dest_path = to.join(relative_path);
+
+        if source_path.is_dir() {
+            fs::create_dir_all(&dest_path)?;
+        } else {
+            if let Some(parent) = dest_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(source_path, dest_path)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Generate agent-specific command files
 fn generate_agent_commands(
     package: &crate::models::package::Package,
     aik_dir: &crate::core::filesystem::AikDirectory,
+    agent_keys: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::core::agent::get_agent_configs;
+    use crate::core::agent::get_agent_config;
 
-    for agent_config in get_agent_configs() {
+    for agent_key in agent_keys {
+        if let Some(agent_config) = get_agent_config(agent_key) {
         generate_commands_for_agent(package, &agent_config, aik_dir)?;
+        } else {
+            return Err(format!("Unknown agent: {}", agent_key).into());
+        }
     }
 
     Ok(())
+}
+
+/// Load template content from installed package directory
+fn load_template_content(
+    package: &crate::models::package::Package,
+    command_name: &str,
+    command_def: &crate::models::package::CommandDefinition,
+    aik_dir: &crate::core::filesystem::AikDirectory,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use std::fs;
+
+    // Determine template path:
+    // 1. Use command_def.template if specified (relative to package root)
+    // 2. Default to templates/{command_name}.md
+    let template_path_str = command_def.template
+        .as_ref()
+        .map(|t| t.clone())
+        .unwrap_or_else(|| format!("templates/{}.md", command_name));
+
+    let template_path = template_path_str.as_str();
+
+    // Get installed package directory
+    let package_dir = aik_dir
+        .packages_path()
+        .join(format!("{}-{}", package.package.name, package.package.version));
+
+    let full_path = package_dir.join(template_path);
+
+    // Read template file
+    fs::read_to_string(&full_path)
+        .map_err(|e| {
+            format!(
+                "Failed to load template '{}' from package '{}': {}",
+                template_path, package.package.name, e
+            ).into()
+        })
 }
 
 /// Generate commands for a specific agent
 fn generate_commands_for_agent(
     package: &crate::models::package::Package,
     agent: &crate::core::agent::AgentConfig,
-    _aik_dir: &crate::core::filesystem::AikDirectory,
+    aik_dir: &crate::core::filesystem::AikDirectory,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::fs;
 
-    // Create agent commands directory if it doesn't exist
-    let commands_dir = std::path::Path::new(&agent.output_dir);
-    fs::create_dir_all(commands_dir)?;
+    // Create agent commands directory relative to project root (.aikit parent)
+    let project_root = aik_dir.project_root();
+    let commands_dir = project_root.join(&agent.output_dir);
+    fs::create_dir_all(&commands_dir)?;
 
     // Generate command files for each package command
     for (command_name, command_def) in &package.commands {
+        // Load actual template content from installed package
+        let template_content = load_template_content(
+            package,
+            command_name,
+            command_def,
+            aik_dir,
+        )?;
+
+        // Generate command content using loaded template
         let content = agent.generate_package_command(
             &package.package.name,
             command_name,
             &command_def.description,
-            "# Package command - implementation goes here",
+            &template_content,
         );
 
-        let filename = format!("{}.md", agent.get_namespace_prefix(&package.package.name));
+        // Fix filename: use {package}.{command} instead of {package}.{agent_key}
+        let filename = format!("{}.{}.md", package.package.name, command_name);
         let filepath = commands_dir.join(filename);
 
         fs::write(filepath, content)?;
@@ -328,12 +526,9 @@ pub async fn execute_update(args: UpdateArgs) -> Result<(), Box<dyn std::error::
     use crate::core::filesystem::AikDirectory;
     use crate::core::git::GitHubClient;
     use crate::models::registry::LocalRegistry;
-    use std::path::PathBuf;
 
-    let aik_dir = AikDirectory::new(PathBuf::from(".aikit"));
-    if !aik_dir.exists() {
-        return Err("No packages installed (.aikit directory not found)".into());
-    }
+    let aik_dir = AikDirectory::find()
+        .map_err(|_| "No packages installed (.aikit directory not found)")?;
 
     let registry_path = aik_dir.registry_path();
     let mut registry =
@@ -369,12 +564,9 @@ pub async fn execute_update(args: UpdateArgs) -> Result<(), Box<dyn std::error::
 pub async fn execute_remove(args: RemoveArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::core::filesystem::AikDirectory;
     use crate::models::registry::LocalRegistry;
-    use std::path::PathBuf;
 
-    let aik_dir = AikDirectory::new(PathBuf::from(".aikit"));
-    if !aik_dir.exists() {
-        return Err("No packages installed (.aikit directory not found)".into());
-    }
+    let aik_dir = AikDirectory::find()
+        .map_err(|_| "No packages installed (.aikit directory not found)")?;
 
     let registry_path = aik_dir.registry_path();
     let mut registry =
@@ -446,13 +638,14 @@ fn remove_agent_commands(package_name: &str) -> Result<(), Box<dyn std::error::E
 pub async fn execute_list(args: ListArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::core::filesystem::AikDirectory;
     use crate::models::registry::LocalRegistry;
-    use std::path::PathBuf;
 
-    let aik_dir = AikDirectory::new(PathBuf::from(".aikit"));
-    if !aik_dir.exists() {
-        println!("No packages installed (.aikit directory not found)");
-        return Ok(());
-    }
+    let aik_dir = match AikDirectory::find() {
+        Ok(dir) => dir,
+        Err(_) => {
+            println!("No packages installed (.aikit directory not found)");
+            return Ok(());
+        }
+    };
 
     let registry_path = aik_dir.registry_path();
     let registry =

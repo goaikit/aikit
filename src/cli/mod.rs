@@ -19,17 +19,13 @@ use clap::{Parser, Subcommand};
 
 /// AIKIT - Rust Spec Kit CLI Complete Reimplementation
 #[derive(Parser)]
-#[command(name = "aikit")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
+#[command(name = "aikit", version = env!("CARGO_PKG_VERSION"), disable_version_flag = true)]
 #[command(about = "AIKIT - Rust Spec Kit CLI", long_about = None)]
 pub struct Cli {
     /// Enable debug output (verbose diagnostic information)
     #[arg(long, global = true)]
     pub debug: bool,
 
-    /// Show version information
-    #[arg(long, action = clap::ArgAction::Version)]
-    pub version: (),
 
     #[command(subcommand)]
     command: Commands,

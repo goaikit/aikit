@@ -55,7 +55,7 @@ async fn get_template_version(github_token: Option<String>) -> Result<String> {
 
     // TODO: Get from actual spec-kit repository
     // For now, return a placeholder
-    let release = client.get_latest_release("aroff", "spec-kit").await?;
+    let release = client.get_latest_release("aroff").await?;
     let tag_name = release["tag_name"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("No tag_name in release"))?;

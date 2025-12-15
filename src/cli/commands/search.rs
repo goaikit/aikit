@@ -34,7 +34,9 @@ pub async fn execute_search(args: SearchArgs) -> Result<(), Box<dyn std::error::
     let github = GitHubClient::new(None);
 
     // Search GitHub repositories for packages
-    let results = github.search_repositories(&args.query, args.limit).await
+    let results = github
+        .search_repositories(&args.query, args.limit)
+        .await
         .map_err(|e| format!("Search failed: {}", e))?;
 
     if results.is_empty() {
@@ -44,24 +46,28 @@ pub async fn execute_search(args: SearchArgs) -> Result<(), Box<dyn std::error::
     }
 
     // Filter results to only include repositories that might have packages
-    // (This is a basic filter - in a full implementation, we'd check for package.toml)
-    let package_repos: Vec<_> = results.into_iter()
+    // (This is a basic filter - in a full implementation, we'd check for aikit.toml)
+    let package_repos: Vec<_> = results
+        .into_iter()
         .filter(|repo| {
             // Basic heuristics for package repositories
-            repo.description.as_ref()
-                .map(|desc| desc.to_lowercase().contains("package") ||
-                           desc.to_lowercase().contains("aikit") ||
-                           desc.to_lowercase().contains("ai agent"))
-                .unwrap_or(false) ||
-            repo.name.to_lowercase().contains("package") ||
-            repo.name.to_lowercase().contains("aikit")
+            repo.description
+                .as_ref()
+                .map(|desc| {
+                    desc.to_lowercase().contains("package")
+                        || desc.to_lowercase().contains("aikit")
+                        || desc.to_lowercase().contains("ai agent")
+                })
+                .unwrap_or(false)
+                || repo.name.to_lowercase().contains("package")
+                || repo.name.to_lowercase().contains("aikit")
         })
         .take(args.limit)
         .collect();
 
     if package_repos.is_empty() {
         println!("No AIKIT packages found matching: {}", args.query);
-        println!("📦 Packages typically contain 'package.toml' and mention AI agents");
+        println!("📦 Packages typically contain 'aikit.toml' and mention AI agents");
         return Ok(());
     }
 
@@ -88,11 +94,20 @@ fn display_compact_results(repos: &[crate::core::git::RepositoryInfo]) {
             "".to_string()
         };
 
-        let description = repo.description.as_ref()
-            .map(|d| if d.len() > 60 { format!("{}...", &d[..57]) } else { d.clone() })
+        let description = repo
+            .description
+            .as_ref()
+            .map(|d| {
+                if d.len() > 60 {
+                    format!("{}...", &d[..57])
+                } else {
+                    d.clone()
+                }
+            })
             .unwrap_or_else(|| "No description".to_string());
 
-        println!("{:<30} {:<15} {}",
+        println!(
+            "{:<30} {:<15} {}",
             format!("{}/{}", repo.owner.login, repo.name),
             stars,
             description
@@ -107,7 +122,12 @@ fn display_detailed_results(repos: &[crate::core::git::RepositoryInfo]) {
 
     for (i, repo) in repos.iter().enumerate() {
         println!("{}. {} ({})", i + 1, repo.full_name, repo.html_url);
-        println!("   Description: {}", repo.description.as_ref().unwrap_or(&"No description".to_string()));
+        println!(
+            "   Description: {}",
+            repo.description
+                .as_ref()
+                .unwrap_or(&"No description".to_string())
+        );
 
         if repo.stargazers_count > 0 {
             println!("   ⭐ Stars: {}", repo.stargazers_count);

@@ -15,9 +15,29 @@ pub struct AikDirectory {
 
 #[allow(dead_code)]
 impl AikDirectory {
-    /// Create a new .aikit/ directory manager
+    /// Create a new .aikit/ directory manager by finding .aikit in the directory hierarchy
     pub fn new(base_path: PathBuf) -> Self {
         Self { base_path }
+    }
+
+    /// Find .aikit directory by searching up the directory hierarchy
+    pub fn find() -> Result<Self, Box<dyn std::error::Error>> {
+        let mut current_dir = std::env::current_dir()?;
+
+        loop {
+            let aikit_path = current_dir.join(".aikit");
+            if aikit_path.exists() && aikit_path.is_dir() {
+                return Ok(Self::new(aikit_path));
+            }
+
+            // Move up one directory
+            if let Some(parent) = current_dir.parent() {
+                current_dir = parent.to_path_buf();
+            } else {
+                // Reached root directory, .aikit not found
+                return Err("Could not find .aikit directory in current directory or any parent directory".into());
+            }
+        }
     }
 
     /// Create .aikit/ directory structure
@@ -31,6 +51,11 @@ impl AikDirectory {
     /// Check if .aikit/ directory exists
     pub fn exists(&self) -> bool {
         self.base_path.exists() && self.base_path.is_dir()
+    }
+
+    /// Get the project root directory (parent of .aikit)
+    pub fn project_root(&self) -> PathBuf {
+        self.base_path.parent().unwrap_or(&self.base_path).to_path_buf()
     }
 
     /// Get packages installation directory

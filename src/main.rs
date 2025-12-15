@@ -16,6 +16,9 @@ mod tui;
 
 /// Main entry point for the AIKIT CLI
 fn main() {
+    // Load environment variables from .env file if it exists
+    let _ = dotenv::dotenv();
+
     // Initialize error handling
     if let Err(e) = cli::run() {
         eprintln!("Error: {}", e);

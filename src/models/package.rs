@@ -1,7 +1,7 @@
 //! Universal Package Data Structures
 //!
 //! This module defines the data structures for AIKIT's universal package system.
-//! Packages are defined by package.toml files and can contain any kind of reusable
+//! Packages are defined by aikit.toml files and can contain any kind of reusable
 //! content (prompts, templates, scripts, configurations) for AI agents.
 
 use serde::{Deserialize, Serialize};
@@ -213,7 +213,7 @@ impl Package {
         fs::create_dir_all(base_path.join("docs"))?;
 
         // Write package.toml
-        self.to_toml_file(&base_path.join("package.toml"))?;
+        self.to_toml_file(&base_path.join("aikit.toml"))?;
 
         Ok(())
     }

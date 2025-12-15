@@ -91,7 +91,7 @@ impl GitHubClient {
         limit: usize,
     ) -> Result<Vec<RepositoryInfo>, Box<dyn std::error::Error>> {
         // First try searching for repos with package.toml files
-        let package_search = format!("{} filename:package.toml", query);
+        let package_search = format!("{} filename:aikit.toml", query);
         let url = format!(
             "https://api.github.com/search/repositories?q={}&per_page={}&sort=stars&order=desc",
             urlencoding::encode(&package_search),
