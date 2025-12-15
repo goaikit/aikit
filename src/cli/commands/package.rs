@@ -63,6 +63,10 @@ pub struct PackagePublishArgs {
     /// Repository in format "owner/repo" (required)
     pub repo: String,
 
+    /// Path to package ZIP file (default: dist/{name}-{version}.zip)
+    #[arg(short, long)]
+    pub package: Option<String>,
+
     /// Version tag for the release (default: from package.toml)
     #[arg(short, long)]
     pub tag: Option<String>,
@@ -317,6 +321,31 @@ fn add_artifacts_to_zip(
     Ok(())
 }
 
+/// Find package ZIP file in dist folder or user-specified path
+fn find_package_zip(package: &crate::models::package::Package, package_arg: Option<&str>) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    let zip_name = format!("{}-{}.zip", package.package.name, package.package.version);
+
+    // If custom path specified, use it
+    if let Some(path) = package_arg {
+        let zip_path = std::path::PathBuf::from(path);
+        if zip_path.exists() {
+            println!("📦 Using specified package: {}", zip_path.display());
+            return Ok(zip_path);
+        } else {
+            return Err(format!("Specified package file not found: {}", path).into());
+        }
+    }
+
+    // Default: look in dist folder (which is the default build output)
+    let zip_path = std::path::Path::new("dist").join(&zip_name);
+    if zip_path.exists() {
+        println!("📦 Found package in dist folder: {}", zip_path.display());
+        return Ok(zip_path);
+    }
+
+    Err(format!("Package ZIP not found: {}. Run 'aikit package build' first, or specify path with --package.", zip_name).into())
+}
+
 /// Execute package publish command
 pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::models::package::Package;
@@ -336,12 +365,8 @@ pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std
     let package = Package::from_toml_file(&package_path)?;
     package.validate().map_err(|e| format!("Package validation failed: {}", e))?;
 
-    // Check if package ZIP exists
-    let zip_name = format!("{}-{}.zip", package.package.name, package.package.version);
-    let zip_path = current_dir.join(&zip_name);
-    if !zip_path.exists() {
-        return Err(format!("Package ZIP not found: {}. Run 'aikit package build' first.", zip_name).into());
-    }
+    // Find package ZIP file
+    let zip_path = find_package_zip(&package, args.package.as_deref())?;
 
     println!("🚀 Publishing {} v{} to {}/{}", package.package.name, package.package.version, args.repo, args.tag.as_ref().unwrap_or(&format!("v{}", package.package.version)));
 
@@ -387,7 +412,7 @@ pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std
     }
 
     println!("📤 Upload functionality would be implemented here");
-    println!("💡 For now, manually upload {} to the GitHub release", zip_name);
+    println!("💡 For now, manually upload {} to the GitHub release", zip_path.display());
 
     Ok(())
 }
