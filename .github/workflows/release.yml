@@ -129,17 +129,28 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
 
-      - name: Install musl toolchain (for native musl builds)
+      - name: Install musl toolchain and dependencies (for native musl builds)
         if: matrix.use-native-musl == true
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools
+          sudo apt-get install -y musl-tools musl-dev libssl-dev pkg-config
 
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: rustfmt, clippy
           target: ${{ matrix.target }}
+
+      - name: Configure musl linker (for native musl builds)
+        if: matrix.use-native-musl == true
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [target.x86_64-unknown-linux-musl]
+          linker = "musl-gcc"
+          rustflags = ["-C", "target-feature=+crt-static"]
+          EOF
+          cat .cargo/config.toml
 
       - name: Cache Cargo registry
         uses: actions/cache@v4
@@ -197,7 +208,9 @@ jobs:
         if: ${{ !matrix.use-cross }}
         run: cargo build --release --verbose --target ${{ matrix.target }}
         env:
-          RUSTFLAGS: ${{ matrix.use-native-musl && '-C target-feature=+crt-static' || '' }}
+          RUSTFLAGS: ${{ matrix.use-native-musl && '-C target-feature=+crt-static -C link-arg=-static' || '' }}
+          PKG_CONFIG_ALL_STATIC: ${{ matrix.use-native-musl && '1' || '' }}
+          PKG_CONFIG_ALLOW_CROSS: ${{ matrix.use-native-musl && '1' || '' }}
 
       - name: Check built binary
         id: check-binary
