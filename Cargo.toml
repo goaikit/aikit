@@ -27,7 +27,7 @@ anyhow = "1.0"
 tokio = { version = "1", features = ["full"] }
 
 # TUI rendering
-ratatui = "0.27"
+ratatui = "0.29"
 crossterm = "0.28"
 
 # Directory traversal
