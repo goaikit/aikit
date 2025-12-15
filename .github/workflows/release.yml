@@ -176,21 +176,17 @@ jobs:
             du -sh ~/.cargo/* 2>/dev/null | sort -hr | head -5 || true
           fi
 
-      - name: Install cross-rs
+      - name: Install cargo-zigbuild
         if: matrix.use-cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: |
+          cargo install cargo-zigbuild --locked
+          rustup target add ${{ matrix.target }}
 
       - name: Build release binary (cross)
         if: matrix.use-cross
-        run: |
-          # Use a specific cross image that works around glibc version issues
-          # Set CROSS_CONTAINER_OPTS to use a newer base image if needed
-          cross build --release --verbose --target ${{ matrix.target }}
+        run: cargo zigbuild --release --target ${{ matrix.target }} --verbose
         env:
           RUSTFLAGS: ""
-          # Workaround for glibc version issues in cross-rs Docker images
-          # Force cross to use a specific image or skip version checks
-          CROSS_CONTAINER_OPTS: "--platform linux/amd64"
 
       - name: Build release binary (cargo)
         if: ${{ !matrix.use-cross }}
