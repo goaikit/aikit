@@ -134,7 +134,21 @@ jobs:
           git tag "$TAG"
           git push origin "$TAG"
 
-          echo "::notice::Created and pushed tag $TAG - release workflow will be triggered"
+          echo "::notice::Created and pushed tag $TAG"
+
+      - name: Trigger Release workflow
+        if: steps.check-label.outputs.skip != 'true'
+        run: |
+          VERSION="${{ steps.release.outputs.version }}"
+          
+          # Trigger the Release workflow via GitHub API
+          gh workflow run Release \
+            --ref main \
+            --field version="$VERSION"
+          
+          echo "::notice::Triggered Release workflow for version $VERSION"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Skip notice
         if: steps.check-label.outputs.skip == 'true'
