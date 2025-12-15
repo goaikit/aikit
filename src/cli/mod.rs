@@ -4,9 +4,16 @@
 
 mod check;
 mod init;
-mod package;
+mod template_package;  // Old template zip archive builder (used by release command)
 mod release;
 mod version;
+
+// Package management commands (init, build, publish)
+mod commands {
+    pub mod install;
+    pub mod package;
+    pub mod search;
+}
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -32,8 +39,9 @@ enum Commands {
     Check(check::CheckArgs),
     /// Display version information
     Version(version::VersionArgs),
-    /// Build template zip archives for GitHub releases
-    Package(package::PackageArgs),
+    /// Package management commands (init, build, publish)
+    #[command(subcommand)]
+    Package(commands::package::PackageCommands),
     /// Create GitHub release with package files
     Release(release::ReleaseArgs),
 }
@@ -55,7 +63,22 @@ pub fn run() -> Result<()> {
         Commands::Init(args) => rt.block_on(init::execute(args))?,
         Commands::Check(args) => check::execute(args)?,
         Commands::Version(args) => rt.block_on(version::execute(args))?,
-        Commands::Package(args) => rt.block_on(package::execute(args))?,
+        Commands::Package(cmd) => {
+            match cmd {
+                commands::package::PackageCommands::Init(args) => {
+                    rt.block_on(commands::package::execute_init(args))
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                }
+                commands::package::PackageCommands::Build(args) => {
+                    rt.block_on(commands::package::execute_build(args))
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                }
+                commands::package::PackageCommands::Publish(args) => {
+                    rt.block_on(commands::package::execute_publish(args))
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                }
+            }
+        }
         Commands::Release(args) => rt.block_on(release::execute(args))?,
     }
 

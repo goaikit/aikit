@@ -241,17 +241,18 @@ pub async fn execute_build(args: PackageBuildArgs) -> Result<(), Box<dyn std::er
 
 /// Build package ZIP archive
 fn build_package(
-    package: &Package,
-    source_dir: &Path,
+    package: &crate::models::package::Package,
+    source_dir: &std::path::Path,
     args: &PackageBuildArgs,
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     use std::fs::File;
+    use std::io::Write;
     use zip::write::ZipWriter;
     use zip::CompressionMethod;
     use walkdir::WalkDir;
 
     let output_name = format!("{}-{}.zip", package.package.name, package.package.version);
-    let output_path = Path::new(&args.output).join(output_name);
+    let output_path = std::path::Path::new(&args.output).join(output_name);
 
     let file = File::create(&output_path)?;
     let mut zip = ZipWriter::new(file);
@@ -270,7 +271,7 @@ fn build_package(
     let readme_path = source_dir.join("README.md");
     if readme_path.exists() {
         zip.start_file("README.md", zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated))?;
-        let content = fs::read_to_string(readme_path)?;
+        let content = std::fs::read_to_string(readme_path)?;
         std::io::Write::write_all(&mut zip, content.as_bytes())?;
     }
 
@@ -281,10 +282,12 @@ fn build_package(
 /// Add artifacts matching pattern to ZIP
 fn add_artifacts_to_zip(
     zip: &mut zip::ZipWriter<std::fs::File>,
-    base_dir: &Path,
+    base_dir: &std::path::Path,
     pattern: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use glob::Pattern;
+    use walkdir::WalkDir;
+    use std::io::Write;
 
     let glob_pattern = Pattern::new(pattern)?;
 
@@ -304,7 +307,7 @@ fn add_artifacts_to_zip(
         if glob_pattern.matches(&path_str) {
             let content = std::fs::read(path)?;
             zip.start_file(
-                &path_str,
+                path_str.as_ref(),
                 zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated)
             )?;
             std::io::Write::write_all(zip, &content)?;
@@ -390,12 +393,10 @@ pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std
 }
 
 /// Generate release notes from package information
-fn generate_release_notes(package: &Package) -> String {
+fn generate_release_notes(package: &crate::models::package::Package) -> String {
     let mut notes = format!("# {} v{}\n\n", package.package.name, package.package.version);
 
-    if let Some(desc) = &package.package.description {
-        notes.push_str(&format!("{}\n\n", desc));
-    }
+    notes.push_str(&format!("{}\n\n", package.package.description));
 
     if !package.commands.is_empty() {
         notes.push_str("## Commands\n\n");

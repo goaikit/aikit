@@ -7,6 +7,7 @@
 //! - list: List installed packages
 
 use clap::{Args, Subcommand};
+use toml;
 
 /// Installation management subcommands
 #[derive(Debug, Subcommand)]
@@ -108,7 +109,9 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), Box<dyn std::error
         .map_err(|e| format!("Failed to fetch package manifest: {}", e))?;
 
     // Validate package
-    let package = Package::from_toml_str(&manifest.package)?;
+    // Convert PackageManifest to TOML string for parsing
+    let manifest_toml = toml::to_string(&manifest)?;
+    let package = crate::models::package::Package::from_toml_str(&manifest_toml)?;
     package.validate().map_err(|e| format!("Package validation failed: {}", e))?;
 
     // Check if already installed
@@ -146,7 +149,8 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), Box<dyn std::error
     registry.save_to_file(&registry_path)?;
 
     // Handle .gitignore
-    if !args.skip_gitignore {
+    // Note: skip_gitignore field doesn't exist in InstallArgs, always prompt
+    {
         use crate::core::filesystem::GitIgnoreManager;
         let gitignore = GitIgnoreManager::new(std::path::Path::new("."));
         if gitignore.prompt_user() {
@@ -198,7 +202,7 @@ fn parse_github_url(source: &str, version: Option<&str>) -> Result<(String, Stri
 
 /// Install package from downloaded archive
 fn install_package_from_archive(
-    package: &Package,
+    package: &crate::models::package::Package,
     archive_path: &std::path::Path,
     aik_dir: &crate::core::filesystem::AikDirectory,
     _args: &InstallArgs,
@@ -240,10 +244,10 @@ fn install_package_from_archive(
 
 /// Generate agent-specific command files
 fn generate_agent_commands(
-    package: &Package,
+    package: &crate::models::package::Package,
     aik_dir: &crate::core::filesystem::AikDirectory,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use crate::core::agent::{get_agent_configs, AgentConfig};
+    use crate::core::agent::get_agent_configs;
 
     for agent_config in get_agent_configs() {
         generate_commands_for_agent(package, &agent_config, aik_dir)?;
@@ -254,8 +258,8 @@ fn generate_agent_commands(
 
 /// Generate commands for a specific agent
 fn generate_commands_for_agent(
-    package: &Package,
-    agent: &AgentConfig,
+    package: &crate::models::package::Package,
+    agent: &crate::core::agent::AgentConfig,
     _aik_dir: &crate::core::filesystem::AikDirectory,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::fs;
