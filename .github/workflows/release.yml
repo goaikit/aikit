@@ -561,8 +561,22 @@ jobs:
           echo "linux_musl_hash=$LINUX_MUSL_HASH" >> $GITHUB_OUTPUT
 
           # Windows
-          WINDOWS_URL=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-pc-windows-msvc.zip") | .browser_download_url')
-          WINDOWS_HASH=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-pc-windows-msvc.zip") | .digest' | sed 's/sha256://')
+          # browser_download_url can be null, so construct it from the release if needed
+          WINDOWS_ASSET=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-pc-windows-msvc.zip")')
+          if [ -n "$WINDOWS_ASSET" ]; then
+            WINDOWS_URL=$(echo $WINDOWS_ASSET | jq -r '.browser_download_url // empty')
+            # If browser_download_url is null, construct it from the release tag
+            if [ -z "$WINDOWS_URL" ] || [ "$WINDOWS_URL" = "null" ]; then
+              TAG="${{ github.ref_name }}"
+              WINDOWS_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/aikit-x86_64-pc-windows-msvc.zip"
+              echo "⚠️  browser_download_url was null, constructed URL: $WINDOWS_URL"
+            fi
+            WINDOWS_HASH=$(echo $WINDOWS_ASSET | jq -r '.digest' | sed 's/sha256://')
+          else
+            WINDOWS_URL=""
+            WINDOWS_HASH=""
+            echo "⚠️  Warning: Windows asset not found in release"
+          fi
           echo "windows_url=$WINDOWS_URL" >> $GITHUB_OUTPUT
           echo "windows_hash=$WINDOWS_HASH" >> $GITHUB_OUTPUT
 
@@ -605,6 +619,46 @@ jobs:
 
           cd scoop-bucket
 
+          # Check if bucket directory exists, create if not
+          if [ ! -d "bucket" ]; then
+            echo "⚠️  bucket directory not found, creating it"
+            mkdir -p bucket
+          fi
+
+          # Check if file exists, create initial structure if not
+          if [ ! -f "bucket/aikit.json" ]; then
+            echo "⚠️  bucket/aikit.json not found, creating initial file"
+            cat > bucket/aikit.json << 'EOF'
+          {
+            "version": "0.0.1",
+            "description": "AIKit",
+            "homepage": "https://github.com/goaikit/aikit",
+            "license": "Apache-2.0",
+            "architecture": {
+              "64bit": {
+                "url": "",
+                "hash": ""
+              }
+            },
+            "bin": "aikit.exe",
+            "checkver": "github",
+            "autoupdate": {
+              "architecture": {
+                "64bit": {
+                  "url": "https://github.com/goaikit/aikit/releases/download/v$version/aikit-x86_64-pc-windows-msvc.zip"
+                }
+              }
+            }
+          }
+          EOF
+          fi
+
+          # Skip update if Windows URL is null or empty
+          if [ -z "${{ steps.release-info.outputs.windows_url }}" ] || [ "${{ steps.release-info.outputs.windows_url }}" = "null" ]; then
+            echo "⚠️  Windows URL is null or empty, skipping Scoop update"
+            exit 0
+          fi
+
           # Update version, URL and hash using jq for safer JSON manipulation
           jq --arg version "${{ steps.release-info.outputs.version }}" \
              --arg url "${{ steps.release-info.outputs.windows_url }}" \
@@ -644,6 +698,11 @@ jobs:
       - name: Commit and push Homebrew changes
         continue-on-error: true
         run: |
+          if [ ! -d "homebrew-cli" ]; then
+            echo "⚠️  homebrew-cli repository not checked out, skipping Homebrew push"
+            exit 0
+          fi
+
           cd homebrew-cli
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -653,6 +712,8 @@ jobs:
           else
             git add Formula/aikit.rb
             git commit -m "Update aikit to version ${{ steps.release-info.outputs.version }}"
+            # Configure git to use token for authentication
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/goaikit/homebrew-cli.git
             git push origin main
             echo "Homebrew formula updated and pushed"
           fi
@@ -660,6 +721,11 @@ jobs:
       - name: Commit and push Scoop changes
         continue-on-error: true
         run: |
+          if [ ! -d "scoop-bucket" ]; then
+            echo "⚠️  scoop-bucket repository not checked out, skipping Scoop push"
+            exit 0
+          fi
+
           cd scoop-bucket
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -669,6 +735,8 @@ jobs:
           else
             git add bucket/aikit.json
             git commit -m "Update aikit to version ${{ steps.release-info.outputs.version }}"
+            # Configure git to use token for authentication
+            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/goaikit/scoop-bucket.git
             git push origin main
             echo "Scoop bucket updated and pushed"
           fi
