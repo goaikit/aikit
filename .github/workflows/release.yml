@@ -712,8 +712,6 @@ jobs:
           else
             git add Formula/aikit.rb
             git commit -m "Update aikit to version ${{ steps.release-info.outputs.version }}"
-            # Configure git to use token for authentication
-            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/goaikit/homebrew-cli.git
             git push origin main
             echo "Homebrew formula updated and pushed"
           fi
@@ -735,8 +733,6 @@ jobs:
           else
             git add bucket/aikit.json
             git commit -m "Update aikit to version ${{ steps.release-info.outputs.version }}"
-            # Configure git to use token for authentication
-            git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/goaikit/scoop-bucket.git
             git push origin main
             echo "Scoop bucket updated and pushed"
           fi
