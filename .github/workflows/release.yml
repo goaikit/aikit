@@ -43,10 +43,12 @@ jobs:
             # When triggered via workflow_run, get the latest tag
             # Fetch all tags first to ensure we have them
             git fetch --tags --force
-            # Get the latest tag (most recent by date)
-            TAG_VERSION=$(git tag --sort=-creatordate | head -1)
+            # Get the latest tag matching v*.*.* pattern (most recent by date)
+            TAG_VERSION=$(git tag --sort=-creatordate --list 'v*.*.*' | head -1)
             if [ -z "$TAG_VERSION" ]; then
-              echo "Error: No tags found"
+              echo "Error: No version tags (v*.*.*) found"
+              echo "Available tags:"
+              git tag --list
               exit 1
             fi
             VERSION="${TAG_VERSION#v}"
