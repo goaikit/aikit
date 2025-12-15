@@ -176,7 +176,7 @@ jobs:
 
       - name: Build release binary (cross)
         if: matrix.use-cross
-        run: cross build --release --verbose --target ${{ matrix.target }} --no-default-features --features "filesystem-storage,hot-reload"
+        run: cross build --release --verbose --target ${{ matrix.target }}
         env:
           RUSTFLAGS: ""
 
@@ -496,6 +496,7 @@ jobs:
           repository: goaikit/homebrew-cli
           path: homebrew-cli
           token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
 
       - name: Checkout scoop-bucket repo
         uses: actions/checkout@v4
@@ -503,6 +504,7 @@ jobs:
           repository: goaikit/scoop-bucket
           path: scoop-bucket
           token: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
 
       - name: Get release metadata
         id: release-info
@@ -535,7 +537,13 @@ jobs:
           echo "Release metadata extracted successfully"
 
       - name: Update Homebrew formula
+        if: success() || failure()
         run: |
+          if [ ! -d "homebrew-cli" ]; then
+            echo "⚠️  homebrew-cli repository not checked out, skipping Homebrew update"
+            exit 0
+          fi
+
           echo "Updating Homebrew formula to version ${{ steps.release-info.outputs.version }}"
 
           cd homebrew-cli
@@ -554,7 +562,13 @@ jobs:
           echo "Homebrew formula updated"
 
       - name: Update Scoop bucket
+        if: success() || failure()
         run: |
+          if [ ! -d "scoop-bucket" ]; then
+            echo "⚠️  scoop-bucket repository not checked out, skipping Scoop update"
+            exit 0
+          fi
+
           echo "Updating Scoop bucket to version ${{ steps.release-info.outputs.version }}"
 
           cd scoop-bucket
