@@ -27,6 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.extract-version.outputs.version }}
+      tag: ${{ steps.extract-version.outputs.tag }}
     steps:
       - name: Checkout code for tag detection
         uses: actions/checkout@v4
@@ -416,7 +417,7 @@ jobs:
       - name: Delete existing releases if present
         continue-on-error: true
         run: |
-          TAG="${{ github.ref_name }}"
+          TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
 
           # Delete from main repository
           echo "Checking for existing release ..."
@@ -441,7 +442,7 @@ jobs:
         id: release-notes
         run: |
           VERSION="${{ needs.verify-version.outputs.version }}"
-          TAG="${{ github.ref_name }}"
+          TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
 
           # Get previous tag
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
@@ -487,7 +488,7 @@ jobs:
       - name: Create Release (as draft to allow asset uploads)
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.verify-version.outputs.tag || github.ref_name }}
           name: Release ${{ needs.verify-version.outputs.version }}
           body_path: release_notes.md
           files: ${{ steps.prepare-files.outputs.files }}
@@ -498,7 +499,7 @@ jobs:
 
       - name: Publish release (remove draft status)
         run: |
-          TAG="${{ github.ref_name }}"
+          TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
           echo "Publishing release $TAG..."
           gh release edit "$TAG" --draft=false
           echo "Release $TAG is now published!"
@@ -541,10 +542,11 @@ jobs:
       - name: Get release metadata
         id: release-info
         run: |
-          echo "Getting release metadata for ${{ github.ref_name }}"
+          TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
+          echo "Getting release metadata for $TAG"
 
           # Get release assets from the newly created release
-          ASSETS=$(gh release view ${{ github.ref_name }} --repo ${{ github.repository }} --json assets --jq '.assets')
+          ASSETS=$(gh release view "$TAG" --repo ${{ github.repository }} --json assets --jq '.assets')
 
           echo "version=${{ needs.verify-version.outputs.version }}" >> $GITHUB_OUTPUT
 
@@ -567,8 +569,8 @@ jobs:
             WINDOWS_URL=$(echo $WINDOWS_ASSET | jq -r '.browser_download_url // empty')
             # If browser_download_url is null, construct it from the release tag
             if [ -z "$WINDOWS_URL" ] || [ "$WINDOWS_URL" = "null" ]; then
-              TAG="${{ github.ref_name }}"
-              WINDOWS_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/aikit-x86_64-pc-windows-msvc.zip"
+              RELEASE_TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
+              WINDOWS_URL="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/aikit-x86_64-pc-windows-msvc.zip"
               echo "⚠️  browser_download_url was null, constructed URL: $WINDOWS_URL"
             fi
             WINDOWS_HASH=$(echo $WINDOWS_ASSET | jq -r '.digest' | sed 's/sha256://')
