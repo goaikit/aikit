@@ -10,6 +10,12 @@ on:
         description: 'Version to release (e.g., 0.1.1)'
         required: false
         type: string
+  workflow_run:
+    workflows: ["Auto Release"]
+    types:
+      - completed
+    branches:
+      - main
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,12 +28,25 @@ jobs:
     outputs:
       version: ${{ steps.extract-version.outputs.version }}
     steps:
+      - name: Checkout code for tag detection
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Extract version from tag or input
         id: extract-version
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             VERSION="${{ inputs.version }}"
             TAG_VERSION="v$VERSION"
+          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+            # When triggered via workflow_run, get the latest tag
+            TAG_VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -z "$TAG_VERSION" ]; then
+              echo "Error: No tags found"
+              exit 1
+            fi
+            VERSION="${TAG_VERSION#v}"
           else
             TAG_VERSION="${{ github.ref_name }}"
             # Strip 'v' prefix
@@ -42,6 +61,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.extract-version.outputs.tag || github.ref }}
+          fetch-depth: 0
 
       - name: Read version from Cargo.toml
         id: cargo-version
