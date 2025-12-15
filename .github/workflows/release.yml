@@ -176,15 +176,13 @@ jobs:
             du -sh ~/.cargo/* 2>/dev/null | sort -hr | head -5 || true
           fi
 
-      - name: Install cargo-zigbuild
+      - name: Install cross-rs
         if: matrix.use-cross
-        run: |
-          cargo install cargo-zigbuild --locked
-          rustup target add ${{ matrix.target }}
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build release binary (cross)
         if: matrix.use-cross
-        run: cargo zigbuild --release --target ${{ matrix.target }} --verbose
+        run: cross build --release --verbose --target ${{ matrix.target }}
         env:
           RUSTFLAGS: ""
 
