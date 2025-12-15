@@ -193,7 +193,20 @@ jobs:
         env:
           RUSTFLAGS: ""
 
+      - name: Check built binary
+        id: check-binary
+        run: |
+          BIN_PATH=target/${{ matrix.target }}/release/${{ matrix.binary-name }}
+          if [ -f "$BIN_PATH" ]; then
+            echo "has_binary=true" >> $GITHUB_OUTPUT
+            echo "✅ Found binary at $BIN_PATH"
+          else
+            echo "has_binary=false" >> $GITHUB_OUTPUT
+            echo "::warning::Binary not found at $BIN_PATH; skipping packaging for ${{ matrix.target }}"
+          fi
+
       - name: Create release directory
+        if: steps.check-binary.outputs.has_binary == 'true'
         shell: bash
         run: |
           mkdir -p release
@@ -204,6 +217,7 @@ jobs:
           fi
 
       - name: Create README for release
+        if: steps.check-binary.outputs.has_binary == 'true'
         shell: bash
         run: |
           cat > release/README.md << 'EOF'
@@ -246,6 +260,7 @@ jobs:
           EOF
 
       - name: Create archive
+        if: steps.check-binary.outputs.has_binary == 'true'
         shell: bash
         run: |
           cd release
@@ -263,6 +278,7 @@ jobs:
           ls -lh ${{ matrix.archive-name }}
 
       - name: Upload artifact
+        if: steps.check-binary.outputs.has_binary == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.archive-name }}
@@ -617,6 +633,7 @@ jobs:
           fi
 
       - name: Commit and push Homebrew changes
+        continue-on-error: true
         run: |
           cd homebrew-cli
           git config --global user.name "github-actions[bot]"
@@ -632,6 +649,7 @@ jobs:
           fi
 
       - name: Commit and push Scoop changes
+        continue-on-error: true
         run: |
           cd scoop-bucket
           git config --global user.name "github-actions[bot]"
