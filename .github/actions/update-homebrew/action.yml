@@ -60,16 +60,39 @@ runs:
 
         cd $HOMEBREW_REPO
 
-        # Update version
-        sed -i "s/version \".*\"/version \"${{ inputs.version }}\"/" $FORMULA_PATH
+        # Use Python for reliable URL/hash replacement that handles "null" values
+        python3 << PYTHON_SCRIPT
+import re
+import sys
 
-        # Update GNU URLs and hashes (first occurrence)
-        sed -i "0,/url \".*${FORMULA_NAME}-x86_64-unknown-linux-gnu.tar.gz\"/s|url \".*\"|url \"${{ inputs.linux_gnu_url }}\"|" $FORMULA_PATH
-        sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ inputs.linux_gnu_hash }}\"/" $FORMULA_PATH
+formula_path = "${{ inputs.formula_path }}"
+version = "${{ inputs.version }}"
+gnu_url = "${{ inputs.linux_gnu_url }}"
+gnu_hash = "${{ inputs.linux_gnu_hash }}"
+musl_url = "${{ inputs.linux_musl_url }}"
+musl_hash = "${{ inputs.linux_musl_hash }}"
 
-        # Update MUSL URLs and hashes (second occurrence)
-        sed -i "s|url \".*${FORMULA_NAME}-x86_64-unknown-linux-musl.tar.gz\"|url \"${{ inputs.linux_musl_url }}\"|" $FORMULA_PATH
-        sed -i "s/sha256 \"${{ inputs.linux_gnu_hash }}\"/sha256 \"${{ inputs.linux_musl_hash }}\"/" $FORMULA_PATH
+with open(formula_path, 'r') as f:
+    content = f.read()
+
+# Update version
+content = re.sub(r'version ".*"', f'version "{version}"', content)
+
+# Update GNU URL and hash (in the "if glibc_version >= 2.38" block)
+# Match any URL value (including "null") followed by sha256 in the GNU block
+gnu_pattern = r'(if glibc_version >= 2\.38\s*\n\s+url ")([^"]+)("\s*\n\s+sha256 ")([^"]+)(")'
+content = re.sub(gnu_pattern, rf'\1{gnu_url}\3{gnu_hash}\5', content, flags=re.MULTILINE)
+
+# Update MUSL URL and hash (in the "else" block)
+# Match any URL value (including "null") followed by sha256 in the else block
+musl_pattern = r'(else\s*\n\s+url ")([^"]+)("\s*\n\s+sha256 ")([^"]+)(")'
+content = re.sub(musl_pattern, rf'\1{musl_url}\3{musl_hash}\5', content, flags=re.MULTILINE)
+
+with open(formula_path, 'w') as f:
+    f.write(content)
+
+print("Homebrew formula updated successfully")
+PYTHON_SCRIPT
 
         echo "Homebrew formula updated"
 
