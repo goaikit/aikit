@@ -1,0 +1,14 @@
+# Code owners for AIKit repository
+# Changes to these files require approval from the repository owner
+
+# Global owners - require approval from repository owner for all changes
+* @goaikit
+
+# Security-related files - extra scrutiny
+.github/SECURITY.md @goaikit
+.github/workflows/*.yml @goaikit
+Cargo.lock @goaikit
+
+# Core source code - require owner review
+src/ @goaikit
+Cargo.toml @goaikit
