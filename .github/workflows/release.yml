@@ -93,6 +93,11 @@ jobs:
 
 
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
+
       - name: Build Rust binary
         uses: ./.github/actions/build-rust-binary
         with:
