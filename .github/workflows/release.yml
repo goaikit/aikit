@@ -327,14 +327,32 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: goaikit
+
+      - name: Validate App Token
+        run: |
+          if [ -z "${{ steps.app-token.outputs.token }}" ]; then
+            echo "❌ Failed to generate GitHub App token"
+            exit 1
+          fi
+          echo "✅ GitHub App token generated successfully"
+          # Verify token has required permissions
+          gh auth status --hostname github.com || exit 1
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Install dependencies
         run: |
@@ -346,16 +364,14 @@ jobs:
         with:
           repository: goaikit/homebrew-cli
           path: homebrew-cli
-          token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Checkout scoop-bucket repo
         uses: actions/checkout@v4
         with:
           repository: goaikit/scoop-bucket
           path: scoop-bucket
-          token: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Get release metadata
         id: release-info
@@ -401,11 +417,16 @@ jobs:
           echo "windows_hash=$WINDOWS_HASH" >> $GITHUB_OUTPUT
 
           echo "Release metadata extracted successfully"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Update Homebrew formula
         if: success() || failure()
         uses: ./.github/actions/update-homebrew
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
+          gh_token: ${{ steps.app-token.outputs.token }}
           version: ${{ steps.release-info.outputs.version }}
           linux_gnu_url: ${{ steps.release-info.outputs.linux_gnu_url }}
           linux_gnu_hash: ${{ steps.release-info.outputs.linux_gnu_hash }}
@@ -415,7 +436,10 @@ jobs:
       - name: Update Scoop bucket
         if: success() || failure()
         uses: ./.github/actions/update-scoop
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         with:
+          gh_token: ${{ steps.app-token.outputs.token }}
           version: ${{ steps.release-info.outputs.version }}
           windows_url: ${{ steps.release-info.outputs.windows_url }}
           windows_hash: ${{ steps.release-info.outputs.windows_hash }}

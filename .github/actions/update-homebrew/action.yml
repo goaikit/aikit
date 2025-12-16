@@ -16,6 +16,9 @@ inputs:
   linux_musl_hash:
     description: 'SHA256 hash for Linux MUSL binary'
     required: true
+  gh_token:
+    description: 'GitHub token for git operations'
+    required: true
   formula_path:
     description: 'Path to the formula file'
     required: false
@@ -86,19 +89,30 @@ runs:
       shell: bash
       run: |
         if [ ! -d "${{ inputs.repo_path }}" ]; then
-          echo "⚠️  ${{ inputs.repo_path }} repository not checked out, skipping Homebrew push"
-          exit 0
+          echo "❌ ${{ inputs.repo_path }} repository not checked out"
+          exit 1
         fi
 
         cd ${{ inputs.repo_path }}
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
+        # Configure git to use token
+        git remote set-url origin https://${{ inputs.gh_token }}@github.com/goaikit/homebrew-cli.git
+
         if git diff --quiet; then
           echo "No changes to commit for Homebrew"
         else
           git add ${{ inputs.formula_path }}
           git commit -m "Update ${{ inputs.formula_name }} to version ${{ inputs.version }}"
-          git push origin main
-          echo "Homebrew formula updated and pushed"
+          git push origin HEAD:refs/heads/main
+
+          # Verify push succeeded
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to push Homebrew changes"
+            exit 1
+          fi
+          echo "✅ Homebrew formula updated and pushed"
         fi
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}

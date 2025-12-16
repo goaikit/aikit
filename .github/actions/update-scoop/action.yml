@@ -10,6 +10,9 @@ inputs:
   windows_hash:
     description: 'SHA256 hash for Windows binary'
     required: true
+  gh_token:
+    description: 'GitHub token for git operations'
+    required: true
   bucket_path:
     description: 'Path to the bucket manifest file'
     required: false
@@ -126,19 +129,30 @@ runs:
       shell: bash
       run: |
         if [ ! -d "${{ inputs.repo_path }}" ]; then
-          echo "⚠️  ${{ inputs.repo_path }} repository not checked out, skipping Scoop push"
-          exit 0
+          echo "❌ ${{ inputs.repo_path }} repository not checked out"
+          exit 1
         fi
 
         cd ${{ inputs.repo_path }}
         git config --global user.name "github-actions[bot]"
         git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
+        # Configure git to use token
+        git remote set-url origin https://${{ inputs.gh_token }}@github.com/goaikit/scoop-bucket.git
+
         if git diff --quiet; then
           echo "No changes to commit for Scoop"
         else
           git add ${{ inputs.bucket_path }}
           git commit -m "Update ${{ inputs.manifest_name }} to version ${{ inputs.version }}"
-          git push origin main
-          echo "Scoop bucket updated and pushed"
+          git push origin HEAD:refs/heads/main
+
+          # Verify push succeeded
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to push Scoop changes"
+            exit 1
+          fi
+          echo "✅ Scoop bucket updated and pushed"
         fi
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
