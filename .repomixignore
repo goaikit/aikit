@@ -6,3 +6,5 @@ spec-kit
 specs
 .specify
 .cursor
+*.md
+.github

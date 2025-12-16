@@ -1,0 +1,244 @@
+# Quick Start: AIKIT Rust Implementation
+
+**Date**: 2025-01-27  
+**Feature**: 002-rust-spec-kit-complete
+
+## Prerequisites
+
+- Rust toolchain (stable, minimum 1.75+)
+- Git (optional, for repository initialization)
+- GitHub personal access token (optional, for higher API rate limits)
+
+## Installation
+
+### From Source
+
+```bash
+git clone https://github.com/aroff/aikit.git
+cd aikit
+cargo build --release
+cargo install --path .
+```
+
+### Binary Distribution
+
+*(Future: Download pre-built binaries from GitHub releases)*
+
+## Basic Usage
+
+### Initialize a New Project
+
+```bash
+# Interactive agent selection
+aikit init my-project
+
+# Specify agent directly
+aikit init my-project --ai claude
+
+# Initialize in current directory
+aikit init --here --ai copilot
+
+# Force merge into non-empty directory
+aikit init --here --force
+```
+
+### Check Installed Tools
+
+```bash
+# Check all tools and agents
+aikit check
+```
+
+### Display Version Information
+
+```bash
+# Show CLI and template versions
+aikit version
+
+# With GitHub token for template version
+aikit version --github-token <token>
+```
+
+## Advanced Usage
+
+### Package Generation
+
+```bash
+# Build all template packages
+aikit package v1.0.0
+
+# Build specific agents only
+AGENTS=claude,gemini aikit package v1.0.0
+
+# Build specific script types only
+SCRIPTS=sh aikit package v1.0.0
+
+# Custom output directory
+aikit package v1.0.0 --output-dir ./packages
+```
+
+### Release Creation
+
+```bash
+# Create GitHub release with all packages
+aikit release v1.0.0
+
+# With custom release notes
+aikit release v1.0.0 --notes-file CHANGELOG.md
+```
+
+## Configuration
+
+### GitHub Token
+
+Set GitHub token for higher API rate limits:
+
+```bash
+# Via environment variable
+export GH_TOKEN=ghp_xxxxxxxxxxxxx
+
+# Via CLI argument
+aikit init my-project --github-token ghp_xxxxxxxxxxxxx
+```
+
+### Script Type Defaults
+
+- **Windows**: Defaults to PowerShell (`ps`)
+- **Unix-like** (Linux, macOS): Defaults to Bash (`sh`)
+
+Override with `--script`:
+
+```bash
+aikit init my-project --ai claude --script ps  # Use PowerShell on Unix
+```
+
+## Project Structure
+
+After initialization, your project will have:
+
+```
+my-project/
+├── .specify/
+│   ├── memory/
+│   │   └── constitution.md
+│   ├── scripts/
+│   │   ├── bash/
+│   │   │   ├── common.sh
+│   │   │   ├── check-prerequisites.sh
+│   │   │   ├── create-new-feature.sh
+│   │   │   ├── setup-plan.sh
+│   │   │   └── update-agent-context.sh
+│   │   └── powershell/
+│   │       ├── common.ps1
+│   │       ├── check-prerequisites.ps1
+│   │       ├── create-new-feature.ps1
+│   │       ├── setup-plan.ps1
+│   │       └── update-agent-context.ps1
+│   └── templates/
+│       ├── spec-template.md
+│       ├── plan-template.md
+│       ├── tasks-template.md
+│       ├── checklist-template.md
+│       └── ...
+├── .claude/  # or .gemini/, .github/, etc. (agent-specific)
+│   └── commands/
+│       ├── speckit.constitution.md
+│       ├── speckit.specify.md
+│       ├── speckit.plan.md
+│       └── ...
+└── .git/  # (if git initialized)
+```
+
+## Troubleshooting
+
+### Rate Limit Errors
+
+If you see rate limit errors:
+
+1. **Wait**: Rate limits reset hourly
+2. **Use Token**: Set `GH_TOKEN` environment variable or use `--github-token`
+3. **Check Reset Time**: Error message shows when limit resets
+
+### Network Errors
+
+If template download fails:
+
+1. **Check Connection**: Verify internet connectivity
+2. **Retry**: Network issues may be temporary
+3. **Use Debug**: Run with `--debug` for detailed diagnostics
+
+### Git Initialization Fails
+
+If Git initialization fails:
+
+1. **Check Git**: Verify `git` is installed and on PATH
+2. **Skip Git**: Use `--no-git` flag to skip initialization
+3. **Manual Init**: Initialize Git manually after project creation
+
+### Invalid Agent Key
+
+If agent key is invalid:
+
+1. **Check Available**: Run `aikit check` to see available agents
+2. **Use Interactive**: Omit `--ai` flag to see interactive selection
+3. **Verify Spelling**: Agent keys are lowercase (e.g., `claude`, not `Claude`)
+
+## Development
+
+### Running Tests
+
+```bash
+# Run all tests
+cargo test
+
+# Run specific test
+cargo test test_init_command
+
+# Run with output
+cargo test -- --nocapture
+```
+
+### Building
+
+```bash
+# Debug build
+cargo build
+
+# Release build
+cargo build --release
+
+# Install locally
+cargo install --path .
+```
+
+### Code Structure
+
+See [plan.md](./plan.md) for detailed project structure.
+
+Key modules:
+- `src/cli/`: Command implementations
+- `src/core/`: Business logic
+- `src/tui/`: Interactive UI components
+- `src/github/`: GitHub API integration
+- `src/fs/`: File system operations
+
+## Next Steps
+
+1. **Read Specification**: See [spec.md](./spec.md) for complete requirements
+2. **Review Data Model**: See [data-model.md](./data-model.md) for entity definitions
+3. **Check Contracts**: See [contracts/](./contracts/) for API contracts
+4. **Start Implementation**: Follow tasks in [tasks.md](./tasks.md) (generated by `/speckit.tasks`)
+
+## Resources
+
+- **Rust Documentation**: https://doc.rust-lang.org/
+- **cli-framework**: See `cli-framework/` directory for framework documentation
+- **GitHub API**: https://docs.github.com/en/rest
+- **Python Reference**: See `spec-kit/` directory for original Python implementation
+
+## Support
+
+For issues or questions:
+- GitHub Issues: https://github.com/aroff/aikit/issues
+- Author: @aroff (GitHub)
+

@@ -1,0 +1,58 @@
+project:
+  name: aikit
+  binary_name: aikit
+  description: "AIKIT - Rust Spec Kit CLI Complete Reimplementation"
+  homepage: "https://github.com/goaikit/aikit"
+  license: "Apache-2.0"
+
+repositories:
+  main: goaikit/aikit
+  homebrew: goaikit/homebrew-cli
+  scoop: goaikit/scoop-bucket
+
+package_managers:
+  homebrew:
+    formula_path: Formula/aikit.rb
+    formula_name: aikit
+  scoop:
+    bucket_path: bucket/aikit.json
+    manifest_name: aikit
+
+build:
+  cargo_toml_path: Cargo.toml
+  targets:
+    - target: x86_64-unknown-linux-gnu
+      os: ubuntu-latest
+      binary_name: aikit
+      archive_format: tar.gz
+      use_cross: false
+    - target: x86_64-unknown-linux-musl
+      os: ubuntu-latest
+      binary_name: aikit
+      archive_format: tar.gz
+      use_cross: true
+    - target: x86_64-pc-windows-msvc
+      os: windows-latest
+      binary_name: aikit.exe
+      archive_format: zip
+      use_cross: false
+
+auto_release:
+  skip_paths:
+    - 'docs/**'
+    - 'specs/**'
+    - 'examples/**'
+    - 'skills/**'
+    - 'webdocs/**'
+    - 'helm/**'
+    - 'reports/**'
+    - '*.md'
+    - '.github/*.md'
+    - '.gitignore'
+    - 'LICENSE'
+  skip_labels:
+    - 'no-release'
+  skip_commit_messages:
+    - '[skip release]'
+    - '[no release]'
+    - '[skip ci]'

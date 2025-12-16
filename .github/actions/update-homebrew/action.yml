@@ -1,0 +1,104 @@
+name: 'Update Homebrew Formula'
+description: 'Update Homebrew formula with new version and binary URLs/hashes'
+inputs:
+  version:
+    description: 'New version to update to'
+    required: true
+  linux_gnu_url:
+    description: 'URL for Linux GNU binary'
+    required: true
+  linux_gnu_hash:
+    description: 'SHA256 hash for Linux GNU binary'
+    required: true
+  linux_musl_url:
+    description: 'URL for Linux MUSL binary'
+    required: true
+  linux_musl_hash:
+    description: 'SHA256 hash for Linux MUSL binary'
+    required: true
+  formula_path:
+    description: 'Path to the formula file'
+    required: false
+    default: 'Formula/aikit.rb'
+  formula_name:
+    description: 'Name of the formula'
+    required: false
+    default: 'aikit'
+  repo_path:
+    description: 'Path where homebrew repo is checked out'
+    required: false
+    default: 'homebrew-cli'
+  config_file:
+    description: 'Path to release config file'
+    required: false
+    default: '.github/release-config.yml'
+runs:
+  using: 'composite'
+  steps:
+    - name: Update Homebrew formula
+      shell: bash
+      run: |
+        # Read config for repository and formula paths, with fallbacks
+        HOMEBREW_REPO="${{ inputs.repo_path }}"
+        FORMULA_PATH="${{ inputs.formula_path }}"
+        FORMULA_NAME="${{ inputs.formula_name }}"
+
+        if [ -f "${{ inputs.config_file }}" ]; then
+          # Try to parse config - for now use defaults
+          echo "Using config defaults for Homebrew"
+        fi
+
+        if [ ! -d "$HOMEBREW_REPO" ]; then
+          echo "⚠️  $HOMEBREW_REPO repository not checked out, skipping Homebrew update"
+          exit 0
+        fi
+
+        echo "Updating Homebrew formula to version ${{ inputs.version }}"
+
+        cd $HOMEBREW_REPO
+
+        # Update version
+        sed -i "s/version \".*\"/version \"${{ inputs.version }}\"/" $FORMULA_PATH
+
+        # Update GNU URLs and hashes (first occurrence)
+        sed -i "0,/url \".*${FORMULA_NAME}-x86_64-unknown-linux-gnu.tar.gz\"/s|url \".*\"|url \"${{ inputs.linux_gnu_url }}\"|" $FORMULA_PATH
+        sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ inputs.linux_gnu_hash }}\"/" $FORMULA_PATH
+
+        # Update MUSL URLs and hashes (second occurrence)
+        sed -i "s|url \".*${FORMULA_NAME}-x86_64-unknown-linux-musl.tar.gz\"|url \"${{ inputs.linux_musl_url }}\"|" $FORMULA_PATH
+        sed -i "s/sha256 \"${{ inputs.linux_gnu_hash }}\"/sha256 \"${{ inputs.linux_musl_hash }}\"/" $FORMULA_PATH
+
+        echo "Homebrew formula updated"
+
+    - name: Validate Homebrew formula
+      shell: bash
+      run: |
+        if [ ! -d "${{ inputs.repo_path }}" ]; then
+          echo "⚠️  ${{ inputs.repo_path }} repository not checked out, skipping validation"
+          exit 0
+        fi
+
+        echo "Validating Homebrew formula..."
+        cd ${{ inputs.repo_path }}
+        brew audit --strict ${{ inputs.formula_path }} || echo "Warning: Formula validation failed, but continuing..."
+
+    - name: Commit and push Homebrew changes
+      shell: bash
+      run: |
+        if [ ! -d "${{ inputs.repo_path }}" ]; then
+          echo "⚠️  ${{ inputs.repo_path }} repository not checked out, skipping Homebrew push"
+          exit 0
+        fi
+
+        cd ${{ inputs.repo_path }}
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+        if git diff --quiet; then
+          echo "No changes to commit for Homebrew"
+        else
+          git add ${{ inputs.formula_path }}
+          git commit -m "Update ${{ inputs.formula_name }} to version ${{ inputs.version }}"
+          git push origin main
+          echo "Homebrew formula updated and pushed"
+        fi

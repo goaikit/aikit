@@ -1,0 +1,59 @@
+name: 'Detect Version'
+description: 'Extract version information from workflow context'
+inputs:
+  config_file:
+    description: 'Path to release config file (optional)'
+    required: false
+    default: '.github/release-config.yml'
+outputs:
+  version:
+    description: 'The extracted version (without v prefix)'
+    value: ${{ steps.extract-version.outputs.version }}
+  tag:
+    description: 'The version tag (with v prefix)'
+    value: ${{ steps.extract-version.outputs.tag }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Extract version from tag or input
+      id: extract-version
+      shell: bash
+      run: |
+        # Default fallback values
+        DEFAULT_BINARY_NAME="aikit"
+
+        # Try to read config file if it exists
+        if [ -f "${{ inputs.config_file }}" ]; then
+          # Use yq or similar to parse YAML - for now, fallback to defaults
+          # TODO: Add proper YAML parsing
+          BINARY_NAME="${DEFAULT_BINARY_NAME}"
+        else
+          BINARY_NAME="${DEFAULT_BINARY_NAME}"
+        fi
+
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          VERSION="${{ inputs.version }}"
+          TAG_VERSION="v$VERSION"
+        elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+          # When triggered via workflow_run, get the latest tag
+          # Fetch all tags first to ensure we have them
+          git fetch --tags --force
+          # Get the latest tag matching v*.*.* pattern (most recent by date)
+          TAG_VERSION=$(git tag --sort=-creatordate --list 'v*.*.*' | head -1)
+          if [ -z "$TAG_VERSION" ]; then
+            echo "Error: No version tags (v*.*.*) found"
+            echo "Available tags:"
+            git tag --list
+            exit 1
+          fi
+          VERSION="${TAG_VERSION#v}"
+          echo "Detected tag from workflow_run: $TAG_VERSION (version: $VERSION)"
+        else
+          TAG_VERSION="${{ github.ref_name }}"
+          # Strip 'v' prefix
+          VERSION="${TAG_VERSION#v}"
+        fi
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "tag=$TAG_VERSION" >> $GITHUB_OUTPUT
+        echo "Tag version: $TAG_VERSION"
+        echo "Extracted version: $VERSION"

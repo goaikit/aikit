@@ -1,0 +1,144 @@
+name: 'Update Scoop Bucket'
+description: 'Update Scoop bucket manifest with new version and binary URL/hash'
+inputs:
+  version:
+    description: 'New version to update to'
+    required: true
+  windows_url:
+    description: 'URL for Windows binary'
+    required: true
+  windows_hash:
+    description: 'SHA256 hash for Windows binary'
+    required: true
+  bucket_path:
+    description: 'Path to the bucket manifest file'
+    required: false
+    default: 'bucket/aikit.json'
+  manifest_name:
+    description: 'Name of the manifest'
+    required: false
+    default: 'aikit'
+  repo_path:
+    description: 'Path where scoop repo is checked out'
+    required: false
+    default: 'scoop-bucket'
+  config_file:
+    description: 'Path to release config file'
+    required: false
+    default: '.github/release-config.yml'
+runs:
+  using: 'composite'
+  steps:
+    - name: Update Scoop bucket
+      shell: bash
+      run: |
+        # Read config for repository and bucket paths, with fallbacks
+        SCOOP_REPO="${{ inputs.repo_path }}"
+        BUCKET_PATH="${{ inputs.bucket_path }}"
+        MANIFEST_NAME="${{ inputs.manifest_name }}"
+
+        if [ -f "${{ inputs.config_file }}" ]; then
+          # Try to parse config - for now use defaults
+          echo "Using config defaults for Scoop"
+        fi
+
+        if [ ! -d "$SCOOP_REPO" ]; then
+          echo "⚠️  $SCOOP_REPO repository not checked out, skipping Scoop update"
+          exit 0
+        fi
+
+        echo "Updating Scoop bucket to version ${{ inputs.version }}"
+
+        cd $SCOOP_REPO
+
+        # Check if bucket directory exists, create if not
+        if [ ! -d "bucket" ]; then
+          echo "⚠️  bucket directory not found, creating it"
+          mkdir -p bucket
+        fi
+
+        # Check if file exists, create initial structure if not
+        if [ ! -f "$BUCKET_PATH" ]; then
+          echo "⚠️  $BUCKET_PATH not found, creating initial file"
+          cat > $BUCKET_PATH << 'EOF'
+        {
+          "version": "0.0.1",
+          "description": "AIKit",
+          "homepage": "https://github.com/goaikit/aikit",
+          "license": "Apache-2.0",
+          "architecture": {
+            "64bit": {
+              "url": "",
+              "hash": ""
+            }
+          },
+          "bin": "aikit.exe",
+          "checkver": "github",
+          "autoupdate": {
+            "architecture": {
+              "64bit": {
+                "url": "https://github.com/goaikit/aikit/releases/download/v$version/aikit-x86_64-pc-windows-msvc.zip"
+              }
+            }
+          }
+        }
+        EOF
+        fi
+
+        # Skip update if Windows URL is null or empty
+        if [ -z "${{ inputs.windows_url }}" ] || [ "${{ inputs.windows_url }}" = "null" ]; then
+          echo "⚠️  Windows URL is null or empty, skipping Scoop update"
+          exit 0
+        fi
+
+        # Update version, URL and hash using jq for safer JSON manipulation
+        jq --arg version "${{ inputs.version }}" \
+           --arg url "${{ inputs.windows_url }}" \
+           --arg hash "${{ inputs.windows_hash }}" \
+           '.version = $version | .architecture."64bit".url = $url | .architecture."64bit".hash = $hash' \
+           $BUCKET_PATH > $BUCKET_PATH.tmp && mv $BUCKET_PATH.tmp $BUCKET_PATH
+
+        echo "Scoop bucket updated"
+
+    - name: Validate Scoop bucket
+      shell: bash
+      run: |
+        if [ ! -d "${{ inputs.repo_path }}" ]; then
+          echo "⚠️  ${{ inputs.repo_path }} repository not checked out, skipping validation"
+          exit 0
+        fi
+
+        echo "Validating Scoop bucket..."
+        cd ${{ inputs.repo_path }}
+        # Try common locations for scoop bucket files
+        if [ -f "${{ inputs.bucket_path }}" ]; then
+          jq . ${{ inputs.bucket_path }} > /dev/null && echo "Scoop bucket JSON is valid"
+        elif [ -f "${{ inputs.manifest_name }}.json" ]; then
+          jq . ${{ inputs.manifest_name }}.json > /dev/null && echo "Scoop bucket JSON is valid"
+        else
+          echo "⚠️  ${{ inputs.manifest_name }}.json not found in ${{ inputs.repo_path }}, skipping validation"
+          echo "Available files:"
+          find . -name "*.json" -type f | head -10
+          exit 0
+        fi
+
+    - name: Commit and push Scoop changes
+      shell: bash
+      run: |
+        if [ ! -d "${{ inputs.repo_path }}" ]; then
+          echo "⚠️  ${{ inputs.repo_path }} repository not checked out, skipping Scoop push"
+          exit 0
+        fi
+
+        cd ${{ inputs.repo_path }}
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+        if git diff --quiet; then
+          echo "No changes to commit for Scoop"
+        else
+          git add ${{ inputs.bucket_path }}
+          git commit -m "Update ${{ inputs.manifest_name }} to version ${{ inputs.version }}"
+          git push origin main
+          echo "Scoop bucket updated and pushed"
+        fi

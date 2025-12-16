@@ -26,48 +26,17 @@ jobs:
     name: Verify Version
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.extract-version.outputs.version }}
-      tag: ${{ steps.extract-version.outputs.tag }}
+      version: ${{ steps.detect-version.outputs.version }}
+      tag: ${{ steps.detect-version.outputs.tag }}
     steps:
-      - name: Checkout code for tag detection
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Extract version from tag or input
-        id: extract-version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            VERSION="${{ inputs.version }}"
-            TAG_VERSION="v$VERSION"
-          elif [ "${{ github.event_name }}" = "workflow_run" ]; then
-            # When triggered via workflow_run, get the latest tag
-            # Fetch all tags first to ensure we have them
-            git fetch --tags --force
-            # Get the latest tag matching v*.*.* pattern (most recent by date)
-            TAG_VERSION=$(git tag --sort=-creatordate --list 'v*.*.*' | head -1)
-            if [ -z "$TAG_VERSION" ]; then
-              echo "Error: No version tags (v*.*.*) found"
-              echo "Available tags:"
-              git tag --list
-              exit 1
-            fi
-            VERSION="${TAG_VERSION#v}"
-            echo "Detected tag from workflow_run: $TAG_VERSION (version: $VERSION)"
-          else
-            TAG_VERSION="${{ github.ref_name }}"
-            # Strip 'v' prefix
-            VERSION="${TAG_VERSION#v}"
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "tag=$TAG_VERSION" >> $GITHUB_OUTPUT
-          echo "Tag version: $TAG_VERSION"
-          echo "Extracted version: $VERSION"
+      - name: Detect version
+        id: detect-version
+        uses: ./.github/actions/detect-version
 
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.extract-version.outputs.tag || github.ref }}
+          ref: ${{ steps.detect-version.outputs.tag || github.ref }}
           fetch-depth: 0
 
       - name: Read version from Cargo.toml
@@ -79,7 +48,7 @@ jobs:
 
       - name: Verify versions match
         run: |
-          TAG_VER="${{ steps.extract-version.outputs.version }}"
+          TAG_VER="${{ steps.detect-version.outputs.version }}"
           CARGO_VER="${{ steps.cargo-version.outputs.cargo-version }}"
 
           # Skip version verification for test/pre-release tags (containing hyphens)
@@ -124,176 +93,15 @@ jobs:
 
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Build Rust binary
+        uses: ./.github/actions/build-rust-binary
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
-
-      - name: Install Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          components: rustfmt, clippy
           target: ${{ matrix.target }}
-
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: Cache target
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-target-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-target-${{ matrix.target }}-
-            ${{ runner.os }}-target-
-
-      - name: Clean disk space
-        shell: bash
-        run: |
-          # Remove large cargo registry files that aren't needed
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            # Windows commands (using bash on Windows)
-            rm -rf ~/.cargo/registry/src
-            # Show disk usage
-            df -h || echo "df not available on Windows"
-            du -sh ~/.cargo/* 2>/dev/null | sort -hr | head -5 || true
-          else
-            # Linux/macOS commands
-            rm -rf ~/.cargo/registry/src
-            # Clean system package cache
-            if command -v apt-get >/dev/null 2>&1; then
-              sudo apt-get clean
-            fi
-            # Show disk usage
-            df -h
-            du -sh ~/.cargo/* 2>/dev/null | sort -hr | head -5 || true
-          fi
-
-      - name: Install zig and cargo-zigbuild
-        if: matrix.use-cross
-        run: |
-          # Install zig
-          wget -q https://ziglang.org/download/0.12.0/zig-linux-x86_64-0.12.0.tar.xz
-          tar -xf zig-linux-x86_64-0.12.0.tar.xz
-          sudo mv zig-linux-x86_64-0.12.0 /opt/zig
-          sudo ln -s /opt/zig/zig /usr/local/bin/zig
-          zig version
-          # Install cargo-zigbuild
-          cargo install cargo-zigbuild --locked
-          rustup target add ${{ matrix.target }}
-
-      - name: Build release binary (cross)
-        if: matrix.use-cross
-        run: cargo zigbuild --release --target ${{ matrix.target }} --verbose
-        env:
-          RUSTFLAGS: ""
-
-      - name: Build release binary (cargo)
-        if: ${{ !matrix.use-cross }}
-        run: cargo build --release --verbose --target ${{ matrix.target }}
-        env:
-          RUSTFLAGS: ""
-
-      - name: Check built binary
-        id: check-binary
-        shell: bash
-        run: |
-          BIN_PATH=target/${{ matrix.target }}/release/${{ matrix.binary-name }}
-          if [ -f "$BIN_PATH" ]; then
-            echo "has_binary=true" >> $GITHUB_OUTPUT
-            echo "✅ Found binary at $BIN_PATH"
-          else
-            echo "has_binary=false" >> $GITHUB_OUTPUT
-            echo "::warning::Binary not found at $BIN_PATH; skipping packaging for ${{ matrix.target }}"
-          fi
-
-      - name: Create release directory
-        if: steps.check-binary.outputs.has_binary == 'true'
-        shell: bash
-        run: |
-          mkdir -p release
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            cp target/${{ matrix.target }}/release/${{ matrix.binary-name }} release/
-          else
-            cp target/${{ matrix.target }}/release/${{ matrix.binary-name }} release/
-          fi
-
-      - name: Create README for release
-        if: steps.check-binary.outputs.has_binary == 'true'
-        shell: bash
-        run: |
-          cat > release/README.md << 'EOF'
-          # AiKit ${{ needs.verify-version.outputs.version }}
-
-          ## Installation
-
-          ### Linux
-
-          Two Linux binaries are available:
-
-          | Binary | Best For |
-          |--------|----------|
-          | `aikit-x86_64-unknown-linux-musl.tar.gz` | Universal - containers, CI/CD, older distributions |
-          | `aikit-x86_64-unknown-linux-gnu.tar.gz` | FIPS/compliance environments requiring dynamic linking |
-
-          **Recommended (musl/static - works everywhere):**
-          ```bash
-          tar -xzf aikit-x86_64-unknown-linux-musl.tar.gz
-          sudo mv aikit /usr/local/bin/
-          aikit --version
-          ```
-
-          **For FIPS/compliance (glibc - requires glibc 2.38+):**
-          ```bash
-          tar -xzf aikit-x86_64-unknown-linux-gnu.tar.gz
-          sudo mv aikit /usr/local/bin/
-          aikit --version
-          ```
-
-          ### Windows
-          Extract the ZIP file and add to your PATH, or run from the extracted directory:
-          ```powershell
-          # Extract aikit-x86_64-pc-windows-msvc.zip
-          # Add to PATH or run from extracted directory
-          aikit.exe --version
-          ```
-
-          For more information, visit: https://github.com/goaikit/aikit
-          EOF
-
-      - name: Create archive
-        if: steps.check-binary.outputs.has_binary == 'true'
-        shell: bash
-        run: |
-          cd release
-          if [ "${{ matrix.archive-format }}" = "tar.gz" ]; then
-            tar -czf ../${{ matrix.archive-name }} *
-          else
-            # Use PowerShell Compress-Archive on Windows
-            if [ "${{ runner.os }}" = "Windows" ]; then
-              powershell -Command "Compress-Archive -Path * -DestinationPath ../${{ matrix.archive-name }} -Force"
-            else
-              zip -r ../${{ matrix.archive-name }} *
-            fi
-          fi
-          cd ..
-          ls -lh ${{ matrix.archive-name }}
-
-      - name: Upload artifact
-        if: steps.check-binary.outputs.has_binary == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.archive-name }}
-          path: ${{ matrix.archive-name }}
-          retention-days: 30
+          os: ${{ matrix.os }}
+          binary_name: ${{ matrix.binary-name }}
+          archive_format: ${{ matrix.archive-format }}
+          use_cross: ${{ matrix.use-cross }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
 
   collect-artifacts:
     name: Collect Release Artifacts
@@ -586,89 +394,21 @@ jobs:
 
       - name: Update Homebrew formula
         if: success() || failure()
-        run: |
-          if [ ! -d "homebrew-cli" ]; then
-            echo "⚠️  homebrew-cli repository not checked out, skipping Homebrew update"
-            exit 0
-          fi
-
-          echo "Updating Homebrew formula to version ${{ steps.release-info.outputs.version }}"
-
-          cd homebrew-cli
-
-          # Update version
-          sed -i "s/version \".*\"/version \"${{ steps.release-info.outputs.version }}\"/" Formula/aikit.rb
-
-          # Update GNU URLs and hashes (first occurrence)
-          sed -i "0,/url \".*aikit-x86_64-unknown-linux-gnu.tar.gz\"/s|url \".*\"|url \"${{ steps.release-info.outputs.linux_gnu_url }}\"|" Formula/aikit.rb
-          sed -i "0,/sha256 \".*\"/s/sha256 \".*\"/sha256 \"${{ steps.release-info.outputs.linux_gnu_hash }}\"/" Formula/aikit.rb
-
-          # Update MUSL URLs and hashes (second occurrence)
-          sed -i "s|url \".*aikit-x86_64-unknown-linux-musl.tar.gz\"|url \"${{ steps.release-info.outputs.linux_musl_url }}\"|" Formula/aikit.rb
-          sed -i "s/sha256 \"${{ steps.release-info.outputs.linux_gnu_hash }}\"/sha256 \"${{ steps.release-info.outputs.linux_musl_hash }}\"/" Formula/aikit.rb
-
-          echo "Homebrew formula updated"
+        uses: ./.github/actions/update-homebrew
+        with:
+          version: ${{ steps.release-info.outputs.version }}
+          linux_gnu_url: ${{ steps.release-info.outputs.linux_gnu_url }}
+          linux_gnu_hash: ${{ steps.release-info.outputs.linux_gnu_hash }}
+          linux_musl_url: ${{ steps.release-info.outputs.linux_musl_url }}
+          linux_musl_hash: ${{ steps.release-info.outputs.linux_musl_hash }}
 
       - name: Update Scoop bucket
         if: success() || failure()
-        run: |
-          if [ ! -d "scoop-bucket" ]; then
-            echo "⚠️  scoop-bucket repository not checked out, skipping Scoop update"
-            exit 0
-          fi
-
-          echo "Updating Scoop bucket to version ${{ steps.release-info.outputs.version }}"
-
-          cd scoop-bucket
-
-          # Check if bucket directory exists, create if not
-          if [ ! -d "bucket" ]; then
-            echo "⚠️  bucket directory not found, creating it"
-            mkdir -p bucket
-          fi
-
-          # Check if file exists, create initial structure if not
-          if [ ! -f "bucket/aikit.json" ]; then
-            echo "⚠️  bucket/aikit.json not found, creating initial file"
-            cat > bucket/aikit.json << 'EOF'
-          {
-            "version": "0.0.1",
-            "description": "AIKit",
-            "homepage": "https://github.com/goaikit/aikit",
-            "license": "Apache-2.0",
-            "architecture": {
-              "64bit": {
-                "url": "",
-                "hash": ""
-              }
-            },
-            "bin": "aikit.exe",
-            "checkver": "github",
-            "autoupdate": {
-              "architecture": {
-                "64bit": {
-                  "url": "https://github.com/goaikit/aikit/releases/download/v$version/aikit-x86_64-pc-windows-msvc.zip"
-                }
-              }
-            }
-          }
-          EOF
-          fi
-
-          # Skip update if Windows URL is null or empty
-          if [ -z "${{ steps.release-info.outputs.windows_url }}" ] || [ "${{ steps.release-info.outputs.windows_url }}" = "null" ]; then
-            echo "⚠️  Windows URL is null or empty, skipping Scoop update"
-            exit 0
-          fi
-
-          # Update version, URL and hash using jq for safer JSON manipulation
-          jq --arg version "${{ steps.release-info.outputs.version }}" \
-             --arg url "${{ steps.release-info.outputs.windows_url }}" \
-             --arg hash "${{ steps.release-info.outputs.windows_hash }}" \
-             '.version = $version | .architecture."64bit".url = $url | .architecture."64bit".hash = $hash' \
-             bucket/aikit.json > bucket/aikit.json.tmp && mv bucket/aikit.json.tmp bucket/aikit.json
-
-          echo "Scoop bucket updated"
+        uses: ./.github/actions/update-scoop
+        with:
+          version: ${{ steps.release-info.outputs.version }}
+          windows_url: ${{ steps.release-info.outputs.windows_url }}
+          windows_hash: ${{ steps.release-info.outputs.windows_hash }}
 
       - name: Validate Homebrew formula
         run: |
