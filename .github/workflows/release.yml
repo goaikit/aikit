@@ -29,15 +29,15 @@ jobs:
       version: ${{ steps.detect-version.outputs.version }}
       tag: ${{ steps.detect-version.outputs.tag }}
     steps:
+      - name: Checkout code for tag detection
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
       - name: Detect version
         id: detect-version
         uses: ./.github/actions/detect-version
-
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.detect-version.outputs.tag || github.ref }}
-          fetch-depth: 0
 
       - name: Read version from Cargo.toml
         id: cargo-version
