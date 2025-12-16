@@ -33,14 +33,14 @@ AIKIT is a universal package manager for AI agent extensions that enables develo
 
 ### Option 1: Release Binaries (Recommended)
 Download the latest release from [GitHub Releases](https://github.com/goaikit/aikit/releases):
-- Windows: `aikit-x86_64-pc-windows-msvc.zip`
-- Linux: `aikit-x86_64-unknown-linux-gnu.zip`
+- Linux GNU: `aikit-x86_64-unknown-linux-gnu.tar.gz`
+- Linux MUSL: `aikit-x86_64-unknown-linux-musl.tar.gz`
 
 Extract and add to your PATH, then make executable on Unix systems.
 
 ### Option 2: Homebrew (Linux)
 ```bash
-brew install goaikit/aikit/aikit
+brew install goaikit/cli/aikit
 ```
 
 ### Option 3: Scoop (Windows)
