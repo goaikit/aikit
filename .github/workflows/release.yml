@@ -86,7 +86,7 @@ jobs:
             use-cross: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary-name: aikit.exe
+            binary-name: aikit
             archive-format: zip
             archive-name: aikit-x86_64-pc-windows-msvc.zip
             use-cross: false
