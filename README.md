@@ -43,11 +43,8 @@ Extract and add to your PATH, then make executable on Unix systems.
 brew install goaikit/cli/aikit
 ```
 
-### Option 3: Scoop (Windows)
-```powershell
-scoop bucket add goaikit https://github.com/goaikit/scoop-bucket
-scoop install aikit
-```
+### Option 3: Windows (Coming Soon)
+Windows binaries are not currently available. Support for Windows via Scoop will be added in a future release.
 
 ### Configuration
 Create a `.env` file in your project root for GitHub authentication:
