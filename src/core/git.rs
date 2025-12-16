@@ -22,7 +22,8 @@ impl GitHubClient {
         }
     }
 
-    /// Get package.toml from a GitHub repository
+    /// Get package manifest from a GitHub repository
+    /// Tries aikit.toml first, then falls back to package.toml for backward compatibility
     pub async fn get_package_manifest(
         &self,
         owner: &str,
@@ -30,26 +31,56 @@ impl GitHubClient {
         ref_: Option<&str>,
     ) -> Result<PackageManifest, Box<dyn std::error::Error>> {
         let ref_param = ref_.unwrap_or("main");
-        let url = format!(
-            "https://raw.githubusercontent.com/{}/{}/{}/package.toml",
+
+        // Try aikit.toml first
+        let aikit_url = format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/aikit.toml",
             owner, repo, ref_param
         );
 
-        let mut request = self.client.get(&url);
-
+        let mut request = self.client.get(&aikit_url);
         if let Some(token) = &self.token {
             request = request.header("Authorization", format!("token {}", token));
         }
 
         let response = request.send().await?;
-        if !response.status().is_success() {
-            return Err(format!("Failed to fetch package.toml: HTTP {}", response.status()).into());
+
+        // If aikit.toml found, parse and return
+        if response.status().is_success() {
+            let content = response.text().await?;
+            let manifest: PackageManifest = toml::from_str(&content)?;
+            return Ok(manifest);
         }
 
-        let content = response.text().await?;
-        let manifest: PackageManifest = toml::from_str(&content)?;
+        // If 404, try package.toml as fallback
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            let package_url = format!(
+                "https://raw.githubusercontent.com/{}/{}/{}/package.toml",
+                owner, repo, ref_param
+            );
 
-        Ok(manifest)
+            let mut fallback_request = self.client.get(&package_url);
+            if let Some(token) = &self.token {
+                fallback_request = fallback_request.header("Authorization", format!("token {}", token));
+            }
+
+            let fallback_response = fallback_request.send().await?;
+
+            if fallback_response.status().is_success() {
+                let content = fallback_response.text().await?;
+                let manifest: PackageManifest = toml::from_str(&content)?;
+                return Ok(manifest);
+            }
+
+            // Both files not found
+            return Err(format!(
+                "Failed to fetch package manifest: Neither aikit.toml nor package.toml found in {}/{}",
+                owner, repo
+            ).into());
+        }
+
+        // Other HTTP errors from aikit.toml request
+        Err(format!("Failed to fetch aikit.toml: HTTP {}", response.status()).into())
     }
 
     /// Download repository archive (ZIP)
