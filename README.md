@@ -35,6 +35,7 @@ AIKIT is a universal package manager for AI agent extensions that enables develo
 Download the latest release from [GitHub Releases](https://github.com/goaikit/aikit/releases):
 - Linux GNU: `aikit-x86_64-unknown-linux-gnu.tar.gz`
 - Linux MUSL: `aikit-x86_64-unknown-linux-musl.tar.gz`
+- Windows: `aikit-x86_64-pc-windows-msvc.zip` (coming soon)
 
 Extract and add to your PATH, then make executable on Unix systems.
 
@@ -43,8 +44,14 @@ Extract and add to your PATH, then make executable on Unix systems.
 brew install goaikit/cli/aikit
 ```
 
-### Option 3: Windows (Coming Soon)
-Windows binaries are not currently available. Support for Windows via Scoop will be added in a future release.
+### Option 3: Scoop (Windows - Coming Soon)
+Windows binaries and Scoop support will be added in a future release.
+
+```powershell
+# Future installation (when available):
+scoop bucket add goaikit https://github.com/goaikit/scoop-bucket
+scoop install aikit
+```
 
 ### Configuration
 Create a `.env` file in your project root for GitHub authentication:
