@@ -264,3 +264,4 @@ Override with `--script` option.
 Apache License, Version 2.0 - See [LICENSE](LICENSE) file for details.
 
 Need help? Open an issue on [GitHub](https://github.com/goaikit/aikit/issues).
+# Test release trigger
