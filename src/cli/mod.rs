@@ -17,10 +17,10 @@ mod commands {
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 
-/// AIKIT - Rust Spec Kit CLI Complete Reimplementation
+/// AIKIT - Universal template package manager for AI agents
 #[derive(Parser)]
 #[command(name = "aikit", version = env!("CARGO_PKG_VERSION"), disable_version_flag = true)]
-#[command(about = "AIKIT - Rust Spec Kit CLI", long_about = None)]
+#[command(about = "AIKit - Universal template package manager for AI agents", long_about = None)]
 pub struct Cli {
     /// Enable debug output (verbose diagnostic information)
     #[arg(long, global = true)]

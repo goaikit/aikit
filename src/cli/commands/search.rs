@@ -4,6 +4,7 @@
 //! from remote registries.
 
 use clap::Args;
+use crate::error::AikError;
 
 /// Arguments for search command
 #[derive(Debug, Args)]
@@ -25,8 +26,17 @@ pub struct SearchArgs {
 }
 
 /// Execute search command
-pub async fn execute_search(args: SearchArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn execute_search(args: SearchArgs) -> Result<(), AikError> {
     use crate::core::git::GitHubClient;
+
+    // Validate query
+    if args.query.trim().is_empty() {
+        return Err(AikError::InvalidSource("Search query cannot be empty".to_string()));
+    }
+
+    if args.query.len() > 100 {
+        return Err(AikError::InvalidSource("Search query too long (max 100 characters)".to_string()));
+    }
 
     println!("🔍 Searching for packages: '{}'", args.query);
 
@@ -36,8 +46,7 @@ pub async fn execute_search(args: SearchArgs) -> Result<(), Box<dyn std::error::
     // Search GitHub repositories for packages
     let results = github
         .search_repositories(&args.query, args.limit)
-        .await
-        .map_err(|e| format!("Search failed: {}", e))?;
+        .await?;
 
     if results.is_empty() {
         println!("No packages found matching: {}", args.query);

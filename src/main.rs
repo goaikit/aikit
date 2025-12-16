@@ -8,6 +8,7 @@
 mod cli;
 mod config;
 mod core;
+mod error;
 mod fs;
 mod git;
 mod github;

@@ -8,12 +8,14 @@
 
 pub mod cli;
 pub mod core;
+pub mod error;
 pub mod fs;
 pub mod git;
 pub mod github;
 pub mod models;
 pub mod tui;
 
+pub use error::AikError;
 pub use core::registry::RegistryManager;
 /// Re-export commonly used types
 pub use models::{
