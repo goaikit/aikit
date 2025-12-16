@@ -6,6 +6,7 @@ mod check;
 mod init;
 mod release;
 mod template_package; // Old template zip archive builder (used by release command)
+mod version;
 
 // Package management commands (init, build, publish)
 mod commands {
@@ -19,16 +20,19 @@ use clap::{Parser, Subcommand};
 
 /// AIKIT - Universal template package manager for AI agents
 #[derive(Parser)]
-#[command(name = "aikit", version = env!("CARGO_PKG_VERSION"), disable_version_flag = true)]
+#[command(name = "aikit")]
 #[command(about = "AIKit - Universal template package manager for AI agents", long_about = None)]
 pub struct Cli {
     /// Enable debug output (verbose diagnostic information)
     #[arg(long, global = true)]
     pub debug: bool,
 
+    /// Display version information
+    #[arg(long, short = 'V', global = true)]
+    pub version: bool,
 
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -58,6 +62,16 @@ enum Commands {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    // Handle --version flag
+    if cli.version {
+        let rt = tokio::runtime::Runtime::new()?;
+        let args = version::VersionArgs {
+            github_token: None, // Could extract from env if needed
+        };
+        rt.block_on(version::execute(args))?;
+        return Ok(());
+    }
+
     // Set debug mode if enabled
     if cli.debug {
         std::env::set_var("AIKIT_DEBUG", "1");
@@ -68,24 +82,24 @@ pub fn run() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
     match cli.command {
-        Commands::Init(args) => rt.block_on(init::execute(args))?,
-        Commands::Check(args) => check::execute(args)?,
-        Commands::Install(args) => rt
+        Some(Commands::Init(args)) => rt.block_on(init::execute(args))?,
+        Some(Commands::Check(args)) => check::execute(args)?,
+        Some(Commands::Install(args)) => rt
             .block_on(commands::install::execute_install(args))
             .map_err(|e| anyhow::anyhow!("{}", e))?,
-        Commands::Update(args) => rt
+        Some(Commands::Update(args)) => rt
             .block_on(commands::install::execute_update(args))
             .map_err(|e| anyhow::anyhow!("{}", e))?,
-        Commands::Remove(args) => rt
+        Some(Commands::Remove(args)) => rt
             .block_on(commands::install::execute_remove(args))
             .map_err(|e| anyhow::anyhow!("{}", e))?,
-        Commands::List(args) => rt
+        Some(Commands::List(args)) => rt
             .block_on(commands::install::execute_list(args))
             .map_err(|e| anyhow::anyhow!("{}", e))?,
-        Commands::Search(args) => rt
+        Some(Commands::Search(args)) => rt
             .block_on(commands::search::execute_search(args))
             .map_err(|e| anyhow::anyhow!("{}", e))?,
-        Commands::Package(cmd) => match cmd {
+        Some(Commands::Package(cmd)) => match cmd {
             commands::package::PackageCommands::Init(args) => rt
                 .block_on(commands::package::execute_init(args))
                 .map_err(|e| anyhow::anyhow!("{}", e))?,
@@ -96,7 +110,12 @@ pub fn run() -> Result<()> {
                 .block_on(commands::package::execute_publish(args))
                 .map_err(|e| anyhow::anyhow!("{}", e))?,
         },
-        Commands::Release(args) => rt.block_on(release::execute(args))?,
+        Some(Commands::Release(args)) => rt.block_on(release::execute(args))?,
+        None => {
+            // No command provided - this shouldn't happen with our current logic
+            // but we'll handle it gracefully
+            return Ok(());
+        }
     }
 
     Ok(())
