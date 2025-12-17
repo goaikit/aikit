@@ -205,10 +205,6 @@ aikit version
 
 ## Troubleshooting
 
-### Command Not Found
-- Ensure binary is in your PATH
-- Make executable on Unix: `chmod +x aikit`
-
 ### Template Download Issues
 - Check internet connection
 - **GitHub token**: Create `.env` file with `GITHUB_TOKEN=your_token` or use `--token` flag
