@@ -68,21 +68,17 @@ runs:
         export MUSL_URL="${{ inputs.linux_musl_url }}"
         export MUSL_HASH="${{ inputs.linux_musl_hash }}"
 
-        python3 -c "import re, os; \
-formula_path = os.environ['FORMULA_PATH']; \
-version = os.environ['VERSION']; \
-gnu_url = os.environ['GNU_URL']; \
-gnu_hash = os.environ['GNU_HASH']; \
-musl_url = os.environ['MUSL_URL']; \
-musl_hash = os.environ['MUSL_HASH']; \
-content = open(formula_path, 'r').read(); \
-content = re.sub(r'version \".*\"', f'version \"{version}\"', content); \
-gnu_pattern = r'(if glibc_version >= 2\\.38\\s*\\n\\s+url \")([^\"]+)(\"\\s*\\n\\s+sha256 \")([^\"]+)(\")'; \
-content = re.sub(gnu_pattern, rf'\\1{gnu_url}\\3{gnu_hash}\\5', content, flags=re.MULTILINE); \
-musl_pattern = r'(else\\s*\\n\\s+url \")([^\"]+)(\"\\s*\\n\\s+sha256 \")([^\"]+)(\")'; \
-content = re.sub(musl_pattern, rf'\\1{musl_url}\\3{musl_hash}\\5', content, flags=re.MULTILINE); \
-open(formula_path, 'w').write(content); \
-print('Homebrew formula updated successfully')"
+        echo 'import re, os' > /tmp/update_formula.py
+        echo 'p, v, gu, gh, mu, mh = os.environ["FORMULA_PATH"], os.environ["VERSION"], os.environ["GNU_URL"], os.environ["GNU_HASH"], os.environ["MUSL_URL"], os.environ["MUSL_HASH"]' >> /tmp/update_formula.py
+        echo 'c = open(p, "r").read()' >> /tmp/update_formula.py
+        echo 'c = re.sub(r'\''version ".*"'\'', f'\''version "{v}"'\'', c)' >> /tmp/update_formula.py
+        echo 'c = re.sub(r'\''(if glibc_version >= 2\\.38\\s*\\n\\s+url ")([^"]+)("\\s*\\n\\s+sha256 ")([^"]+)(")'\'', rf'\''\\1{gu}\\3{gh}\\5'\'', c, flags=re.MULTILINE)' >> /tmp/update_formula.py
+        echo 'c = re.sub(r'\''(else\\s*\\n\\s+url ")([^"]+)("\\s*\\n\\s+sha256 ")([^"]+)(")'\'', rf'\''\\1{mu}\\3{mh}\\5'\'', c, flags=re.MULTILINE)' >> /tmp/update_formula.py
+        echo 'open(p, "w").write(c)' >> /tmp/update_formula.py
+        echo 'print("Homebrew formula updated successfully")' >> /tmp/update_formula.py
+
+        python3 /tmp/update_formula.py
+        rm -f /tmp/update_formula.py
 
         echo "Homebrew formula updated"
 
