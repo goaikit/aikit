@@ -35,7 +35,7 @@ crossterm = "0.28"
 walkdir = "2"
 
 # Tool detection
-which = "6.0"
+which = "8.0"
 
 # Temporary directories
 tempfile = "3.10"
@@ -66,7 +66,7 @@ dialoguer = "0.11"  # Interactive prompts
 # Testing utilities
 mockito = "1.2"
 tempfile = "3.10"
-which = "6.0"
+which = "8.0"
 
 [profile.release]
 opt-level = 3
