@@ -35,7 +35,7 @@ AIKIT is a universal package manager for AI agent extensions that enables develo
 Download the latest release from [GitHub Releases](https://github.com/goaikit/aikit/releases):
 - Linux GNU: `aikit-x86_64-unknown-linux-gnu.tar.gz`
 - Linux MUSL: `aikit-x86_64-unknown-linux-musl.tar.gz`
-- Windows: `aikit-x86_64-pc-windows-msvc.zip` (coming soon)
+- Windows: `aikit-x86_64-pc-windows-msvc.zip`
 
 Extract and add to your PATH, then make executable on Unix systems.
 
@@ -44,11 +44,8 @@ Extract and add to your PATH, then make executable on Unix systems.
 brew install goaikit/cli/aikit
 ```
 
-### Option 3: Scoop (Windows - Coming Soon)
-Windows binaries and Scoop support will be added in a future release.
-
+### Option 3: Scoop (Windows)
 ```powershell
-# Future installation (when available):
 scoop bucket add goaikit https://github.com/goaikit/scoop-bucket
 scoop install aikit
 ```
@@ -92,6 +89,30 @@ aikit install myorg/useful-tools
 cd my-package && aikit install .           # Install from local directory
 aikit list                                 # Verify installation
 ```
+
+### Local Installation
+Install packages directly from local directories for development and testing:
+
+```bash
+# Install from current directory (must contain aikit.toml)
+aikit install .
+
+# Install from specific directory path
+aikit install /path/to/my-package
+
+# Install with specific AI agent selection
+aikit install . --ai claude
+```
+
+**Requirements for Local Installation:**
+- Directory must contain an `aikit.toml` file
+- Package structure should be valid (use `aikit package validate` to check)
+- Templates and scripts should be in the correct locations
+
+**Note on ZIP Files:**
+- ZIP file extraction happens automatically when installing from GitHub
+- Local ZIP file installation is not supported - use the extracted directory instead
+- For package distribution, use `aikit package publish` which creates and uploads ZIP files to GitHub releases
 
 ### Project Templates
 ```bash
@@ -137,7 +158,7 @@ aikit install .                             # Install from current directory
 aikit install --token TOKEN user/package    # Use specific GitHub token
 ```
 
-Options: `--version <ver>`, `--token <token>`, `--force`, `--yes`
+Options: `--version <ver>`, `--token <token>`, `--force`, `--yes`, `--ai <agent>`
 
 ### `aikit list` - List Installed Packages
 Show all installed AIKIT packages.
@@ -153,6 +174,7 @@ Update installed packages to their latest versions.
 
 ```bash
 aikit update package-name
+aikit update package-name --breaking    # Allow breaking changes
 ```
 
 ### `aikit remove` - Remove Packages
@@ -168,8 +190,11 @@ Discover packages in the AIKIT ecosystem.
 
 ```bash
 aikit search "testing"
-aikit search "code review"
+aikit search "code review" --detailed     # Show detailed results
+aikit search "analysis" --limit 10       # Limit results to 10
 ```
+
+Options: `--limit <num>`, `--detailed`, `--registry <url>`
 
 ### `aikit version` - Check Version
 Displays current AIKIT version and checks for updates.
@@ -232,7 +257,7 @@ aikit package publish myorg/my-tools    # Publish to GitHub
 
 **Notes:**
 - `.aikit` directory is automatically discovered by searching up the directory hierarchy
-- Local installation supports both `aikit.toml` and `package.toml` configuration files
+- Local installation supports `aikit.toml` configuration files
 - GitHub authentication via `.env` file, environment variables, or `--token` flag
 - Agent command files are created at the project root level (same level as `.aikit`)
 - Templates are loaded with actual content, not placeholder text

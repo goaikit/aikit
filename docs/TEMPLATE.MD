@@ -483,4 +483,39 @@ description = "Scan for hardcoded secrets"
 "scripts/scan.sh" = ".aikit/scripts/"
 ```
 
+## Local Development Workflow
+
+### Testing Package Installation Locally
+
+Before publishing, test your package installation locally:
+
+```bash
+# Navigate to your package directory
+cd my-package
+
+# Test local installation
+aikit install .
+
+# Verify installation
+aikit list
+
+# Test package functionality
+aikit check  # See available AI agents
+```
+
+### Development Iteration Cycle
+
+1. **Edit package files** - Modify `aikit.toml`, templates, and scripts
+2. **Test locally** - Use `aikit install .` to test changes
+3. **Build package** - Run `aikit package build` to create distributable ZIP
+4. **Test built package** - Install from `dist/` directory if needed
+5. **Publish** - Use `aikit package publish` when ready
+
+### Local vs Remote Installation
+
+- **Local installation** (`aikit install .`): Installs directly from source directory
+- **Remote installation** (`aikit install user/package`): Downloads and extracts ZIP from GitHub
+
+Both methods require a valid `aikit.toml` file, but local installation is faster for development iteration.
+
 This comprehensive guide covers everything needed to create, test, and publish AIKIT packages. Start with a simple package and expand functionality as you become familiar with the system.

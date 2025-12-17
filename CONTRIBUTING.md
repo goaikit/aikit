@@ -289,147 +289,43 @@ This project follows Spec-Driven Development (SDD) methodology. When working on 
 
 Contributors will be recognized in the project README and changelog. Thank you for your contributions!
 
-## Release Automation Setup
+## CI/CD Pipeline
 
-This project uses automated CI/CD pipelines for releases, including cross-platform binary builds and automatic package manager updates. The release process is powered by reusable GitHub Actions and a GitHub App for secure cross-repository operations.
+This project uses GitHub Actions for continuous integration and automated releases. The CI pipeline ensures code quality and automatically creates releases with pre-built binaries.
 
-### GitHub App Configuration
+### CI Workflow
 
-The project uses a GitHub App (`aikit-release-automation`) for automated package manager updates during releases. This provides secure, scoped access to update Homebrew and Scoop repositories without using personal access tokens.
+The CI pipeline (`.github/workflows/ci.yml`) runs on every push and pull request:
 
-#### App Creation Steps
+- **Test Job**: Runs `cargo test`, `cargo clippy -- -D warnings`, and `cargo fmt --check`
+- **Security Job**: Runs `cargo audit` for dependency vulnerability scanning
+- **Release Job**: Automatically creates GitHub releases with Linux binaries when code is pushed to main
 
-1. **Create GitHub App** in Organization Settings → Developer settings → GitHub Apps:
-   - **Name**: `aikit-release-automation`
-   - **Description**: `Automates package manager updates for aikit releases`
-   - **Homepage URL**: `https://github.com/goaikit/aikit`
-   - **Webhook URL**: Leave blank (not needed for API-only operations)
-   - **Webhook secret**: Leave blank
+### Release Process
 
-2. **Repository Permissions**:
-   - ✅ **Contents**: Read and write
-   - ✅ **Pull requests**: Read and write
-   - ✅ **Metadata**: Read-only
+When code is merged to the `main` branch:
 
-3. **Install the App**:
-   - Install on the `goaikit` organization
-   - Grant access to: `aikit`, `homebrew-cli`, `scoop-bucket`
+1. Tests and security checks run automatically
+2. If all checks pass, a release is created with:
+   - Linux GNU binary (`aikit-x86_64-unknown-linux-gnu.tar.gz`)
+   - Linux MUSL binary (`aikit-x86_64-unknown-linux-musl.tar.gz`)
+3. The release is published to GitHub Releases for download
 
-4. **Generate Private Key**:
-   - Download the private key (PEM file)
-   - This will be used to generate JWT tokens
+### Local Development Setup
 
-#### Repository Secrets Configuration
+Before pushing code, ensure it passes all CI checks:
 
-Add these secrets to the `goaikit/aikit` repository (Settings → Secrets and variables → Actions):
+```bash
+# Run tests
+cargo test
 
-- `GH_APP_ID`: The GitHub App ID (numeric value from app settings)
-- `GH_APP_PRIVATE_KEY`: The complete PEM content of the downloaded private key
+# Check code style and formatting
+cargo fmt --check
+cargo clippy -- -D warnings
 
-#### Workflow Integration
-
-The release workflow uses `actions/create-github-app-token@v1` to generate short-lived tokens:
-
-```yaml
-- name: Generate GitHub App Token
-  id: app-token
-  uses: actions/create-github-app-token@v1
-  with:
-    app-id: ${{ secrets.GH_APP_ID }}
-    private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-    owner: goaikit
-
-# Use the token for cross-repository operations
-env:
-  GH_TOKEN: ${{ steps.app-token.outputs.token }}
+# Run security audit
+cargo audit  # (if cargo-audit is installed)
 ```
-
-### Release Process Architecture
-
-The CI/CD pipeline consists of reusable components:
-
-#### Directory Structure
-```
-.github/
-├── release-config.yml          # Project-specific configuration
-├── workflows/
-│   ├── auto-release.yml        # Automatic versioning and tagging
-│   ├── release-build.yml       # Cross-platform binary building
-│   ├── release-publish.yml     # GitHub release creation
-│   └── release-package-managers.yml  # Homebrew/Scoop updates
-└── actions/                     # Reusable composite actions
-    ├── detect-version/         # Version detection logic
-    ├── build-rust-binary/      # Cross-platform Rust builds
-    ├── update-homebrew/        # Homebrew formula updates
-    └── update-scoop/           # Scoop bucket updates
-```
-
-#### Configuration File
-
-The `release-config.yml` contains all project-specific values:
-
-```yaml
-project:
-  name: aikit
-  binary_name: aikit
-  description: "AIKIT - Rust Spec Kit CLI"
-  homepage: "https://github.com/goaikit/aikit"
-  license: "Apache-2.0"
-
-repositories:
-  main: goaikit/aikit
-  homebrew: goaikit/homebrew-cli
-  scoop: goaikit/scoop-bucket
-
-build:
-  targets:
-    - target: x86_64-unknown-linux-gnu
-      binary_name: aikit
-      archive_format: tar.gz
-    - target: x86_64-unknown-linux-musl
-      binary_name: aikit
-      archive_format: tar.gz
-    - target: x86_64-pc-windows-msvc
-      binary_name: aikit.exe
-      archive_format: zip
-```
-
-#### Reusability for New Projects
-
-To reuse this setup for other Rust CLI projects:
-
-1. **Copy the `.github/` folder** (contains all workflows and actions)
-2. **Update `release-config.yml`** with project-specific values
-3. **Set up GitHub App** with appropriate repository permissions
-4. **Configure repository secrets** (`GH_APP_ID`, `GH_APP_PRIVATE_KEY`)
-
-### Security Considerations
-
-- **Short-lived tokens**: GitHub App tokens expire after 1 hour
-- **Scoped permissions**: App only has access to necessary repositories and operations
-- **Audit trail**: All app operations are logged in organization audit logs
-- **No personal credentials**: Not dependent on individual developer accounts
-- **Automatic rotation**: Tokens are generated fresh for each workflow run
-
-### Troubleshooting
-
-**Common Issues:**
-
-1. **"Permission denied to github-actions[bot]"**
-   - Solution: Ensure GitHub App is installed and has repository access
-
-2. **"Can't find action.yml" errors**
-   - Solution: Ensure composite actions are committed and workflows checkout code first
-
-3. **Package manager updates failing**
-   - Solution: Check GitHub App permissions and repository access
-
-**Debugging Steps:**
-
-1. Check workflow run logs for detailed error messages
-2. Verify GitHub App installation and permissions
-3. Test repository secrets are correctly configured
-4. Ensure target repositories exist and are accessible
 
 ## License
 
