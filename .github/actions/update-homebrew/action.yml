@@ -61,38 +61,28 @@ runs:
         cd $HOMEBREW_REPO
 
         # Use Python for reliable URL/hash replacement that handles "null" values
-        python3 << PYTHON_SCRIPT
-import re
-import sys
+        export FORMULA_PATH="${{ inputs.formula_path }}"
+        export VERSION="${{ inputs.version }}"
+        export GNU_URL="${{ inputs.linux_gnu_url }}"
+        export GNU_HASH="${{ inputs.linux_gnu_hash }}"
+        export MUSL_URL="${{ inputs.linux_musl_url }}"
+        export MUSL_HASH="${{ inputs.linux_musl_hash }}"
 
-formula_path = "${{ inputs.formula_path }}"
-version = "${{ inputs.version }}"
-gnu_url = "${{ inputs.linux_gnu_url }}"
-gnu_hash = "${{ inputs.linux_gnu_hash }}"
-musl_url = "${{ inputs.linux_musl_url }}"
-musl_hash = "${{ inputs.linux_musl_hash }}"
-
-with open(formula_path, 'r') as f:
-    content = f.read()
-
-# Update version
-content = re.sub(r'version ".*"', f'version "{version}"', content)
-
-# Update GNU URL and hash (in the "if glibc_version >= 2.38" block)
-# Match any URL value (including "null") followed by sha256 in the GNU block
-gnu_pattern = r'(if glibc_version >= 2\.38\s*\n\s+url ")([^"]+)("\s*\n\s+sha256 ")([^"]+)(")'
-content = re.sub(gnu_pattern, rf'\1{gnu_url}\3{gnu_hash}\5', content, flags=re.MULTILINE)
-
-# Update MUSL URL and hash (in the "else" block)
-# Match any URL value (including "null") followed by sha256 in the else block
-musl_pattern = r'(else\s*\n\s+url ")([^"]+)("\s*\n\s+sha256 ")([^"]+)(")'
-content = re.sub(musl_pattern, rf'\1{musl_url}\3{musl_hash}\5', content, flags=re.MULTILINE)
-
-with open(formula_path, 'w') as f:
-    f.write(content)
-
-print("Homebrew formula updated successfully")
-PYTHON_SCRIPT
+        python3 -c "import re, os; \
+formula_path = os.environ['FORMULA_PATH']; \
+version = os.environ['VERSION']; \
+gnu_url = os.environ['GNU_URL']; \
+gnu_hash = os.environ['GNU_HASH']; \
+musl_url = os.environ['MUSL_URL']; \
+musl_hash = os.environ['MUSL_HASH']; \
+content = open(formula_path, 'r').read(); \
+content = re.sub(r'version \".*\"', f'version \"{version}\"', content); \
+gnu_pattern = r'(if glibc_version >= 2\\.38\\s*\\n\\s+url \")([^\"]+)(\"\\s*\\n\\s+sha256 \")([^\"]+)(\")'; \
+content = re.sub(gnu_pattern, rf'\\1{gnu_url}\\3{gnu_hash}\\5', content, flags=re.MULTILINE); \
+musl_pattern = r'(else\\s*\\n\\s+url \")([^\"]+)(\"\\s*\\n\\s+sha256 \")([^\"]+)(\")'; \
+content = re.sub(musl_pattern, rf'\\1{musl_url}\\3{musl_hash}\\5', content, flags=re.MULTILINE); \
+open(formula_path, 'w').write(content); \
+print('Homebrew formula updated successfully')"
 
         echo "Homebrew formula updated"
 
