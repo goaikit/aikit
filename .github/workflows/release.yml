@@ -30,7 +30,7 @@ jobs:
       tag: ${{ steps.detect-version.outputs.tag }}
     steps:
       - name: Checkout code for tag detection
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
@@ -94,7 +94,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
 
@@ -173,7 +173,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
           ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
@@ -330,7 +330,7 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
 
@@ -360,14 +360,14 @@ jobs:
           sudo apt-get install -y jq
 
       - name: Checkout homebrew-cli repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: goaikit/homebrew-cli
           path: homebrew-cli
           token: ${{ steps.app-token.outputs.token }}
 
       - name: Checkout scoop-bucket repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: goaikit/scoop-bucket
           path: scoop-bucket
