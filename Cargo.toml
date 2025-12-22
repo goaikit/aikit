@@ -14,7 +14,7 @@ clap = { version = "4.5", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # ZIP archive handling
-zip = "0.6"
+zip = "7.0"
 
 # JSON serialization
 serde = { version = "1.0", features = ["derive"] }
