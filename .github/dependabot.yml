@@ -9,9 +9,9 @@ updates:
       interval: "weekly"
     open-pull-requests-limit: 10
     reviewers:
-      - "goaikit"
+      - "aroff"
     assignees:
-      - "goaikit"
+      - "aroff"
     commit-message:
       prefix: "deps"
       include: "scope"
