@@ -422,27 +422,47 @@ jobs:
 
       - name: Update Homebrew formula
         if: success() || failure()
-        uses: ./.github/actions/update-homebrew
+        run: |
+          cd homebrew-cli
+
+          # Make script executable
+          chmod +x generate_formula.sh
+
+          # Run script with version from release
+          VERSION="${{ steps.release-info.outputs.version }}"
+          ./generate_formula.sh --version "$VERSION"
+
+          # Verify formula was updated
+          if ! grep -q "version \"$VERSION\"" Formula/aikit.rb; then
+            echo "❌ Formula version not updated correctly"
+            exit 1
+          fi
+
+          echo "✅ Homebrew formula updated to version $VERSION"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        with:
-          gh_token: ${{ steps.app-token.outputs.token }}
-          version: ${{ steps.release-info.outputs.version }}
-          linux_gnu_url: ${{ steps.release-info.outputs.linux_gnu_url }}
-          linux_gnu_hash: ${{ steps.release-info.outputs.linux_gnu_hash }}
-          linux_musl_url: ${{ steps.release-info.outputs.linux_musl_url }}
-          linux_musl_hash: ${{ steps.release-info.outputs.linux_musl_hash }}
 
       - name: Update Scoop bucket
         if: success() || failure()
-        uses: ./.github/actions/update-scoop
+        run: |
+          cd scoop-bucket
+
+          # Make script executable
+          chmod +x generate_manifest.sh
+
+          # Run script with version from release
+          VERSION="${{ steps.release-info.outputs.version }}"
+          ./generate_manifest.sh --version "$VERSION"
+
+          # Verify manifest was updated
+          if ! jq -e ".version == \"$VERSION\"" bucket/aikit.json > /dev/null; then
+            echo "❌ Manifest version not updated correctly"
+            exit 1
+          fi
+
+          echo "✅ Scoop manifest updated to version $VERSION"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        with:
-          gh_token: ${{ steps.app-token.outputs.token }}
-          version: ${{ steps.release-info.outputs.version }}
-          windows_url: ${{ steps.release-info.outputs.windows_url }}
-          windows_hash: ${{ steps.release-info.outputs.windows_hash }}
 
       - name: Validate Homebrew formula
         run: |

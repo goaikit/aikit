@@ -4,18 +4,6 @@ inputs:
   version:
     description: 'New version to update to'
     required: true
-  linux_gnu_url:
-    description: 'URL for Linux GNU binary'
-    required: true
-  linux_gnu_hash:
-    description: 'SHA256 hash for Linux GNU binary'
-    required: true
-  linux_musl_url:
-    description: 'URL for Linux MUSL binary'
-    required: true
-  linux_musl_hash:
-    description: 'SHA256 hash for Linux MUSL binary'
-    required: true
   gh_token:
     description: 'GitHub token for git operations'
     required: true
@@ -31,56 +19,31 @@ inputs:
     description: 'Path where homebrew repo is checked out'
     required: false
     default: 'homebrew-cli'
-  config_file:
-    description: 'Path to release config file'
-    required: false
-    default: '.github/release-config.yml'
 runs:
   using: 'composite'
   steps:
     - name: Update Homebrew formula
       shell: bash
       run: |
-        # Read config for repository and formula paths, with fallbacks
         HOMEBREW_REPO="${{ inputs.repo_path }}"
         FORMULA_PATH="${{ inputs.formula_path }}"
-        FORMULA_NAME="${{ inputs.formula_name }}"
-
-        if [ -f "${{ inputs.config_file }}" ]; then
-          # Try to parse config - for now use defaults
-          echo "Using config defaults for Homebrew"
-        fi
 
         if [ ! -d "$HOMEBREW_REPO" ]; then
           echo "⚠️  $HOMEBREW_REPO repository not checked out, skipping Homebrew update"
           exit 0
         fi
 
-        echo "Updating Homebrew formula to version ${{ inputs.version }}"
-
         cd $HOMEBREW_REPO
 
-        # Use Python for reliable URL/hash replacement that handles "null" values
-        export FORMULA_PATH="${{ inputs.formula_path }}"
-        export VERSION="${{ inputs.version }}"
-        export GNU_URL="${{ inputs.linux_gnu_url }}"
-        export GNU_HASH="${{ inputs.linux_gnu_hash }}"
-        export MUSL_URL="${{ inputs.linux_musl_url }}"
-        export MUSL_HASH="${{ inputs.linux_musl_hash }}"
+        # Make script executable
+        chmod +x generate_formula.sh
 
-        echo 'import re, os' > /tmp/update_formula.py
-        echo 'p, v, gu, gh, mu, mh = os.environ["FORMULA_PATH"], os.environ["VERSION"], os.environ["GNU_URL"], os.environ["GNU_HASH"], os.environ["MUSL_URL"], os.environ["MUSL_HASH"]' >> /tmp/update_formula.py
-        echo 'c = open(p, "r").read()' >> /tmp/update_formula.py
-        echo 'c = re.sub(r'\''version ".*"'\'', f'\''version "{v}"'\'', c)' >> /tmp/update_formula.py
-        echo 'c = re.sub(r'\''(if glibc_version >= 2\\.38\\s*\\n\\s+url ")([^"]+)("\\s*\\n\\s+sha256 ")([^"]+)(")'\'', rf'\''\\1{gu}\\3{gh}\\5'\'', c, flags=re.MULTILINE)' >> /tmp/update_formula.py
-        echo 'c = re.sub(r'\''(else\\s*\\n\\s+url ")([^"]+)("\\s*\\n\\s+sha256 ")([^"]+)(")'\'', rf'\''\\1{mu}\\3{mh}\\5'\'', c, flags=re.MULTILINE)' >> /tmp/update_formula.py
-        echo 'open(p, "w").write(c)' >> /tmp/update_formula.py
-        echo 'print("Homebrew formula updated successfully")' >> /tmp/update_formula.py
+        # Run script with version
+        ./generate_formula.sh --version "${{ inputs.version }}"
 
-        python3 /tmp/update_formula.py
-        rm -f /tmp/update_formula.py
-
-        echo "Homebrew formula updated"
+        echo "✅ Homebrew formula updated to version ${{ inputs.version }}"
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
 
     - name: Validate Homebrew formula
       shell: bash

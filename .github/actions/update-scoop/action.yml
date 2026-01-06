@@ -4,12 +4,6 @@ inputs:
   version:
     description: 'New version to update to'
     required: true
-  windows_url:
-    description: 'URL for Windows binary'
-    required: true
-  windows_hash:
-    description: 'SHA256 hash for Windows binary'
-    required: true
   gh_token:
     description: 'GitHub token for git operations'
     required: true
@@ -25,83 +19,31 @@ inputs:
     description: 'Path where scoop repo is checked out'
     required: false
     default: 'scoop-bucket'
-  config_file:
-    description: 'Path to release config file'
-    required: false
-    default: '.github/release-config.yml'
 runs:
   using: 'composite'
   steps:
     - name: Update Scoop bucket
       shell: bash
       run: |
-        # Read config for repository and bucket paths, with fallbacks
         SCOOP_REPO="${{ inputs.repo_path }}"
         BUCKET_PATH="${{ inputs.bucket_path }}"
-        MANIFEST_NAME="${{ inputs.manifest_name }}"
-
-        if [ -f "${{ inputs.config_file }}" ]; then
-          # Try to parse config - for now use defaults
-          echo "Using config defaults for Scoop"
-        fi
 
         if [ ! -d "$SCOOP_REPO" ]; then
           echo "⚠️  $SCOOP_REPO repository not checked out, skipping Scoop update"
           exit 0
         fi
 
-        echo "Updating Scoop bucket to version ${{ inputs.version }}"
-
         cd $SCOOP_REPO
 
-        # Check if bucket directory exists, create if not
-        if [ ! -d "bucket" ]; then
-          echo "⚠️  bucket directory not found, creating it"
-          mkdir -p bucket
-        fi
+        # Make script executable
+        chmod +x generate_manifest.sh
 
-        # Check if file exists, create initial structure if not
-        if [ ! -f "$BUCKET_PATH" ]; then
-          echo "⚠️  $BUCKET_PATH not found, creating initial file"
-          cat > $BUCKET_PATH << 'EOF'
-        {
-          "version": "0.0.1",
-          "description": "AIKit",
-          "homepage": "https://github.com/goaikit/aikit",
-          "license": "Apache-2.0",
-          "architecture": {
-            "64bit": {
-              "url": "",
-              "hash": ""
-            }
-          },
-          "bin": "aikit.exe",
-          "checkver": "github",
-          "autoupdate": {
-            "architecture": {
-              "64bit": {
-                "url": "https://github.com/goaikit/aikit/releases/download/v$version/aikit-x86_64-pc-windows-msvc.zip"
-              }
-            }
-          }
-        }
-        EOF
-        fi
+        # Run script with version
+        ./generate_manifest.sh --version "${{ inputs.version }}"
 
-        # Skip update if Windows URL is null or empty
-        if [ -z "${{ inputs.windows_url }}" ] || [ "${{ inputs.windows_url }}" = "null" ]; then
-          echo "⚠️  Windows URL is null or empty, skipping Scoop update"
-          exit 0
-        fi
-
-        # Update version, URL and hash using jq for safer JSON manipulation
-        jq --arg version "${{ inputs.version }}" \
-           --arg url "${{ inputs.windows_url }}" \
-           --arg hash "${{ inputs.windows_hash }}" \
-           '.version = $version | .architecture."64bit".url = $url | .architecture."64bit".hash = $hash' \
-           $BUCKET_PATH > $BUCKET_PATH.tmp && mv $BUCKET_PATH.tmp $BUCKET_PATH
-
-        echo "Scoop bucket updated"
+        echo "✅ Scoop manifest updated to version ${{ inputs.version }}"
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
 
     - name: Validate Scoop bucket
       shell: bash
