@@ -1,0 +1,679 @@
+---
+title: "Troubleshooting"
+description: "Common issues, error messages, and solutions for AIKit usage."
+---
+
+# Troubleshooting Guide
+
+This guide covers common issues you might encounter when using AIKit, along with their solutions and debugging techniques.
+
+## Quick Diagnosis
+
+### Run Diagnostic Commands
+
+```bash
+# Check AIKit installation and environment
+aikit check
+
+# Enable verbose output for debugging
+aikit --debug check
+
+# Validate configuration
+aikit config validate
+
+# Test package installation
+aikit list
+```
+
+### Common Symptoms and Solutions
+
+## Installation Issues
+
+### "aikit command not found"
+
+**Problem**: AIKit is not installed or not in PATH.
+
+**Solutions**:
+
+1. **Check installation**:
+   ```bash
+   which aikit
+   # Should show: /path/to/aikit
+   ```
+
+2. **Add to PATH** (Linux/macOS):
+   ```bash
+   export PATH="$PATH:/path/to/aikit/directory"
+   # Add to ~/.bashrc or ~/.zshrc for permanence
+   ```
+
+3. **Reinstall AIKit**:
+   ```bash
+   # Download latest release
+   curl -L https://github.com/your-org/aikit/releases/latest/download/aikit-x86_64-unknown-linux-gnu.tar.gz | tar xz
+   sudo mv aikit /usr/local/bin/
+   ```
+
+### "Permission denied" during installation
+
+**Problem**: Insufficient permissions to install AIKit.
+
+**Solutions**:
+
+```bash
+# Install to user directory (recommended)
+mkdir -p ~/.local/bin
+export PATH="$HOME/.local/bin:$PATH"
+
+# Or install system-wide with sudo
+sudo mv aikit /usr/local/bin/
+
+# Verify permissions
+ls -la $(which aikit)
+```
+
+### Rust toolchain issues
+
+**Problem**: Rust/Cargo not found during build from source.
+
+**Solutions**:
+
+```bash
+# Install Rust toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# Update Rust
+rustup update
+
+# Check installation
+cargo --version
+rustc --version
+```
+
+## Configuration Issues
+
+### "Configuration file not found"
+
+**Problem**: AIKit cannot locate configuration files.
+
+**Solutions**:
+
+```bash
+# Check configuration file locations
+ls -la ~/.aikit/config.toml  # Global config
+ls -la aikit.toml            # Project config
+
+# Create default global configuration
+mkdir -p ~/.aikit
+cat > ~/.aikit/config.toml << 'EOF'
+version = "1.0"
+install_dir = ".aikit"
+[preferences]
+verbose = false
+default_agent = "claude"
+confirm_overwrite = true
+network_timeout = 30
+EOF
+
+# Create project configuration
+aikit config init
+```
+
+### Invalid configuration syntax
+
+**Problem**: TOML syntax errors in configuration files.
+
+**Solutions**:
+
+```bash
+# Validate configuration
+aikit config validate
+
+# Check for syntax errors
+cat aikit.toml | python3 -c "import tomllib, sys; tomllib.load(sys.stdin)"
+
+# Fix common syntax errors:
+# - Use double quotes for strings
+# - Use true/false for booleans
+# - Use integers for numbers
+# - Ensure proper indentation
+```
+
+### Agent configuration issues
+
+**Problem**: Specific AI agent not working after configuration.
+
+**Solutions**:
+
+```bash
+# Validate agent configuration
+aikit check agents
+
+# Check agent CLI installation
+aikit check agents --verbose
+
+# Test specific agent
+aikit check agents --agent claude
+
+# Reconfigure agent
+aikit config agents update claude
+```
+
+## Package Management Issues
+
+### "Package not found"
+
+**Problem**: Cannot find or install a package.
+
+**Solutions**:
+
+```bash
+# Search for packages
+aikit search "package-name"
+
+# Check exact package name
+aikit search "package-name" --detailed
+
+# Install with verbose output
+aikit install https://github.com/user/package --debug
+
+# Check network connectivity
+curl -I https://api.github.com/repos/user/package
+```
+
+### "GitHub token required"
+
+**Problem**: Package installation fails due to missing authentication.
+
+**Solutions**:
+
+```bash
+# Set GitHub token
+export GITHUB_TOKEN="your_personal_access_token_here"
+
+# Create token at: https://github.com/settings/tokens
+# Required scopes: repo, read:packages
+
+# Test token
+curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
+
+# Add to shell profile
+echo 'export GITHUB_TOKEN="your_token"' >> ~/.bashrc
+```
+
+### Package installation hangs
+
+**Problem**: Package installation appears to freeze.
+
+**Solutions**:
+
+```bash
+# Enable debug output
+aikit --debug install https://github.com/user/package
+
+# Check network timeout
+aikit install https://github.com/user/package --timeout 120
+
+# Kill hanging process
+pkill -f aikit
+
+# Clean up partial installation
+rm -rf .aikit/packages/partial-*
+```
+
+### Package validation fails
+
+**Problem**: Installed package reports validation errors.
+
+**Solutions**:
+
+```bash
+# Validate specific package
+aikit package validate package-name
+
+# Check package structure
+aikit list --detailed package-name
+
+# Reinstall package
+aikit remove package-name
+aikit install https://github.com/user/package
+
+# Check for file permissions
+ls -la .aikit/packages/package-name/
+```
+
+## AI Agent Integration Issues
+
+### "Agent CLI not found"
+
+**Problem**: AIKit cannot find the required AI agent CLI.
+
+**Solutions**:
+
+```bash
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Install other agents
+# Cursor: Download from https://cursor.sh
+# Copilot: Built into GitHub supported editors
+# Gemini: Available through various integrations
+
+# Verify installation
+which claude
+claude --version
+
+# Update PATH if needed
+export PATH="$PATH:$(npm bin -g)"
+```
+
+### Agent commands not appearing
+
+**Problem**: AI agent cannot find AIKit-generated commands.
+
+**Solutions**:
+
+```bash
+# Check command generation
+aikit list --paths
+
+# Verify output directory
+ls -la commands/your-agent/
+
+# Regenerate commands
+aikit generate commands --agent your-agent
+
+# Check agent configuration
+aikit config agents show your-agent
+
+# Restart AI agent
+# Some agents require restart after command changes
+```
+
+### Template loading issues
+
+**Problem**: AI agent cannot load AIKit templates.
+
+**Solutions**:
+
+```bash
+# Validate template files
+find commands/ -name "*.md" -exec echo "Checking {}" \; -exec head -5 {} \;
+
+# Check template syntax
+aikit template validate
+
+# Regenerate templates
+aikit generate templates --agent your-agent --force
+
+# Clear agent cache
+# Agent-specific cache clearing instructions
+```
+
+## Build and Development Issues
+
+### "Build failed"
+
+**Problem**: Package building fails.
+
+**Solutions**:
+
+```bash
+# Check build requirements
+aikit package validate
+
+# Build with verbose output
+aikit package build --debug
+
+# Check for missing files
+find . -name "aikit.toml" -type f
+
+# Validate aikit.toml syntax
+cat aikit.toml | python3 -c "import tomllib, sys; tomllib.load(sys.stdin)"
+```
+
+### Publishing fails
+
+**Problem**: Cannot publish package to registry.
+
+**Solutions**:
+
+```bash
+# Check GitHub token permissions
+curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user/repos
+
+# Verify repository exists
+curl -I https://api.github.com/repos/your-org/your-repo
+
+# Check repository permissions
+aikit package publish --dry-run
+
+# Publish with debug output
+aikit package publish --debug
+```
+
+### Git operations fail
+
+**Problem**: Git-related operations fail during package management.
+
+**Solutions**:
+
+```bash
+# Check Git installation
+git --version
+
+# Configure Git credentials
+git config --global user.name "Your Name"
+git config --global user.email "your.email@example.com"
+
+# Test GitHub access
+ssh -T git@github.com  # For SSH
+curl -u username:$GITHUB_TOKEN https://api.github.com/user  # For HTTPS
+
+# Use HTTPS instead of SSH
+git remote set-url origin https://github.com/user/repo.git
+```
+
+## Network and Connectivity Issues
+
+### "Network timeout"
+
+**Problem**: Operations fail due to network timeouts.
+
+**Solutions**:
+
+```bash
+# Increase timeout
+export AIKIT_TIMEOUT=120
+
+# Check network connectivity
+ping github.com
+curl -I https://api.github.com
+
+# Use proxy if required
+export HTTPS_PROXY="http://proxy.company.com:8080"
+
+# Disable SSL verification (not recommended)
+export GIT_SSL_NO_VERIFY=1
+```
+
+### Firewall blocking connections
+
+**Problem**: Corporate firewall blocks AIKit connections.
+
+**Solutions**:
+
+```bash
+# Configure proxy
+export HTTPS_PROXY="http://proxy.company.com:8080"
+export HTTP_PROXY="http://proxy.company.com:8080"
+
+# Use VPN if required
+# Contact IT for firewall exceptions for:
+# - api.github.com
+# - github.com
+# - git.github.com
+
+# Test connectivity
+curl -x $HTTPS_PROXY https://api.github.com/user
+```
+
+## Performance Issues
+
+### Slow package installation
+
+**Problem**: Package installation takes too long.
+
+**Solutions**:
+
+```bash
+# Use faster mirror
+export AIKIT_REGISTRY="https://fast-mirror.example.com"
+
+# Enable parallel downloads
+export AIKIT_CONCURRENT_DOWNLOADS=4
+
+# Clear cache
+aikit cache clear
+
+# Use local packages when possible
+aikit install ./local-package/
+```
+
+### High memory usage
+
+**Problem**: AIKit uses excessive memory.
+
+**Solutions**:
+
+```bash
+# Reduce cache size
+aikit config set cache.size 50
+
+# Disable unused agents
+aikit config agents disable unused-agent
+
+# Use smaller packages
+aikit search "minimal" --category lightweight
+
+# Monitor memory usage
+aikit stats memory
+```
+
+### Slow command generation
+
+**Problem**: Command generation is slow.
+
+**Solutions**:
+
+```bash
+# Pre-generate commands
+aikit generate commands --all
+
+# Use cached templates
+aikit config set templates.cache.enabled true
+
+# Optimize agent configuration
+aikit config agents optimize
+
+# Use faster templates
+aikit template use minimal
+```
+
+## Error Messages and Solutions
+
+### "Error: Repository not found"
+
+```
+Error: Repository 'user/repo' not found
+```
+
+**Solutions**:
+- Check repository name spelling
+- Verify repository is public
+- Use full GitHub URL: `https://github.com/user/repo`
+- Check GitHub token permissions
+
+### "Error: Authentication failed"
+
+```
+Error: Authentication failed for https://github.com/user/repo.git/
+```
+
+**Solutions**:
+- Set GITHUB_TOKEN environment variable
+- Verify token has correct permissions
+- Regenerate token if expired
+- Check token scopes (repo, packages)
+
+### "Error: Package already exists"
+
+```
+Error: Package 'name' already exists at path/to/package
+```
+
+**Solutions**:
+- Use different package name
+- Remove existing package: `aikit remove name`
+- Use version suffixes: `name-v2`
+- Install to different location
+
+### "Error: Template not found"
+
+```
+Error: Template 'command-name' not found for agent 'claude'
+```
+
+**Solutions**:
+- Generate missing templates: `aikit generate templates`
+- Check agent configuration
+- Verify command name spelling
+- Reinstall package with templates
+
+## Advanced Debugging
+
+### Enable Debug Logging
+
+```bash
+# Global debug mode
+aikit --debug command
+
+# Configuration debug
+aikit config validate --verbose
+
+# Package debug
+aikit package build --debug
+
+# Agent debug
+aikit generate commands --agent claude --debug
+```
+
+### Collect System Information
+
+```bash
+# System information
+uname -a
+echo $SHELL
+echo $PATH
+
+# AIKit information
+aikit --version
+aikit check --verbose
+
+# Environment variables
+env | grep -i aikit
+env | grep -i github
+
+# Configuration files
+cat ~/.aikit/config.toml
+cat ./aikit.toml 2>/dev/null || echo "No project config"
+```
+
+### Log File Analysis
+
+```bash
+# Enable logging
+export AIKIT_LOG_LEVEL=debug
+export AIKIT_LOG_FILE=/tmp/aikit.log
+
+# Run command
+aikit command
+
+# Analyze logs
+tail -f /tmp/aikit.log
+grep ERROR /tmp/aikit.log
+```
+
+### Performance Profiling
+
+```bash
+# Time command execution
+time aikit install https://github.com/user/package
+
+# Profile memory usage
+/usr/bin/time -v aikit package build
+
+# Monitor system resources
+top -p $(pgrep aikit)
+```
+
+## Getting Help
+
+### Documentation Resources
+
+- [CLI Commands](cli-commands.md) - Complete command reference
+- [Configuration Guide](configuration.md) - Setup and configuration
+- [Usage Examples](examples.md) - Practical examples
+- [Package Management](packages.md) - Creating and publishing packages
+- [AI Agent Integration](agents.md) - Agent-specific setup
+
+### Community Support
+
+- **GitHub Issues**: Report bugs at https://github.com/your-org/aikit/issues
+- **Discussions**: Ask questions at https://github.com/your-org/aikit/discussions
+- **Contributing**: See [CONTRIBUTING.md](../CONTRIBUTING.md) for contribution guidelines
+
+### Emergency Commands
+
+```bash
+# Reset AIKit to clean state
+aikit reset --force
+
+# Clear all caches
+aikit cache clear --all
+
+# Remove all packages
+aikit remove --all
+
+# Restore default configuration
+aikit config reset
+```
+
+## Prevention Best Practices
+
+### Regular Maintenance
+
+```bash
+# Weekly maintenance
+aikit update --all          # Update all packages
+aikit cache clear           # Clear old cache
+aikit config validate       # Validate configuration
+
+# Monthly maintenance
+aikit check --full          # Full system check
+aikit backup create         # Backup configuration
+```
+
+### Configuration Backup
+
+```bash
+# Backup configuration
+cp ~/.aikit/config.toml ~/.aikit/config.toml.backup
+cp aikit.toml aikit.toml.backup
+
+# Restore configuration
+cp ~/.aikit/config.toml.backup ~/.aikit/config.toml
+```
+
+### Monitoring and Alerts
+
+```bash
+# Set up monitoring
+aikit monitor enable
+
+# Check system health
+aikit health check
+
+# View performance metrics
+aikit stats show
+```
+
+---
+
+If you encounter an issue not covered here, please [open an issue](https://github.com/your-org/aikit/issues) with:
+- AIKit version (`aikit --version`)
+- Operating system and version
+- Complete error message
+- Steps to reproduce
+- Debug output (`aikit --debug command`)

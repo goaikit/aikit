@@ -1,0 +1,517 @@
+---
+title: "CLI Commands"
+description: "Complete reference for all AIKit command-line interface commands with examples and options."
+---
+
+# CLI Commands
+
+AIKit provides a comprehensive command-line interface for managing AI agent packages, templates, and development workflows. This guide covers all available commands with detailed usage examples.
+
+## Command Overview
+
+AIKit organizes functionality into logical command groups:
+
+### Core Commands
+- **`init`** - Initialize new Spec-Driven Development projects
+- **`check`** - Validate installed tools and AI agent CLIs
+- **`version`** - Display version information
+
+### Package Management
+- **`install`** - Install packages from GitHub URLs
+- **`update`** - Update installed packages to latest versions
+- **`remove`** - Remove installed packages
+- **`list`** - Display installed packages
+- **`search`** - Search for packages in registries
+
+### Package Development
+- **`package init`** - Initialize new package with aikit.toml
+- **`package build`** - Build package for distribution
+- **`package publish`** - Publish package to registry
+
+### Release Management
+- **`release`** - Create GitHub releases with package files
+
+## Global Options
+
+All commands support these global options:
+
+```bash
+# Enable debug output for troubleshooting
+aikit --debug <command>
+
+# Display version information
+aikit --version
+aikit -V
+
+# Show help for any command
+aikit --help
+aikit <command> --help
+```
+
+## Quick Reference
+
+| Command | Purpose | Example |
+|---------|---------|---------|
+| `init` | Create new project | `aikit init my-project` |
+| `check` | Validate environment | `aikit check` |
+| `install` | Install package | `aikit install https://github.com/user/repo` |
+| `search` | Find packages | `aikit search "agent-template"` |
+| `package init` | Create package | `aikit package init` |
+| `list` | Show installed | `aikit list` |
+
+## Prerequisites
+
+Before using AIKit commands, ensure you have:
+
+- **GitHub Token** (for package installation and publishing):
+  ```bash
+  export GITHUB_TOKEN="your-personal-access-token"
+  ```
+
+- **AI Agent CLI** (depending on your target agent):
+  ```bash
+  # For Claude Code
+  npm install -g @anthropic-ai/claude-code
+
+  # For other agents (check with aikit check)
+  ```
+
+## Command Details
+
+### init
+
+Initialize a new Spec-Driven Development project with AI agent integration.
+
+```bash
+# Create new project in subdirectory
+aikit init my-project
+
+# Initialize in current directory
+aikit init --here
+
+# Initialize for specific AI agent
+aikit init my-project --ai claude
+
+# Skip Git initialization
+aikit init my-project --no-git
+
+# Force initialization in non-empty directory
+aikit init existing-dir --force
+```
+
+**Options:**
+- `--ai <AGENT>` - Target AI assistant (see supported agents below)
+- `--script <TYPE>` - Script type (sh or ps)
+- `--here` - Initialize in current directory
+- `--force` - Skip confirmation for non-empty directories
+- `--no-git` - Skip Git repository initialization
+- `--github-token <TOKEN>` - GitHub token for API requests
+- `--skip-tls` - Skip TLS verification (not recommended)
+- `--ignore-agent-tools` - Skip CLI validation for selected agent
+
+**Supported AI Agents:**
+AIKit supports 17+ AI assistants across different categories:
+
+**Primary Assistants:**
+- `claude` - Claude Code by Anthropic
+- `cursor` - Cursor AI IDE
+- `copilot` - GitHub Copilot
+- `gemini` - Google Gemini
+
+**Additional Assistants:**
+- `qwen` - Qwen Code
+- `opencode` - OpenCode
+- `codex` - GitHub Codex
+- `windsurf` - Windsurf IDE
+- `kilocode` - KiloCode
+- `auggie` - Auggie CLI
+- `roo` - Roo Code
+- `codebuddy` - CodeBuddy CLI
+- `qoder` - Qoder CLI
+- `amp` - Amp
+- `shai` - Shai
+- `continue` - Continue (Codex)
+- `bob` - Bob
+
+**What it creates:**
+- Project directory with basic structure
+- `aikit.toml` configuration file
+- `.aikit/` directory for internal state
+- Git repository (unless `--no-git` specified)
+- Agent-specific templates and scripts
+
+**Example output:**
+```bash
+$ aikit init my-claude-project --ai claude
+✓ Created project: my-claude-project
+✓ Initialized Git repository
+✓ Generated aikit.toml for Claude integration
+✓ Created development scripts
+✓ Project ready for Spec-Driven Development
+```
+
+### check
+
+Validate installed tools and AI agent CLIs in your environment.
+
+```bash
+# Check all available tools
+aikit check
+
+# Enable debug output for troubleshooting
+aikit check --debug
+```
+
+**What it validates:**
+- GitHub CLI authentication
+- AI agent CLIs (Claude Code, etc.)
+- Required system tools
+- Network connectivity
+- Token validity
+
+**Example output:**
+```bash
+$ aikit check
+Tree display not implemented
+```
+
+*Note: The check command validates your development environment. Output format may vary by implementation.*
+
+### --version
+
+Display AIKit version information.
+
+```bash
+# Show version (global flag)
+aikit --version
+aikit -V
+```
+
+**Example output:**
+```bash
+$ aikit --version
+=== AIKIT Version Information ===
+Table display not implemented
+```
+
+*Note: The version command provides detailed system and version information.*
+
+## Package Management Commands
+
+### install
+
+Install a package from a GitHub repository URL.
+
+```bash
+# Install from GitHub URL
+aikit install https://github.com/username/package-repo
+
+# Install specific branch
+aikit install https://github.com/username/package-repo --branch develop
+
+# Install with debug output
+aikit install https://github.com/username/package-repo --debug
+```
+
+**Prerequisites:**
+- Valid GitHub token: `export GITHUB_TOKEN="your-token"`
+- Repository must contain `aikit.toml` file
+
+**Example output:**
+```bash
+$ aikit install https://github.com/example/agent-template
+✓ Cloning repository...
+✓ Validating aikit.toml...
+✓ Installing dependencies...
+✓ Package 'agent-template' installed successfully
+```
+
+### update
+
+Update installed packages to their latest versions.
+
+```bash
+# Update all installed packages
+aikit update
+
+# Update specific package
+aikit update package-name
+
+# Update with debug output
+aikit update --debug
+```
+
+**Example output:**
+```bash
+$ aikit update
+Checking for updates...
+✓ agent-template: 1.0.0 → 1.2.0
+✓ data-processor: 0.9.0 → 1.0.0
+✓ Updated 2 packages
+```
+
+### remove
+
+Remove an installed package.
+
+```bash
+# Remove specific package
+aikit remove package-name
+
+# Remove with debug output
+aikit remove package-name --debug
+```
+
+**Example output:**
+```bash
+$ aikit remove agent-template
+✓ Removed package 'agent-template'
+✓ Cleaned up dependencies
+```
+
+### list
+
+Display all installed packages.
+
+```bash
+# List all packages
+aikit list
+
+# List with detailed information
+aikit list --detailed
+
+# List with debug output
+aikit list --debug
+```
+
+**Example output:**
+```bash
+$ aikit list
+Installed packages:
+  aikit v1.0.1 - AIKIT package creation guide and template - helps you create new AIKIT template packages
+```
+
+*Note: Shows currently installed AIKit packages with version and description information.*
+
+### search
+
+Search for packages in registries.
+
+```bash
+# Search for packages (requires GitHub API access)
+aikit search "agent template"
+
+# Limit results
+aikit search "data processing" --limit 5
+
+# Show detailed information
+aikit search "template" --detailed
+
+# Search specific registry
+aikit search "ai agent" --registry https://custom-registry.com
+```
+
+**Prerequisites:**
+- Network access to GitHub API
+- **GitHub Token Required**: `export GITHUB_TOKEN="your-token"` (avoids rate limits)
+- For private repositories: token with appropriate permissions
+
+**Options:**
+- `--limit <NUMBER>` - Maximum results (default: 20)
+- `--detailed` - Show detailed package information
+- `--registry <URL>` - Custom registry URL (default: GitHub)
+
+**Example output:**
+```bash
+$ aikit search "template" --limit 2
+🔍 Searching for packages: 'template'
+Found packages matching query.
+```
+
+*Note: Search results depend on available packages and GitHub API access. Authentication required for full functionality.*
+
+## Package Development Commands
+
+### package init
+
+Initialize a new package with `aikit.toml` configuration.
+
+```bash
+# Initialize package with name
+aikit package init my-package
+
+# Initialize with description and version
+aikit package init my-package --description "My AI agent package" --version 1.0.0
+
+# Initialize with author information
+aikit package init my-package --author "Your Name" --description "Package description"
+
+# Skip interactive prompts
+aikit package init my-package --yes
+
+# Initialize with debug output
+aikit package init my-package --debug
+```
+
+**Options:**
+- `--description <TEXT>` - Package description
+- `--version <VERSION>` - Package version (default: 0.1.0)
+- `--author <NAME>` - Author name
+- `--yes` - Skip interactive prompts
+
+**What it creates:**
+- `aikit.toml` - Package configuration file
+- Basic directory structure
+- Example files and documentation
+
+**Example output:**
+```bash
+$ aikit package init my-package --description "AI agent utilities"
+✓ Created package: my-package
+✓ Generated aikit.toml configuration
+✓ Package initialized successfully
+```
+
+### package build
+
+Build package for distribution.
+
+```bash
+# Build package
+aikit package build
+
+# Build with debug output
+aikit package build --debug
+```
+
+**What it does:**
+- Validates `aikit.toml` configuration
+- Creates distribution artifacts
+- Generates package metadata
+- Prepares for publishing
+
+**Example output:**
+```bash
+$ aikit package build
+✓ Validating package configuration...
+✓ Creating distribution artifacts...
+✓ Generated package metadata
+✓ Build completed: dist/my-package-1.0.0.zip
+```
+
+### package publish
+
+Publish package to registry.
+
+```bash
+# Publish to default registry
+aikit package publish
+
+# Publish with debug output
+aikit package publish --debug
+```
+
+**Prerequisites:**
+- Valid GitHub token with repo permissions
+- Built package (run `aikit package build` first)
+- GitHub repository access
+
+**Example output:**
+```bash
+$ aikit package publish
+✓ Authenticating with GitHub...
+✓ Uploading package artifacts...
+✓ Creating GitHub release...
+✓ Package published: v1.0.0
+✓ Available at: https://github.com/username/my-package/releases/tag/v1.0.0
+```
+
+## Release Management
+
+### release
+
+Create GitHub release with package files.
+
+```bash
+# Create release with current version
+aikit release
+
+# Create release with specific tag
+aikit release v1.2.0
+
+# Create release with debug output
+aikit release --debug
+```
+
+**Prerequisites:**
+- GitHub token with repo permissions
+- Git repository with commits
+- Built package artifacts
+
+**Example output:**
+```bash
+$ aikit release v1.0.0
+✓ Creating GitHub release v1.0.0...
+✓ Uploading package files...
+✓ Release created successfully
+✓ URL: https://github.com/username/repo/releases/tag/v1.0.0
+```
+
+## Troubleshooting
+
+### Common Issues
+
+**"GitHub token required"**
+```bash
+# Set your GitHub token
+export GITHUB_TOKEN="ghp_your_token_here"
+
+# Or use GitHub CLI
+gh auth login
+```
+
+**"AI agent CLI not found"**
+```bash
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Verify installation
+aikit check
+```
+
+**"Package validation failed"**
+```bash
+# Check aikit.toml syntax
+cat aikit.toml
+
+# Validate package
+aikit package build --debug
+```
+
+### Debug Mode
+
+Enable debug output for detailed troubleshooting:
+
+```bash
+aikit --debug <command>
+```
+
+This provides verbose output including:
+- API requests and responses
+- File operations
+- Validation steps
+- Error stack traces
+
+### Getting Help
+
+```bash
+# General help
+aikit --help
+
+# Command-specific help
+aikit <command> --help
+
+# Subcommand help
+aikit package --help
+aikit package build --help
+```

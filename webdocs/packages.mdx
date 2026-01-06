@@ -1,0 +1,521 @@
+# AIKit Package Management
+
+**Version**: 1.0.0
+**Last Updated**: 2025-01-06
+
+## Overview
+
+AIKit packages are self-contained extensions that add AI agent commands and templates to your development workflow. The package ecosystem enables sharing reusable AI tools across teams and the broader community.
+
+## Package Ecosystem
+
+### What Are Packages?
+
+AIKit packages contain:
+- **Commands**: Reusable AI prompts and automation scripts
+- **Templates**: Structured content templates for common tasks
+- **Scripts**: Supporting automation and utility scripts
+- **Documentation**: Usage guides and examples
+- **Metadata**: Package information and dependencies
+
+### Package Registry
+
+Packages are distributed via GitHub repositories, forming a decentralized package registry:
+
+- **Discovery**: Search GitHub for `aikit package` repositories
+- **Installation**: Direct from GitHub URLs or local directories
+- **Updates**: Version-based package management
+- **Community**: Open-source collaboration and sharing
+
+## Creating Packages
+
+### Package Structure
+
+Every AIKit package follows this structure:
+
+```
+my-package/
+├── aikit.toml          # Package metadata and configuration
+├── README.md           # Package description and usage
+├── templates/          # AI command templates
+│   ├── help.md        # Example command template
+│   ├── analyze.md     # Another command template
+│   └── ...
+├── scripts/           # Optional automation scripts
+│   ├── setup.sh       # Installation/setup scripts
+│   └── validate.sh    # Validation scripts
+└── docs/             # Optional additional documentation
+    └── advanced.md
+```
+
+### Package Metadata (`aikit.toml`)
+
+The `aikit.toml` file defines your package:
+
+```toml
+[package]
+name = "my-package"
+version = "0.1.0"
+description = "My AI development tools"
+authors = ["Your Name"]
+license = "MIT"
+homepage = "https://example.com"
+repository = "https://github.com/username/my-package"
+
+[commands.help]
+description = "Show help information"
+template = "help.md"
+
+[commands.analyze]
+description = "Analyze code for issues"
+template = "analyze.md"
+
+[artifacts]
+"templates/*.md" = ".aikit/templates/"
+"scripts/*" = ".aikit/scripts/"
+```
+
+#### Package Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Unique package identifier |
+| `version` | Yes | Semantic version (major.minor.patch) |
+| `description` | Yes | Brief package purpose |
+| `authors` | No | Package authors/maintainers |
+| `license` | No | License type (MIT, Apache-2.0, etc.) |
+| `homepage` | No | Project website |
+| `repository` | No | Source code repository |
+
+#### Commands Section
+
+Define available commands in your package:
+
+```toml
+[commands.command-name]
+description = "What this command does"
+template = "template-file.md"  # Optional, defaults to commands/{name}.md
+```
+
+#### Artifacts Mapping
+
+Map package files to AIKit installation locations:
+
+```toml
+[artifacts]
+# Source files → Destination directories
+"templates/*.md" = ".aikit/templates/"
+"scripts/*.sh" = ".aikit/scripts/"
+"docs/*" = ".aikit/docs/"
+```
+
+### Command Templates
+
+Templates use Markdown with variable substitution:
+
+```markdown
+# Code Review Command
+
+**Description**: {{command_description}}
+
+**Package**: {{package_name}}
+
+## Usage
+
+Select code and run this command to get a comprehensive review.
+
+## Analysis Results
+
+[AI will provide detailed code review here]
+```
+
+#### Available Variables
+
+| Variable | Description |
+|----------|-------------|
+| `{{package_name}}` | Package name from aikit.toml |
+| `{{command_description}}` | Command description |
+| `{{command_name}}` | Current command name |
+
+### Quick Package Creation
+
+1. **Initialize package**:
+   ```bash
+   aikit package init my-tools --description "My AI tools"
+   cd my-tools
+   ```
+
+2. **Edit metadata**:
+   ```bash
+   # Modify aikit.toml as needed
+   # Add authors, license, etc.
+   ```
+
+3. **Create command templates**:
+   ```bash
+   # Create templates/analyze.md
+   cat > templates/analyze.md << 'EOF'
+   # Code Analysis
+
+   **Description**: {{command_description}}
+
+   ## Usage
+
+   Select code to analyze and run this command.
+
+   ## Analysis
+
+   [AI analysis results will appear here]
+   EOF
+   ```
+
+4. **Update command definitions**:
+   ```bash
+   # Add to aikit.toml
+   cat >> aikit.toml << 'EOF'
+
+   [commands.analyze]
+   description = "Analyze code for improvements"
+   template = "analyze.md"
+   EOF
+   ```
+
+5. **Test locally**:
+   ```bash
+   aikit package build
+   aikit install .
+   aikit check
+   ```
+
+## Package Development Workflow
+
+### Local Development
+
+Develop and test packages locally before publishing:
+
+1. **Initialize package**:
+   ```bash
+   aikit package init dev-tools
+   cd dev-tools
+   ```
+
+2. **Development cycle**:
+   ```bash
+   # Edit templates and metadata
+   # Test changes locally
+   aikit install . --force
+   aikit check
+   ```
+
+3. **Build for distribution**:
+   ```bash
+   aikit package build
+   # Creates dist/dev-tools-0.1.0.zip
+   ```
+
+### Version Management
+
+Follow semantic versioning for packages:
+
+- **Major** (1.0.0): Breaking changes
+- **Minor** (0.1.0): New features, backward compatible
+- **Patch** (0.0.1): Bug fixes, backward compatible
+
+```bash
+# Update version
+sed -i 's/version = "0.1.0"/version = "0.2.0"/' aikit.toml
+
+# Build new version
+aikit package build
+
+# Tag in git
+git tag v0.2.0
+```
+
+### Publishing Packages
+
+Share your packages with the community:
+
+1. **Create GitHub repository**:
+   ```bash
+   # Create repository: username/my-package
+   # Push your package code
+   git remote add origin https://github.com/username/my-package.git
+   git push -u origin main
+   ```
+
+2. **Publish package**:
+   ```bash
+   aikit package publish username/my-package
+   ```
+
+   This creates:
+   - GitHub release with package ZIP
+   - Release notes and version tags
+   - Download links for users
+
+3. **Users can install**:
+   ```bash
+   aikit install username/my-package
+   ```
+
+## Advanced Package Features
+
+### Multi-Command Packages
+
+Create packages with multiple related commands:
+
+```toml
+[commands.lint]
+description = "Check code style and syntax"
+
+[commands.format]
+description = "Format code according to standards"
+
+[commands.test]
+description = "Run automated tests"
+
+[artifacts]
+"templates/*.md" = ".aikit/templates/"
+"scripts/linter.sh" = ".aikit/scripts/"
+```
+
+### Agent-Specific Customizations
+
+Customize behavior for different AI agents:
+
+```toml
+[agents.claude]
+# Claude-specific settings
+command_prefix = "claude-"
+
+[agents.cursor]
+# Cursor-specific settings
+template_format = "cursor"
+```
+
+### Package Dependencies
+
+Reference other packages (future feature):
+
+```toml
+[dependencies]
+base-tools = "1.0.0"  # Require another package
+```
+
+### Script Integration
+
+Include automation scripts in your package:
+
+```toml
+[artifacts]
+"scripts/setup.sh" = ".aikit/scripts/"
+"scripts/validate.sh" = ".aikit/scripts/"
+```
+
+Scripts can be referenced in templates or used for package setup.
+
+## Package Discovery and Usage
+
+### Finding Packages
+
+Discover packages in the ecosystem:
+
+```bash
+# Search for packages
+aikit search "code review"
+aikit search "testing" --detailed
+
+# Browse by category
+aikit search "documentation"
+aikit search "ci/cd"
+```
+
+### Discovering Community Packages
+
+Find packages created by the AIKit community:
+
+```bash
+# Search for packages by keyword
+aikit search "code review"
+aikit search "testing tools" --detailed
+
+# Browse popular packages
+aikit search "popular" --limit 10
+
+# Find packages for specific agents
+aikit search "claude" --limit 5
+aikit search "gemini tools"
+```
+
+**Search Tips:**
+- Use descriptive keywords like "testing", "code review", "documentation"
+- Add `--detailed` for more information about each package
+- Search results show package name, stars, description, and repository URL
+- Packages are ranked by relevance and popularity
+
+### Installing Packages
+
+Install from various sources:
+
+```bash
+# From GitHub
+aikit install username/package-name
+
+# Specific version
+aikit install username/package-name --version v2.1.0
+
+# From local directory (development)
+aikit install /path/to/package
+aikit install .  # Current directory
+
+# With custom token
+aikit install username/private-package --token ghp_123...
+```
+
+### Managing Installed Packages
+
+```bash
+# List installed packages
+aikit list
+
+# List with details
+aikit list --detailed
+
+# Update packages
+aikit update package-name
+aikit update  # All packages
+
+# Remove packages
+aikit remove package-name
+```
+
+## Package Validation
+
+### Automatic Validation
+
+AIKit validates packages during installation:
+
+- Package structure and required files
+- TOML syntax and required fields
+- Template file references
+- Artifact mappings
+
+### Manual Validation
+
+Validate your package before publishing:
+
+```bash
+# Validate package structure
+aikit package validate
+
+# Build package (additional validation)
+aikit package build
+
+# Test installation
+aikit install ./dist/package-0.1.0.zip
+```
+
+## Best Practices
+
+### Package Naming
+
+- Use lowercase with hyphens: `code-analysis-tools`
+- Be descriptive but concise
+- Avoid generic names like "utils" or "tools"
+
+### Command Design
+
+- **Single Responsibility**: Each command should do one thing well
+- **Clear Descriptions**: Explain what the command does and when to use it
+- **Consistent Naming**: Use verbs for actions (analyze, generate, refactor)
+- **Progressive Disclosure**: Start simple, offer advanced options
+
+### Template Quality
+
+- **Structured Content**: Use clear headings and sections
+- **Actionable Guidance**: Provide specific, implementable advice
+- **Examples**: Include concrete examples wherever possible
+- **Error Handling**: Anticipate common issues and edge cases
+
+### Documentation
+
+- **README.md**: Include installation, usage, and examples
+- **Command Documentation**: Each template should be self-documenting
+- **Changelog**: Track changes and version updates
+- **Contributing Guide**: How others can contribute
+
+## Community and Collaboration
+
+### Contributing to Packages
+
+1. **Fork the repository**
+2. **Create a feature branch**
+3. **Make your changes**
+4. **Test locally**: `aikit install .`
+5. **Submit a pull request**
+
+### Package Categories
+
+Common package types in the ecosystem:
+
+- **Code Analysis**: Linting, security, performance
+- **Code Generation**: Components, APIs, tests
+- **Documentation**: README generation, API docs
+- **DevOps**: CI/CD, deployment scripts
+- **Project Management**: Issue tracking, PR templates
+
+### Ecosystem Growth
+
+Contribute to the AIKit ecosystem by:
+
+- **Sharing packages**: Publish useful tools you've created
+- **Improving existing packages**: Submit bug fixes and enhancements
+- **Documenting patterns**: Share best practices and templates
+- **Reporting issues**: Help improve the ecosystem quality
+
+## Troubleshooting Package Issues
+
+### Common Problems
+
+**"Package not found" error**:
+```bash
+# Check repository exists and is public
+curl -s https://api.github.com/repos/username/package-name
+```
+
+**"Invalid package structure" error**:
+```bash
+# Validate package locally
+aikit package validate
+# Check aikit.toml syntax
+python3 -c "import toml; toml.load('aikit.toml')"
+```
+
+**"Template not found" during installation**:
+```bash
+# Verify template files exist
+ls -la templates/
+# Check artifact mappings in aikit.toml
+```
+
+**"Permission denied" during installation**:
+```bash
+# Check directory permissions
+ls -ld ~/.aikit/
+ls -ld .aikit/
+```
+
+### Getting Help
+
+- **Package Documentation**: Check the package's README.md
+- **Community Support**: Open issues on package repositories
+- **Validation Tools**: Use `aikit package validate --verbose`
+- **Debug Mode**: Run `aikit --debug command` for detailed output
+
+## See Also
+
+- [CLI Commands](cli-commands.md) - Command-line interface reference
+- [Configuration Guide](configuration.md) - Setup and configuration options
+- [Usage Examples](examples.md) - Practical examples and tutorials
+- [Troubleshooting](troubleshooting.md) - Common issues and solutions

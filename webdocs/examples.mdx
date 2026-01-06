@@ -1,0 +1,990 @@
+---
+title: "Examples"
+description: "Comprehensive, runnable examples for AIKit features including installation, configuration, package management, and AI agent integration."
+---
+
+# Examples
+
+This guide provides comprehensive, copy-paste runnable examples for all AIKit features. Each example includes prerequisites, step-by-step instructions, and expected outputs.
+
+## Prerequisites
+
+Before running these examples, ensure you have:
+
+### Required Setup
+
+```bash
+# 1. Install AIKit (if not already installed)
+cargo install aikit
+
+# 2. Set up GitHub token (required for most operations)
+export GITHUB_TOKEN="your_github_personal_access_token"
+
+# 3. Verify installation
+aikit --version
+```
+
+### Optional Tools
+
+```bash
+# Install Claude Code (for Claude examples)
+npm install -g @anthropic-ai/claude-code
+
+# Install other AI agent CLIs as needed
+# Each agent has different installation requirements
+```
+
+## Basic Usage Examples
+
+### 1. Initialize a New Project
+
+**Goal**: Create a new AIKit project with default configuration.
+
+**Prerequisites**: None (beyond basic AIKit installation)
+
+```bash
+# Create a new project
+aikit init my-first-project
+
+# Navigate to the project
+cd my-first-project
+
+# Check what was created
+ls -la
+```
+
+**Expected output**:
+```
+✓ Created project: my-first-project
+✓ Initialized Git repository
+✓ Generated aikit.toml configuration
+✓ Created development directories
+✓ Project ready for AI agent integration
+
+my-first-project/
+├── .git/
+├── .gitignore
+├── aikit.toml
+├── commands/
+│   ├── claude/
+│   ├── gemini/
+│   └── copilot/
+└── README.md
+```
+
+**What was created**:
+- `aikit.toml` - Project configuration file
+- `commands/` - Agent-specific command directories
+- Git repository with AIKit-specific .gitignore entries
+
+### 2. Check Environment Setup
+
+**Goal**: Verify AIKit installation and environment configuration.
+
+**Prerequisites**: AIKit installed
+
+```bash
+# Check AIKit environment
+aikit check
+
+# Enable debug output for troubleshooting
+aikit check --debug
+```
+
+**Expected output**:
+```
+Environment check completed.
+- AIKit version: 0.1.19
+- Configuration: Valid
+- Network access: Available
+- GitHub token: Configured (if set)
+- AI agent CLIs: Listed with status
+```
+
+### 3. Install a Package
+
+**Goal**: Install an AIKit package from GitHub.
+
+**Prerequisites**: GitHub token configured
+
+```bash
+# Install a package by GitHub URL
+aikit install https://github.com/example/ai-agent-template
+
+# Install to a specific directory
+aikit install https://github.com/example/package --target ./custom-packages
+
+# Install with verbose output
+aikit install https://github.com/example/package --debug
+```
+
+**Expected output**:
+```
+✓ Validating package: ai-agent-template
+✓ Downloading from: https://github.com/example/ai-agent-template
+✓ Installing to: .aikit/packages/ai-agent-template
+✓ Package installed successfully
+✓ Available commands: aikit run ai-agent-template <command>
+```
+
+### 4. Search for Packages
+
+**Goal**: Find AIKit packages in registries.
+
+**Prerequisites**: Network access, optional GitHub token
+
+```bash
+# Search for packages
+aikit search "agent template"
+
+# Limit search results
+aikit search "data processing" --limit 5
+
+# Show detailed package information
+aikit search "workflow" --detailed
+
+# Search with debug output
+aikit search "template" --debug
+```
+
+**Expected output**:
+```
+🔍 Searching for packages: 'agent template'
+Found 3 packages:
+
+1. ai-agent-workflow-template
+   ⭐ 45 - Comprehensive workflow templates for AI agents
+   https://github.com/example/ai-agent-workflow-template
+   Tags: workflow, template, automation
+
+2. claude-code-templates
+   ⭐ 23 - Ready-to-use templates for Claude Code
+   https://github.com/example/claude-templates
+   Tags: claude, template, productivity
+
+3. multi-agent-framework
+   ⭐ 12 - Framework for building multi-agent systems
+   https://github.com/example/multi-agent-framework
+   Tags: framework, multi-agent, advanced
+```
+
+### 5. List Installed Packages
+
+**Goal**: View all installed AIKit packages.
+
+**Prerequisites**: At least one package installed
+
+```bash
+# List all installed packages
+aikit list
+
+# Show detailed information
+aikit list --detailed
+
+# List with debug information
+aikit list --debug
+```
+
+**Expected output**:
+```
+Installed packages:
+├── ai-agent-template v1.2.0
+│   Location: .aikit/packages/ai-agent-template
+│   Commands: help, analyze, generate
+│   Last updated: 2025-01-06
+└── data-processor v0.9.0
+    Location: .aikit/packages/data-processor
+    Commands: process, validate, export
+    Last updated: 2025-01-05
+```
+
+## Advanced Integration Examples
+
+### 6. Multi-Agent Project Setup
+
+**Goal**: Configure a project for multiple AI agents.
+
+**Prerequisites**: Multiple AI agent CLIs installed
+
+**Step 1: Initialize project**
+```bash
+aikit init multi-agent-project
+cd multi-agent-project
+```
+
+**Step 2: Configure multiple agents in aikit.toml**
+```toml
+# aikit.toml
+version = "1.0"
+install_dir = ".aikit"
+
+[agents.claude]
+name = "Claude Code"
+key = "claude"
+folder = "claude"
+requires_cli = true
+output_dir = "commands/claude"
+extensions = ["md", "py", "js", "rs"]
+
+[agents.gemini]
+name = "Google Gemini"
+key = "gemini"
+folder = "gemini"
+requires_cli = false
+output_dir = "commands/gemini"
+extensions = ["md", "py", "js", "ts"]
+
+[preferences]
+default_agent = "claude"
+verbose = true
+```
+
+**Step 3: Install packages for different agents**
+```bash
+# Install Claude-specific package
+aikit install https://github.com/example/claude-tools --agent claude
+
+# Install general-purpose package
+aikit install https://github.com/example/data-tools
+
+# Install Gemini-specific package
+aikit install https://github.com/example/gemini-extensions --agent gemini
+```
+
+**Step 4: Verify setup**
+```bash
+aikit list --detailed
+aikit check
+```
+
+**Expected output**:
+```
+Multi-agent project configured successfully
+- Claude: 3 packages installed
+- Gemini: 2 packages installed
+- General: 1 package installed
+- Total: 6 packages across 2 agents
+```
+
+### 7. Package Development Workflow
+
+**Goal**: Create, build, and publish an AIKit package.
+
+**Prerequisites**: GitHub repository, GitHub token
+
+**Step 1: Initialize package**
+```bash
+# Create package directory
+mkdir my-ai-package
+cd my-ai-package
+
+# Initialize Git repository
+git init
+git remote add origin https://github.com/yourusername/my-ai-package.git
+
+# Initialize AIKit package
+aikit package init "my-ai-package" --description "Useful AI agent tools"
+```
+
+**Step 2: Configure package**
+```toml
+# Edit aikit.toml
+name = "my-ai-package"
+version = "0.1.0"
+description = "Useful AI agent tools"
+author = "Your Name"
+
+[agents.claude]
+commands = ["analyze", "generate", "optimize"]
+
+[agents.gemini]
+commands = ["analyze", "create"]
+
+[dependencies]
+# Add package dependencies if needed
+```
+
+**Step 3: Add package content**
+```bash
+# Create command files
+mkdir -p commands/claude commands/gemini
+
+# Create Claude commands
+cat > commands/claude/analyze.md << 'EOF'
+# analyze
+
+Analyze code or text for improvements.
+
+## Usage
+claude analyze <target>
+
+## Examples
+claude analyze src/main.rs
+claude analyze --format json src/
+EOF
+
+# Create Gemini commands
+cat > commands/gemini/create.md << 'EOF'
+# create
+
+Create new content or code.
+
+## Usage
+gemini create <type> <name>
+
+## Examples
+gemini create component Button
+gemini create function validateInput
+EOF
+```
+
+**Step 4: Build package**
+```bash
+# Build the package
+aikit package build
+
+# Check build output
+ls -la dist/
+```
+
+**Expected build output**:
+```
+dist/
+└── my-ai-package-0.1.0.zip
+```
+
+**Step 5: Test package locally**
+```bash
+# Install locally for testing
+aikit install ./dist/my-ai-package-0.1.0.zip --local
+
+# Test installation
+aikit list | grep my-ai-package
+
+# Run a command
+aikit run my-ai-package analyze --help
+```
+
+**Step 6: Publish package**
+```bash
+# Commit and push changes
+git add .
+git commit -m "Initial package release"
+git push origin main
+
+# Create GitHub release
+aikit release v0.1.0
+
+# Publish to registry
+aikit package publish
+```
+
+**Expected publish output**:
+```
+✓ Created GitHub release v0.1.0
+✓ Uploaded package: my-ai-package-0.1.0.zip
+✓ Package published to registry
+✓ Available for installation: aikit install my-ai-package
+```
+
+### 8. CI/CD Integration
+
+**Goal**: Set up automated package building and publishing in CI/CD.
+
+**Prerequisites**: GitHub repository with Actions enabled
+
+**GitHub Actions workflow (.github/workflows/release.yml)**:
+```yaml
+name: Release AIKit Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install AIKit
+      run: cargo install aikit
+
+    - name: Configure GitHub token
+      run: echo "GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }}" >> $GITHUB_ENV
+
+    - name: Build package
+      run: aikit package build
+
+    - name: Create release
+      run: aikit release ${{ github.ref_name }}
+
+    - name: Publish package
+      run: aikit package publish
+```
+
+**Alternative: Simple build workflow**
+```yaml
+name: Build Package
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install AIKit
+      run: cargo install aikit
+
+    - name: Build package
+      run: aikit package build
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: aikit-package
+        path: dist/*.zip
+```
+
+### 9. Custom Agent Integration
+
+**Goal**: Add support for a custom AI agent.
+
+**Prerequisites**: Custom agent with CLI or API
+
+**Step 1: Define agent configuration**
+```toml
+# Add to aikit.toml
+[agents.myagent]
+name = "My Custom Agent"
+key = "myagent"
+folder = "myagent"
+requires_cli = true
+install_url = "https://myagent.ai/install"
+output_dir = "commands/myagent"
+arg_placeholder = "<arg>"
+extensions = ["md", "txt", "py", "js"]
+output_format = "markdown"
+```
+
+**Step 2: Create agent-specific commands**
+```bash
+# Create command directory
+mkdir -p commands/myagent
+
+# Create command files
+cat > commands/myagent/help.md << 'EOF'
+# help
+
+Get help and usage information.
+
+## Usage
+myagent help [topic]
+
+## Examples
+myagent help
+myagent help commands
+EOF
+
+cat > commands/myagent/analyze.md << 'EOF'
+# analyze
+
+Analyze code or documents.
+
+## Usage
+myagent analyze <file> [options]
+
+## Options
+- `--format`: Output format (text, json, xml)
+- `--depth`: Analysis depth (shallow, medium, deep)
+
+## Examples
+myagent analyze src/main.py
+myagent analyze --format json --depth deep report.md
+EOF
+```
+
+**Step 3: Test integration**
+```bash
+# Validate configuration
+aikit check agents
+
+# Test command execution
+aikit run myagent help
+
+# List available commands
+aikit list myagent
+```
+
+**Expected output**:
+```
+✓ Agent 'myagent' configured successfully
+✓ CLI detected: myagent command available
+✓ Commands: help, analyze
+✓ Integration test passed
+```
+
+### 10. Troubleshooting Examples
+
+**Goal**: Diagnose and fix common AIKit issues.
+
+#### Issue: Package Installation Fails
+
+**Symptoms**: `aikit install` returns authentication error
+
+**Solution**:
+```bash
+# Check GitHub token
+echo $GITHUB_TOKEN
+
+# Test token validity
+curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
+
+# Reconfigure token
+export GITHUB_TOKEN="new_token_here"
+aikit install https://github.com/example/package
+```
+
+#### Issue: Agent CLI Not Found
+
+**Symptoms**: `aikit check` shows missing CLI
+
+**Solution**:
+```bash
+# Install Claude Code
+npm install -g @anthropic-ai/claude-code
+
+# Verify installation
+which claude
+claude --version
+
+# Re-run check
+aikit check
+```
+
+#### Issue: Package Search Returns No Results
+
+**Symptoms**: `aikit search` returns empty results
+
+**Solution**:
+```bash
+# Check network connectivity
+curl https://api.github.com/search/repositories?q=aikit
+
+# Check token permissions
+curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
+
+# Try without token (limited results)
+unset GITHUB_TOKEN
+aikit search "template" --limit 10
+```
+
+#### Issue: Configuration Validation Errors
+
+**Symptoms**: AIKit reports invalid configuration
+
+**Solution**:
+```bash
+# Validate configuration
+aikit config validate
+
+# Show detailed errors
+aikit config validate --verbose
+
+# Create default configuration
+aikit config init
+
+# Edit configuration
+nano aikit.toml
+```
+
+#### Issue: Build Fails
+
+**Symptoms**: `aikit package build` fails
+
+**Solution**:
+```bash
+# Check package structure
+ls -la
+cat aikit.toml
+
+# Validate package configuration
+aikit package build --dry-run
+
+# Build with debug output
+aikit package build --debug
+
+# Check for missing files
+find . -name "*.md" -path "./commands/*"
+```
+
+## Performance Optimization Examples
+
+### 11. Large Project Configuration
+
+**Goal**: Optimize AIKit for large projects with many packages.
+
+```toml
+# aikit.toml - Large project optimization
+version = "1.0"
+install_dir = ".aikit"
+
+[registry]
+# Shorter cache TTL for development
+cache_ttl_minutes = 15
+cache_dir = ".aikit/cache"
+
+[preferences]
+# Enable verbose output for debugging
+verbose = true
+# Disable confirmations for automation
+confirm_overwrite = false
+# Longer timeout for large operations
+network_timeout = 120
+
+[build]
+# Optimize build settings
+output_dir = "dist"
+include_sources = false  # Smaller packages
+compress = true
+target_agents = ["claude", "gemini"]  # Build only for used agents
+```
+
+### 12. Team Collaboration Setup
+
+**Goal**: Configure AIKit for team development.
+
+**Global configuration (~/.aikit/config.toml)**:
+```toml
+version = "1.0"
+
+[preferences]
+auto_gitignore = true
+verbose = false
+default_agent = "claude"
+confirm_overwrite = true
+network_timeout = 30
+
+[registry]
+remotes = ["https://api.github.com"]
+cache_dir = ".aikit/cache"
+cache_ttl_minutes = 60
+```
+
+**Project configuration (aikit.toml)**:
+```toml
+version = "1.0"
+
+[agents.claude]
+# Team-standard Claude configuration
+name = "Claude Code"
+output_dir = "commands/claude"
+extensions = ["md", "py", "js", "ts", "rs", "go"]
+
+[agents.gemini]
+# Optional Gemini support
+name = "Google Gemini"
+output_dir = "commands/gemini"
+extensions = ["md", "py", "js"]
+
+[preferences]
+# Project-specific overrides
+verbose = true  # Enable for development
+default_agent = "claude"
+```
+
+**Team workflow**:
+```bash
+# Developer setup
+git clone <project-repo>
+cd <project>
+aikit install  # Install all project dependencies
+aikit check    # Verify environment
+
+# Daily development
+aikit search "new feature"  # Find relevant packages
+aikit install <package-url> # Add new dependency
+aikit update               # Update all packages
+
+# Before commit
+aikit list --detailed      # Verify package status
+git add aikit.toml
+git commit -m "Add new AI package"
+```
+
+## Migration Examples
+
+### 13. Migrating from Manual Setup
+
+**Before**: Manual AI agent configuration
+```bash
+# Manual setup (painful)
+mkdir -p commands/claude commands/gemini
+# Manually create each command file
+# Manually manage dependencies
+# No version control for packages
+```
+
+**After**: AIKit-managed setup
+```bash
+# AIKit setup (easy)
+aikit init my-project
+cd my-project
+
+# Install predefined packages
+aikit install https://github.com/team/ai-templates
+aikit install https://github.com/company/workflows
+
+# Everything version-controlled and reproducible
+git add .
+git commit -m "Add AIKit configuration"
+```
+
+### 14. Upgrading Existing Projects
+
+**Goal**: Add AIKit to existing AI agent projects.
+
+```bash
+# Navigate to existing project
+cd existing-ai-project
+
+# Initialize AIKit (will detect existing structure)
+aikit init --here --force
+
+# Migrate existing commands
+aikit package init "migrated-commands"
+# Follow prompts to import existing command files
+
+# Install additional packages
+aikit search "workflow" | head -5
+aikit install <chosen-package-url>
+
+# Test migration
+aikit list
+aikit check
+```
+
+## End-to-End Workflow Examples
+
+These examples demonstrate complete workflows that combine multiple AIKit commands for real-world scenarios.
+
+### Complete Project Setup to Package Publishing
+
+**Goal**: Set up a new AI project, install community packages, create a custom package, and publish it.
+
+**Prerequisites**: GitHub token, GitHub repository for publishing
+
+```bash
+# 1. Set up project with Claude
+aikit init my-ai-project --ai claude
+
+# 2. Navigate to project
+cd my-ai-project
+
+# 3. Search for useful packages
+aikit search "code review" --limit 3
+
+# 4. Install a community package
+aikit install owner/code-review-tools
+
+# 5. List installed packages to verify
+aikit list
+
+# 6. Create a custom package in a separate directory
+cd ..
+aikit package init my-custom-tools --description "My custom AI tools"
+
+# 7. Configure the package for multiple agents
+# Edit aikit.toml to add agent configurations
+
+# 8. Build the package
+cd my-custom-tools
+aikit package build
+
+# 9. Publish to GitHub (requires GitHub token and repository)
+aikit package publish yourusername/my-custom-tools
+
+# 10. Install your published package in the original project
+cd ../my-ai-project
+aikit install yourusername/my-custom-tools
+
+# 11. Verify everything is working
+aikit check
+aikit list
+```
+
+**Expected output**:
+```bash
+✓ Created project: my-ai-project
+✓ Initialized Git repository
+✓ Generated aikit.toml for Claude integration
+✓ Created development scripts
+✓ Project ready for Spec-Driven Development
+
+🔍 Searching for packages: 'code review'
+Found packages matching query.
+1. code-review-tools
+   ⭐ 127 - AI-powered code review and improvement tools
+   https://github.com/owner/code-review-tools
+
+✓ Installed package: owner/code-review-tools
+✓ Generated Claude commands
+✓ Updated project configuration
+
+Package: owner/code-review-tools
+Version: 1.2.0
+Author: owner
+Description: AI-powered code review and improvement tools
+
+✓ Created package: my-custom-tools
+✓ Generated aikit.toml configuration
+✓ Package initialized successfully
+
+✓ Built package: my-custom-tools-0.1.0.zip
+✓ Package ready for distribution
+
+✓ Created GitHub release v0.1.0
+✓ Uploaded package: my-custom-tools-0.1.0.zip
+✓ Release published successfully
+
+✓ Installed package: yourusername/my-custom-tools
+✓ Generated Claude commands
+✓ Updated project configuration
+
+✓ All tools verified and ready
+✓ Claude Code: Available
+✓ 2 packages installed and configured
+```
+
+### Development Workflow: Feature Branch to Production
+
+**Goal**: Demonstrate a complete development workflow from feature development to production deployment.
+
+**Prerequisites**: GitHub repository, CI/CD setup, multiple environments
+
+```bash
+# 1. Create feature branch for new AI capability
+git checkout -b feature/add-ai-summarizer
+
+# 2. Initialize AIKit in the project
+aikit init --here --ai claude
+
+# 3. Search for summarization packages
+aikit search "summarizer" --detailed
+
+# 4. Install and test a summarization package
+aikit install owner/text-summarizer
+aikit check
+
+# 5. Create custom summarizer package
+cd ..
+aikit package init ai-summarizer --description "Advanced text summarization tools"
+
+# 6. Build and test locally
+cd ai-summarizer
+aikit package build
+cd ../your-project
+aikit install ../ai-summarizer
+
+# 7. Commit changes
+git add .
+git commit -m "feat: Add AI summarizer capability
+
+- Install text summarizer package
+- Create custom summarizer tools
+- Integrate with Claude workflows"
+
+# 8. Push to feature branch
+git push origin feature/add-ai-summarizer
+
+# 9. Create pull request for review
+# (GitHub/GitLab web interface)
+
+# 10. After PR approval, merge to main
+git checkout main
+git pull origin main
+
+# 11. Create production release
+aikit package init production-tools --description "Production AI tools"
+aikit package build
+aikit package publish yourorg/production-tools --tag v1.0.0
+```
+
+**Expected output**:
+```bash
+Switched to a new branch 'feature/add-ai-summarizer'
+
+✓ Updated project configuration for Claude integration
+✓ Created command directories
+✓ Generated agent-specific scripts
+
+🔍 Searching for packages: 'summarizer'
+Found packages matching query.
+1. text-summarizer
+   ⭐ 89 - Advanced text summarization with multiple algorithms
+   https://github.com/owner/text-summarizer
+   Supports: Claude, Gemini, Copilot
+   Last updated: 2 weeks ago
+
+✓ Installed package: owner/text-summarizer
+✓ Generated Claude commands
+✓ Package ready for use
+
+✓ All tools verified and ready
+✓ Claude Code: Available
+✓ 1 package installed and configured
+
+✓ Created package: ai-summarizer
+✓ Generated aikit.toml configuration
+✓ Package initialized successfully
+
+✓ Built package: ai-summarizer-0.1.0.zip
+✓ Package ready for distribution
+
+✓ Installed package: ai-summarizer
+✓ Generated Claude commands
+✓ Updated project configuration
+
+[main 1a2b3c4] feat: Add AI summarizer capability
+ 5 files changed, 247 insertions(+)
+ create mode 100644 .aikit/config.toml
+ create mode 100644 commands/claude/summarize.md
+
+✓ Changes pushed successfully
+✓ Feature branch ready for pull request
+
+✓ Package published successfully
+✓ Release v1.0.0 created
+✓ Production deployment ready
+```
+
+## Summary
+
+These examples demonstrate:
+
+- **Basic operations**: Installation, search, listing
+- **Advanced workflows**: Multi-agent setup, package development
+- **Integration**: CI/CD pipelines, custom agents
+- **Troubleshooting**: Common issues and solutions
+- **Optimization**: Performance tuning for different use cases
+- **Migration**: Upgrading from manual setups
+
+Each example includes:
+- Clear prerequisites
+- Step-by-step instructions
+- Expected outputs
+- Error handling guidance
+
+For additional help, run `aikit --help` or visit the specific documentation sections.

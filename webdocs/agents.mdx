@@ -1,0 +1,552 @@
+# AI Agent Integration Guide
+
+**Version**: 1.0.0
+**Last Updated**: 2025-01-06
+
+## Overview
+
+AIKit integrates with 17+ AI coding assistants to enhance your development workflow. Each agent has unique capabilities, setup requirements, and integration patterns. This guide covers all supported agents with detailed configuration instructions.
+
+## Choosing the Right AI Agent
+
+### Agent Capability Comparison
+
+| Feature | Claude Code | Cursor | GitHub Copilot | Gemini | Continue |
+|---------|-------------|--------|----------------|--------|----------|
+| **Best For** | Complex reasoning, code analysis | Integrated IDE experience | GitHub ecosystem | Fast responses, cost-effective | Flexible model selection |
+| **Setup Complexity** | Medium (CLI required) | Easy (native) | Easy (native) | Easy (native) | Medium (configuration) |
+| **Real-time Integration** | ✅ Excellent | ✅ Excellent | ✅ Excellent | ✅ Good | ✅ Good |
+| **Code Generation** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Code Analysis** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Refactoring** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Documentation** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Cost** | 💰💰💰 | 💰💰 | 💰💰 | 💰 | 💰-💰💰💰 |
+
+### Selection Guidance
+
+#### For Individual Developers
+- **Start with Cursor** - Best balance of features and ease of use
+- **Try Claude Code** - If you need advanced reasoning capabilities
+- **Use Copilot** - If you're heavily invested in GitHub ecosystem
+
+#### For Teams
+- **Cursor** - Great for team collaboration with shared configurations
+- **Claude Code** - Excellent for code review and complex problem solving
+- **Continue** - Flexible for teams with specific model preferences
+
+#### For Budget-Conscious Projects
+- **Gemini** - Cost-effective with good performance
+- **Copilot** - Good value if you already use GitHub
+- **Cursor** - Free tier available, premium for advanced features
+
+#### For Maximum AI Capabilities
+- **Claude Code** - Most sophisticated reasoning and analysis
+- **Cursor** - Best integration with modern development workflows
+- **Continue** - Access to latest AI models and techniques
+
+### Quick Agent Selection Guide
+
+```bash
+# For beginners - start here
+aikit init my-project --ai cursor
+
+# For complex coding tasks
+aikit init my-project --ai claude
+
+# For cost-effective development
+aikit init my-project --ai gemini
+
+# For GitHub ecosystem integration
+aikit init my-project --ai copilot
+```
+
+## Supported AI Agents
+
+AIKit supports the following AI coding assistants:
+
+### Universal Compatibility Matrix
+
+| Agent | CLI Required | Template Support | Real-time Integration | Status |
+|-------|--------------|------------------|----------------------|--------|
+| Claude Code | ✅ Required | ✅ Full | ✅ Real-time | Production |
+| Cursor | ❌ Native | ✅ Full | ✅ Real-time | Production |
+| GitHub Copilot | ❌ Native | ✅ Full | ✅ Real-time | Production |
+| Gemini | ❌ Native | ✅ Full | ✅ Real-time | Production |
+| Continue | ❌ Native | ✅ Full | ✅ Real-time | Production |
+| Qwen | ✅ Required | ✅ Full | ✅ Real-time | Production |
+| OpenCode | ❌ Native | ✅ Full | ⚠️ Limited | Beta |
+| CodeX (Continue) | ❌ Native | ✅ Full | ✅ Real-time | Production |
+| Windsurf | ❌ Native | ✅ Full | ✅ Real-time | Production |
+| KiloCode | ❌ Native | ✅ Full | ⚠️ Limited | Beta |
+| Auggie | ✅ Required | ✅ Full | ✅ Real-time | Production |
+| Roo Code | ❌ Native | ✅ Full | ✅ Real-time | Production |
+| CodeBuddy | ✅ Required | ✅ Full | ✅ Real-time | Production |
+| Qoder | ✅ Required | ✅ Full | ✅ Real-time | Production |
+| AMP | ❌ Native | ✅ Full | ⚠️ Limited | Beta |
+| Shai | ✅ Required | ✅ Full | ✅ Real-time | Production |
+| Q | ❌ Native | ✅ Full | ⚠️ Limited | Beta |
+| Bob | ❌ Native | ✅ Full | ✅ Real-time | Production |
+
+## Agent Setup and Configuration
+
+### Claude Code
+
+**Overview**: Anthropic's official coding assistant with advanced reasoning capabilities.
+
+**Requirements**:
+- Claude Code CLI installed
+- Anthropic API access
+- macOS, Linux, or Windows
+
+**Installation**:
+```bash
+# Install Claude Code
+npm install -g @anthropic/claude-code
+# or
+pip install claude-code
+```
+
+**Authentication**:
+```bash
+claude auth
+# Follow prompts to authenticate with Anthropic
+```
+
+**AIKit Configuration**:
+```toml
+[agents.claude]
+name = "Claude Code"
+key = "claude"
+folder = ".claude"
+requires_cli = true
+output_format = "Markdown"
+output_dir = ".claude/commands"
+arg_placeholder = "$ARGUMENTS"
+extensions = [".md"]
+```
+
+**Directory Structure**:
+```
+.claude/
+├── commands/
+│   ├── analyze.md
+│   ├── refactor.md
+│   └── help.md
+└── config.json  # Claude Code configuration
+```
+
+### Cursor
+
+**Overview**: AI-first code editor with integrated AI assistance.
+
+**Requirements**:
+- Cursor application installed
+- No CLI required (native integration)
+
+**Installation**:
+```bash
+# Download from cursor.com
+# Install for your platform
+```
+
+**AIKit Configuration**:
+```toml
+[agents.cursor]
+name = "Cursor"
+key = "cursor"
+folder = ".cursor"
+requires_cli = false
+output_format = "Markdown"
+output_dir = ".cursor/commands"
+arg_placeholder = "{args}"
+extensions = [".md"]
+```
+
+**Directory Structure**:
+```
+.cursor/
+├── commands/
+│   ├── debug.md
+│   ├── optimize.md
+│   └── explain.md
+└── rules/  # Cursor-specific configuration
+```
+
+### GitHub Copilot
+
+**Overview**: AI pair programmer integrated into GitHub's ecosystem.
+
+**Requirements**:
+- GitHub Copilot subscription
+- VS Code or compatible editor
+- No CLI required
+
+**Setup**:
+```bash
+# Install GitHub Copilot extension in your editor
+# Authenticate with GitHub
+```
+
+**AIKit Configuration**:
+```toml
+[agents.copilot]
+name = "GitHub Copilot"
+key = "copilot"
+folder = ".github"
+requires_cli = false
+output_format = "Markdown"
+output_dir = ".github/copilot-instructions"
+arg_placeholder = "{args}"
+extensions = [".md"]
+```
+
+**Directory Structure**:
+```
+.github/
+├── copilot-instructions/
+│   ├── testing.md
+│   ├── documentation.md
+│   └── review.md
+└── workflows/  # GitHub Actions
+```
+
+### Gemini (Google AI)
+
+**Overview**: Google's multimodal AI assistant for coding tasks.
+
+**Requirements**:
+- Google AI API key
+- No CLI required (API integration)
+
+**Setup**:
+```bash
+# Get API key from Google AI Studio
+# Set environment variable
+export GOOGLE_AI_API_KEY="your-key-here"
+```
+
+**AIKit Configuration**:
+```toml
+[agents.gemini]
+name = "Gemini"
+key = "gemini"
+folder = ".gemini"
+requires_cli = false
+output_format = "Markdown"
+output_dir = ".gemini/prompts"
+arg_placeholder = "{args}"
+extensions = [".md"]
+```
+
+### Continue
+
+**Overview**: Open-source AI coding assistant with multiple model support.
+
+**Requirements**:
+- Continue extension installed
+- API keys for chosen models
+- VS Code or compatible editor
+
+**AIKit Configuration**:
+```toml
+[agents.continue]
+name = "Continue"
+key = "continue"
+folder = ".continue"
+requires_cli = false
+output_format = "Markdown"
+output_dir = ".continue/config"
+arg_placeholder = "{args}"
+extensions = [".json", ".md"]
+```
+
+## Advanced Agent Configurations
+
+### Multi-Agent Project Setup
+
+Configure multiple agents for comprehensive AI assistance:
+
+```toml
+# .aikit/config.toml
+[agents.claude]
+name = "Claude Code"
+key = "claude"
+folder = ".claude"
+requires_cli = true
+output_format = "Markdown"
+output_dir = ".claude/commands"
+arg_placeholder = "$ARGUMENTS"
+
+[agents.cursor]
+name = "Cursor"
+key = "cursor"
+folder = ".cursor"
+requires_cli = false
+output_format = "Markdown"
+output_dir = ".cursor/commands"
+arg_placeholder = "{args}"
+
+[agents.copilot]
+name = "GitHub Copilot"
+key = "copilot"
+folder = ".github"
+requires_cli = false
+output_format = "Markdown"
+output_dir = ".github/copilot-instructions"
+arg_placeholder = "{args}"
+```
+
+### Agent-Specific Customizations
+
+#### Claude-Specific Features
+```toml
+[agents.claude]
+# Advanced Claude configuration
+command_prefix = "claude-"  # Prefix for Claude commands
+model = "claude-3-5-sonnet-20241022"  # Specific model
+max_tokens = 4096  # Response length limit
+```
+
+#### Cursor-Specific Features
+```toml
+[agents.cursor]
+# Cursor-specific settings
+template_format = "cursor-md"  # Cursor markdown format
+auto_save = true  # Auto-save generated files
+workspace_settings = true  # Use workspace settings
+```
+
+### Custom Agent Integration
+
+For unsupported AI agents, create custom configurations:
+
+```toml
+[agents.custom-ai]
+name = "Custom AI Assistant"
+key = "custom-ai"
+folder = ".custom-ai"
+requires_cli = true
+output_format = "Markdown"
+output_dir = ".custom-ai/commands"
+arg_placeholder = "{{args}}"
+extensions = [".md", ".txt"]
+```
+
+## Agent Detection and Validation
+
+### Checking Agent Availability
+
+```bash
+# Check all configured agents
+aikit check
+
+# Check specific agent
+aikit check --agent claude
+```
+
+### Troubleshooting Agent Issues
+
+#### Claude Code Issues
+```
+Error: Claude Code not found
+```
+**Solution**:
+```bash
+# Install Claude Code
+npm install -g @anthropic/claude-code
+
+# Verify installation
+claude --version
+
+# Re-run check
+aikit check
+```
+
+#### Authentication Problems
+```
+Error: Agent authentication failed
+```
+**Solutions**:
+```bash
+# Claude: Re-authenticate
+claude auth
+
+# GitHub Copilot: Check subscription
+# Visit github.com/copilot
+
+# API-based agents: Check environment variables
+echo $ANTHROPIC_API_KEY
+echo $GOOGLE_AI_API_KEY
+```
+
+#### Directory Permission Issues
+```
+Error: Cannot create agent directory
+```
+**Solution**:
+```bash
+# Check permissions
+ls -ld ~/.aikit/
+ls -ld .aikit/
+
+# Fix permissions
+chmod 755 ~/.aikit/
+chmod 755 .aikit/
+```
+
+## Agent-Specific Workflows
+
+### Code Review Workflow
+
+1. **Select code** in your editor
+2. **Run AIKit command**: `aikit check` (verifies agents)
+3. **Use agent-specific review**:
+   - Claude: Advanced reasoning and context awareness
+   - Cursor: Integrated editor experience
+   - Copilot: GitHub ecosystem integration
+
+### Documentation Generation
+
+```bash
+# Generate README with Claude
+claude "Create a comprehensive README for this project"
+
+# Generate API docs with Cursor
+# Use Cursor's integrated documentation tools
+
+# Generate code comments with Copilot
+# Use inline suggestions for documentation
+```
+
+### Refactoring Assistance
+
+```bash
+# Complex refactoring with Claude
+claude "Refactor this function to use modern async patterns"
+
+# Quick improvements with Cursor
+# Use Cursor's refactoring tools
+
+# Code suggestions with Copilot
+# Accept inline refactoring suggestions
+```
+
+## Performance Optimization
+
+### Agent Selection Guidelines
+
+- **Claude**: Complex reasoning, architectural decisions, comprehensive analysis
+- **Cursor**: Fast iteration, integrated workflow, immediate feedback
+- **Copilot**: Code completion, quick suggestions, GitHub integration
+- **Gemini**: Creative solutions, multimodal tasks, experimental features
+
+### Configuration Optimization
+
+```toml
+[preferences]
+# Optimize for your workflow
+network_timeout = 30    # Balance speed vs reliability
+verbose = false         # Reduce noise for stable workflows
+auto_gitignore = true   # Automatic cleanup
+```
+
+## Integration Best Practices
+
+### Project Structure Recommendations
+
+```
+my-project/
+├── .aikit/
+│   ├── config.toml     # AIKit configuration
+│   └── packages/       # Installed packages
+├── .claude/
+│   └── commands/       # Claude-specific commands
+├── .cursor/
+│   └── commands/       # Cursor-specific commands
+├── .github/
+│   ├── copilot-instructions/  # Copilot prompts
+│   └── workflows/             # CI/CD
+└── src/                # Your code
+```
+
+### Workflow Integration
+
+1. **Development Setup**:
+   ```bash
+   # Initialize project
+   aikit init my-project --ai claude
+   cd my-project
+
+   # Install essential packages
+   aikit install org/essential-tools
+   ```
+
+2. **Daily Workflow**:
+   ```bash
+   # Start with agent check
+   aikit check
+
+   # Use appropriate agent for task
+   # Claude for planning, Cursor for coding, Copilot for completion
+   ```
+
+3. **Code Review Process**:
+   ```bash
+   # Pre-commit checks
+   aikit check
+   aikit run lint  # If linting package installed
+
+   # AI-assisted review
+   # Use Claude for comprehensive review
+   # Use Copilot for quick suggestions
+   ```
+
+### Team Collaboration
+
+```toml
+# .aikit/config.toml (shared team config)
+[agents.claude]
+# Team Claude configuration
+name = "Team Claude"
+command_prefix = "team-"
+
+[agents.cursor]
+# Team Cursor settings
+workspace_settings = true
+shared_rules = true
+```
+
+## Agent Ecosystem Evolution
+
+### Staying Updated
+
+- **Check agent availability**: `aikit check` shows current support
+- **Update configurations**: New agent versions may require config updates
+- **Follow AIKit releases**: New agent integrations added regularly
+
+### Contributing Agent Integrations
+
+To add support for new AI agents:
+
+1. **Analyze agent API/capabilities**
+2. **Create agent configuration structure**
+3. **Implement template integration**
+4. **Test with sample workflows**
+5. **Submit integration proposal**
+
+### Future Agent Support
+
+AIKit evolves with the AI coding assistant landscape. Expected additions:
+
+- **New Claude models**: Opus, Sonnet variants
+- **Advanced reasoning agents**: Specialized coding assistants
+- **IDE integrations**: Deeper editor integrations
+- **Multi-modal agents**: Voice, image, and code integration
+
+## See Also
+
+- [CLI Commands](cli-commands.md) - Command-line interface reference
+- [Configuration Guide](configuration.md) - Setup and configuration options
+- [Package Management](packages.md) - Creating and publishing packages
+- [Usage Examples](examples.md) - Practical examples and tutorials
+- [Troubleshooting](troubleshooting.md) - Common issues and solutions
