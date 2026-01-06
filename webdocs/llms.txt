@@ -14,3 +14,4 @@
 ## Reference
 - [Troubleshooting](troubleshooting.mdx): Common issues, error messages, and solutions for AIKit usage
 - [Development](development.mdx): Contributing to AIKit development, architecture overview, and testing guidelines
+- [llms.txt](llms-txt.mdx): Optimize AIKit documentation for LLMs to read and index efficiently

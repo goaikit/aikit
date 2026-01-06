@@ -1,0 +1,117 @@
+---
+title: "llms.txt"
+description: "Optimize AIKit documentation for LLMs to read and index efficiently."
+---
+
+# llms.txt
+
+Copy page
+
+AIKit automatically generates an `llms.txt` file to help Large Language Models (LLMs) efficiently index and understand our documentation structure. This industry-standard approach improves AI-assisted documentation search and retrieval.
+
+Copy page
+
+## What is llms.txt?
+
+The `llms.txt` file is an industry standard that helps LLMs index content more efficiently, similar to how a sitemap helps search engines. AI tools can use this file to understand your documentation structure and find content relevant to user queries. AIKit automatically hosts an `llms.txt` file at the root of our documentation that lists all available pages in a structured format.
+
+## How it Works
+
+AIKit's `llms.txt` implementation provides:
+
+- **Site title** as an H1 heading
+- **Structured content sections** with links and descriptions of each page
+- **Alphabetical organization** starting from the root directory
+- **Page descriptions** extracted from each page's frontmatter
+
+## AIKit's llms.txt Structure
+
+AIKit organizes documentation into logical sections that mirror our user journey:
+
+```
+# AIKit Documentation
+
+## Getting Started
+- [Introduction](index.mdx): Complete guide to AIKit - Universal Package Manager for AI Agent Extensions
+- [Quickstart](quickstart.mdx): Get started with AIKit in minutes - install, configure, and create your first AI-powered project
+
+## Core Documentation
+- [CLI Commands](cli-commands.mdx): Complete reference for all AIKit command-line interface commands with examples and options
+- [Configuration](configuration.mdx): Complete guide to configuring AIKit including AikConfig structure, file locations, and agent-specific settings
+- [Package Management](packages.mdx): Guide to creating, publishing, and managing AIKit packages for sharing AI agent extensions
+- [AI Agent Integration](agents.mdx): Complete guide to integrating AIKit with 17+ AI coding assistants including setup, configuration, and capability comparison
+- [Examples](examples.mdx): Comprehensive, runnable examples for AIKit features including installation, configuration, package management, and AI agent integration
+
+## Reference
+- [Troubleshooting](troubleshooting.mdx): Common issues, error messages, and solutions for AIKit usage
+- [Development](development.mdx): Contributing to AIKit development, architecture overview, and testing guidelines
+```
+
+## Benefits for AI Interactions
+
+### Improved Context Understanding
+- LLMs can quickly understand AIKit's documentation structure
+- Better context for answering user questions about AIKit features
+- More accurate responses when users ask about specific functionality
+
+### Enhanced Search and Discovery
+- AI tools can locate relevant documentation sections faster
+- Structured format helps LLMs prioritize important information
+- Consistent descriptions improve search result quality
+
+### Streamlined AI Assistance
+- Developers using AI coding assistants can get better AIKit-specific help
+- Documentation context is readily available for AI-powered development
+- Faster resolution of AIKit-related questions and issues
+
+## Accessing AIKit's llms.txt
+
+You can view AIKit's `llms.txt` file by appending `/llms.txt` to our documentation site URL:
+
+```
+https://docs.aikit.dev/llms.txt
+```
+
+The file is automatically updated whenever our documentation changes, ensuring LLMs always have access to the latest information.
+
+## Technical Implementation
+
+AIKit's `llms.txt` implementation:
+
+- **Auto-generated**: Created automatically from documentation structure
+- **Always current**: Updates with every documentation deployment
+- **Structured format**: Follows industry standards for LLM compatibility
+- **Comprehensive coverage**: Includes all user-facing documentation pages
+
+## Best Practices for LLM Indexing
+
+### Content Organization
+- Clear, descriptive page titles in frontmatter
+- Comprehensive descriptions for each page
+- Logical grouping of related topics
+- Consistent terminology throughout
+
+### Link Structure
+- Relative links within documentation
+- Clear navigation hierarchy
+- Cross-references between related pages
+- External links clearly marked
+
+### Content Quality
+- Technical accuracy and up-to-date information
+- Clear explanations of complex concepts
+- Practical examples and code samples
+- Troubleshooting information for common issues
+
+## Future Enhancements
+
+AIKit continues to improve LLM integration through:
+
+- **llms-full.txt**: Complete documentation in single file format
+- **Enhanced metadata**: Richer page descriptions and context
+- **Dynamic updates**: Real-time synchronization with documentation changes
+- **Multi-format support**: Additional LLM-friendly formats as needed
+
+---
+
+*AIKit's llms.txt implementation ensures that AI assistants can provide the most accurate and helpful guidance for our users.*
