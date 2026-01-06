@@ -1,80 +1,146 @@
 ---
-title: 'Development'
-description: 'Preview changes locally to update your docs'
+title: "Development"
+description: "Contributing to AIKit development, architecture overview, and testing guidelines."
 ---
 
-<Info>
-  **Prerequisites**:
-  - Node.js version 19 or higher
-  - A docs repository with a `docs.json` file
-</Info>
+# AIKit Development
 
-Follow these steps to install and run Mintlify on your operating system.
+This guide covers AIKit development practices, architecture, testing, and contribution guidelines for maintainers and contributors.
+
+## Architecture Overview
+
+AIKit is built with Rust and follows a modular architecture designed for extensibility and performance.
+
+### Core Components
+
+- **CLI Layer**: Command parsing and user interaction
+- **Core Services**: Package management, registry operations, agent integration
+- **Agent Abstraction**: Unified interface for 17+ AI assistants
+- **Package System**: Decentralized package distribution via GitHub
+
+### Key Design Principles
+
+- **CLI-First**: All features accessible via command line
+- **Agent Agnostic**: Consistent experience across AI platforms
+- **Package-Based**: Extensible through community contributions
+- **Git-Native**: Leverages GitHub for distribution and collaboration
+
+## Development Setup
 
 <Steps>
-<Step title="Install the Mintlify CLI">
+<Step title="Clone the Repository">
 
 ```bash
-npm i -g mint
+git clone https://github.com/goaikit/aikit.git
+cd aikit
 ```
 </Step>
 
-<Step title="Preview locally">
-
-Navigate to your docs directory where your `docs.json` file is located, and run the following command:
+<Step title="Install Rust and Dependencies">
 
 ```bash
-mint dev
+# Install Rust (if not already installed)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# Install dependencies
+cargo build
 ```
+</Step>
 
-A local preview of your documentation will be available at `http://localhost:3000`.
+<Step title="Run Tests">
 
+```bash
+# Run the test suite
+cargo test
+
+# Run with verbose output
+cargo test -- --nocapture
+```
 </Step>
 </Steps>
 
-## Custom ports
+## Code Organization
 
-By default, Mintlify uses port 3000. You can customize the port Mintlify runs on by using the `--port` flag. For example, to run Mintlify on port 3333, use this command:
+### Source Structure
+```
+src/
+├── cli/           # Command-line interface
+│   ├── commands/  # Individual command implementations
+│   └── mod.rs      # CLI module definitions
+├── core/          # Core business logic
+│   ├── agent.rs   # AI agent abstractions
+│   ├── package.rs # Package management
+│   └── registry.rs # Package registry operations
+├── models/        # Data structures
+└── main.rs        # Application entry point
+```
 
+### Key Modules
+
+| Module | Responsibility | Key Files |
+|--------|----------------|-----------|
+| `cli` | User interaction, command parsing | `mod.rs`, `commands/` |
+| `core` | Business logic, external integrations | `agent.rs`, `package.rs` |
+| `models` | Data structures, serialization | `config.rs`, `package.rs` |
+| `github` | GitHub API integration | `api.rs`, `rate_limit.rs` |
+
+## Testing Strategy
+
+### Unit Tests
+- Located in `tests/` directory
+- Test individual functions and modules
+- Run with `cargo test`
+
+### Integration Tests
+- Test end-to-end workflows
+- Validate CLI command interactions
+- Located in `tests/integration/`
+
+### Test Coverage
+- Aim for >80% code coverage
+- Run coverage reports with `cargo tarpaulin`
+
+## Contributing Guidelines
+
+### Code Style
+- Follow Rust standard formatting: `cargo fmt`
+- Lint with `cargo clippy`
+- Use descriptive variable names and comprehensive documentation
+
+### Pull Request Process
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/your-feature`
+3. Make your changes with tests
+4. Run the full test suite: `cargo test`
+5. Submit a pull request with a clear description
+
+### Commit Messages
+- Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`
+- Keep first line under 50 characters
+- Provide detailed description when needed
+
+## Release Process
+
+### Version Management
+- Semantic versioning (MAJOR.MINOR.PATCH)
+- Update version in `Cargo.toml`
+- Tag releases: `git tag v1.2.3`
+
+### Building Releases
 ```bash
-mint dev --port 3333
+# Build for multiple platforms
+cargo build --release --target x86_64-unknown-linux-gnu
+cargo build --release --target x86_64-apple-darwin
+cargo build --release --target x86_64-pc-windows-msvc
 ```
 
-If you attempt to run Mintlify on a port that's already in use, it will use the next available port:
+### Publishing
+- Automated via GitHub Actions
+- Releases published to GitHub Releases
+- Homebrew formula updated automatically
 
-```md
-Port 3000 is already in use. Trying 3001 instead.
-```
-
-## Mintlify versions
-
-Please note that each CLI release is associated with a specific version of Mintlify. If your local preview does not align with the production version, please update the CLI:
-
-```bash
-npm mint update
-```
-
-## Validating links
-
-The CLI can assist with validating links in your documentation. To identify any broken links, use the following command:
-
-```bash
-mint broken-links
-```
-
-## Deployment
-
-If the deployment is successful, you should see the following:
-
-<Frame>
-  <img src="/images/checks-passed.png" alt="Screenshot of a deployment confirmation message that says All checks have passed." style={{ borderRadius: '0.5rem' }} />
-</Frame>
-
-## Code formatting
-
-We suggest using extensions on your IDE to recognize and format MDX. If you're a VSCode user, consider the [MDX VSCode extension](https://marketplace.visualstudio.com/items?itemName=unifiedjs.vscode-mdx) for syntax highlighting, and [Prettier](https://marketplace.visualstudio.com/items?itemName=esbenp.prettier-vscode) for code formatting.
-
-## Troubleshooting
+## Troubleshooting Development Issues
 
 <AccordionGroup>
   <Accordion title='Error: Could not load the "sharp" module using the darwin-arm64 runtime'>

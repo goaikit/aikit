@@ -1,80 +1,140 @@
 ---
 title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+description: "Get started with AIKit in minutes - install, configure, and create your first AI-powered project."
 ---
 
-## Get started in three steps
+# AIKit Quickstart
 
-Get your documentation site running locally and make your first customization.
+Get up and running with AIKit in three simple steps. This guide will have you managing AI agent packages and creating AI-powered projects in under 10 minutes.
 
-### Step 1: Set up your local environment
+## Step 1: Install AIKit
 
 <AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
+  <Accordion icon="download" title="Download from GitHub Releases">
+    Visit the [AIKit releases page](https://github.com/goaikit/aikit/releases) and download the latest version for your platform:
+
+    - **Linux**: Download `aikit-x86_64-unknown-linux-gnu.tar.gz`
+    - **macOS**: Download `aikit-x86_64-apple-darwin.tar.gz`
+    - **Windows**: Download `aikit-x86_64-pc-windows-msvc.zip`
+
+    Extract the archive and place the `aikit` binary in your PATH.
   </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
+
+  <Accordion icon="terminal" title="Verify Installation">
+    Open a terminal and run:
+
+    ```bash
+    aikit --version
+    ```
+
+    You should see output similar to:
+    ```
+    AIKit 0.1.19
+    ```
   </Accordion>
 </AccordionGroup>
 
-### Step 2: Deploy your changes
+## Step 2: Configure AI Agents
 
 <AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+  <Accordion icon="cog" title="Set up your first AI agent">
+    Initialize AIKit in your project:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    ```bash
+    # Create a new project
+    aikit init my-ai-project --ai claude
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
+    # Or set up in existing directory
+    cd existing-project
+    aikit init --here --ai cursor
+    ```
+
+    This creates the necessary configuration files and agent-specific directories.
+  </Accordion>
+
+  <Accordion icon="key" title="Configure GitHub Token (Recommended)">
+    For full functionality, set up a GitHub personal access token:
+
+    ```bash
+    # Create token at: https://github.com/settings/tokens
+    # Required scopes: repo, read:packages
+    export GITHUB_TOKEN="your_token_here"
+    ```
   </Accordion>
 </AccordionGroup>
 
-### Step 3: Go live
+## Step 3: Start Using AIKit
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+<AccordionGroup>
+  <Accordion icon="play" title="Test your setup">
+    Verify everything is working:
 
-## Next steps
+    ```bash
+    # Check available tools
+    aikit check
 
-Now that you have your docs running, explore these key features:
+    # Search for community packages
+    aikit search "code review"
+
+    # Install a useful package
+    aikit install owner/code-review-tools
+
+    # List your installed packages
+    aikit list
+    ```
+  </Accordion>
+
+  <Accordion icon="package" title="Create your first package">
+    Build and share your own AI tools:
+
+    ```bash
+    # Create a new package
+    aikit package init my-tools --description "My custom AI tools"
+
+    # Add your commands (edit the generated files)
+
+    # Build the package
+    aikit package build
+
+    # Publish to GitHub
+    aikit package publish yourusername/my-tools
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## 🎉 You're Ready!
+
+Your AIKit setup is complete. You can now:
+
+- **Manage AI agents**: Configure different AI assistants for various tasks
+- **Discover packages**: Find community-created AI tools
+- **Create packages**: Build and share your own AI extensions
+- **Integrate workflows**: Use AIKit in your development pipeline
+
+## Next Steps
+
+Explore these core features to get the most out of AIKit:
 
 <CardGroup cols={2}>
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
+<Card title="CLI Commands" icon="terminal" href="/cli-commands">
+  Complete reference for all AIKit commands and options.
 </Card>
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
+<Card title="Configuration" icon="cog" href="/configuration">
+  Advanced configuration options and agent setup.
 </Card>
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
+<Card title="Package Management" icon="box" href="/packages">
+  Create, publish, and manage AIKit packages.
 </Card>
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
+<Card title="Examples" icon="code" href="/examples">
+  Practical examples for common workflows.
 </Card>
 
 </CardGroup>
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  **Need help?** Check the [troubleshooting guide](/troubleshooting) or open an issue on [GitHub](https://github.com/goaikit/aikit/issues).
 </Note>

@@ -1,0 +1,16 @@
+# AIKit Documentation
+
+## Getting Started
+- [Introduction](index.mdx): Complete guide to AIKit - Universal Package Manager for AI Agent Extensions
+- [Quickstart](quickstart.mdx): Get started with AIKit in minutes - install, configure, and create your first AI-powered project
+
+## Core Documentation
+- [CLI Commands](cli-commands.mdx): Complete reference for all AIKit command-line interface commands with examples and options
+- [Configuration](configuration.mdx): Complete guide to configuring AIKit including AikConfig structure, file locations, and agent-specific settings
+- [Package Management](packages.mdx): Guide to creating, publishing, and managing AIKit packages for sharing AI agent extensions
+- [AI Agent Integration](agents.mdx): Complete guide to integrating AIKit with 17+ AI coding assistants including setup, configuration, and capability comparison
+- [Examples](examples.mdx): Comprehensive, runnable examples for AIKit features including installation, configuration, package management, and AI agent integration
+
+## Reference
+- [Troubleshooting](troubleshooting.mdx): Common issues, error messages, and solutions for AIKit usage
+- [Development](development.mdx): Contributing to AIKit development, architecture overview, and testing guidelines
