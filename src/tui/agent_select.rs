@@ -48,7 +48,10 @@ pub fn select_agent_interactive() -> Result<SelectionResult, Box<dyn std::error:
 
 fn run_selection_app<B: Backend>(
     terminal: &mut Terminal<B>,
-) -> Result<SelectionResult, Box<dyn std::error::Error>> {
+) -> Result<SelectionResult, Box<dyn std::error::Error>>
+where
+    <B as Backend>::Error: 'static,
+{
     let mut app = SelectionApp::new();
 
     loop {
@@ -138,7 +141,7 @@ fn ui(f: &mut Frame, app: &mut SelectionApp) {
             Constraint::Min(10),   // List
             Constraint::Length(4), // Instructions
         ])
-        .split(f.size());
+        .split(f.area());
 
     // Title
     let title = Paragraph::new("Select AI Agent")
