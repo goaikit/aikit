@@ -8,16 +8,20 @@
 
 use crate::error::AikError;
 use crate::github::api::GitHubClient as GitHubApiClient;
+use atty;
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
 use toml;
-use atty;
 
 /// Source type for package installation
 #[derive(Debug, Clone)]
 pub enum SourceType {
     LocalFolder(PathBuf),
-    GitHubRepo { owner: String, repo: String, version: String },
+    GitHubRepo {
+        owner: String,
+        repo: String,
+        version: String,
+    },
 }
 
 /// Installation management subcommands
@@ -41,7 +45,7 @@ pub struct InstallArgs {
 
     /// Specific version to install
     #[arg(short, long)]
-    pub version: Option<String>,
+    pub install_version: Option<String>,
 
     /// GitHub token (can also be set via GITHUB_TOKEN or GH_TOKEN env var)
     #[arg(long)]
@@ -79,8 +83,13 @@ impl InstallArgs {
 
         // Check if it's a GitHub URL or owner/repo format
         if self.looks_like_github_source() {
-            let (owner, repo, version) = parse_github_url(&self.source, self.version.as_deref())?;
-            return Ok(SourceType::GitHubRepo { owner, repo, version });
+            let (owner, repo, version) =
+                parse_github_url(&self.source, self.install_version.as_deref())?;
+            return Ok(SourceType::GitHubRepo {
+                owner,
+                repo,
+                version,
+            });
         }
 
         // Provide helpful error
@@ -92,8 +101,10 @@ impl InstallArgs {
 
     fn looks_like_github_source(&self) -> bool {
         let source = self.source.to_lowercase();
-        source.contains("github.com") ||
-        (source.contains('/') && source.split('/').count() == 2 && !std::path::Path::new(&self.source).exists())
+        source.contains("github.com")
+            || (source.contains('/')
+                && source.split('/').count() == 2
+                && !std::path::Path::new(&self.source).exists())
     }
 }
 
@@ -145,7 +156,7 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
 
     println!("Installing package from: {}", args.source);
 
-    if let Some(version) = &args.version {
+    if let Some(version) = &args.install_version {
         println!("Version: {}", version);
     }
 
@@ -162,7 +173,7 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     };
 
     // Validate inputs
-    if let Some(version) = &args.version {
+    if let Some(version) = &args.install_version {
         crate::core::validation::validate_version_format(version)?;
     }
 
@@ -171,52 +182,66 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     let source_type = args.detect_source_type()?;
     spinner.finish_with_message("Source type detected");
 
-    let (package, archive_path): (crate::models::package::Package, Option<std::path::PathBuf>) = match source_type {
-        SourceType::LocalFolder(path) => {
-            let install_spinner = create_spinner(&format!("Installing from local directory: {}", path.display()));
-            let result = install_from_local_directory(&path);
-            install_spinner.finish_with_message("Local package loaded");
-            result?
-        }
-        SourceType::GitHubRepo { owner, repo, version } => {
-            show_info(&format!("Installing from GitHub: {}/{}@{}", owner, repo, version));
+    let (package, archive_path): (crate::models::package::Package, Option<std::path::PathBuf>) =
+        match source_type {
+            SourceType::LocalFolder(path) => {
+                let install_spinner = create_spinner(&format!(
+                    "Installing from local directory: {}",
+                    path.display()
+                ));
+                let result = install_from_local_directory(&path);
+                install_spinner.finish_with_message("Local package loaded");
+                result?
+            }
+            SourceType::GitHubRepo {
+                owner,
+                repo,
+                version,
+            } => {
+                show_info(&format!(
+                    "Installing from GitHub: {}/{}@{}",
+                    owner, repo, version
+                ));
 
-            // Initialize GitHub client with token resolution
-            let github = GitHubClient::new(GitHubApiClient::resolve_token(args.token.clone()));
+                // Initialize GitHub client with token resolution
+                let github = GitHubClient::new(GitHubApiClient::resolve_token(args.token.clone()));
 
-            // Get package manifest
-            let manifest_spinner = create_spinner(&format!("Fetching package manifest from {}/{}...", owner, repo));
-            let manifest = github
-                .get_package_manifest(&owner, &repo, Some(&version))
-                .await?;
-            manifest_spinner.finish_with_message("Package manifest fetched");
+                // Get package manifest
+                let manifest_spinner = create_spinner(&format!(
+                    "Fetching package manifest from {}/{}...",
+                    owner, repo
+                ));
+                let manifest = github
+                    .get_package_manifest(&owner, &repo, Some(&version))
+                    .await?;
+                manifest_spinner.finish_with_message("Package manifest fetched");
 
-            // Convert PackageManifest to TOML string for parsing
-            let manifest_toml = toml::to_string(&manifest)?;
-            let package = crate::models::package::Package::from_toml_str(&manifest_toml)
-                .map_err(|e| AikError::Generic(format!("Failed to parse manifest: {}", e)))?;
+                // Convert PackageManifest to TOML string for parsing
+                let manifest_toml = toml::to_string(&manifest)?;
+                let package = crate::models::package::Package::from_toml_str(&manifest_toml)
+                    .map_err(|e| AikError::Generic(format!("Failed to parse manifest: {}", e)))?;
 
-            // Download package archive
-            let download_spinner = create_spinner(&format!(
-                "Downloading package {} v{}...",
-                package.package.name, package.package.version
-            ));
+                // Download package archive
+                let download_spinner = create_spinner(&format!(
+                    "Downloading package {} v{}...",
+                    package.package.name, package.package.version
+                ));
 
-            // Download package archive
-            let temp_dir = tempfile::tempdir()?;
-            let archive_path = temp_dir.path().join(format!(
-                "{}-{}.zip",
-                package.package.name, package.package.version
-            ));
+                // Download package archive
+                let temp_dir = tempfile::tempdir()?;
+                let archive_path = temp_dir.path().join(format!(
+                    "{}-{}.zip",
+                    package.package.name, package.package.version
+                ));
 
-            github
-                .download_archive(&owner, &repo, Some(&version), &archive_path)
-                .await?;
-            download_spinner.finish_with_message("Package downloaded");
+                github
+                    .download_archive(&owner, &repo, Some(&version), &archive_path)
+                    .await?;
+                download_spinner.finish_with_message("Package downloaded");
 
-            (package, Some(archive_path))
-        }
-    };
+                (package, Some(archive_path))
+            }
+        };
 
     // Check if already installed
     let registry_path = aik_dir.registry_path();
@@ -293,7 +318,8 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     } else if atty::is(atty::Stream::Stdin) {
         // Interactive selection
         match crate::tui::agent_select::select_agent_interactive()
-            .map_err(|e| AikError::Generic(format!("Interactive agent selection failed: {}", e)))? {
+            .map_err(|e| AikError::Generic(format!("Interactive agent selection failed: {}", e)))?
+        {
             crate::tui::agent_select::SelectionResult::Selected(key) => {
                 vec![key]
             }
@@ -311,7 +337,10 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     };
 
     // Generate agent commands
-    println!("Generating agent commands for: {}", selected_agents.join(", "));
+    println!(
+        "Generating agent commands for: {}",
+        selected_agents.join(", ")
+    );
     if let Err(e) = generate_agent_commands(&package, &aik_dir, &selected_agents) {
         eprintln!("Warning: Failed to generate agent commands: {}", e);
         // Don't fail the installation if command generation fails
@@ -330,7 +359,9 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
 }
 
 /// Install package from local directory
-fn install_from_local_directory(source_path: &std::path::Path) -> Result<(crate::models::package::Package, Option<std::path::PathBuf>), AikError> {
+fn install_from_local_directory(
+    source_path: &std::path::Path,
+) -> Result<(crate::models::package::Package, Option<std::path::PathBuf>), AikError> {
     use std::fs;
     use std::path::Path;
 
@@ -352,14 +383,16 @@ fn install_from_local_directory(source_path: &std::path::Path) -> Result<(crate:
     };
 
     // Read and parse package file
-    let package_toml_content = fs::read_to_string(&toml_path)
-        .map_err(|e| AikError::Io(e))?;
+    let package_toml_content = fs::read_to_string(&toml_path).map_err(|e| AikError::Io(e))?;
 
-    let package = crate::models::package::Package::from_toml_str(&package_toml_content)
-        .map_err(|e| AikError::Generic(format!("Failed to parse {}: {}", toml_path.display(), e)))?;
+    let package =
+        crate::models::package::Package::from_toml_str(&package_toml_content).map_err(|e| {
+            AikError::Generic(format!("Failed to parse {}: {}", toml_path.display(), e))
+        })?;
 
     // Validate package
-    package.validate()
+    package
+        .validate()
         .map_err(|e| AikError::PackageValidation(e))?;
 
     // For local installation, we don't need to download an archive
@@ -395,7 +428,9 @@ fn parse_github_url(
 
     let parts: Vec<&str> = path.split('/').collect();
     if parts.len() < 2 {
-        return Err(AikError::InvalidGitHubUrl("Invalid GitHub URL format".to_string()));
+        return Err(AikError::InvalidGitHubUrl(
+            "Invalid GitHub URL format".to_string(),
+        ));
     }
 
     let owner = parts[0].to_string();
@@ -468,9 +503,10 @@ fn install_package_from_directory(
     use std::path::Path;
 
     let source_path = Path::new(source_dir);
-    let install_path = aik_dir
-        .packages_path()
-        .join(format!("{}-{}", package.package.name, package.package.version));
+    let install_path = aik_dir.packages_path().join(format!(
+        "{}-{}",
+        package.package.name, package.package.version
+    ));
 
     // Create package directory
     fs::create_dir_all(&install_path)?;
@@ -482,12 +518,24 @@ fn install_package_from_directory(
 }
 
 /// Copy package files, excluding version control and build directories
-fn copy_package_files(from: &std::path::Path, to: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+fn copy_package_files(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::fs;
     use walkdir::WalkDir;
 
     // Directories to exclude
-    let exclude_dirs = ["target", "build", "out", ".git", ".aikit", "node_modules", ".next", "dist"];
+    let exclude_dirs = [
+        "target",
+        "build",
+        "out",
+        ".git",
+        ".aikit",
+        "node_modules",
+        ".next",
+        "dist",
+    ];
 
     for entry in WalkDir::new(from).into_iter().filter_map(|e| e.ok()) {
         let source_path = entry.path();
@@ -527,7 +575,7 @@ fn generate_agent_commands(
 
     for agent_key in agent_keys {
         if let Some(agent_config) = get_agent_config(agent_key) {
-        generate_commands_for_agent(package, &agent_config, aik_dir)?;
+            generate_commands_for_agent(package, &agent_config, aik_dir)?;
         } else {
             return Err(format!("Unknown agent: {}", agent_key).into());
         }
@@ -548,7 +596,8 @@ fn load_template_content(
     // Determine template path:
     // 1. Use command_def.template if specified (relative to package root)
     // 2. Default to templates/{command_name}.md
-    let template_path_str = command_def.template
+    let template_path_str = command_def
+        .template
         .as_ref()
         .map(|t| t.clone())
         .unwrap_or_else(|| format!("templates/{}.md", command_name));
@@ -556,20 +605,21 @@ fn load_template_content(
     let template_path = template_path_str.as_str();
 
     // Get installed package directory
-    let package_dir = aik_dir
-        .packages_path()
-        .join(format!("{}-{}", package.package.name, package.package.version));
+    let package_dir = aik_dir.packages_path().join(format!(
+        "{}-{}",
+        package.package.name, package.package.version
+    ));
 
     let full_path = package_dir.join(template_path);
 
     // Read template file
-    fs::read_to_string(&full_path)
-        .map_err(|e| {
-            format!(
-                "Failed to load template '{}' from package '{}': {}",
-                template_path, package.package.name, e
-            ).into()
-        })
+    fs::read_to_string(&full_path).map_err(|e| {
+        format!(
+            "Failed to load template '{}' from package '{}': {}",
+            template_path, package.package.name, e
+        )
+        .into()
+    })
 }
 
 /// Generate commands for a specific agent
@@ -588,12 +638,7 @@ fn generate_commands_for_agent(
     // Generate command files for each package command
     for (command_name, command_def) in &package.commands {
         // Load actual template content from installed package
-        let template_content = load_template_content(
-            package,
-            command_name,
-            command_def,
-            aik_dir,
-        )?;
+        let template_content = load_template_content(package, command_name, command_def, aik_dir)?;
 
         // Generate command content using loaded template
         let content = agent.generate_package_command(
@@ -622,8 +667,9 @@ pub async fn execute_update(args: UpdateArgs) -> Result<(), AikError> {
     // Validate package name
     crate::core::validation::validate_package_name(&args.package)?;
 
-    let aik_dir = AikDirectory::find()
-        .map_err(|_| AikError::Installation("No packages installed (.aikit directory not found)".to_string()))?;
+    let aik_dir = AikDirectory::find().map_err(|_| {
+        AikError::Installation("No packages installed (.aikit directory not found)".to_string())
+    })?;
 
     let registry_path = aik_dir.registry_path();
     let mut registry =
@@ -663,8 +709,9 @@ pub async fn execute_remove(args: RemoveArgs) -> Result<(), AikError> {
     // Validate package name
     crate::core::validation::validate_package_name(&args.package)?;
 
-    let aik_dir = AikDirectory::find()
-        .map_err(|_| AikError::Installation("No packages installed (.aikit directory not found)".to_string()))?;
+    let aik_dir = AikDirectory::find().map_err(|_| {
+        AikError::Installation("No packages installed (.aikit directory not found)".to_string())
+    })?;
 
     let registry_path = aik_dir.registry_path();
     let mut registry =
@@ -803,11 +850,15 @@ mod tests {
     fn test_detect_source_type_local_directory() {
         let temp_dir = TempDir::new().unwrap();
         let aikit_toml = temp_dir.path().join("aikit.toml");
-        fs::write(&aikit_toml, "[package]\nname = \"test\"\nversion = \"1.0.0\"").unwrap();
+        fs::write(
+            &aikit_toml,
+            "[package]\nname = \"test\"\nversion = \"1.0.0\"",
+        )
+        .unwrap();
 
         let args = InstallArgs {
             source: temp_dir.path().to_string_lossy().to_string(),
-            version: None,
+            install_version: None,
             token: None,
             force: false,
             yes: false,
@@ -828,7 +879,7 @@ mod tests {
     fn test_detect_source_type_github_url() {
         let args = InstallArgs {
             source: "https://github.com/owner/repo".to_string(),
-            version: None,
+            install_version: None,
             token: None,
             force: false,
             yes: false,
@@ -839,7 +890,11 @@ mod tests {
         // This should parse as a GitHub URL successfully
         assert!(result.is_ok());
         match result.unwrap() {
-            SourceType::GitHubRepo { owner, repo, version } => {
+            SourceType::GitHubRepo {
+                owner,
+                repo,
+                version,
+            } => {
                 assert_eq!(owner, "owner");
                 assert_eq!(repo, "repo");
                 assert_eq!(version, "main");
@@ -852,7 +907,7 @@ mod tests {
     fn test_detect_source_type_invalid() {
         let args = InstallArgs {
             source: "not-a-valid-source".to_string(),
-            version: None,
+            install_version: None,
             token: None,
             force: false,
             yes: false,

@@ -12,7 +12,7 @@ use std::process::Command;
 pub struct ReleaseArgs {
     /// Version string with 'v' prefix (e.g., v1.0.0)
     #[arg(value_name = "VERSION")]
-    pub version: String,
+    pub release_version: String,
 
     /// Path to release notes file
     #[arg(long, value_name = "FILE", default_value = "release_notes.md")]
@@ -26,14 +26,14 @@ pub struct ReleaseArgs {
 /// Execute the release command
 pub async fn execute(args: ReleaseArgs) -> Result<()> {
     // Validate version format
-    validate_version_format(&args.version)?;
+    validate_version_format(&args.release_version)?;
 
     // Find package files in .genreleases/
     let package_dir = PathBuf::from(".genreleases");
     if !package_dir.exists() {
         return Err(anyhow::anyhow!(
             "Package directory '.genreleases/' not found. Run 'aikit package {}' first.",
-            args.version
+            args.release_version
         ));
     }
 
@@ -52,7 +52,7 @@ pub async fn execute(args: ReleaseArgs) -> Result<()> {
     if package_files.is_empty() {
         return Err(anyhow::anyhow!(
             "No package files found in '.genreleases/'. Run 'aikit package {}' first.",
-            args.version
+            args.release_version
         ));
     }
 
@@ -68,7 +68,7 @@ pub async fn execute(args: ReleaseArgs) -> Result<()> {
 
     // Format release title
     let version_without_v = args
-        .version
+        .release_version
         .strip_prefix('v')
         .ok_or_else(|| anyhow::anyhow!("Version must start with 'v'"))?;
     let release_title = format!("Spec Kit Templates - {}", version_without_v);
@@ -86,7 +86,7 @@ pub async fn execute(args: ReleaseArgs) -> Result<()> {
     // Create release using GitHub CLI
     if gh_available {
         create_release_with_gh(
-            &args.version,
+            &args.release_version,
             &release_title,
             &package_files,
             notes_content.as_deref(),
@@ -98,7 +98,7 @@ pub async fn execute(args: ReleaseArgs) -> Result<()> {
         ));
     }
 
-    println!("Release '{}' created successfully", args.version);
+    println!("Release '{}' created successfully", args.release_version);
     Ok(())
 }
 
