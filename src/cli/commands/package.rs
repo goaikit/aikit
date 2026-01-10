@@ -30,7 +30,7 @@ pub struct PackageInitArgs {
 
     /// Package version (default: 0.1.0)
     #[arg(short, long, default_value = "0.1.0")]
-    pub version: String,
+    pub package_version: String,
 
     /// Author name
     #[arg(short, long)]
@@ -118,7 +118,12 @@ pub async fn execute_init(args: PackageInitArgs) -> Result<(), Box<dyn std::erro
     fs::create_dir_all(package_path.join("docs"))?;
 
     // Create aikit.toml
-    let package = Package::create_template(package_name.clone(), args.description, args.author);
+    let package = Package::create_template(
+        package_name.clone(),
+        args.description,
+        args.author,
+        Some(args.package_version.clone()),
+    );
 
     // Validate package before writing
     package

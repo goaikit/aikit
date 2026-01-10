@@ -11,7 +11,7 @@ use clap::Args;
 pub struct PackageArgs {
     /// Version string with 'v' prefix (e.g., v1.0.0)
     #[arg(value_name = "VERSION")]
-    pub version: String,
+    pub release_version: String,
 
     /// Output directory for zip files
     #[arg(long, value_name = "DIR", default_value = ".genreleases")]
@@ -26,7 +26,7 @@ pub async fn execute(args: PackageArgs) -> Result<()> {
 
     // Validate version format
     let config = PackageConfig {
-        version: args.version.clone(),
+        version: args.release_version.clone(),
         agents,
         scripts,
         output_dir: std::path::PathBuf::from(args.output_dir),

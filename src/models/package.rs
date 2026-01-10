@@ -317,10 +317,11 @@ Specify your license in package.toml
         name: String,
         description: Option<String>,
         author: Option<String>,
+        version: Option<String>,
     ) -> Self {
         let mut package = Self::new(
             name.clone(),
-            "0.1.0".to_string(),
+            version.unwrap_or_else(|| "0.1.0".to_string()),
             description.unwrap_or_else(|| format!("{} package", name)),
         );
 
