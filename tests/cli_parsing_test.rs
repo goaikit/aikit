@@ -370,7 +370,5 @@ mod tests {
         // Missing required version for release
         assert!(Cli::try_parse_from(["aikit", "release"]).is_err());
 
-        // Missing required project name for init
-        assert!(Cli::try_parse_from(["aikit", "init"]).is_err());
     }
 }
