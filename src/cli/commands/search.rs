@@ -3,8 +3,8 @@
 //! This module contains the search command for discovering packages
 //! from remote registries.
 
-use clap::Args;
 use crate::error::AikError;
+use clap::Args;
 
 /// Arguments for search command
 #[derive(Debug, Args)]
@@ -31,11 +31,15 @@ pub async fn execute_search(args: SearchArgs) -> Result<(), AikError> {
 
     // Validate query
     if args.query.trim().is_empty() {
-        return Err(AikError::InvalidSource("Search query cannot be empty".to_string()));
+        return Err(AikError::InvalidSource(
+            "Search query cannot be empty".to_string(),
+        ));
     }
 
     if args.query.len() > 100 {
-        return Err(AikError::InvalidSource("Search query too long (max 100 characters)".to_string()));
+        return Err(AikError::InvalidSource(
+            "Search query too long (max 100 characters)".to_string(),
+        ));
     }
 
     println!("🔍 Searching for packages: '{}'", args.query);
@@ -44,9 +48,7 @@ pub async fn execute_search(args: SearchArgs) -> Result<(), AikError> {
     let github = GitHubClient::new(None);
 
     // Search GitHub repositories for packages
-    let results = github
-        .search_repositories(&args.query, args.limit)
-        .await?;
+    let results = github.search_repositories(&args.query, args.limit).await?;
 
     if results.is_empty() {
         println!("No packages found matching: {}", args.query);

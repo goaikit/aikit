@@ -15,8 +15,8 @@ pub mod github;
 pub mod models;
 pub mod tui;
 
-pub use error::AikError;
 pub use core::registry::RegistryManager;
+pub use error::AikError;
 /// Re-export commonly used types
 pub use models::{
     config::{load_config, save_config, AikConfig},

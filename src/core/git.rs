@@ -61,7 +61,8 @@ impl GitHubClient {
 
             let mut fallback_request = self.client.get(&package_url);
             if let Some(token) = &self.token {
-                fallback_request = fallback_request.header("Authorization", format!("token {}", token));
+                fallback_request =
+                    fallback_request.header("Authorization", format!("token {}", token));
             }
 
             let fallback_response = fallback_request.send().await?;

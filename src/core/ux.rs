@@ -50,7 +50,9 @@ pub fn confirm_action(prompt: &str) -> Result<bool, AikError> {
 /// Select from a list of options
 pub fn select_from_list<T: Display>(items: &[T], prompt: &str) -> Result<usize, AikError> {
     if !atty::is(atty::Stream::Stdout) {
-        return Err(AikError::Generic("Cannot show interactive selection in non-interactive mode".to_string()));
+        return Err(AikError::Generic(
+            "Cannot show interactive selection in non-interactive mode".to_string(),
+        ));
     }
 
     let selection = dialoguer::Select::new()

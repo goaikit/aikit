@@ -67,6 +67,8 @@ dialoguer = "0.12"  # Interactive prompts
 mockito = "1.2"
 tempfile = "3.10"
 which = "8.0"
+assert_cmd = "2.0"
+predicates = "3.0"
 
 [profile.release]
 opt-level = 3

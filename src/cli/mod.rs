@@ -9,7 +9,7 @@ mod template_package; // Old template zip archive builder (used by release comma
 mod version;
 
 // Package management commands (init, build, publish)
-mod commands {
+pub mod commands {
     pub mod install;
     pub mod package;
     pub mod search;
@@ -32,11 +32,11 @@ pub struct Cli {
     pub version: bool,
 
     #[command(subcommand)]
-    command: Option<Commands>,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
-enum Commands {
+pub enum Commands {
     /// Initialize a new Spec-Driven Development project
     Init(init::InitArgs),
     /// Check installed tools and AI agent CLIs

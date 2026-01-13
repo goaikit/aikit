@@ -35,7 +35,10 @@ impl AikDirectory {
                 current_dir = parent.to_path_buf();
             } else {
                 // Reached root directory, .aikit not found
-                return Err("Could not find .aikit directory in current directory or any parent directory".into());
+                return Err(
+                    "Could not find .aikit directory in current directory or any parent directory"
+                        .into(),
+                );
             }
         }
     }
@@ -55,7 +58,10 @@ impl AikDirectory {
 
     /// Get the project root directory (parent of .aikit)
     pub fn project_root(&self) -> PathBuf {
-        self.base_path.parent().unwrap_or(&self.base_path).to_path_buf()
+        self.base_path
+            .parent()
+            .unwrap_or(&self.base_path)
+            .to_path_buf()
     }
 
     /// Get packages installation directory

@@ -145,7 +145,11 @@ fn ui(f: &mut Frame, app: &mut SelectionApp) {
 
     // Title
     let title = Paragraph::new("Select AI Agent")
-        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
         .alignment(Alignment::Center)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(title, chunks[0]);
@@ -168,23 +172,25 @@ fn ui(f: &mut Frame, app: &mut SelectionApp) {
 
     // Create the list widget
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Available Agents"))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("Available Agents"),
+        )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD))
         .highlight_symbol("▶ ");
 
     f.render_stateful_widget(list, chunks[1], &mut app.state);
 
     // Instructions
-    let instructions = vec![
-        Line::from(vec![
-            Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
-            Span::raw(" Navigate • "),
-            Span::styled("Enter", Style::default().fg(Color::Green)),
-            Span::raw(" Select • "),
-            Span::styled("Esc", Style::default().fg(Color::Red)),
-            Span::raw(" Cancel"),
-        ]),
-    ];
+    let instructions = vec![Line::from(vec![
+        Span::styled("↑/↓", Style::default().fg(Color::Cyan)),
+        Span::raw(" Navigate • "),
+        Span::styled("Enter", Style::default().fg(Color::Green)),
+        Span::raw(" Select • "),
+        Span::styled("Esc", Style::default().fg(Color::Red)),
+        Span::raw(" Cancel"),
+    ])];
 
     let instructions_widget = Paragraph::new(instructions)
         .alignment(Alignment::Center)
