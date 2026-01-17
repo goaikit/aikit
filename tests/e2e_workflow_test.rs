@@ -24,29 +24,44 @@ mod tests {
 
         // Step 1: Initialize package
         let mut init_cmd = Command::cargo_bin("aikit").unwrap();
-        init_cmd.args([
-            "package", "init", "workflow-test",
-            "--description", "End-to-end workflow test package",
-            "--package-version", "1.0.0",
-            "--author", "Workflow Tester",
-            "--yes"
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("Package 'workflow-test' initialized"));
+        init_cmd
+            .args([
+                "package",
+                "init",
+                "workflow-test",
+                "--description",
+                "End-to-end workflow test package",
+                "--package-version",
+                "1.0.0",
+                "--author",
+                "Workflow Tester",
+                "--yes",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains(
+                "Package 'workflow-test' initialized",
+            ));
 
         // Verify package structure was created
         assert!(temp_dir.path().join("workflow-test").exists());
-        assert!(temp_dir.path().join("workflow-test").join("aikit.toml").exists());
+        assert!(temp_dir
+            .path()
+            .join("workflow-test")
+            .join("aikit.toml")
+            .exists());
 
         // Step 2: Change to package directory and build
         std::env::set_current_dir(temp_dir.path().join("workflow-test")).unwrap();
 
         let mut build_cmd = Command::cargo_bin("aikit").unwrap();
-        build_cmd.args(["package", "build"])
+        build_cmd
+            .args(["package", "build"])
             .assert()
             .success()
-            .stdout(predicate::str::contains("Package 'workflow-test' built successfully"));
+            .stdout(predicate::str::contains(
+                "Package 'workflow-test' built successfully",
+            ));
 
         // Verify ZIP was created
         let zip_path = Path::new("dist/workflow-test-1.0.0.zip");
@@ -56,14 +71,16 @@ mod tests {
         std::env::set_current_dir(temp_dir.path()).unwrap();
 
         let mut install_cmd = Command::cargo_bin("aikit").unwrap();
-        install_cmd.args(["install", "./workflow-test", "--yes"])
+        install_cmd
+            .args(["install", "./workflow-test", "--yes"])
             .assert()
             .success()
             .stdout(predicate::str::contains("Installing"));
 
         // Step 4: Verify package appears in list
         let mut list_cmd = Command::cargo_bin("aikit").unwrap();
-        list_cmd.args(["list", "--detailed"])
+        list_cmd
+            .args(["list", "--detailed"])
             .assert()
             .success()
             .stdout(predicate::str::contains("workflow-test"))
@@ -84,31 +101,35 @@ mod tests {
 
         // Create a package to install
         let mut init_cmd = Command::cargo_bin("aikit").unwrap();
-        init_cmd.args([
-            "package", "init", "install-workflow-test",
-            "--description", "Installation workflow test",
-            "--yes"
-        ])
-        .assert()
-        .success();
+        init_cmd
+            .args([
+                "package",
+                "init",
+                "install-workflow-test",
+                "--description",
+                "Installation workflow test",
+                "--yes",
+            ])
+            .assert()
+            .success();
 
         // Build the package first
         std::env::set_current_dir(temp_dir.path().join("install-workflow-test")).unwrap();
         let mut build_cmd = Command::cargo_bin("aikit").unwrap();
-        build_cmd.args(["package", "build"])
-            .assert()
-            .success();
+        build_cmd.args(["package", "build"]).assert().success();
 
         // Go back and install
         std::env::set_current_dir(temp_dir.path()).unwrap();
         let mut install_cmd = Command::cargo_bin("aikit").unwrap();
-        install_cmd.args(["install", "./install-workflow-test", "--yes"])
+        install_cmd
+            .args(["install", "./install-workflow-test", "--yes"])
             .assert()
             .success();
 
         // Verify installation by checking list output
         let mut list_cmd = Command::cargo_bin("aikit").unwrap();
-        list_cmd.args(["list", "--detailed"])
+        list_cmd
+            .args(["list", "--detailed"])
             .assert()
             .success()
             .stdout(predicate::str::contains("install-workflow-test"))
@@ -117,8 +138,14 @@ mod tests {
         // Verify .aikit directory was created
         let aikit_dir = temp_dir.path().join(".aikit");
         assert!(aikit_dir.exists(), ".aikit directory should exist");
-        assert!(aikit_dir.join("packages").exists(), "packages directory should exist");
-        assert!(aikit_dir.join("registry.json").exists(), "registry should exist");
+        assert!(
+            aikit_dir.join("packages").exists(),
+            "packages directory should exist"
+        );
+        assert!(
+            aikit_dir.join("registry.json").exists(),
+            "registry should exist"
+        );
 
         // Restore original directory
         std::env::set_current_dir(original_dir).unwrap();
@@ -134,7 +161,8 @@ mod tests {
 
         // Initialize a new project
         let mut init_cmd = Command::cargo_bin("aikit").unwrap();
-        init_cmd.args(["init", "test-project", "--force"]) // --force skips git checks
+        init_cmd
+            .args(["init", "test-project", "--force"]) // --force skips git checks
             .assert()
             .success()
             .stdout(predicate::str::contains("Initialized project"));
@@ -146,16 +174,15 @@ mod tests {
 
         // Verify the project can be used for package operations
         let mut package_init_cmd = Command::cargo_bin("aikit").unwrap();
-        package_init_cmd.args(["package", "init", "project-package", "--yes"])
+        package_init_cmd
+            .args(["package", "init", "project-package", "--yes"])
             .assert()
             .success();
 
         // Build the package
         std::env::set_current_dir(temp_dir.path().join("project-package")).unwrap();
         let mut build_cmd = Command::cargo_bin("aikit").unwrap();
-        build_cmd.args(["package", "build"])
-            .assert()
-            .success();
+        build_cmd.args(["package", "build"]).assert().success();
 
         // Restore original directory
         std::env::set_current_dir(original_dir).unwrap();
@@ -171,46 +198,55 @@ mod tests {
 
         // Step 1: Create and install initial package v1.0.0
         let mut init_cmd = Command::cargo_bin("aikit").unwrap();
-        init_cmd.args([
-            "package", "init", "update-test",
-            "--package-version", "1.0.0",
-            "--yes"
-        ])
-        .assert()
-        .success();
-
-        std::env::set_current_dir(temp_dir.path().join("update-test")).unwrap();
-        let mut build_cmd = Command::cargo_bin("aikit").unwrap();
-        build_cmd.args(["package", "build"])
+        init_cmd
+            .args([
+                "package",
+                "init",
+                "update-test",
+                "--package-version",
+                "1.0.0",
+                "--yes",
+            ])
             .assert()
             .success();
 
+        std::env::set_current_dir(temp_dir.path().join("update-test")).unwrap();
+        let mut build_cmd = Command::cargo_bin("aikit").unwrap();
+        build_cmd.args(["package", "build"]).assert().success();
+
         std::env::set_current_dir(temp_dir.path()).unwrap();
         let mut install_cmd = Command::cargo_bin("aikit").unwrap();
-        install_cmd.args(["install", "./update-test", "--yes"])
+        install_cmd
+            .args(["install", "./update-test", "--yes"])
             .assert()
             .success();
 
         // Verify initial installation
         let mut list_cmd = Command::cargo_bin("aikit").unwrap();
-        list_cmd.args(["list"])
+        list_cmd
+            .args(["list"])
             .assert()
             .success()
             .stdout(predicate::str::contains("update-test"));
 
         // Step 2: Create updated package v2.0.0
         let mut update_init_cmd = Command::cargo_bin("aikit").unwrap();
-        update_init_cmd.args([
-            "package", "init", "update-test-v2",
-            "--package-version", "2.0.0",
-            "--yes"
-        ])
-        .assert()
-        .success();
+        update_init_cmd
+            .args([
+                "package",
+                "init",
+                "update-test-v2",
+                "--package-version",
+                "2.0.0",
+                "--yes",
+            ])
+            .assert()
+            .success();
 
         std::env::set_current_dir(temp_dir.path().join("update-test-v2")).unwrap();
         let mut update_build_cmd = Command::cargo_bin("aikit").unwrap();
-        update_build_cmd.args(["package", "build"])
+        update_build_cmd
+            .args(["package", "build"])
             .assert()
             .success();
 
@@ -219,7 +255,11 @@ mod tests {
         // Note: In a real scenario, we'd test `aikit update update-test`
         // But since we don't have a registry for this test, we just verify
         // that the package structure is correct for updates
-        let update_zip = temp_dir.path().join("update-test-v2").join("dist").join("update-test-v2-2.0.0.zip");
+        let update_zip = temp_dir
+            .path()
+            .join("update-test-v2")
+            .join("dist")
+            .join("update-test-v2-2.0.0.zip");
         assert!(update_zip.exists());
 
         // Restore original directory
@@ -236,14 +276,16 @@ mod tests {
 
         // Try to build package without aikit.toml (should fail)
         let mut build_cmd = Command::cargo_bin("aikit").unwrap();
-        build_cmd.args(["package", "build"])
+        build_cmd
+            .args(["package", "build"])
             .assert()
             .failure()
             .stderr(predicate::str::contains("aikit.toml not found"));
 
         // Now create a valid package and try again
         let mut init_cmd = Command::cargo_bin("aikit").unwrap();
-        init_cmd.args(["package", "init", "recovery-test", "--yes"])
+        init_cmd
+            .args(["package", "init", "recovery-test", "--yes"])
             .assert()
             .success();
 
@@ -251,7 +293,8 @@ mod tests {
 
         // Now build should succeed
         let mut build_cmd = Command::cargo_bin("aikit").unwrap();
-        build_cmd.args(["package", "build"])
+        build_cmd
+            .args(["package", "build"])
             .assert()
             .success()
             .stdout(predicate::str::contains("built successfully"));
@@ -273,26 +316,29 @@ mod tests {
 
         for package_name in &package_names {
             let mut init_cmd = Command::cargo_bin("aikit").unwrap();
-            init_cmd.args([
-                "package", "init", package_name,
-                "--description", &format!("Test package {}", package_name),
-                "--yes"
-            ])
-            .assert()
-            .success();
+            init_cmd
+                .args([
+                    "package",
+                    "init",
+                    package_name,
+                    "--description",
+                    &format!("Test package {}", package_name),
+                    "--yes",
+                ])
+                .assert()
+                .success();
 
             // Build each package
             std::env::set_current_dir(temp_dir.path().join(package_name)).unwrap();
             let mut build_cmd = Command::cargo_bin("aikit").unwrap();
-            build_cmd.args(["package", "build"])
-                .assert()
-                .success();
+            build_cmd.args(["package", "build"]).assert().success();
 
             std::env::set_current_dir(temp_dir.path()).unwrap();
 
             // Install each package
             let mut install_cmd = Command::cargo_bin("aikit").unwrap();
-            install_cmd.args(["install", &format!("./{}", package_name), "--yes"])
+            install_cmd
+                .args(["install", &format!("./{}", package_name), "--yes"])
                 .assert()
                 .success();
         }
@@ -301,11 +347,14 @@ mod tests {
         let mut list_cmd = Command::cargo_bin("aikit").unwrap();
         let output = list_cmd.args(["list", "--detailed"]).output().unwrap();
         assert!(output.status.success());
-        
+
         let stdout = String::from_utf8_lossy(&output.stdout);
         for package_name in &package_names {
-            assert!(stdout.contains(package_name),
-                   "Package {} should be in list output", package_name);
+            assert!(
+                stdout.contains(package_name),
+                "Package {} should be in list output",
+                package_name
+            );
         }
 
         // Restore original directory
@@ -322,7 +371,8 @@ mod tests {
 
         // Initialize project (creates .aikit/config.toml)
         let mut init_cmd = Command::cargo_bin("aikit").unwrap();
-        init_cmd.args(["init", "config-test", "--force"])
+        init_cmd
+            .args(["init", "config-test", "--force"])
             .assert()
             .success();
 
@@ -337,9 +387,7 @@ mod tests {
 
         // Verify that subsequent operations use this config
         let mut check_cmd = Command::cargo_bin("aikit").unwrap();
-        check_cmd.arg("check")
-            .assert()
-            .success();
+        check_cmd.arg("check").assert().success();
 
         // Restore original directory
         std::env::set_current_dir(original_dir).unwrap();
