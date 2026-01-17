@@ -159,6 +159,60 @@ Before making changes, understand the project structure by:
 - Fix all clippy warnings (some are allowed via `.clippy.toml`)
 - The project uses `-D warnings` in CI, so code must be warning-free
 
+## Git Hooks
+
+AIKit provides optional git hooks to automatically enforce code quality standards before commits and pushes. These hooks mirror the CI checks and help catch issues early in development.
+
+### Available Hooks
+
+- **`pre-commit`**: Runs fast checks before each commit
+  - Code formatting validation (`cargo fmt --check`)
+  - Linting with Clippy (`cargo clippy -- -D warnings`)
+  - Quick unit tests (`cargo test --lib`)
+
+- **`pre-push`**: Runs comprehensive checks before pushing
+  - Full test suite including integration tests (`cargo test`)
+  - Documentation build validation (`cargo doc`)
+
+- **`commit-msg`**: Validates commit message format (optional)
+  - Checks for conventional commit format
+  - Warns but allows override for flexibility
+
+### Installation
+
+To install the git hooks locally:
+
+```bash
+# From the project root (aikit directory)
+./scripts/install-git-hooks.sh
+```
+
+This will copy the hooks from `.githooks/` to `.git/hooks/` and make them executable.
+
+### Benefits
+
+- **Early feedback**: Catch formatting and linting issues before pushing
+- **Consistent quality**: Ensures all contributors follow the same standards
+- **CI alignment**: Local checks match GitHub Actions pipeline
+- **Optional**: Hooks can be disabled if needed for specific workflows
+
+### Disabling Hooks
+
+If you need to bypass hooks temporarily:
+
+```bash
+# Skip all hooks for a commit
+git commit --no-verify
+
+# Skip hooks for a push
+git push --no-verify
+
+# Disable specific hooks
+chmod -x .git/hooks/pre-commit
+chmod -x .git/hooks/pre-push
+chmod -x .git/hooks/commit-msg
+```
+
 ## Pull Request Process
 
 1. **Create a feature branch**
