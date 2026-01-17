@@ -20,16 +20,17 @@ use clap::{Parser, Subcommand};
 
 /// AIKIT - Universal template package manager for AI agents
 #[derive(Parser)]
-#[command(name = "aikit")]
-#[command(about = "AIKit - Universal template package manager for AI agents", long_about = None)]
+#[command(
+    name = "aikit",
+    about = "AIKit - Universal template package manager for AI agents",
+    long_about = None,
+    version = env!("CARGO_PKG_VERSION"),
+    arg_required_else_help = true
+)]
 pub struct Cli {
     /// Enable debug output (verbose diagnostic information)
     #[arg(long, global = true)]
     pub debug: bool,
-
-    /// Display version information
-    #[arg(long, short = 'V', global = true)]
-    pub version: bool,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -61,16 +62,6 @@ pub enum Commands {
 /// Run the CLI application
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
-
-    // Handle --version flag
-    if cli.version {
-        let rt = tokio::runtime::Runtime::new()?;
-        let args = version::VersionArgs {
-            github_token: None, // Could extract from env if needed
-        };
-        rt.block_on(version::execute(args))?;
-        return Ok(());
-    }
 
     // Set debug mode if enabled
     if cli.debug {
@@ -111,11 +102,8 @@ pub fn run() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("{}", e))?,
         },
         Some(Commands::Release(args)) => rt.block_on(release::execute(args))?,
-        None => {
-            // No command provided - this shouldn't happen with our current logic
-            // but we'll handle it gracefully
-            return Ok(());
-        }
+        // This should never be reached due to arg_required_else_help = true
+        None => unreachable!("arg_required_else_help should prevent None commands"),
     }
 
     Ok(())

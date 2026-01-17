@@ -10,21 +10,19 @@ use clap::Parser;
 mod tests {
     use super::*;
 
-    /// Test that global version flag works without conflicts
+    /// Test that global version flag works (handled by clap)
     #[test]
     fn test_global_version_flag() {
-        // This would have caught the version field conflict
-        let cli = Cli::try_parse_from(["aikit", "--version"]).unwrap();
-        assert!(cli.version);
-        assert!(cli.command.is_none()); // No subcommand provided
+        // --version is now handled by clap automatically, so parsing should fail
+        // (clap exits with version info instead of returning parsed args)
+        assert!(Cli::try_parse_from(["aikit", "--version"]).is_err());
     }
 
-    /// Test that global short version flag works
+    /// Test that global short version flag works (handled by clap)
     #[test]
     fn test_global_short_version_flag() {
-        let cli = Cli::try_parse_from(["aikit", "-V"]).unwrap();
-        assert!(cli.version);
-        assert!(cli.command.is_none());
+        // -V is now handled by clap automatically, so parsing should fail
+        assert!(Cli::try_parse_from(["aikit", "-V"]).is_err());
     }
 
     /// Test debug flag works
@@ -59,12 +57,19 @@ mod tests {
     #[test]
     fn test_package_init_with_options() {
         let cli = Cli::try_parse_from([
-            "aikit", "package", "init", "my-package",
-            "--description", "A test package",
-            "--package-version", "2.1.0",
-            "--author", "Test Author",
-            "--yes"
-        ]).unwrap();
+            "aikit",
+            "package",
+            "init",
+            "my-package",
+            "--description",
+            "A test package",
+            "--package-version",
+            "2.1.0",
+            "--author",
+            "Test Author",
+            "--yes",
+        ])
+        .unwrap();
 
         match cli.command.unwrap() {
             aikit::cli::Commands::Package(pkg_cmd) => match pkg_cmd {
@@ -103,11 +108,16 @@ mod tests {
     #[test]
     fn test_package_build_with_options() {
         let cli = Cli::try_parse_from([
-            "aikit", "package", "build",
-            "--output", "build",
-            "--agents", "claude,copilot",
-            "--include-sources"
-        ]).unwrap();
+            "aikit",
+            "package",
+            "build",
+            "--output",
+            "build",
+            "--agents",
+            "claude,copilot",
+            "--include-sources",
+        ])
+        .unwrap();
 
         match cli.command.unwrap() {
             aikit::cli::Commands::Package(pkg_cmd) => match pkg_cmd {
@@ -144,11 +154,15 @@ mod tests {
     #[test]
     fn test_install_with_install_version() {
         let cli = Cli::try_parse_from([
-            "aikit", "install", "test-package",
-            "--install-version", "1.2.3",
+            "aikit",
+            "install",
+            "test-package",
+            "--install-version",
+            "1.2.3",
             "--force",
-            "--yes"
-        ]).unwrap();
+            "--yes",
+        ])
+        .unwrap();
 
         match cli.command.unwrap() {
             aikit::cli::Commands::Install(args) => {
@@ -182,11 +196,15 @@ mod tests {
     #[test]
     fn test_init_with_options() {
         let cli = Cli::try_parse_from([
-            "aikit", "init", "my-project",
-            "--ai", "claude",
+            "aikit",
+            "init",
+            "my-project",
+            "--ai",
+            "claude",
             "--here",
-            "--force"
-        ]).unwrap();
+            "--force",
+        ])
+        .unwrap();
 
         match cli.command.unwrap() {
             aikit::cli::Commands::Init(args) => {
@@ -257,10 +275,14 @@ mod tests {
     #[test]
     fn test_search_with_options() {
         let cli = Cli::try_parse_from([
-            "aikit", "search", "complex query",
+            "aikit",
+            "search",
+            "complex query",
             "--detailed",
-            "--limit", "10"
-        ]).unwrap();
+            "--limit",
+            "10",
+        ])
+        .unwrap();
 
         match cli.command.unwrap() {
             aikit::cli::Commands::Search(args) => {
@@ -291,10 +313,15 @@ mod tests {
     #[test]
     fn test_release_with_options() {
         let cli = Cli::try_parse_from([
-            "aikit", "release", "v2.1.0",
-            "--notes-file", "custom_notes.md",
-            "--github-token", "ghp_123456"
-        ]).unwrap();
+            "aikit",
+            "release",
+            "v2.1.0",
+            "--notes-file",
+            "custom_notes.md",
+            "--github-token",
+            "ghp_123456",
+        ])
+        .unwrap();
 
         match cli.command.unwrap() {
             aikit::cli::Commands::Release(args) => {
@@ -369,6 +396,18 @@ mod tests {
 
         // Missing required version for release
         assert!(Cli::try_parse_from(["aikit", "release"]).is_err());
+    }
 
+    /// Test that no arguments triggers help (clap exits with help)
+    #[test]
+    fn test_no_arguments_triggers_help() {
+        // When no command is provided, clap should show help and exit
+        // This means parsing will fail because clap calls std::process::exit()
+        // But in tests, we can verify that arg_required_else_help is working
+        // by checking that the parsing succeeds for valid commands but fails
+        // for no arguments (due to required arguments)
+
+        // This should fail because no command is provided and arg_required_else_help is true
+        assert!(Cli::try_parse_from(["aikit"]).is_err());
     }
 }

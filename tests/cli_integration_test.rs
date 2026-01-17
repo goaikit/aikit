@@ -22,15 +22,33 @@ mod tests {
         cmd.args(["package", "init", "test-package", "--yes"])
             .assert()
             .success()
-            .stdout(predicate::str::contains("Package 'test-package' initialized"))
+            .stdout(predicate::str::contains(
+                "Package 'test-package' initialized",
+            ))
             .stdout(predicate::str::contains("Created directory structure"));
 
         // Verify directory structure was created
         assert!(temp_dir.path().join("test-package").exists());
-        assert!(temp_dir.path().join("test-package").join("aikit.toml").exists());
-        assert!(temp_dir.path().join("test-package").join("README.md").exists());
-        assert!(temp_dir.path().join("test-package").join("templates").exists());
-        assert!(temp_dir.path().join("test-package").join("scripts").exists());
+        assert!(temp_dir
+            .path()
+            .join("test-package")
+            .join("aikit.toml")
+            .exists());
+        assert!(temp_dir
+            .path()
+            .join("test-package")
+            .join("README.md")
+            .exists());
+        assert!(temp_dir
+            .path()
+            .join("test-package")
+            .join("templates")
+            .exists());
+        assert!(temp_dir
+            .path()
+            .join("test-package")
+            .join("scripts")
+            .exists());
         assert!(temp_dir.path().join("test-package").join("docs").exists());
     }
 
@@ -42,11 +60,16 @@ mod tests {
 
         let mut cmd = Command::cargo_bin("aikit").unwrap();
         cmd.args([
-            "package", "init", "my-package",
-            "--description", "A comprehensive test package",
-            "--package-version", "2.0.0",
-            "--author", "Test Author",
-            "--yes"
+            "package",
+            "init",
+            "my-package",
+            "--description",
+            "A comprehensive test package",
+            "--package-version",
+            "2.0.0",
+            "--author",
+            "Test Author",
+            "--yes",
         ])
         .assert()
         .success()
@@ -85,7 +108,8 @@ mod tests {
 
         // First create a package
         let mut init_cmd = Command::cargo_bin("aikit").unwrap();
-        init_cmd.args(["package", "init", "build-test", "--yes"])
+        init_cmd
+            .args(["package", "init", "build-test", "--yes"])
             .assert()
             .success();
 
@@ -94,14 +118,21 @@ mod tests {
 
         // Build the package
         let mut build_cmd = Command::cargo_bin("aikit").unwrap();
-        build_cmd.args(["package", "build"])
+        build_cmd
+            .args(["package", "build"])
             .assert()
             .success()
-            .stdout(predicate::str::contains("Package 'build-test' built successfully"))
+            .stdout(predicate::str::contains(
+                "Package 'build-test' built successfully",
+            ))
             .stdout(predicate::str::contains("Output:"));
 
         // Verify ZIP was created
-        let zip_path = temp_dir.path().join("build-test").join("dist").join("build-test-0.1.0.zip");
+        let zip_path = temp_dir
+            .path()
+            .join("build-test")
+            .join("dist")
+            .join("build-test-0.1.0.zip");
         assert!(zip_path.exists());
     }
 
@@ -126,7 +157,8 @@ mod tests {
 
         // Create package
         let mut init_cmd = Command::cargo_bin("aikit").unwrap();
-        init_cmd.args(["package", "init", "custom-output-test", "--yes"])
+        init_cmd
+            .args(["package", "init", "custom-output-test", "--yes"])
             .assert()
             .success();
 
@@ -134,12 +166,17 @@ mod tests {
 
         // Build with custom output
         let mut build_cmd = Command::cargo_bin("aikit").unwrap();
-        build_cmd.args(["package", "build", "--output", "custom-dist"])
+        build_cmd
+            .args(["package", "build", "--output", "custom-dist"])
             .assert()
             .success();
 
         // Verify ZIP in custom directory
-        let zip_path = temp_dir.path().join("custom-output-test").join("custom-dist").join("custom-output-test-0.1.0.zip");
+        let zip_path = temp_dir
+            .path()
+            .join("custom-output-test")
+            .join("custom-dist")
+            .join("custom-output-test-0.1.0.zip");
         assert!(zip_path.exists());
     }
 
@@ -213,18 +250,14 @@ mod tests {
     #[test]
     fn test_list_detailed() {
         let mut cmd = Command::cargo_bin("aikit").unwrap();
-        cmd.args(["list", "--detailed"])
-            .assert()
-            .success();
+        cmd.args(["list", "--detailed"]).assert().success();
     }
 
     /// Test search command (basic functionality, may not return results)
     #[test]
     fn test_search_command() {
         let mut cmd = Command::cargo_bin("aikit").unwrap();
-        cmd.args(["search", "test"])
-            .assert()
-            .success(); // May succeed with no results, but shouldn't fail
+        cmd.args(["search", "test"]).assert().success(); // May succeed with no results, but shouldn't fail
     }
 
     /// Test install from local directory
@@ -235,13 +268,15 @@ mod tests {
 
         // Create a test package first
         let mut init_cmd = Command::cargo_bin("aikit").unwrap();
-        init_cmd.args(["package", "init", "install-test", "--yes"])
+        init_cmd
+            .args(["package", "init", "install-test", "--yes"])
             .assert()
             .success();
 
         // Try to install it from local path
         let mut install_cmd = Command::cargo_bin("aikit").unwrap();
-        install_cmd.args(["install", "./install-test", "--yes"])
+        install_cmd
+            .args(["install", "./install-test", "--yes"])
             .assert()
             .success()
             .stdout(predicate::str::contains("Installing"));
@@ -345,7 +380,9 @@ mod tests {
         cmd.args(["package"]) // Missing subcommand
             .assert()
             .failure()
-            .stderr(predicate::str::contains("required arguments were not provided"));
+            .stderr(predicate::str::contains(
+                "required arguments were not provided",
+            ));
     }
 
     /// Test error handling for invalid package names
@@ -363,8 +400,44 @@ mod tests {
         // But validation should fail in build
         std::env::set_current_dir(temp_dir.path().join("invalid name!")).unwrap();
         let mut build_cmd = Command::cargo_bin("aikit").unwrap();
-        build_cmd.args(["package", "build"])
-            .assert()
-            .failure(); // Should fail validation
+        build_cmd.args(["package", "build"]).assert().failure(); // Should fail validation
+    }
+
+    /// Test that running aikit with no arguments shows help
+    #[test]
+    fn test_no_arguments_shows_help() {
+        // With arg_required_else_help, clap should show help and exit with code 2
+        // This is a basic test to ensure the CLI behaves as expected
+        let output = Command::cargo_bin("aikit")
+            .unwrap()
+            .output()
+            .expect("Failed to run command");
+
+        // Should exit with code 2 (clap's default for help/error)
+        assert_eq!(output.status.code(), Some(2));
+
+        // Should have some output (help message)
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.is_empty(), "Should have error/help output");
+        assert!(stderr.contains("Usage") || stderr.contains("aikit"));
+    }
+
+    /// Test that --help output includes version flag
+    #[test]
+    fn test_help_includes_version_flag() {
+        let output = Command::cargo_bin("aikit")
+            .unwrap()
+            .arg("--help")
+            .output()
+            .expect("Failed to run command");
+
+        assert_eq!(output.status.code(), Some(0));
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Usage:"));
+        assert!(stdout.contains("AIKit"));
+        assert!(stdout.contains("--version"));
+        assert!(stdout.contains("package"));
+        assert!(stdout.contains("install"));
     }
 }
