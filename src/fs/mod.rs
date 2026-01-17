@@ -141,7 +141,7 @@ mod tests {
 
     #[test]
     fn test_join_paths() {
-        let base = PathBuf::from("/tmp");
+        let base = PathBuf::from("tmp");
         let result = join_paths(&base, &["a", "b", "c"]);
         assert!(result.ends_with("c"));
     }
