@@ -55,7 +55,9 @@ mod tests {
             ));
 
         // Verify ZIP was created
-        let zip_path = work.join("workflow-test").join("dist/workflow-test-1.0.0.zip");
+        let zip_path = work
+            .join("workflow-test")
+            .join("dist/workflow-test-1.0.0.zip");
         assert!(zip_path.exists(), "ZIP file should exist at {:?}", zip_path);
 
         // Step 3: Install the package from the parent directory
@@ -109,7 +111,13 @@ mod tests {
         // Install the package
         Command::cargo_bin("aikit")?
             .current_dir(work)
-            .args(["install", "./install-workflow-test", "--yes", "--ai", "claude"])
+            .args([
+                "install",
+                "./install-workflow-test",
+                "--yes",
+                "--ai",
+                "claude",
+            ])
             .assert()
             .success();
 
@@ -136,7 +144,6 @@ mod tests {
 
         Ok(())
     }
-
 
     /// Test package update workflow (simulated)
     #[test]
@@ -275,7 +282,13 @@ mod tests {
             // Install each package
             Command::cargo_bin("aikit")?
                 .current_dir(work)
-                .args(["install", &format!("./{}", package_name), "--yes", "--ai", "claude"])
+                .args([
+                    "install",
+                    &format!("./{}", package_name),
+                    "--yes",
+                    "--ai",
+                    "claude",
+                ])
                 .assert()
                 .success();
         }
@@ -298,7 +311,6 @@ mod tests {
 
         Ok(())
     }
-
 
     /// Test help system workflow
     #[test]
