@@ -551,7 +551,10 @@ fn copy_package_files(
         // Skip excluded directories
         if let Some(dir_name) = relative_path.iter().next() {
             if let Some(dir_str) = dir_name.to_str() {
-                if exclude_dirs.contains(&dir_str) {
+                if exclude_dirs
+                    .iter()
+                    .any(|&excluded| excluded.eq_ignore_ascii_case(dir_str))
+                {
                     continue;
                 }
             }
@@ -773,7 +776,10 @@ fn remove_agent_commands(package_name: &str) -> Result<(), Box<dyn std::error::E
                 let filename = entry.file_name().to_string_lossy().to_string();
 
                 // Check if this is a command file for this package
-                if filename.starts_with(&format!("{}.", package_name)) && filename.ends_with(".md")
+                if filename
+                    .to_lowercase()
+                    .starts_with(&format!("{}.", package_name.to_lowercase()))
+                    && filename.to_lowercase().ends_with(".md")
                 {
                     fs::remove_file(entry.path())?;
                 }

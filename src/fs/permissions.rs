@@ -42,7 +42,12 @@ pub fn set_script_permissions<P: AsRef<Path>>(path: P) -> Result<()> {
     let path = path.as_ref();
 
     // Only process .sh files
-    if path.extension().and_then(|s| s.to_str()) != Some("sh") {
+    if path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_lowercase())
+        != Some("sh".to_string())
+    {
         return Ok(());
     }
 

@@ -278,7 +278,13 @@ fn set_script_permissions_recursive<P: AsRef<std::path::Path>>(path: P) -> Resul
 
     for entry in WalkDir::new(path) {
         let entry = entry?;
-        if entry.path().extension().and_then(|s| s.to_str()) == Some("sh") {
+        if entry
+            .path()
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_lowercase())
+            == Some("sh".to_string())
+        {
             permissions::set_script_permissions(entry.path())?;
         }
     }
@@ -313,7 +319,12 @@ fn merge_directory_contents<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>
             // Handle special files that need merging
             if dest.exists() {
                 // Check if it's a JSON file that should be merged
-                if dest.extension().and_then(|s| s.to_str()) == Some("json") {
+                if dest
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_lowercase())
+                    == Some("json".to_string())
+                {
                     let new_content: serde_json::Value =
                         serde_json::from_str(&std::fs::read_to_string(path)?)?;
                     merge::merge_json_file(&dest, &new_content)?;

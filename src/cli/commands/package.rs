@@ -355,7 +355,13 @@ fn add_artifacts_to_zip(
         let path = entry.path();
 
         // Skip directories and aikit.toml (already added)
-        if path.is_dir() || path.file_name() == Some(std::ffi::OsStr::new("aikit.toml")) {
+        if path.is_dir()
+            || path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_lowercase())
+                == Some("aikit.toml".to_string())
+        {
             continue;
         }
 

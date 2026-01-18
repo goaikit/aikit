@@ -41,7 +41,13 @@ pub async fn execute(args: ReleaseArgs) -> Result<()> {
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
-            if path.is_file() && path.extension()? == "zip" {
+            if path.is_file()
+                && path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.to_lowercase())
+                    == Some("zip".to_string())
+            {
                 Some(path)
             } else {
                 None

@@ -293,7 +293,13 @@ pub fn load_command_templates<P: AsRef<Path>>(templates_dir: P) -> Result<Vec<Co
     for entry in WalkDir::new(&templates_path) {
         let entry = entry?;
         let path = entry.path();
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("md") {
+        if path.is_file()
+            && path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_lowercase())
+                == Some("md".to_string())
+        {
             match CommandTemplate::from_file(path) {
                 Ok(template) => templates.push(template),
                 Err(e) => {
@@ -355,12 +361,21 @@ pub fn copy_base_directories<P: AsRef<Path>, Q: AsRef<Path>>(
             let relative = path.strip_prefix(&templates_source)?;
 
             // Skip commands/ directory
-            if relative.starts_with("commands") {
+            if relative
+                .to_string_lossy()
+                .to_lowercase()
+                .starts_with("commands")
+            {
                 continue;
             }
 
             // Skip vscode-settings.json
-            if relative.file_name().and_then(|n| n.to_str()) == Some("vscode-settings.json") {
+            if relative
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_lowercase())
+                == Some("vscode-settings.json".to_string())
+            {
                 continue;
             }
 
