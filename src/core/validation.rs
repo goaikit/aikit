@@ -63,10 +63,17 @@ pub fn validate_version_format(version: &str) -> Result<(), AikError> {
 pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
     let path_buf = PathBuf::from(path);
 
-    // Resolve any .. or . components
-    let canonical = path_buf
-        .canonicalize()
-        .map_err(|e| AikError::InvalidSource(format!("Invalid path '{}': {}", path, e)))?;
+    // For relative paths, try canonicalization but fall back to absolute path if it fails
+    // This handles cases where canonicalize fails due to permissions or other issues
+    let canonical = if path_buf.is_relative() {
+        path_buf.canonicalize().or_else(|_| {
+            // Fall back to making it absolute relative to current dir
+            std::env::current_dir().map(|cwd| cwd.join(&path_buf))
+        })
+    } else {
+        path_buf.canonicalize()
+    }
+    .map_err(|e| AikError::InvalidSource(format!("Invalid path '{}': {}", path, e)))?;
 
     // Prevent absolute paths that go outside current working directory
     // This is a basic check - more sophisticated validation might be needed
