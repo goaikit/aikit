@@ -695,11 +695,12 @@ description = "Test package with invalid name"
             .create();
 
         // Set environment variable to override GitHub API URL for testing
-        std::env::set_var("GITHUB_API_URL", mock_url);
+        std::env::set_var("GITHUB_API_URL", &mock_url);
 
         // Try to publish (this will likely fail due to incomplete implementation)
         let result = Command::cargo_bin("aikit")?
             .current_dir(work.join("publish-test-pkg"))
+            .env("GITHUB_API_URL", &mock_url)
             .args([
                 "package",
                 "publish",
