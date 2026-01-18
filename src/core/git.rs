@@ -117,74 +117,6 @@ impl GitHubClient {
     }
 
     /// Search repositories for packages
-    pub async fn search_repositories(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<RepositoryInfo>, Box<dyn std::error::Error>> {
-        // First try searching for repos with package.toml files
-        let package_search = format!("{} filename:aikit.toml", query);
-        let url = format!(
-            "https://api.github.com/search/repositories?q={}&per_page={}&sort=stars&order=desc",
-            urlencoding::encode(&package_search),
-            limit
-        );
-
-        let mut request = self.client.get(&url);
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("token {}", token));
-            request = request.header("User-Agent", "AIKIT-Package-Manager/1.0");
-        }
-
-        let response = request.send().await?;
-        if !response.status().is_success() {
-            return Err(format!("Package search failed: HTTP {}", response.status()).into());
-        }
-
-        let search_result: SearchResult = response.json().await?;
-        let mut results = search_result.items;
-
-        // If we didn't find enough results, also search for AI-related repositories
-        if results.len() < limit {
-            let ai_search = format!(
-                "{} AI agent OR AI assistant OR LLM tool OR language model",
-                query
-            );
-            let url2 = format!(
-                "https://api.github.com/search/repositories?q={}&per_page={}&sort=stars&order=desc",
-                urlencoding::encode(&ai_search),
-                limit - results.len()
-            );
-
-            let mut request2 = self.client.get(&url2);
-            if let Some(token) = &self.token {
-                request2 = request2.header("Authorization", format!("token {}", token));
-                request2 = request2.header("User-Agent", "AIKIT-Package-Manager/1.0");
-            }
-
-            if let Ok(response2) = request2.send().await {
-                if response2.status().is_success() {
-                    if let Ok(search_result2) = response2.json::<SearchResult>().await {
-                        // Filter out duplicates and add new results
-                        let existing_names: std::collections::HashSet<_> =
-                            results.iter().map(|r| &r.full_name).collect();
-
-                        let new_results: Vec<_> = search_result2
-                            .items
-                            .into_iter()
-                            .filter(|r| !existing_names.contains(&r.full_name))
-                            .collect();
-
-                        results.extend(new_results);
-                    }
-                }
-            }
-        }
-
-        // Limit results
-        results.truncate(limit);
-        Ok(results)
-    }
 
     /// Create a GitHub release
     pub async fn create_release(
@@ -251,33 +183,6 @@ pub struct CommandInfo {
     pub template: Option<String>,
 }
 
-/// GitHub repository information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RepositoryInfo {
-    pub id: u64,
-    pub name: String,
-    pub full_name: String,
-    pub description: Option<String>,
-    pub html_url: String,
-    pub owner: OwnerInfo,
-    pub updated_at: String,
-    pub stargazers_count: u32,
-    pub forks_count: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OwnerInfo {
-    pub login: String,
-    pub id: u64,
-}
-
-/// GitHub search result
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchResult {
-    pub total_count: u32,
-    pub incomplete_results: bool,
-    pub items: Vec<RepositoryInfo>,
-}
 
 /// Release creation information
 #[derive(Debug, Clone, Serialize, Deserialize)]

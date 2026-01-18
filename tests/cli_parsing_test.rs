@@ -258,41 +258,7 @@ mod tests {
 
     /// Test search command parsing
     #[test]
-    fn test_search_basic() {
-        let cli = Cli::try_parse_from(["aikit", "search", "query"]).unwrap();
 
-        match cli.command.unwrap() {
-            aikit::cli::Commands::Search(args) => {
-                assert_eq!(args.query, "query");
-                assert!(!args.detailed);
-                assert_eq!(args.limit, 20); // default value
-            }
-            _ => panic!("Expected Commands::Search"),
-        }
-    }
-
-    /// Test search with options
-    #[test]
-    fn test_search_with_options() {
-        let cli = Cli::try_parse_from([
-            "aikit",
-            "search",
-            "complex query",
-            "--detailed",
-            "--limit",
-            "10",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
-            aikit::cli::Commands::Search(args) => {
-                assert_eq!(args.query, "complex query");
-                assert!(args.detailed);
-                assert_eq!(args.limit, 10);
-            }
-            _ => panic!("Expected Commands::Search"),
-        }
-    }
 
     /// Test release command parsing (renamed version field)
     #[test]

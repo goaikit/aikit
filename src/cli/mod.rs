@@ -12,7 +12,6 @@ mod version;
 pub mod commands {
     pub mod install;
     pub mod package;
-    pub mod search;
 }
 
 use anyhow::Result;
@@ -50,8 +49,6 @@ pub enum Commands {
     Remove(commands::install::RemoveArgs),
     /// List installed packages
     List(commands::install::ListArgs),
-    /// Search for packages in registries
-    Search(commands::search::SearchArgs),
     /// Package management commands (init, build, publish)
     #[command(subcommand)]
     Package(commands::package::PackageCommands),
@@ -86,9 +83,6 @@ pub fn run() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("{}", e))?,
         Some(Commands::List(args)) => rt
             .block_on(commands::install::execute_list(args))
-            .map_err(|e| anyhow::anyhow!("{}", e))?,
-        Some(Commands::Search(args)) => rt
-            .block_on(commands::search::execute_search(args))
             .map_err(|e| anyhow::anyhow!("{}", e))?,
         Some(Commands::Package(cmd)) => match cmd {
             commands::package::PackageCommands::Init(args) => rt

@@ -100,11 +100,21 @@ impl InstallArgs {
     }
 
     fn looks_like_github_source(&self) -> bool {
-        let source = self.source.to_lowercase();
-        source.contains("github.com")
-            || (source.contains('/')
+        let source = &self.source;
+
+        // Exclude relative and absolute paths
+        if source.starts_with("./") || source.starts_with("../") {
+            return false;
+        }
+        if std::path::Path::new(source).is_absolute() {
+            return false;
+        }
+
+        let source_lower = source.to_lowercase();
+        source_lower.contains("github.com")
+            || (source_lower.contains('/')
                 && source.split('/').count() == 2
-                && !std::path::Path::new(&self.source).exists())
+                && !std::path::Path::new(source).exists())
     }
 }
 
@@ -147,7 +157,6 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     use crate::core::filesystem::AikDirectory;
     use crate::core::git::GitHubClient;
     use crate::core::ux::{create_spinner, show_info, show_success, show_warning};
-    use crate::models::package::Package;
     use crate::models::registry::LocalRegistry;
     use std::path::PathBuf;
 
@@ -383,7 +392,7 @@ fn install_from_local_directory(
     };
 
     // Read and parse package file
-    let package_toml_content = fs::read_to_string(&toml_path).map_err(|e| AikError::Io(e))?;
+    let package_toml_content = fs::read_to_string(&toml_path).map_err(AikError::Io)?;
 
     let package =
         crate::models::package::Package::from_toml_str(&package_toml_content).map_err(|e| {
@@ -391,9 +400,7 @@ fn install_from_local_directory(
         })?;
 
     // Validate package
-    package
-        .validate()
-        .map_err(|e| AikError::PackageValidation(e))?;
+    package.validate().map_err(AikError::PackageValidation)?;
 
     // For local installation, we don't need to download an archive
     // We'll install directly from the source directory
@@ -598,8 +605,7 @@ fn load_template_content(
     // 2. Default to templates/{command_name}.md
     let template_path_str = command_def
         .template
-        .as_ref()
-        .map(|t| t.clone())
+        .clone()
         .unwrap_or_else(|| format!("templates/{}.md", command_name));
 
     let template_path = template_path_str.as_str();
@@ -661,7 +667,6 @@ fn generate_commands_for_agent(
 /// Execute update command
 pub async fn execute_update(args: UpdateArgs) -> Result<(), AikError> {
     use crate::core::filesystem::AikDirectory;
-    use crate::core::git::GitHubClient;
     use crate::models::registry::LocalRegistry;
 
     // Validate package name
@@ -672,7 +677,7 @@ pub async fn execute_update(args: UpdateArgs) -> Result<(), AikError> {
     })?;
 
     let registry_path = aik_dir.registry_path();
-    let mut registry =
+    let registry =
         LocalRegistry::load_from_file(&registry_path).unwrap_or_else(|_| LocalRegistry::new());
 
     // Check if package is installed
@@ -810,10 +815,10 @@ pub async fn execute_list(args: ListArgs) -> Result<(), Box<dyn std::error::Erro
     if args.detailed {
         println!("Installed packages:");
         println!(
-            "{:<25} {:<12} {:<15} {}",
-            "Name", "Version", "Author", "Description"
+            "{:<25} {:<12} {:<15} Description",
+            "Name", "Version", "Author"
         );
-        println!("{}", "-".repeat(80));
+        println!("{:-<80}", "");
 
         for package in packages {
             let author = package

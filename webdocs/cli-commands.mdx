@@ -21,7 +21,6 @@ AIKit organizes functionality into logical command groups:
 - **`update`** - Update installed packages to latest versions
 - **`remove`** - Remove installed packages
 - **`list`** - Display installed packages
-- **`search`** - Search for packages in registries
 
 ### Package Development
 - **`package init`** - Initialize new package with aikit.toml
@@ -55,7 +54,6 @@ aikit <command> --help
 | `init` | Create new project | `aikit init my-project` |
 | `check` | Validate environment | `aikit check` |
 | `install` | Install package | `aikit install https://github.com/user/repo` |
-| `search` | Find packages | `aikit search "agent-template"` |
 | `package init` | Create package | `aikit package init` |
 | `list` | Show installed | `aikit list` |
 
@@ -292,43 +290,6 @@ Installed packages:
 ```
 
 *Note: Shows currently installed AIKit packages with version and description information.*
-
-### search
-
-Search for packages in registries.
-
-```bash
-# Search for packages (requires GitHub API access)
-aikit search "agent template"
-
-# Limit results
-aikit search "data processing" --limit 5
-
-# Show detailed information
-aikit search "template" --detailed
-
-# Search specific registry
-aikit search "ai agent" --registry https://custom-registry.com
-```
-
-**Prerequisites:**
-- Network access to GitHub API
-- **GitHub Token Required**: `export GITHUB_TOKEN="your-token"` (avoids rate limits)
-- For private repositories: token with appropriate permissions
-
-**Options:**
-- `--limit <NUMBER>` - Maximum results (default: 20)
-- `--detailed` - Show detailed package information
-- `--registry <URL>` - Custom registry URL (default: GitHub)
-
-**Example output:**
-```bash
-$ aikit search "template" --limit 2
-🔍 Searching for packages: 'template'
-Found packages matching query.
-```
-
-*Note: Search results depend on available packages and GitHub API access. Authentication required for full functionality.*
 
 ## Package Development Commands
 

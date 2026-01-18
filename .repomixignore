@@ -8,3 +8,5 @@ specs
 .cursor
 *.md
 .github
+webdocs
+tests

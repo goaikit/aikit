@@ -9,7 +9,7 @@ AIKIT is a universal package manager for AI agent extensions that enables develo
 ### Package Management System
 - Create packages with reusable AI commands and templates
 - Share packages via GitHub with one command
-- Discover and install community packages
+- Install packages from local directories or GitHub URLs
 - **Local development**: Install packages from local directories (`aikit install .`)
 - **Hierarchical discovery**: Automatically finds `.aikit` directory in parent folders
 - Universal compatibility with 17+ AI agents
@@ -68,7 +68,6 @@ aikit version
 ```bash
 aikit init my-project --ai claude                    # Start Claude project
 aikit package init my-tools --description "Tools"   # Create package
-aikit search "testing"                              # Find packages
 aikit install user/cool-package                     # Install from GitHub
 aikit install .                                     # Install from local directory
 aikit list                                          # Show installed packages
@@ -81,8 +80,7 @@ aikit package init my-tools --description "My AI development tools"
 cd my-tools && aikit package build
 aikit package publish myorg/my-tools
 
-# Discover and install community packages
-aikit search "code analysis"
+# Install packages from GitHub or local directories
 aikit install myorg/useful-tools
 
 # Local development workflow
@@ -185,17 +183,6 @@ aikit remove package-name
 aikit remove package-name --force          # Skip confirmation
 ```
 
-### `aikit search` - Search Packages
-Discover packages in the AIKIT ecosystem.
-
-```bash
-aikit search "testing"
-aikit search "code review" --detailed     # Show detailed results
-aikit search "analysis" --limit 10       # Limit results to 10
-```
-
-Options: `--limit <num>`, `--detailed`, `--registry <url>`
-
 ### `aikit version` - Check Version
 Displays current AIKIT version and checks for updates.
 
@@ -232,7 +219,6 @@ aikit package publish yourusername/code-review-tools
 
 ### Using Community Packages
 ```bash
-aikit search "testing"
 aikit install awesome-org/test-helpers    # Install from GitHub
 aikit install .                          # Install from local directory
 aikit list                               # Show installed packages
@@ -282,7 +268,6 @@ Override with `--script` option.
 - Available tools: `aikit check`
 - Installed packages: `aikit list`
 - Command help: `aikit <command> --help`
-- Package discovery: `aikit search "keyword"`
 
 ## License
 

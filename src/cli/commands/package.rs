@@ -91,6 +91,7 @@ pub struct PackagePublishArgs {
 /// Execute package init command
 pub async fn execute_init(args: PackageInitArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::models::package::Package;
+    use anyhow::Context;
     use std::fs;
     use std::path::Path;
 
@@ -110,12 +111,16 @@ pub async fn execute_init(args: PackageInitArgs) -> Result<(), Box<dyn std::erro
     }
 
     // Create package directory
-    fs::create_dir_all(package_path)?;
+    fs::create_dir_all(&package_path)
+        .with_context(|| format!("Failed to create package directory: {}", package_path.display()))?;
 
     // Create subdirectories
-    fs::create_dir_all(package_path.join("templates"))?;
-    fs::create_dir_all(package_path.join("scripts"))?;
-    fs::create_dir_all(package_path.join("docs"))?;
+    fs::create_dir_all(package_path.join("templates"))
+        .with_context(|| format!("Failed to create templates directory: {}", package_path.join("templates").display()))?;
+    fs::create_dir_all(package_path.join("scripts"))
+        .with_context(|| format!("Failed to create scripts directory: {}", package_path.join("scripts").display()))?;
+    fs::create_dir_all(package_path.join("docs"))
+        .with_context(|| format!("Failed to create docs directory: {}", package_path.join("docs").display()))?;
 
     // Create aikit.toml
     let package = Package::create_template(
@@ -159,7 +164,8 @@ No special configuration required.
     fs::write(
         package_path.join("templates").join("help.md"),
         help_template,
-    )?;
+    )
+    .with_context(|| format!("Failed to write help template: {}", package_path.join("templates").join("help.md").display()))?;
 
     // Create README
     let readme_content = format!(
@@ -201,7 +207,8 @@ Specify your license here.
         package_name, package.package.description, package_name, package_name, package_name
     );
 
-    fs::write(package_path.join("README.md"), readme_content)?;
+    fs::write(package_path.join("README.md"), readme_content)
+        .with_context(|| format!("Failed to write README file: {}", package_path.join("README.md").display()))?;
 
     println!("✅ Package '{}' initialized successfully!", package_name);
     println!("📁 Created directory structure:");
@@ -224,10 +231,11 @@ Specify your license here.
 /// Execute package build command
 pub async fn execute_build(args: PackageBuildArgs) -> Result<(), Box<dyn std::error::Error>> {
     use crate::models::package::Package;
+    use anyhow::Context;
     use std::fs;
-    use std::path::Path;
 
-    let current_dir = std::env::current_dir()?;
+    let current_dir = std::env::current_dir()
+        .with_context(|| "Failed to get current working directory")?;
     let package_path = current_dir.join("aikit.toml");
 
     // Check if aikit.toml exists
@@ -236,13 +244,15 @@ pub async fn execute_build(args: PackageBuildArgs) -> Result<(), Box<dyn std::er
     }
 
     // Load and validate package
-    let package = Package::from_toml_file(&package_path)?;
+    let package = Package::from_toml_file(&package_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load package configuration from {}: {}", package_path.display(), e))?;
     package
         .validate()
         .map_err(|e| format!("Package validation failed: {}", e))?;
 
     // Create output directory
-    fs::create_dir_all(&args.output)?;
+    fs::create_dir_all(&args.output)
+        .with_context(|| format!("Failed to create output directory: {}", args.output))?;
 
     // Build package
     let output_file = build_package(&package, &current_dir, &args)?;
@@ -261,8 +271,6 @@ fn build_package(
     args: &PackageBuildArgs,
 ) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     use std::fs::File;
-    use std::io::Write;
-    use walkdir::WalkDir;
     use zip::write::ZipWriter;
     use zip::CompressionMethod;
 
@@ -281,7 +289,7 @@ fn build_package(
     std::io::Write::write_all(&mut zip, package_toml.as_bytes())?;
 
     // Collect and add artifacts
-    for (pattern, _dest) in &package.artifacts {
+    for pattern in package.artifacts.keys() {
         add_artifacts_to_zip(&mut zip, source_dir, pattern)?;
     }
 
@@ -332,7 +340,7 @@ fn add_artifacts_to_zip(
                 zip::write::FileOptions::default()
                     .compression_method(zip::CompressionMethod::Deflated),
             )?;
-            std::io::Write::write_all(zip, &content)?;
+            zip.write_all(&content)?;
         }
     }
 
@@ -372,7 +380,6 @@ pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std
     use crate::core::git::{GitHubClient, ReleaseInfo};
     use crate::models::package::Package;
     use std::env;
-    use std::fs;
 
     let current_dir = std::env::current_dir()?;
 
