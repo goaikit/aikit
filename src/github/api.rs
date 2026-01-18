@@ -41,9 +41,13 @@ impl GitHubClient {
             .build()
             .context("Failed to create HTTP client")?;
 
+        // Allow overriding the base URL via environment variable (useful for testing)
+        let base_url = std::env::var("GITHUB_API_URL")
+            .unwrap_or_else(|_| "https://api.github.com".to_string());
+
         Ok(Self {
             client,
-            base_url: "https://api.github.com".to_string(),
+            base_url,
             token,
         })
     }
