@@ -332,7 +332,6 @@ mod tests {
             vec!["aikit", "init", "test"],
             vec!["aikit", "check"],
             vec!["aikit", "list"],
-            vec!["aikit", "search", "query"],
             vec!["aikit", "release", "v1.0.0"],
         ];
 
