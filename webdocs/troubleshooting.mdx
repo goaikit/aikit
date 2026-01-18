@@ -169,17 +169,14 @@ aikit config agents update claude
 **Solutions**:
 
 ```bash
-# Search for packages
-aikit search "package-name"
+# Search for packages manually
+# Visit https://github.com/search?q=aikit+package-name&type=repositories
 
-# Check exact package name
-aikit search "package-name" --detailed
+# Check repository exists
+curl -I https://api.github.com/repos/user/package
 
 # Install with verbose output
 aikit install https://github.com/user/package --debug
-
-# Check network connectivity
-curl -I https://api.github.com/repos/user/package
 ```
 
 ### "GitHub token required"
@@ -455,7 +452,7 @@ aikit config set cache.size 50
 aikit config agents disable unused-agent
 
 # Use smaller packages
-aikit search "minimal" --category lightweight
+# Search for lightweight packages at https://github.com/search?q=aikit+minimal&type=repositories
 
 # Monitor memory usage
 aikit stats memory

@@ -324,13 +324,9 @@ Scripts can be referenced in templates or used for package setup.
 Discover packages in the ecosystem:
 
 ```bash
-# Search for packages
-aikit search "code review"
-aikit search "testing" --detailed
-
-# Browse by category
-aikit search "documentation"
-aikit search "ci/cd"
+# Browse packages manually
+# Visit https://github.com/search?q=aikit&type=repositories
+# Or search for specific keywords: https://github.com/search?q=aikit+code+review&type=repositories
 ```
 
 ### Discovering Community Packages
@@ -338,23 +334,20 @@ aikit search "ci/cd"
 Find packages created by the AIKit community:
 
 ```bash
-# Search for packages by keyword
-aikit search "code review"
-aikit search "testing tools" --detailed
+# Browse packages manually at https://github.com/search?q=aikit&type=repositories
 
-# Browse popular packages
-aikit search "popular" --limit 10
-
-# Find packages for specific agents
-aikit search "claude" --limit 5
-aikit search "gemini tools"
+# Search for specific keywords:
+# - Code review: https://github.com/search?q=aikit+code+review&type=repositories
+# - Testing tools: https://github.com/search?q=aikit+testing&type=repositories
+# - Popular packages: Sort by stars on GitHub
+# - Agent-specific: https://github.com/search?q=aikit+claude&type=repositories
 ```
 
-**Search Tips:**
-- Use descriptive keywords like "testing", "code review", "documentation"
-- Add `--detailed` for more information about each package
-- Search results show package name, stars, description, and repository URL
-- Packages are ranked by relevance and popularity
+**Discovery Tips:**
+- Use descriptive keywords in GitHub search like "aikit testing", "aikit code review"
+- Sort by stars to find popular packages
+- Check repository descriptions and README files
+- Look at recent activity and community engagement
 
 ### Installing Packages
 

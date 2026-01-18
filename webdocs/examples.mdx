@@ -127,48 +127,7 @@ aikit install https://github.com/example/package --debug
 ✓ Available commands: aikit run ai-agent-template <command>
 ```
 
-### 4. Search for Packages
-
-**Goal**: Find AIKit packages in registries.
-
-**Prerequisites**: Network access, optional GitHub token
-
-```bash
-# Search for packages
-aikit search "agent template"
-
-# Limit search results
-aikit search "data processing" --limit 5
-
-# Show detailed package information
-aikit search "workflow" --detailed
-
-# Search with debug output
-aikit search "template" --debug
-```
-
-**Expected output**:
-```
-🔍 Searching for packages: 'agent template'
-Found 3 packages:
-
-1. ai-agent-workflow-template
-   ⭐ 45 - Comprehensive workflow templates for AI agents
-   https://github.com/example/ai-agent-workflow-template
-   Tags: workflow, template, automation
-
-2. claude-code-templates
-   ⭐ 23 - Ready-to-use templates for Claude Code
-   https://github.com/example/claude-templates
-   Tags: claude, template, productivity
-
-3. multi-agent-framework
-   ⭐ 12 - Framework for building multi-agent systems
-   https://github.com/example/multi-agent-framework
-   Tags: framework, multi-agent, advanced
-```
-
-### 5. List Installed Packages
+### 4. List Installed Packages
 
 **Goal**: View all installed AIKit packages.
 
@@ -574,22 +533,6 @@ claude --version
 aikit check
 ```
 
-#### Issue: Package Search Returns No Results
-
-**Symptoms**: `aikit search` returns empty results
-
-**Solution**:
-```bash
-# Check network connectivity
-curl https://api.github.com/search/repositories?q=aikit
-
-# Check token permissions
-curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
-
-# Try without token (limited results)
-unset GITHUB_TOKEN
-aikit search "template" --limit 10
-```
 
 #### Issue: Configuration Validation Errors
 
@@ -714,7 +657,7 @@ aikit install  # Install all project dependencies
 aikit check    # Verify environment
 
 # Daily development
-aikit search "new feature"  # Find relevant packages
+# Browse available packages at https://github.com/search?q=aikit&type=repositories
 aikit install <package-url> # Add new dependency
 aikit update               # Update all packages
 
@@ -768,7 +711,7 @@ aikit package init "migrated-commands"
 # Follow prompts to import existing command files
 
 # Install additional packages
-aikit search "workflow" | head -5
+# Browse available packages at https://github.com/search?q=aikit&type=repositories
 aikit install <chosen-package-url>
 
 # Test migration
@@ -793,8 +736,8 @@ aikit init my-ai-project --ai claude
 # 2. Navigate to project
 cd my-ai-project
 
-# 3. Search for useful packages
-aikit search "code review" --limit 3
+# 3. Find useful packages
+# Browse available packages at https://github.com/search?q=aikit&type=repositories
 
 # 4. Install a community package
 aikit install owner/code-review-tools
@@ -881,8 +824,8 @@ git checkout -b feature/add-ai-summarizer
 # 2. Initialize AIKit in the project
 aikit init --here --ai claude
 
-# 3. Search for summarization packages
-aikit search "summarizer" --detailed
+# 3. Find summarization packages
+# Browse available packages at https://github.com/search?q=aikit&type=repositories
 
 # 4. Install and test a summarization package
 aikit install owner/text-summarizer

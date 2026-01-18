@@ -256,9 +256,6 @@ mod tests {
         }
     }
 
-    /// Test search command parsing
-    #[test]
-
     /// Test release command parsing (renamed version field)
     #[test]
     fn test_release_basic() {

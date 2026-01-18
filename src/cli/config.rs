@@ -173,34 +173,6 @@ pub fn build_cli() -> Command {
                 )
         )
         .subcommand(
-            Command::new("search")
-                .about("Search for packages")
-                .arg(
-                    clap::Arg::new("query")
-                        .help("Search query")
-                        .required(true)
-                )
-                .arg(
-                    clap::Arg::new("limit")
-                        .long("limit")
-                        .short('l')
-                        .default_value("20")
-                        .help("Maximum number of results")
-                )
-                .arg(
-                    clap::Arg::new("detailed")
-                        .long("detailed")
-                        .short('d')
-                        .help("Show detailed information")
-                        .action(clap::ArgAction::SetTrue)
-                )
-                .arg(
-                    clap::Arg::new("registry")
-                        .long("registry")
-                        .help("Registry URL")
-                )
-        )
-        .subcommand(
             Command::new("init")
                 .about("Initialize AIKIT project for an AI agent")
                 .arg(
