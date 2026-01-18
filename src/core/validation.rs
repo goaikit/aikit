@@ -85,9 +85,16 @@ pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
 
         // On Windows, also try normalizing backslashes to forward slashes for comparison
         let canonical_normalized = canonical_str.replace('\\', "/");
-        let current_dir_normalized = current_dir_str.replace('\\', "/");
+        let mut current_dir_normalized = current_dir_str.replace('\\', "/");
 
-        if !canonical_normalized.starts_with(&current_dir_normalized) {
+        // Ensure current dir ends with / for proper prefix checking
+        if !current_dir_normalized.ends_with('/') {
+            current_dir_normalized.push('/');
+        }
+
+        // Allow paths that are within the current directory (including the current directory itself)
+        if !canonical_normalized.starts_with(&current_dir_normalized) &&
+           canonical_normalized != current_dir_normalized.trim_end_matches('/') {
             return Err(AikError::InvalidSource(
                 "Path must be within current working directory".to_string(),
             ));
