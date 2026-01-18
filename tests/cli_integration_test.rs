@@ -509,8 +509,12 @@ description = "Test package with invalid name"
             .args(["update", "update-test-pkg"])
             .assert()
             .success()
-            .stdout(predicate::str::contains("Checking for updates to 'update-test-pkg'"))
-            .stdout(predicate::str::contains("No updates available for package 'update-test-pkg'"))
+            .stdout(predicate::str::contains(
+                "Checking for updates to 'update-test-pkg'",
+            ))
+            .stdout(predicate::str::contains(
+                "No updates available for package 'update-test-pkg'",
+            ))
             .stdout(predicate::str::contains("Current version: 0.1.0"));
 
         Ok(())
@@ -595,7 +599,9 @@ description = "Test package with invalid name"
             .args(["remove", "remove-test-pkg", "--force"])
             .assert()
             .success()
-            .stdout(predicate::str::contains("Package 'remove-test-pkg' removed successfully"));
+            .stdout(predicate::str::contains(
+                "Package 'remove-test-pkg' removed successfully",
+            ));
 
         // Verify package is no longer in list
         Command::cargo_bin("aikit")?
@@ -695,9 +701,11 @@ description = "Test package with invalid name"
         let result = Command::cargo_bin("aikit")?
             .current_dir(work.join("publish-test-pkg"))
             .args([
-                "package", "publish",
+                "package",
+                "publish",
                 "test-owner/test-repo",
-                "--token", "test-token"
+                "--token",
+                "test-token",
             ])
             .output()?;
 
@@ -728,9 +736,11 @@ description = "Test package with invalid name"
         Command::cargo_bin("aikit")?
             .current_dir(work.join("unbuilt-pkg"))
             .args([
-                "package", "publish",
+                "package",
+                "publish",
                 "test-owner/test-repo",
-                "--token", "test-token"
+                "--token",
+                "test-token",
             ])
             .assert()
             .failure(); // Should fail because no ZIP file exists
@@ -760,10 +770,7 @@ description = "Test package with invalid name"
         // Try to publish without token - should fail
         Command::cargo_bin("aikit")?
             .current_dir(work.join("no-token-pkg"))
-            .args([
-                "package", "publish",
-                "test-owner/test-repo"
-            ])
+            .args(["package", "publish", "test-owner/test-repo"])
             .assert()
             .failure()
             .stderr(predicate::str::contains("GitHub token required"));
@@ -797,7 +804,11 @@ description = "Test package with invalid name"
 
         // Should find the package file
         let stdout = String::from_utf8_lossy(&result.stdout);
-        assert!(stdout.contains("Found 1 package file") || result.status.success() || !result.status.success());
+        assert!(
+            stdout.contains("Found 1 package file")
+                || result.status.success()
+                || !result.status.success()
+        );
 
         Ok(())
     }
@@ -818,7 +829,9 @@ description = "Test package with invalid name"
             .args(["release", "v1.0.0"])
             .assert()
             .failure()
-            .stderr(predicate::str::contains("No package files found in '.genreleases/'"));
+            .stderr(predicate::str::contains(
+                "No package files found in '.genreleases/'",
+            ));
 
         Ok(())
     }
@@ -837,7 +850,9 @@ description = "Test package with invalid name"
             .args(["release", "v1.0.0"])
             .assert()
             .failure()
-            .stderr(predicate::str::contains("Package directory '.genreleases/' not found"));
+            .stderr(predicate::str::contains(
+                "Package directory '.genreleases/' not found",
+            ));
 
         Ok(())
     }
@@ -854,7 +869,9 @@ description = "Test package with invalid name"
             .args(["release", "1.0.0"]) // Should start with 'v'
             .assert()
             .failure()
-            .stderr(predicate::str::contains("Version '1.0.0' must start with 'v'"));
+            .stderr(predicate::str::contains(
+                "Version '1.0.0' must start with 'v'",
+            ));
 
         Ok(())
     }
