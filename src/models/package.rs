@@ -192,15 +192,25 @@ impl Package {
     pub fn to_toml_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create parent directory: {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directory: {}", parent.display())
+            })?;
         }
 
-        let toml = self.to_toml_string()
-            .map_err(|e| anyhow::anyhow!("Failed to serialize package to TOML for {}: {}", path.display(), e))?;
+        let toml = self.to_toml_string().map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to serialize package to TOML for {}: {}",
+                path.display(),
+                e
+            )
+        })?;
 
-        std::fs::write(path, toml)
-            .with_context(|| format!("Failed to write package configuration to: {}", path.display()))?;
+        std::fs::write(path, toml).with_context(|| {
+            format!(
+                "Failed to write package configuration to: {}",
+                path.display()
+            )
+        })?;
         Ok(())
     }
 

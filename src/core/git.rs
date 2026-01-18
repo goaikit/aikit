@@ -117,7 +117,6 @@ impl GitHubClient {
     }
 
     /// Search repositories for packages
-
     /// Create a GitHub release
     pub async fn create_release(
         &self,
@@ -182,7 +181,6 @@ pub struct CommandInfo {
     pub description: String,
     pub template: Option<String>,
 }
-
 
 /// Release creation information
 #[derive(Debug, Clone, Serialize, Deserialize)]

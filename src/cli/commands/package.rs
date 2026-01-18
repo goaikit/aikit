@@ -111,16 +111,32 @@ pub async fn execute_init(args: PackageInitArgs) -> Result<(), Box<dyn std::erro
     }
 
     // Create package directory
-    fs::create_dir_all(&package_path)
-        .with_context(|| format!("Failed to create package directory: {}", package_path.display()))?;
+    fs::create_dir_all(package_path).with_context(|| {
+        format!(
+            "Failed to create package directory: {}",
+            package_path.display()
+        )
+    })?;
 
     // Create subdirectories
-    fs::create_dir_all(package_path.join("templates"))
-        .with_context(|| format!("Failed to create templates directory: {}", package_path.join("templates").display()))?;
-    fs::create_dir_all(package_path.join("scripts"))
-        .with_context(|| format!("Failed to create scripts directory: {}", package_path.join("scripts").display()))?;
-    fs::create_dir_all(package_path.join("docs"))
-        .with_context(|| format!("Failed to create docs directory: {}", package_path.join("docs").display()))?;
+    fs::create_dir_all(package_path.join("templates")).with_context(|| {
+        format!(
+            "Failed to create templates directory: {}",
+            package_path.join("templates").display()
+        )
+    })?;
+    fs::create_dir_all(package_path.join("scripts")).with_context(|| {
+        format!(
+            "Failed to create scripts directory: {}",
+            package_path.join("scripts").display()
+        )
+    })?;
+    fs::create_dir_all(package_path.join("docs")).with_context(|| {
+        format!(
+            "Failed to create docs directory: {}",
+            package_path.join("docs").display()
+        )
+    })?;
 
     // Create aikit.toml
     let package = Package::create_template(
@@ -165,7 +181,12 @@ No special configuration required.
         package_path.join("templates").join("help.md"),
         help_template,
     )
-    .with_context(|| format!("Failed to write help template: {}", package_path.join("templates").join("help.md").display()))?;
+    .with_context(|| {
+        format!(
+            "Failed to write help template: {}",
+            package_path.join("templates").join("help.md").display()
+        )
+    })?;
 
     // Create README
     let readme_content = format!(
@@ -207,8 +228,12 @@ Specify your license here.
         package_name, package.package.description, package_name, package_name, package_name
     );
 
-    fs::write(package_path.join("README.md"), readme_content)
-        .with_context(|| format!("Failed to write README file: {}", package_path.join("README.md").display()))?;
+    fs::write(package_path.join("README.md"), readme_content).with_context(|| {
+        format!(
+            "Failed to write README file: {}",
+            package_path.join("README.md").display()
+        )
+    })?;
 
     println!("✅ Package '{}' initialized successfully!", package_name);
     println!("📁 Created directory structure:");
@@ -234,8 +259,8 @@ pub async fn execute_build(args: PackageBuildArgs) -> Result<(), Box<dyn std::er
     use anyhow::Context;
     use std::fs;
 
-    let current_dir = std::env::current_dir()
-        .with_context(|| "Failed to get current working directory")?;
+    let current_dir =
+        std::env::current_dir().with_context(|| "Failed to get current working directory")?;
     let package_path = current_dir.join("aikit.toml");
 
     // Check if aikit.toml exists
@@ -244,8 +269,13 @@ pub async fn execute_build(args: PackageBuildArgs) -> Result<(), Box<dyn std::er
     }
 
     // Load and validate package
-    let package = Package::from_toml_file(&package_path)
-        .map_err(|e| anyhow::anyhow!("Failed to load package configuration from {}: {}", package_path.display(), e))?;
+    let package = Package::from_toml_file(&package_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to load package configuration from {}: {}",
+            package_path.display(),
+            e
+        )
+    })?;
     package
         .validate()
         .map_err(|e| format!("Package validation failed: {}", e))?;

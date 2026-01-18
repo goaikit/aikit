@@ -16,11 +16,11 @@ mod tests {
     /// Test package init command with basic functionality
     #[test]
     fn test_package_init_basic() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempdir()?;  // Auto-creates unique temp dir
-        let work = temp.path();  // Path to temp directory
+        let temp = tempdir()?; // Auto-creates unique temp dir
+        let work = temp.path(); // Path to temp directory
 
         Command::cargo_bin("aikit")?
-            .current_dir(work)  // Sets cwd ONLY for spawned process
+            .current_dir(work) // Sets cwd ONLY for spawned process
             .args(["package", "init", "test-package", "--yes"])
             .assert()
             .success()
@@ -31,22 +31,10 @@ mod tests {
 
         // Verify directory structure was created
         assert!(work.join("test-package").exists());
-        assert!(work
-            .join("test-package")
-            .join("aikit.toml")
-            .exists());
-        assert!(work
-            .join("test-package")
-            .join("README.md")
-            .exists());
-        assert!(work
-            .join("test-package")
-            .join("templates")
-            .exists());
-        assert!(work
-            .join("test-package")
-            .join("scripts")
-            .exists());
+        assert!(work.join("test-package").join("aikit.toml").exists());
+        assert!(work.join("test-package").join("README.md").exists());
+        assert!(work.join("test-package").join("templates").exists());
+        assert!(work.join("test-package").join("scripts").exists());
         assert!(work.join("test-package").join("docs").exists());
 
         Ok(())
@@ -55,11 +43,11 @@ mod tests {
     /// Test package init with all options
     #[test]
     fn test_package_init_with_options() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempdir()?;  // Auto-creates unique temp dir
-        let work = temp.path();  // Path to temp directory
+        let temp = tempdir()?; // Auto-creates unique temp dir
+        let work = temp.path(); // Path to temp directory
 
         Command::cargo_bin("aikit")?
-            .current_dir(work)  // Sets cwd ONLY for spawned process
+            .current_dir(work) // Sets cwd ONLY for spawned process
             .args([
                 "package",
                 "init",
@@ -93,8 +81,8 @@ mod tests {
     /// Test package init error when directory exists
     #[test]
     fn test_package_init_directory_exists_error() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempdir()?;  // Auto-creates unique temp dir
-        let work = temp.path();  // Path to temp directory
+        let temp = tempdir()?; // Auto-creates unique temp dir
+        let work = temp.path(); // Path to temp directory
 
         // Create directory first
         fs::create_dir(work.join("existing-package"))?;
@@ -103,7 +91,7 @@ mod tests {
         assert!(work.join("existing-package").exists());
 
         Command::cargo_bin("aikit")?
-            .current_dir(work)  // Sets cwd ONLY for spawned process
+            .current_dir(work) // Sets cwd ONLY for spawned process
             .args(["package", "init", "existing-package"])
             .assert()
             .success() // Note: success because it prompts user, doesn't fail
@@ -115,8 +103,8 @@ mod tests {
     /// Test package build command
     #[test]
     fn test_package_build() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempdir()?;  // Auto-creates unique temp dir
-        let work = temp.path();  // Path to temp directory
+        let temp = tempdir()?; // Auto-creates unique temp dir
+        let work = temp.path(); // Path to temp directory
 
         // First create a package
         Command::cargo_bin("aikit")?
@@ -127,7 +115,7 @@ mod tests {
 
         // Build the package (in package subdirectory)
         Command::cargo_bin("aikit")?
-            .current_dir(work.join("build-test"))  // Different cwd for this process
+            .current_dir(work.join("build-test")) // Different cwd for this process
             .args(["package", "build"])
             .assert()
             .success()
@@ -149,11 +137,11 @@ mod tests {
     /// Test package build error when no aikit.toml
     #[test]
     fn test_package_build_no_toml_error() -> Result<(), Box<dyn std::error::Error>> {
-        let temp_dir = tempdir()?;  // Auto-creates unique temp dir
-        let work = temp_dir.path();  // Path to temp directory
+        let temp_dir = tempdir()?; // Auto-creates unique temp dir
+        let work = temp_dir.path(); // Path to temp directory
 
         Command::cargo_bin("aikit")?
-            .current_dir(work)  // Sets cwd ONLY for spawned process
+            .current_dir(work) // Sets cwd ONLY for spawned process
             .args(["package", "build"])
             .assert()
             .failure()
@@ -165,8 +153,8 @@ mod tests {
     /// Test package build with custom output directory
     #[test]
     fn test_package_build_custom_output() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempdir()?;  // Auto-creates unique temp dir
-        let work = temp.path();  // Path to temp directory
+        let temp = tempdir()?; // Auto-creates unique temp dir
+        let work = temp.path(); // Path to temp directory
 
         // Create package
         Command::cargo_bin("aikit")?
@@ -180,7 +168,7 @@ mod tests {
 
         // Build with custom output (in package subdirectory)
         Command::cargo_bin("aikit")?
-            .current_dir(work.join("custom-output-test"))  // Different cwd for this process
+            .current_dir(work.join("custom-output-test")) // Different cwd for this process
             .args(["package", "build", "--output", "custom-dist"])
             .assert()
             .success();
@@ -229,11 +217,11 @@ mod tests {
     #[test]
     #[ignore] // Temporarily disabled - requires network access to GitHub API
     fn test_init_basic() -> Result<(), Box<dyn std::error::Error>> {
-        let temp_dir = tempdir()?;  // Auto-creates unique temp dir
-        let work = temp_dir.path();  // Path to temp directory
+        let temp_dir = tempdir()?; // Auto-creates unique temp dir
+        let work = temp_dir.path(); // Path to temp directory
 
         Command::cargo_bin("aikit")?
-            .current_dir(work)  // Sets cwd ONLY for spawned process
+            .current_dir(work) // Sets cwd ONLY for spawned process
             .args(["init", "test-project", "--force"]) // --force to skip git checks
             .assert()
             .success()
@@ -258,11 +246,11 @@ mod tests {
     /// Test list command when no packages installed
     #[test]
     fn test_list_no_packages() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempdir()?;  // Auto-creates unique temp dir
-        let work = temp.path();  // Path to temp directory
+        let temp = tempdir()?; // Auto-creates unique temp dir
+        let work = temp.path(); // Path to temp directory
 
         Command::cargo_bin("aikit")?
-            .current_dir(work)  // Sets cwd ONLY for spawned process
+            .current_dir(work) // Sets cwd ONLY for spawned process
             .arg("list")
             .assert()
             .success()
@@ -282,8 +270,8 @@ mod tests {
     /// Test install from local directory
     #[test]
     fn test_install_local_directory() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempdir()?;  // Auto-creates unique temp dir
-        let work = temp.path();  // Path to temp directory
+        let temp = tempdir()?; // Auto-creates unique temp dir
+        let work = temp.path(); // Path to temp directory
 
         // Use unique package name to avoid conflicts
         let package_name = format!("install-test-{}", std::process::id());
@@ -301,7 +289,11 @@ mod tests {
         // Try to install it from local path
         Command::cargo_bin("aikit")?
             .current_dir(work)
-            .args(["install", &work.join(&package_name).to_string_lossy(), "--yes"])
+            .args([
+                "install",
+                &work.join(&package_name).to_string_lossy(),
+                "--yes",
+            ])
             .assert()
             .failure() // Command fails due to AI agent setup, but package installs
             .stdout(predicate::str::contains("Installing"))
@@ -327,7 +319,9 @@ mod tests {
         cmd.arg("--help")
             .assert()
             .success()
-            .stdout(predicate::str::contains("AIKit - Universal template package manager for AI agents"))
+            .stdout(predicate::str::contains(
+                "AIKit - Universal template package manager for AI agents",
+            ))
             .stdout(predicate::str::contains("package"))
             .stdout(predicate::str::contains("install"))
             .stdout(predicate::str::contains("init"));
@@ -413,8 +407,8 @@ mod tests {
     /// Test error handling for invalid package names
     #[test]
     fn test_invalid_package_name() -> Result<(), Box<dyn std::error::Error>> {
-        let temp = tempdir()?;  // Auto-creates unique temp dir
-        let work = temp.path();  // Path to temp directory
+        let temp = tempdir()?; // Auto-creates unique temp dir
+        let work = temp.path(); // Path to temp directory
 
         // Try to create package with invalid name (spaces, special chars)
         Command::cargo_bin("aikit")?
@@ -440,7 +434,7 @@ description = "Test package with invalid name"
 
         // Test build validation (in invalid directory)
         Command::cargo_bin("aikit")?
-            .current_dir(&invalid_dir)  // Different cwd for this process
+            .current_dir(&invalid_dir) // Different cwd for this process
             .args(["package", "build"])
             .assert()
             .failure(); // Should fail validation
