@@ -79,22 +79,9 @@ pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
     // This is a basic check - more sophisticated validation might be needed
     if canonical.is_absolute() {
         let current_dir = std::env::current_dir()?;
-        // Use a more robust comparison that handles Windows case sensitivity and path normalization
-        let canonical_str = canonical.to_string_lossy().to_lowercase();
-        let current_dir_str = current_dir.to_string_lossy().to_lowercase();
 
-        // On Windows, also try normalizing backslashes to forward slashes for comparison
-        let canonical_normalized = canonical_str.replace('\\', "/");
-        let mut current_dir_normalized = current_dir_str.replace('\\', "/");
-
-        // Ensure current dir ends with / for proper prefix checking
-        if !current_dir_normalized.ends_with('/') {
-            current_dir_normalized.push('/');
-        }
-
-        // Allow paths that are within the current directory (including the current directory itself)
-        if !canonical_normalized.starts_with(&current_dir_normalized) &&
-           canonical_normalized != current_dir_normalized.trim_end_matches('/') {
+        // Use Path::starts_with which handles platform differences correctly
+        if !canonical.starts_with(&current_dir) {
             return Err(AikError::InvalidSource(
                 "Path must be within current working directory".to_string(),
             ));
