@@ -190,7 +190,6 @@ pub fn validate_github_owner_name(name: &str) -> Result<(), AikError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn test_validate_package_name_valid() {
