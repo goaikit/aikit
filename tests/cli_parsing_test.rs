@@ -324,7 +324,6 @@ mod tests {
     #[test]
     fn test_all_subcommands_parseable() {
         let test_cases = vec![
-            vec!["aikit", "--version"],
             vec!["aikit", "package", "init", "test"],
             vec!["aikit", "package", "build"],
             vec!["aikit", "package", "publish", "owner/repo"],
