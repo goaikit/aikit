@@ -77,10 +77,16 @@ pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
 
     // Prevent absolute paths that go outside current working directory
     // This is a basic check - more sophisticated validation might be needed
-    if canonical.is_absolute() && !canonical.starts_with(std::env::current_dir()?) {
-        return Err(AikError::InvalidSource(
-            "Path must be within current working directory".to_string(),
-        ));
+    if canonical.is_absolute() {
+        let current_dir = std::env::current_dir()?;
+        // Use a more robust comparison that handles Windows case sensitivity and path normalization
+        let canonical_str = canonical.to_string_lossy().to_lowercase();
+        let current_dir_str = current_dir.to_string_lossy().to_lowercase();
+        if !canonical_str.starts_with(&current_dir_str) {
+            return Err(AikError::InvalidSource(
+                "Path must be within current working directory".to_string(),
+            ));
+        }
     }
 
     Ok(canonical)
