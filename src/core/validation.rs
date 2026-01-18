@@ -82,7 +82,12 @@ pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
         // Use a more robust comparison that handles Windows case sensitivity and path normalization
         let canonical_str = canonical.to_string_lossy().to_lowercase();
         let current_dir_str = current_dir.to_string_lossy().to_lowercase();
-        if !canonical_str.starts_with(&current_dir_str) {
+
+        // On Windows, also try normalizing backslashes to forward slashes for comparison
+        let canonical_normalized = canonical_str.replace('\\', "/");
+        let current_dir_normalized = current_dir_str.replace('\\', "/");
+
+        if !canonical_normalized.starts_with(&current_dir_normalized) {
             return Err(AikError::InvalidSource(
                 "Path must be within current working directory".to_string(),
             ));
