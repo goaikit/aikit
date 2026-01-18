@@ -81,7 +81,9 @@ pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
         let current_dir = std::env::current_dir()?;
 
         // Use Path::starts_with which handles platform differences correctly
-        if !canonical.starts_with(&current_dir) {
+        // On Windows, canonicalize(".") returns the absolute current directory,
+        // which should be allowed
+        if !canonical.starts_with(&current_dir) && canonical != current_dir {
             return Err(AikError::InvalidSource(
                 "Path must be within current working directory".to_string(),
             ));
