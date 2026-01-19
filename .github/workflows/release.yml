@@ -116,21 +116,21 @@ jobs:
 
     steps:
       - name: Download Linux artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: aikit-x86_64-unknown-linux-gnu.tar.gz
           path: ./artifacts
         continue-on-error: true
 
       - name: Download Windows artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: aikit-x86_64-pc-windows-msvc.zip
           path: ./artifacts
         continue-on-error: true
 
       - name: Download Linux musl artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: aikit-x86_64-unknown-linux-musl.tar.gz
           path: ./artifacts
@@ -179,7 +179,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
 
       - name: Download collected artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: release-artifacts
           path: ./artifacts
