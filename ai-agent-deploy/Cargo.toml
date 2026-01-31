@@ -1,0 +1,15 @@
+[package]
+name = "ai-agent-deploy"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Agent catalog and deploy service for AI assistant configurations"
+repository = "https://github.com/goaikit/aikit"
+keywords = ["ai", "agents", "deploy", "catalog", "capabilities"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+
+[dev-dependencies]
+insta = { version = "1.39", features = ["json"] }
+tempfile = "3.12"
