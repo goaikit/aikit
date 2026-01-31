@@ -26,6 +26,8 @@ Cargo.lock
 
 # Test coverage
 coverage/
+coverage-report/
+coverage-report-all/
 *.gcda
 *.gcno
 
@@ -49,3 +51,5 @@ spec-kit
 specs
 .specify
 .cursor
+.newton
+AGENTS.md
