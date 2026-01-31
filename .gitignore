@@ -66,4 +66,5 @@ specs
 .specify
 .cursor
 .newton
+.newton.newton
 AGENTS.md
