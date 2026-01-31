@@ -155,7 +155,7 @@ pub fn skill_dir(
 ///
 /// Returns an error if the agent is not in the catalog.
 pub fn validate_agent_key(key: &str) -> Result<(), DeployError> {
-    if !agent(key).is_some() {
+    if agent(key).is_none() {
         return Err(DeployError::AgentNotFound(key.to_string()));
     }
     Ok(())
@@ -163,57 +163,30 @@ pub fn validate_agent_key(key: &str) -> Result<(), DeployError> {
 
 /// Returns all agents in the catalog.
 pub fn all_agents() -> Vec<AgentConfig> {
-    let mut agents = Vec::new();
-    for &(_, name, commands, skills, subagents) in AGENTS {
-        let skills_opt = if let Some(s) = skills {
-            Some(s.to_string())
-        } else {
-            None
-        };
-
-        let agents_opt = if let Some(a) = subagents {
-            Some(a.to_string())
-        } else {
-            None
-        };
-
-        agents.push(AgentConfig {
-            name: name.to_string(),
-            commands_dir: commands.to_string(),
-            skills_dir: skills_opt,
-            agents_dir: agents_opt,
-        });
-    }
-    agents
+    AGENTS
+        .iter()
+        .map(|entry| AgentConfig {
+            name: entry.name.to_string(),
+            commands_dir: entry.commands.to_string(),
+            skills_dir: entry.skills.map(|s| s.to_string()),
+            agents_dir: entry.subagents.map(|a| a.to_string()),
+        })
+        .collect()
 }
 
 /// Returns an agent by key.
 ///
 /// Returns `None` if the agent is not in the catalog.
 pub fn agent(key: &str) -> Option<AgentConfig> {
-    for &(k, name, commands, skills, subagents) in AGENTS {
-        if k == key {
-            let skills_opt = if let Some(s) = skills {
-                Some(s.to_string())
-            } else {
-                None
-            };
-
-            let agents_opt = if let Some(a) = subagents {
-                Some(a.to_string())
-            } else {
-                None
-            };
-
-            return Some(AgentConfig {
-                name: name.to_string(),
-                commands_dir: commands.to_string(),
-                skills_dir: skills_opt,
-                agents_dir: agents_opt,
-            });
-        }
-    }
-    None
+    AGENTS
+        .iter()
+        .find(|entry| entry.key == key)
+        .map(|entry| AgentConfig {
+            name: entry.name.to_string(),
+            commands_dir: entry.commands.to_string(),
+            skills_dir: entry.skills.map(|s| s.to_string()),
+            agents_dir: entry.subagents.map(|a| a.to_string()),
+        })
 }
 
 /// Deploys a command to an agent's commands directory.
@@ -299,97 +272,152 @@ pub fn deploy_subagent(
     Ok(subagent_path)
 }
 
-/// Agent catalog containing all supported agents and their capabilities.
-const AGENTS: &[(&str, &str, &str, Option<&str>, Option<&str>)] = &[
-    (
-        "claude",
-        "Claude Code",
-        ".claude/commands",
-        Some(".claude/skills"),
-        Some(".claude/agents"),
-    ),
-    (
-        "gemini",
-        "Google Gemini",
-        ".gemini/commands",
-        Some(".gemini/skills"),
-        Some(".gemini/agents"),
-    ),
-    (
-        "copilot",
-        "GitHub Copilot",
-        ".github/agents",
-        None,
-        Some(".github/agents"),
-    ),
-    (
-        "cursor-agent",
-        "Cursor",
-        ".cursor/commands",
-        Some(".cursor/skills"),
-        Some(".cursor/agents"),
-    ),
-    ("qwen", "Qwen Code", ".qwen/commands", None, None),
-    ("opencode", "opencode", ".opencode/commands", None, None),
-    (
-        "codex",
-        "Codex CLI",
-        ".codex/prompts",
-        Some(".codex/skills"),
-        None,
-    ),
-    (
-        "windsurf",
-        "Windsurf",
-        ".windsurf/workflows",
-        Some(".windsurf/skills"),
-        None,
-    ),
-    (
-        "kilocode",
-        "Kilo Code",
-        ".kilocode/workflows",
-        Some(".kilocode/skills"),
-        None,
-    ),
-    (
-        "auggie",
-        "Auggie CLI",
-        ".augment/commands",
-        Some(".augment/skills"),
-        Some(".augment/agents"),
-    ),
-    (
-        "roo",
-        "Roo Code",
-        ".roo/commands",
-        Some(".roo/skills"),
-        None,
-    ),
-    (
-        "codebuddy",
-        "CodeBuddy CLI",
-        ".codebuddy/commands",
-        None,
-        None,
-    ),
-    (
-        "qoder",
-        "Qoder CLI",
-        ".qoder/commands",
-        None,
-        Some(".qoder/agents"),
-    ),
-    ("amp", "Amp", ".agents/commands", None, None),
-    ("shai", "SHAI", ".shai/commands", None, None),
-    ("q", "Amazon Q Developer", ".amazonq/prompts", None, None),
-    ("bob", "IBM Bob", ".bob/commands", None, None),
+/// Agent catalog entry containing all supported agents and their capabilities.
+struct AgentEntry<'a> {
+    key: &'a str,
+    name: &'a str,
+    commands: &'a str,
+    skills: Option<&'a str>,
+    subagents: Option<&'a str>,
+}
+
+const AGENTS: &[AgentEntry] = &[
+    AgentEntry {
+        key: "claude",
+        name: "Claude Code",
+        commands: ".claude/commands",
+        skills: Some(".claude/skills"),
+        subagents: Some(".claude/agents"),
+    },
+    AgentEntry {
+        key: "gemini",
+        name: "Google Gemini",
+        commands: ".gemini/commands",
+        skills: Some(".gemini/skills"),
+        subagents: Some(".gemini/agents"),
+    },
+    AgentEntry {
+        key: "copilot",
+        name: "GitHub Copilot",
+        commands: ".github/agents",
+        skills: None,
+        subagents: Some(".github/agents"),
+    },
+    AgentEntry {
+        key: "cursor-agent",
+        name: "Cursor",
+        commands: ".cursor/commands",
+        skills: Some(".cursor/skills"),
+        subagents: Some(".cursor/agents"),
+    },
+    AgentEntry {
+        key: "qwen",
+        name: "Qwen Code",
+        commands: ".qwen/commands",
+        skills: None,
+        subagents: None,
+    },
+    AgentEntry {
+        key: "opencode",
+        name: "opencode",
+        commands: ".opencode/commands",
+        skills: None,
+        subagents: None,
+    },
+    AgentEntry {
+        key: "codex",
+        name: "Codex CLI",
+        commands: ".codex/prompts",
+        skills: Some(".codex/skills"),
+        subagents: None,
+    },
+    AgentEntry {
+        key: "windsurf",
+        name: "Windsurf",
+        commands: ".windsurf/workflows",
+        skills: Some(".windsurf/skills"),
+        subagents: None,
+    },
+    AgentEntry {
+        key: "kilocode",
+        name: "Kilo Code",
+        commands: ".kilocode/workflows",
+        skills: Some(".kilocode/skills"),
+        subagents: None,
+    },
+    AgentEntry {
+        key: "auggie",
+        name: "Auggie CLI",
+        commands: ".augment/commands",
+        skills: Some(".augment/skills"),
+        subagents: Some(".augment/agents"),
+    },
+    AgentEntry {
+        key: "roo",
+        name: "Roo Code",
+        commands: ".roo/commands",
+        skills: Some(".roo/skills"),
+        subagents: None,
+    },
+    AgentEntry {
+        key: "codebuddy",
+        name: "CodeBuddy CLI",
+        commands: ".codebuddy/commands",
+        skills: None,
+        subagents: None,
+    },
+    AgentEntry {
+        key: "qoder",
+        name: "Qoder CLI",
+        commands: ".qoder/commands",
+        skills: None,
+        subagents: Some(".qoder/agents"),
+    },
+    AgentEntry {
+        key: "amp",
+        name: "Amp",
+        commands: ".agents/commands",
+        skills: None,
+        subagents: None,
+    },
+    AgentEntry {
+        key: "shai",
+        name: "SHAI",
+        commands: ".shai/commands",
+        skills: None,
+        subagents: None,
+    },
+    AgentEntry {
+        key: "q",
+        name: "Amazon Q Developer",
+        commands: ".amazonq/prompts",
+        skills: None,
+        subagents: None,
+    },
+    AgentEntry {
+        key: "bob",
+        name: "IBM Bob",
+        commands: ".bob/commands",
+        skills: None,
+        subagents: None,
+    },
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    use insta::assert_snapshot;
+
+    fn with_snapshot_path<F, R>(f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let mut settings = insta::Settings::clone_current();
+        settings.set_snapshot_path("../tests/fixture/snapshots");
+        settings.bind(f)
+    }
 
     #[test]
     fn test_all_agents_count() {
@@ -558,6 +586,86 @@ mod tests {
         assert_eq!(command_filename("shai", "test"), "test.command");
         assert_eq!(command_filename("q", "test"), "test.prompt");
         assert_eq!(command_filename("bob", "test"), "test.command");
+    }
+
+    #[test]
+    fn test_deployed_command_snapshot() {
+        with_snapshot_path(|| {
+            let temp_dir = TempDir::new().unwrap();
+            let content = "# My Command\nHello World";
+
+            let path = deploy_command("claude", temp_dir.path(), "test-command", content).unwrap();
+
+            let deployed_content = fs::read_to_string(&path).unwrap();
+            assert_snapshot!(deployed_content, @"# My Command\nHello World");
+        });
+    }
+
+    #[test]
+    fn test_deployed_skill_snapshot() {
+        let temp_dir = TempDir::new().unwrap();
+        let skill_md = "# Skill Name\n\nDescription here.";
+        let scripts: &[(&str, &[u8])] = &[
+            ("setup.sh", b"#!/bin/sh\necho 'setup'"),
+            ("cleanup.sh", b"#!/bin/sh\necho 'cleanup'"),
+        ];
+
+        let path = deploy_skill(
+            "cursor-agent",
+            temp_dir.path(),
+            "my-skill",
+            skill_md,
+            Some(scripts),
+        )
+        .unwrap();
+
+        let skill_content = fs::read_to_string(&path).unwrap();
+        assert_snapshot!(skill_content, @"# Skill Name\n\nDescription here.");
+
+        let setup_content =
+            fs::read_to_string(path.parent().unwrap().join("scripts/setup.sh")).unwrap();
+        assert_snapshot!(setup_content, @"#!/bin/sh
+echo 'setup'");
+
+        let cleanup_content =
+            fs::read_to_string(path.parent().unwrap().join("scripts/cleanup.sh")).unwrap();
+        assert_snapshot!(cleanup_content, @"#!/bin/sh
+echo 'cleanup'");
+    }
+
+    #[test]
+    fn test_deployed_subagent_snapshot() {
+        with_snapshot_path(|| {
+            let temp_dir = TempDir::new().unwrap();
+            let content = "# My Subagent\nConfig here.";
+
+            let path = deploy_subagent("claude", temp_dir.path(), "my-agent", content).unwrap();
+
+            let deployed_content = fs::read_to_string(&path).unwrap();
+            assert_snapshot!(deployed_content, @"# My Subagent\nConfig here.");
+        });
+    }
+
+    #[test]
+    fn test_copilot_subagent_filename_snapshot() {
+        with_snapshot_path(|| {
+            assert_snapshot!(subagent_filename("copilot", "my-agent"), @"my-agent.agent.md");
+            assert_snapshot!(subagent_filename("claude", "test"), @"test.md");
+        });
+    }
+
+    #[test]
+    fn test_all_agents_catalog_snapshot() {
+        with_snapshot_path(|| {
+            let agents = all_agents();
+            let catalog: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+            let catalog_str = catalog
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_snapshot!(catalog_str);
+        });
     }
 }
 

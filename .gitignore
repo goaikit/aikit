@@ -31,6 +31,20 @@ coverage-report-all/
 *.gcda
 *.gcno
 
+# Test outputs
+*.out
+test_results/
+test_results.json
+test_results.md
+test_artifacts/
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+*~
+*.log
+
 # Documentation
 /book/
 

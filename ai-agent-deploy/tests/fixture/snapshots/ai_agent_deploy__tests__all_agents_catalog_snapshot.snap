@@ -1,0 +1,22 @@
+---
+source: src/lib.rs
+assertion_line: 646
+expression: "catalog_str"
+---
+Claude Code
+Google Gemini
+GitHub Copilot
+Cursor
+Qwen Code
+opencode
+Codex CLI
+Windsurf
+Kilo Code
+Auggie CLI
+Roo Code
+CodeBuddy CLI
+Qoder CLI
+Amp
+SHAI
+Amazon Q Developer
+IBM Bob
