@@ -18,7 +18,7 @@ pub struct VersionArgs {
 
 /// Execute the version command
 pub async fn execute(args: VersionArgs) -> Result<()> {
-    // Get CLI version from Cargo.toml
+    // Get CLI version
     let cli_version = env!("CARGO_PKG_VERSION");
 
     // Get system information

@@ -38,12 +38,27 @@ test_results.json
 test_results.md
 test_artifacts/
 
+# Test snapshots
+tests/snapshots/*.snap
+tests/snapshots/*.snap.toml
+
 # Temporary files
 *.tmp
 *.swp
 *.swo
 *~
 *.log
+
+# Package build artifacts
+dist/
+.genreleases/
+
+# Editor files
+.vscode/
+.idea/
+
+# Cargo directories
+**/*.rs.bk
 
 # Documentation
 /book/
