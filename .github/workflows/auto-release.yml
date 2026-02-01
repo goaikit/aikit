@@ -146,19 +146,12 @@ jobs:
           CURRENT="${{ steps.versions.outputs.current }}"
           LAST="${{ steps.versions.outputs.last }}"
 
-          if [ "$CURRENT" != "$LAST" ]; then
-            # Developer already bumped version in their PR - use it
-            echo "version=$CURRENT" >> $GITHUB_OUTPUT
-            echo "needs_bump=false" >> $GITHUB_OUTPUT
-            echo "Developer set version: $CURRENT (was $LAST)"
-          else
-            # Auto-bump patch version
-            IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-            NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-            echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
-            echo "needs_bump=true" >> $GITHUB_OUTPUT
-            echo "Auto-bumping patch: $CURRENT -> $NEW_VERSION"
-          fi
+          # Always create a release (auto-bump patch version if needed)
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
+          NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "needs_bump=true" >> $GITHUB_OUTPUT
+          echo "Auto-bumping patch version: $CURRENT -> $NEW_VERSION"
 
       - name: Update Cargo.toml version
         if: steps.check-label.outputs.skip != 'true' && steps.release.outputs.needs_bump == 'true'
@@ -178,7 +171,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add Cargo.toml
-          git commit -m "chore: bump version to $VERSION [skip ci]"
+          git commit -m "chore: auto-bump version to $VERSION for release [skip ci]"
           git push origin HEAD:refs/heads/main
 
       - name: Create and push tag

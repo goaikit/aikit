@@ -1,277 +1,96 @@
 # AIKIT - Universal Package Manager for AI Agent Extensions
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-
-AIKIT is a universal package manager for AI agent extensions that enables developers to create, share, and discover reusable AI commands and templates. It streamlines AI-powered development workflows by providing a standardized way to package and distribute AI tools across 17+ AI assistants including Claude, Cursor, GitHub Copilot, and Gemini. The tool reduces setup time, ensures consistency across projects, and fosters a community-driven ecosystem of AI development resources.
-
-## Features
-
-### Package Management System
-- Create packages with reusable AI commands and templates
-- Share packages via GitHub with one command
-- Install packages from local directories or GitHub URLs
-- **Local development**: Install packages from local directories (`aikit install .`)
-- **Hierarchical discovery**: Automatically finds `.aikit` directory in parent folders
-- Universal compatibility with 17+ AI agents
-
-### Project Templates
-- One-command setup for new AI-powered projects
-- Support for 17 AI assistants (Claude, Cursor, Copilot, Gemini, etc.)
-- Interactive selection and automatic Git initialization
-- Cross-platform support (Windows, Linux)
-
-### Technical Features
-- **Environment configuration**: Automatic `.env` file loading for GitHub tokens
-- **Smart template loading**: Loads actual template content, not placeholders
-- **Correct command placement**: Agent commands created at project root level
-- Type-safe Rust implementation with comprehensive error handling
-- Fast performance: <30s package installation, <1s command generation
-- Extensible architecture for custom packages and agents
-- Backward compatible with existing functionality
+AIKIT is a universal package manager for AI agent extensions. Create, share, and discover reusable AI commands and templates across 17+ AI assistants including Claude, Cursor, GitHub Copilot, and Gemini.
 
 ## Installation
 
-### Option 1: Release Binaries (Recommended)
-Download the latest release from [GitHub Releases](https://github.com/goaikit/aikit/releases):
-- Linux GNU: `aikit-x86_64-unknown-linux-gnu.tar.gz`
-- Linux MUSL: `aikit-x86_64-unknown-linux-musl.tar.gz`
-- Windows: `aikit-x86_64-pc-windows-msvc.zip`
+### Linux (GNU)
+```bash
+curl -L https://github.com/goaikit/aikit/releases/latest/download/aikit-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv aikit /usr/local/bin/
+```
 
-Extract and add to your PATH, then make executable on Unix systems.
+### Linux (MUSL/Universal)
+```bash
+curl -L https://github.com/goaikit/aikit/releases/latest/download/aikit-x86_64-unknown-linux-musl.tar.gz | tar xz
+sudo mv aikit /usr/local/bin/
+```
 
-### Option 2: Homebrew (Linux)
+### Homebrew (Linux)
 ```bash
 brew install goaikit/cli/aikit
 ```
 
-### Option 3: Scoop (Windows)
+### Scoop (Windows)
 ```powershell
 scoop bucket add goaikit https://github.com/goaikit/scoop-bucket
 scoop install aikit
 ```
 
-### Configuration
-Create a `.env` file in your project root for GitHub authentication:
-```bash
-# .env
-GITHUB_TOKEN=your_github_token_here
-```
-
-### Verify Installation
-```bash
-aikit version
-```
+### Windows
+Download from [GitHub Releases](https://github.com/goaikit/aikit/releases/latest) and add to PATH.
 
 ## Quick Start
 
-### 1-Line Examples
 ```bash
-aikit init my-project --ai claude                    # Start Claude project
-aikit package init my-tools --description "Tools"   # Create package
-aikit install user/cool-package                     # Install from GitHub
-aikit install .                                     # Install from local directory
-aikit list                                          # Show installed packages
-```
-
-### Package Ecosystem
-```bash
-# Create and publish a package
-aikit package init my-tools --description "My AI development tools"
-cd my-tools && aikit package build
-aikit package publish myorg/my-tools
-
-# Install packages from GitHub or local directories
-aikit install myorg/useful-tools
-
-# Local development workflow
-cd my-package && aikit install .           # Install from local directory
-aikit list                                 # Verify installation
-```
-
-### Local Installation
-Install packages directly from local directories for development and testing:
-
-```bash
-# Install from current directory (must contain aikit.toml)
-aikit install .
-
-# Install from specific directory path
-aikit install /path/to/my-package
-
-# Install with specific AI agent selection
-aikit install . --ai claude
-```
-
-**Requirements for Local Installation:**
-- Directory must contain an `aikit.toml` file
-- Package structure should be valid (use `aikit package validate` to check)
-- Templates and scripts should be in the correct locations
-
-**Note on ZIP Files:**
-- ZIP file extraction happens automatically when installing from GitHub
-- Local ZIP file installation is not supported - use the extracted directory instead
-- For package distribution, use `aikit package publish` which creates and uploads ZIP files to GitHub releases
-
-### Project Templates
-```bash
-# Interactive project setup
-aikit init my-project
-
-# Direct setup with specific AI assistant
+# Create a new AI-powered project
 aikit init my-project --ai claude
-cd existing-project && aikit init --here --ai copilot
-```
 
-### Check Available Tools
-```bash
-aikit check    # See which AI assistants are available
+# Install AI commands from the community
+aikit install username/package-name
+
+# See what AI assistants are available
+aikit check
+
+# List installed packages
+aikit list
 ```
 
 ## Commands
 
-### `aikit init` - Create New Projects
-Creates project folders with AI assistant templates and configuration.
+| Command | Description |
+|---------|-------------|
+| `aikit init <name>` | Create new project with AI assistant templates |
+| `aikit install <pkg>` | Install packages from GitHub or local directories |
+| `aikit list` | Show installed packages |
+| `aikit update <pkg>` | Update a package to latest version |
+| `aikit remove <pkg>` | Uninstall a package |
+| `aikit check` | Check available AI assistants |
+| `aikit version` | Show version |
+
+## Creating Packages
 
 ```bash
-aikit init project-name                    # Interactive setup
-aikit init project-name --ai claude       # Specific AI assistant
-aikit init --here --ai copilot           # Setup in current folder
-```
-
-Options: `--ai <name>`, `--here`, `--force`, `--no-git`, `--script <sh|ps>`
-
-### `aikit check` - Check Available Tools
-Shows which AI assistants and development tools are installed.
-
-```bash
-aikit check
-```
-
-### `aikit install` - Install Packages
-Install AIKIT packages from GitHub or local directories.
-
-```bash
-aikit install user/package-name              # Install from GitHub
-aikit install .                             # Install from current directory
-aikit install --token TOKEN user/package    # Use specific GitHub token
-```
-
-Options: `--version <ver>`, `--token <token>`, `--force`, `--yes`, `--ai <agent>`
-
-### `aikit list` - List Installed Packages
-Show all installed AIKIT packages.
-
-```bash
-aikit list
-aikit list --author username               # Filter by author
-aikit list --detailed                      # Show detailed information
-```
-
-### `aikit update` - Update Packages
-Update installed packages to their latest versions.
-
-```bash
-aikit update package-name
-aikit update package-name --breaking    # Allow breaking changes
-```
-
-### `aikit remove` - Remove Packages
-Uninstall AIKIT packages.
-
-```bash
-aikit remove package-name
-aikit remove package-name --force          # Skip confirmation
-```
-
-### `aikit version` - Check Version
-Displays current AIKIT version and checks for updates.
-
-```bash
-aikit version
-```
-
-## Troubleshooting
-
-### Template Download Issues
-- Check internet connection
-- **GitHub token**: Create `.env` file with `GITHUB_TOKEN=your_token` or use `--token` flag
-- Verify GitHub access for private repositories
-
-### Agent Not Found
-- Use `aikit check` to see available assistants
-- Use correct case (e.g., `claude`, not `Claude`)
-- Run `aikit init` interactively for menu
-
-### Permission Errors
-- Make file executable: `chmod +x aikit`
-- Check write permissions in target folder
-
-## Package Management
-
-### Creating Packages
-```bash
-aikit package init code-review-tools --description "AI-powered code review tools"
-cd code-review-tools
-# Edit aikit.toml and add templates
-aikit package build
-aikit package publish yourusername/code-review-tools
-```
-
-### Using Community Packages
-```bash
-aikit install awesome-org/test-helpers    # Install from GitHub
-aikit install .                          # Install from local directory
-aikit list                               # Show installed packages
-aikit update test-helpers                # Update package
-aikit remove old-package                 # Remove package
-```
-
-### Local Package Development
-```bash
-# Develop packages locally
+# Create a new package
 aikit package init my-tools
-cd my-tools
-# Edit aikit.toml and templates/
-aikit install .                         # Test installation locally
-aikit package build                     # Build for distribution
-aikit package publish myorg/my-tools    # Publish to GitHub
+
+# Build and publish to GitHub
+aikit package build
+aikit package publish username/my-tools
 ```
 
-**Notes:**
-- `.aikit` directory is automatically discovered by searching up the directory hierarchy
-- Local installation supports `aikit.toml` configuration files
-- GitHub authentication via `.env` file, environment variables, or `--token` flag
-- Agent command files are created at the project root level (same level as `.aikit`)
-- Templates are loaded with actual content, not placeholder text
+## Configuration
+
+Create a `.env` file in your project for GitHub authentication:
+
+```bash
+GITHUB_TOKEN=your_github_token_here
+```
+
+Or use the `--token` flag when installing packages.
 
 ## Supported AI Assistants
 
-AIKIT works with 17+ AI coding assistants for both packages and project templates.
+AIKIT supports 17+ AI assistants:
 
-### Universal Package Support
-All packages work with: Claude Code, Cursor, GitHub Copilot, Google Gemini, Continue, Windsurf, KiloCode, Roo Code, Bolt.new, Lovable, V0, Grok, Aider, OpenRouter, Marvin, Cody, and more.
+**CLI-Based:** Claude, Gemini, Qwen, OpenCode, Codex, Auggie, CodeBuddy, Qoder, Q, Amp, Shai
 
-### Template Support
-CLI-Based: Claude, Gemini, Qwen, OpenCode, Codex, Auggie, CodeBuddy, Qoder, Q, Amp, Shai
-IDE-Based: GitHub Copilot, Cursor Agent, Windsurf, KiloCode, Roo, Bob
+**IDE-Based:** GitHub Copilot, Cursor, Windsurf, KiloCode, Roo, Bob
 
-Run `aikit check` to see available assistants.
-
-### Script Types
-- Bash (.sh) - Default on Linux
-- PowerShell (.ps1) - Default on Windows
-Override with `--script` option.
-
-## Getting Help
-
-- Version: `aikit --version` or `aikit version`
-- Available tools: `aikit check`
-- Installed packages: `aikit list`
-- Command help: `aikit <command> --help`
+Run `aikit check` to see which are installed on your system.
 
 ## License
 
-Apache License, Version 2.0 - See [LICENSE](LICENSE) file for details.
+Apache License 2.0 - See [LICENSE](LICENSE)
 
-Need help? Open an issue on [GitHub](https://github.com/goaikit/aikit/issues).
-# Test release trigger
+Need help? [Open an issue](https://github.com/goaikit/aikit/issues)
