@@ -73,6 +73,9 @@ which = "8.0"
 assert_cmd = "2.0"
 predicates = "3.0"
 
+# Snapshot testing
+insta = { version = "1.41", features = ["serde"] }
+
 [profile.release]
 opt-level = 3
 lto = true
