@@ -3,8 +3,6 @@
 //! This module contains types and functions for managing AI agent configurations,
 //! including agent selection, validation, and tool checking.
 
-use std::collections::HashMap;
-
 /// Script variant (bash or PowerShell)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScriptVariant {
@@ -168,7 +166,7 @@ static EXTRAS: &[(&str, Option<&str>, bool, &str, &str)] = &[
 /// This is the single source of truth for all supported AI agents.
 /// Delegates to ai-agent-deploy for catalog data and uses extras table for aikit-specific fields.
 pub fn get_agent_configs() -> Vec<AgentConfig> {
-    use ai_agent_deploy::{all_agents, AgentConfig as DeployConfig};
+    use ai_agent_deploy::all_agents;
 
     all_agents()
         .into_iter()
@@ -212,7 +210,7 @@ pub fn get_agent_configs() -> Vec<AgentConfig> {
 ///
 /// Delegates to ai-agent-deploy for catalog data and uses extras table for aikit-specific fields.
 pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
-    use ai_agent_deploy::{agent, AgentConfig as DeployConfig};
+    use ai_agent_deploy::agent;
 
     let deploy_config = agent(key)?;
     let extras = EXTRAS.iter().find(|(k, _, _, _, _)| *k == key);
