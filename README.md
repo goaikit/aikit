@@ -32,17 +32,46 @@ Download from [GitHub Releases](https://github.com/goaikit/aikit/releases/latest
 
 ## Quick Start
 
+### Create a package and deploy to Cursor and Claude
+
 ```bash
-# Create a new AI-powered project
+# 1. Create a new package (defines aikit.toml and template layout)
+aikit package init my-tools --description "My AI commands"
+
+# 2. Enter the package and add your templates (rules, skills, prompts)
+cd my-tools
+# Edit aikit.toml and add files under templates/ as needed
+
+# 3. Build the package (produces dist/ or agent-specific zips)
+aikit package build
+
+# 4. Publish to GitHub (creates release and uploads assets)
+aikit package publish username/my-tools
+# Or: push repo first, then aikit release v1.0.0
+
+# 5. Install the package for Cursor (in a project that uses Cursor)
+cd /path/to/your-project
+aikit install username/my-tools --ai cursor
+
+# 6. Install the same package for Claude (e.g. in another project or --ai claude)
+aikit install username/my-tools --ai claude
+
+# 7. Verify: list installed packages and check available agents
+aikit list
+aikit check
+```
+
+### Use an existing project with an AI assistant
+
+```bash
+# Create a new Spec-Driven Development project with Claude templates
 aikit init my-project --ai claude
 
-# Install AI commands from the community
+# Or set up in the current directory for Cursor
+aikit init --here --ai cursor
+
+# Install a community package
 aikit install username/package-name
-
-# See what AI assistants are available
-aikit check
-
-# List installed packages
 aikit list
 ```
 
@@ -50,44 +79,54 @@ aikit list
 
 | Command | Description |
 |---------|-------------|
-| `aikit init <name>` | Create new project with AI assistant templates |
-| `aikit install <pkg>` | Install packages from GitHub or local directories |
-| `aikit list` | Show installed packages |
-| `aikit update <pkg>` | Update a package to latest version |
-| `aikit remove <pkg>` | Uninstall a package |
-| `aikit check` | Check available AI assistants |
+| `aikit init [name]` | Initialize a Spec-Driven Development project with AI assistant templates |
+| `aikit install <source>` | Install packages from GitHub (owner/repo) or local directory |
+| `aikit list` | Show installed packages (optional: `--author`, `--detailed`) |
+| `aikit update <pkg>` | Update a package to latest version (optional: `--breaking`) |
+| `aikit remove <pkg>` | Uninstall a package (optional: `--force`) |
+| `aikit check` | Check git, VS Code, and AI agent CLIs availability |
 | `aikit version` | Show version |
+| `aikit package init <name>` | Create a new package with aikit.toml |
+| `aikit package build` | Build distributable package (output: dist/ or .genreleases/) |
+| `aikit package publish <owner/repo>` | Publish package to GitHub (release and assets) |
+| `aikit release <version>` | Create GitHub release from .genreleases/ (e.g. v1.0.0) |
 
-## Creating Packages
+## Creating and publishing packages
 
 ```bash
-# Create a new package
-aikit package init my-tools
+# Create package
+aikit package init my-tools --description "AI dev tools" --package-version 0.1.0
 
-# Build and publish to GitHub
+# Add templates and edit aikit.toml, then build
 aikit package build
+
+# Publish (creates GitHub release and uploads)
 aikit package publish username/my-tools
+
+# If you use a flow that produces zips in .genreleases/, create the release with:
+# aikit release v1.0.0 --notes-file release_notes.md
 ```
 
 ## Configuration
 
-Create a `.env` file in your project for GitHub authentication:
+- **GitHub auth:** Set `GITHUB_TOKEN` or `GH_TOKEN` in `.env` or use `--token` / `--github-token` on install, init, or release.
+- **Package manifest:** Each package has an `aikit.toml` (name, version, description). Required for local installs and for publish.
+
+Example `.env`:
 
 ```bash
 GITHUB_TOKEN=your_github_token_here
 ```
 
-Or use the `--token` flag when installing packages.
-
-## Supported AI Assistants
+## Supported AI assistants
 
 AIKIT supports 17+ AI assistants:
 
-**CLI-Based:** Claude, Gemini, Qwen, OpenCode, Codex, Auggie, CodeBuddy, Qoder, Q, Amp, Shai
+**CLI-based:** Claude, Gemini, Qwen, OpenCode, Codex, Auggie, CodeBuddy, Qoder, Q, Amp, Shai
 
-**IDE-Based:** GitHub Copilot, Cursor, Windsurf, KiloCode, Roo, Bob
+**IDE-based:** GitHub Copilot, Cursor, Windsurf, KiloCode, Roo, Bob
 
-Run `aikit check` to see which are installed on your system.
+Run `aikit check` to see which are installed on your system (git and VS Code are also checked).
 
 ## License
 
