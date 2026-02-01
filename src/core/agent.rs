@@ -72,22 +72,94 @@ pub struct AgentConfig {
 /// Extras table for agent-specific configuration
 /// Maps agent keys to (install_url, requires_cli, output_format, arg_placeholder, folder)
 static EXTRAS: &[(&str, Option<&str>, bool, &str, &str)] = &[
-    ("claude", Some("https://claude.ai/code"), true, "$ARGUMENTS", ".claude"),
-    ("gemini", Some("https://ai.google.dev/"), true, "{{args}}", ".gemini"),
+    (
+        "claude",
+        Some("https://claude.ai/code"),
+        true,
+        "$ARGUMENTS",
+        ".claude",
+    ),
+    (
+        "gemini",
+        Some("https://ai.google.dev/"),
+        true,
+        "{{args}}",
+        ".gemini",
+    ),
     ("copilot", None, false, "$ARGUMENTS", ".github"),
-    ("cursor-agent", Some("https://cursor.sh/"), true, "$ARGUMENTS", ".cursor"),
-    ("qwen", Some("https://qwenlm.github.io/"), true, "{{args}}", ".qwen"),
-    ("opencode", Some("https://opencode.dev/"), true, "$ARGUMENTS", ".opencode"),
-    ("codex", Some("https://codex.ai/"), true, "$ARGUMENTS", ".codex"),
+    (
+        "cursor-agent",
+        Some("https://cursor.sh/"),
+        true,
+        "$ARGUMENTS",
+        ".cursor",
+    ),
+    (
+        "qwen",
+        Some("https://qwenlm.github.io/"),
+        true,
+        "{{args}}",
+        ".qwen",
+    ),
+    (
+        "opencode",
+        Some("https://opencode.dev/"),
+        true,
+        "$ARGUMENTS",
+        ".opencode",
+    ),
+    (
+        "codex",
+        Some("https://codex.ai/"),
+        true,
+        "$ARGUMENTS",
+        ".codex",
+    ),
     ("windsurf", None, false, "$ARGUMENTS", ".windsurf"),
     ("kilocode", None, false, "$ARGUMENTS", ".kilocode"),
-    ("auggie", Some("https://auggie.ai/"), true, "$ARGUMENTS", ".augment"),
+    (
+        "auggie",
+        Some("https://auggie.ai/"),
+        true,
+        "$ARGUMENTS",
+        ".augment",
+    ),
     ("roo", None, false, "$ARGUMENTS", ".roo"),
-    ("codebuddy", Some("https://codebuddy.ai/"), true, "$ARGUMENTS", ".codebuddy"),
-    ("qoder", Some("https://qoder.ai/"), true, "$ARGUMENTS", ".qoder"),
-    ("amp", Some("https://amp.dev/"), true, "$ARGUMENTS", ".agents"),
-    ("shai", Some("https://shai.ai/"), true, "$ARGUMENTS", ".shai"),
-    ("q", Some("https://aws.amazon.com/q/"), true, "$ARGUMENTS", ".amazonq"),
+    (
+        "codebuddy",
+        Some("https://codebuddy.ai/"),
+        true,
+        "$ARGUMENTS",
+        ".codebuddy",
+    ),
+    (
+        "qoder",
+        Some("https://qoder.ai/"),
+        true,
+        "$ARGUMENTS",
+        ".qoder",
+    ),
+    (
+        "amp",
+        Some("https://amp.dev/"),
+        true,
+        "$ARGUMENTS",
+        ".agents",
+    ),
+    (
+        "shai",
+        Some("https://shai.ai/"),
+        true,
+        "$ARGUMENTS",
+        ".shai",
+    ),
+    (
+        "q",
+        Some("https://aws.amazon.com/q/"),
+        true,
+        "$ARGUMENTS",
+        ".amazonq",
+    ),
     ("bob", None, false, "$ARGUMENTS", ".bob"),
 ];
 
@@ -96,20 +168,30 @@ static EXTRAS: &[(&str, Option<&str>, bool, &str, &str)] = &[
 /// This is the single source of truth for all supported AI agents.
 /// Delegates to ai-agent-deploy for catalog data and uses extras table for aikit-specific fields.
 pub fn get_agent_configs() -> Vec<AgentConfig> {
-    use ai_agent_deploy::{AgentConfig as DeployConfig, all_agents};
+    use ai_agent_deploy::{all_agents, AgentConfig as DeployConfig};
 
     all_agents()
         .into_iter()
         .map(|deploy_config| {
-            let extras = EXTRAS.iter().find(|(key, _, _, _, _)| *key == deploy_config.key);
+            let extras = EXTRAS
+                .iter()
+                .find(|(key, _, _, _, _)| *key == deploy_config.key);
 
             let (install_url, requires_cli, output_format, arg_placeholder, folder) = match extras {
-                Some((_, url, req_cli, placeholder, folder_str)) => {
-                    (url.map(|s| s.to_string()), *req_cli, OutputFormat::Markdown, placeholder.to_string(), folder_str.to_string())
-                }
-                None => {
-                    (None, true, OutputFormat::Markdown, "$ARGUMENTS".to_string(), deploy_config.key.clone())
-                }
+                Some((_, url, req_cli, placeholder, folder_str)) => (
+                    url.map(|s| s.to_string()),
+                    *req_cli,
+                    OutputFormat::Markdown,
+                    placeholder.to_string(),
+                    folder_str.to_string(),
+                ),
+                None => (
+                    None,
+                    true,
+                    OutputFormat::Markdown,
+                    "$ARGUMENTS".to_string(),
+                    deploy_config.key.clone(),
+                ),
             };
 
             AgentConfig {
@@ -130,7 +212,7 @@ pub fn get_agent_configs() -> Vec<AgentConfig> {
 ///
 /// Delegates to ai-agent-deploy for catalog data and uses extras table for aikit-specific fields.
 pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
-    use ai_agent_deploy::{AgentConfig as DeployConfig, agent};
+    use ai_agent_deploy::{agent, AgentConfig as DeployConfig};
 
     let deploy_config = agent(key)?;
     let extras = EXTRAS.iter().find(|(k, _, _, _, _)| *k == key);
