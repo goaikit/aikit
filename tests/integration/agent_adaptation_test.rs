@@ -9,12 +9,16 @@ mod tests {
 
     #[test]
     fn test_command_generation_for_multiple_agents() {
-        use aikit::models::package::{Package, CommandDefinition};
         use aikit::core::agent::{get_agent_configs, AgentConfig};
+        use aikit::models::package::{CommandDefinition, Package};
         use std::collections::HashMap;
 
         // Create a test package
-        let mut package = Package::new("test-agent-adaptation".to_string(), "1.0.0".to_string(), "Test package for agent adaptation".to_string());
+        let mut package = Package::new(
+            "test-agent-adaptation".to_string(),
+            "1.0.0".to_string(),
+            "Test package for agent adaptation".to_string(),
+        );
 
         // Add test commands
         package.commands.insert(
@@ -101,7 +105,11 @@ mod tests {
         for agent in &agents {
             let prefix = agent.get_namespace_prefix("test-package");
             // Should be unique across agents
-            assert!(prefixes.insert(prefix), "Duplicate prefix found for agent {}", agent.key);
+            assert!(
+                prefixes.insert(prefix),
+                "Duplicate prefix found for agent {}",
+                agent.key
+            );
         }
 
         // Should have same number of unique prefixes as agents
@@ -115,16 +123,33 @@ mod tests {
         let agents = get_agent_configs();
         assert_eq!(agents.len(), 17, "Should support exactly 17 agents");
 
-        // Verify all expected agents are present
+        // Verify all expected agents are present - using actual 17 keys from ai-agent-deploy catalog
         let expected_agents = vec![
-            "claude", "cursor", "copilot", "gemini", "continue",
-            "windsurf", "kilocode", "auggie", "roo", "bolt",
-            "lovable", "v0", "grok", "aider", "openrouter", "marvin", "cody"
+            "claude",
+            "gemini",
+            "copilot",
+            "cursor-agent",
+            "qwen",
+            "opencode",
+            "codex",
+            "windsurf",
+            "kilocode",
+            "auggie",
+            "roo",
+            "codebuddy",
+            "qoder",
+            "amp",
+            "shai",
+            "q",
+            "bob",
         ];
 
         for expected in expected_agents {
-            assert!(agents.iter().any(|a| a.key == expected),
-                "Agent '{}' should be in the supported list", expected);
+            assert!(
+                agents.iter().any(|a| a.key == expected),
+                "Agent '{}' should be in the supported list",
+                expected
+            );
         }
     }
 }

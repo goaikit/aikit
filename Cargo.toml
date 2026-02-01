@@ -37,6 +37,9 @@ walkdir = "2"
 # Tool detection
 which = "8.0"
 
+# AI agent deploy integration
+ai-agent-deploy = { path = "ai-agent-deploy" }
+
 # Temporary directories
 tempfile = "3.10"
 

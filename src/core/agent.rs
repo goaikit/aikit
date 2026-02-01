@@ -3,6 +3,8 @@
 //! This module contains types and functions for managing AI agent configurations,
 //! including agent selection, validation, and tool checking.
 
+use std::collections::HashMap;
+
 /// Script variant (bash or PowerShell)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScriptVariant {
@@ -67,182 +69,142 @@ pub struct AgentConfig {
     pub arg_placeholder: String,
 }
 
+/// Extras table for agent-specific configuration
+/// Maps agent keys to (install_url, requires_cli, output_format, arg_placeholder, folder)
+static EXTRAS: &[(&str, Option<&str>, bool, &str, &str)] = &[
+    ("claude", Some("https://claude.ai/code"), true, "$ARGUMENTS", ".claude"),
+    ("gemini", Some("https://ai.google.dev/"), true, "{{args}}", ".gemini"),
+    ("copilot", None, false, "$ARGUMENTS", ".github"),
+    ("cursor-agent", Some("https://cursor.sh/"), true, "$ARGUMENTS", ".cursor"),
+    ("qwen", Some("https://qwenlm.github.io/"), true, "{{args}}", ".qwen"),
+    ("opencode", Some("https://opencode.dev/"), true, "$ARGUMENTS", ".opencode"),
+    ("codex", Some("https://codex.ai/"), true, "$ARGUMENTS", ".codex"),
+    ("windsurf", None, false, "$ARGUMENTS", ".windsurf"),
+    ("kilocode", None, false, "$ARGUMENTS", ".kilocode"),
+    ("auggie", Some("https://auggie.ai/"), true, "$ARGUMENTS", ".augment"),
+    ("roo", None, false, "$ARGUMENTS", ".roo"),
+    ("codebuddy", Some("https://codebuddy.ai/"), true, "$ARGUMENTS", ".codebuddy"),
+    ("qoder", Some("https://qoder.ai/"), true, "$ARGUMENTS", ".qoder"),
+    ("amp", Some("https://amp.dev/"), true, "$ARGUMENTS", ".agents"),
+    ("shai", Some("https://shai.ai/"), true, "$ARGUMENTS", ".shai"),
+    ("q", Some("https://aws.amazon.com/q/"), true, "$ARGUMENTS", ".amazonq"),
+    ("bob", None, false, "$ARGUMENTS", ".bob"),
+];
+
 /// Get the agent configuration list
 ///
 /// This is the single source of truth for all supported AI agents.
+/// Delegates to ai-agent-deploy for catalog data and uses extras table for aikit-specific fields.
 pub fn get_agent_configs() -> Vec<AgentConfig> {
-    vec![
-        AgentConfig {
-            key: "claude".to_string(),
-            name: "Claude Code".to_string(),
-            folder: ".claude".to_string(),
-            install_url: Some("https://claude.ai/code".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".claude/commands".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "gemini".to_string(),
-            name: "Google Gemini".to_string(),
-            folder: ".gemini".to_string(),
-            install_url: Some("https://ai.google.dev/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Toml,
-            output_dir: ".gemini/commands".to_string(),
-            arg_placeholder: "{{args}}".to_string(),
-        },
-        AgentConfig {
-            key: "copilot".to_string(),
-            name: "GitHub Copilot".to_string(),
-            folder: ".github".to_string(),
-            install_url: None,
-            requires_cli: false,
-            output_format: OutputFormat::AgentMd,
-            output_dir: ".github/agents".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "cursor-agent".to_string(),
-            name: "Cursor".to_string(),
-            folder: ".cursor".to_string(),
-            install_url: Some("https://cursor.sh/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".cursor/commands".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "qwen".to_string(),
-            name: "Qwen Code".to_string(),
-            folder: ".qwen".to_string(),
-            install_url: Some("https://qwenlm.github.io/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Toml,
-            output_dir: ".qwen/commands".to_string(),
-            arg_placeholder: "{{args}}".to_string(),
-        },
-        AgentConfig {
-            key: "opencode".to_string(),
-            name: "opencode".to_string(),
-            folder: ".opencode".to_string(),
-            install_url: Some("https://opencode.dev/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".opencode/command".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "codex".to_string(),
-            name: "Codex CLI".to_string(),
-            folder: ".codex".to_string(),
-            install_url: Some("https://codex.ai/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".codex/prompts".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "windsurf".to_string(),
-            name: "Windsurf".to_string(),
-            folder: ".windsurf".to_string(),
-            install_url: None,
-            requires_cli: false,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".windsurf/workflows".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "kilocode".to_string(),
-            name: "Kilo Code".to_string(),
-            folder: ".kilocode".to_string(),
-            install_url: None,
-            requires_cli: false,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".kilocode/workflows".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "auggie".to_string(),
-            name: "Auggie CLI".to_string(),
-            folder: ".augment".to_string(),
-            install_url: Some("https://auggie.ai/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".augment/commands".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "roo".to_string(),
-            name: "Roo Code".to_string(),
-            folder: ".roo".to_string(),
-            install_url: None,
-            requires_cli: false,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".roo/commands".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "codebuddy".to_string(),
-            name: "CodeBuddy CLI".to_string(),
-            folder: ".codebuddy".to_string(),
-            install_url: Some("https://codebuddy.ai/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".codebuddy/commands".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "qoder".to_string(),
-            name: "Qoder CLI".to_string(),
-            folder: ".qoder".to_string(),
-            install_url: Some("https://qoder.ai/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".qoder/commands".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "amp".to_string(),
-            name: "Amp".to_string(),
-            folder: ".agents".to_string(),
-            install_url: Some("https://amp.dev/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".agents/commands".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "shai".to_string(),
-            name: "SHAI".to_string(),
-            folder: ".shai".to_string(),
-            install_url: Some("https://shai.ai/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".shai/commands".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "q".to_string(),
-            name: "Amazon Q Developer".to_string(),
-            folder: ".amazonq".to_string(),
-            install_url: Some("https://aws.amazon.com/q/".to_string()),
-            requires_cli: true,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".amazonq/prompts".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-        AgentConfig {
-            key: "bob".to_string(),
-            name: "IBM Bob".to_string(),
-            folder: ".bob".to_string(),
-            install_url: None,
-            requires_cli: false,
-            output_format: OutputFormat::Markdown,
-            output_dir: ".bob/commands".to_string(),
-            arg_placeholder: "$ARGUMENTS".to_string(),
-        },
-    ]
+    use ai_agent_deploy::{AgentConfig as DeployConfig, all_agents};
+
+    all_agents()
+        .into_iter()
+        .map(|deploy_config| {
+            let extras = EXTRAS.iter().find(|(key, _, _, _, _)| *key == deploy_config.key);
+
+            let (install_url, requires_cli, output_format, arg_placeholder, folder) = match extras {
+                Some((_, url, req_cli, placeholder, folder_str)) => {
+                    (url.map(|s| s.to_string()), *req_cli, OutputFormat::Markdown, placeholder.to_string(), folder_str.to_string())
+                }
+                None => {
+                    (None, true, OutputFormat::Markdown, "$ARGUMENTS".to_string(), deploy_config.key.clone())
+                }
+            };
+
+            AgentConfig {
+                key: deploy_config.key,
+                name: deploy_config.name,
+                folder,
+                install_url,
+                requires_cli,
+                output_format,
+                output_dir: deploy_config.commands_dir.clone(),
+                arg_placeholder,
+            }
+        })
+        .collect()
+}
+
+/// Get agent configuration by key
+///
+/// Delegates to ai-agent-deploy for catalog data and uses extras table for aikit-specific fields.
+pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
+    use ai_agent_deploy::{AgentConfig as DeployConfig, agent};
+
+    let deploy_config = agent(key)?;
+    let extras = EXTRAS.iter().find(|(k, _, _, _, _)| *k == key);
+
+    let (install_url, requires_cli, output_format, arg_placeholder, folder) = match extras {
+        Some((_, url, req_cli, placeholder, folder_str)) => (
+            url.map(|s| s.to_string()),
+            *req_cli,
+            OutputFormat::Markdown,
+            placeholder.to_string(),
+            folder_str.to_string(),
+        ),
+        None => (
+            None,
+            true,
+            OutputFormat::Markdown,
+            "$ARGUMENTS".to_string(),
+            key.to_string(),
+        ),
+    };
+
+    Some(AgentConfig {
+        key: deploy_config.key,
+        name: deploy_config.name,
+        folder,
+        install_url,
+        requires_cli,
+        output_format,
+        output_dir: deploy_config.commands_dir.clone(),
+        arg_placeholder,
+    })
+}
+
+/// Validate agent key
+///
+/// Delegates to ai-agent-deploy for validation.
+pub fn validate_agent_key(key: &str) -> Result<(), String> {
+    use ai_agent_deploy::validate_agent_key;
+
+    validate_agent_key(key).map_err(|e| e.to_string())
+}
+
+/// Get all agent keys
+#[allow(dead_code)]
+pub fn get_all_agent_keys() -> Vec<String> {
+    get_agent_configs().iter().map(|a| a.key.clone()).collect()
+}
+
+/// Agent selection enum
+///
+/// Represents user's agent selection (interactive or CLI argument).
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub enum AgentSelection {
+    /// Agent key selected
+    Selected(String),
+    /// Trigger interactive selection
+    Interactive,
+    /// Use default (copilot)
+    Default,
+}
+
+impl AgentSelection {
+    /// Resolve to a concrete agent key
+    pub fn resolve(&self) -> String {
+        match self {
+            Self::Selected(key) => key.clone(),
+            Self::Default => "copilot".to_string(),
+            Self::Interactive => {
+                // This will be handled by TUI in a later phase
+                "copilot".to_string()
+            }
+        }
+    }
 }
 
 impl AgentConfig {
@@ -335,78 +297,6 @@ impl AgentConfig {
     }
 }
 
-/// Get agent configuration by key
-pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
-    get_agent_configs()
-        .into_iter()
-        .find(|agent| agent.key == key)
-}
-
-/// Validate agent key
-pub fn validate_agent_key(key: &str) -> Result<(), String> {
-    if key.is_empty() {
-        return Err("Agent key cannot be empty".to_string());
-    }
-
-    if !key
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(format!(
-            "Agent key '{}' contains invalid characters. Only alphanumeric, hyphen, and underscore are allowed.",
-            key
-        ));
-    }
-
-    if get_agent_config(key).is_none() {
-        return Err(format!(
-            "Unknown agent key '{}'. Available agents: {}",
-            key,
-            get_agent_configs()
-                .iter()
-                .map(|a| a.key.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-
-    Ok(())
-}
-
-/// Get all agent keys
-#[allow(dead_code)]
-pub fn get_all_agent_keys() -> Vec<String> {
-    get_agent_configs().iter().map(|a| a.key.clone()).collect()
-}
-
-/// Agent selection enum
-///
-/// Represents user's agent selection (interactive or CLI argument).
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub enum AgentSelection {
-    /// Agent key selected
-    Selected(String),
-    /// Trigger interactive selection
-    Interactive,
-    /// Use default (copilot)
-    Default,
-}
-
-impl AgentSelection {
-    /// Resolve to a concrete agent key
-    pub fn resolve(&self) -> String {
-        match self {
-            Self::Selected(key) => key.clone(),
-            Self::Default => "copilot".to_string(),
-            Self::Interactive => {
-                // This will be handled by TUI in a later phase
-                "copilot".to_string()
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,5 +323,15 @@ mod tests {
     #[test]
     fn test_all_17_agents_present() {
         assert_eq!(get_agent_configs().len(), 17);
+    }
+
+    #[test]
+    fn test_extras_table_populated() {
+        let configs = get_agent_configs();
+        assert_eq!(configs.len(), 17);
+
+        // Verify extras table covers all agents
+        let keys: Vec<_> = configs.iter().map(|c| c.key.as_str()).collect();
+        assert!(keys.contains(&"opencode"));
     }
 }
