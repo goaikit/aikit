@@ -454,7 +454,7 @@ pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std
         })?;
 
     // Initialize GitHub client
-    let github = GitHubClient::new(Some(token));
+    let github = GitHubClient::new(Some(token.clone()));
 
     // Parse repo argument
     let repo_parts: Vec<&str> = args.repo.split('/').collect();
@@ -470,7 +470,7 @@ pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std
         .unwrap_or_else(|| format!("v{}", package.package.version));
 
     // Create release if requested
-    if !args.no_release {
+    let release_id = if !args.no_release {
         let title = args.title.unwrap_or_else(|| format!("Release {}", tag));
         let notes = args
             .notes
@@ -493,13 +493,58 @@ pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std
             .map_err(|e| format!("Failed to create release: {}", e))?;
 
         println!("✅ Release created: {}", release.html_url);
-    }
+        release.id
+    } else {
+        println!("📦 Uploading to existing release: {}", tag);
+        println!(
+            "⚠️  Warning: This will upload to the latest release with tag '{}'",
+            tag
+        );
+        println!("   If no release exists with this tag, the upload will fail.");
+        println!("   Use 'aikit package publish --no-release' with an existing release.");
 
-    println!("📤 Upload functionality would be implemented here");
-    println!(
-        "💡 For now, manually upload {} to the GitHub release",
-        zip_path.display()
-    );
+        // Try to find the release by tag using a public API call
+        let releases_url = format!(
+            "https://api.github.com/repos/{}/{}/releases/tags/{}",
+            owner, repo, tag
+        );
+
+        // Create a temporary client for this API call
+        let temp_client = reqwest::Client::new();
+        let response = temp_client
+            .get(&releases_url)
+            .header("Authorization", format!("token {}", token.clone()))
+            .header("User-Agent", "AIKIT-Package-Manager/1.0")
+            .send()
+            .await
+            .map_err(|e| format!("Failed to find release: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "No release found with tag '{}'. Use --no-release only with an existing release.",
+                tag
+            )
+            .into());
+        }
+
+        let release: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse release response: {}", e))?;
+
+        release["id"]
+            .as_u64()
+            .ok_or_else(|| "Invalid release data: missing ID".to_string())?
+    };
+
+    // Upload package to release
+    println!("📤 Uploading package to release...");
+    let asset_url = github
+        .upload_release_asset(owner, repo, release_id, &zip_path)
+        .await
+        .map_err(|e| format!("Failed to upload package: {}", e))?;
+
+    println!("✅ Package uploaded successfully: {}", asset_url);
 
     Ok(())
 }
@@ -531,4 +576,654 @@ fn generate_release_notes(package: &crate::models::package::Package) -> String {
     notes.push_str("- Add your release notes here\n");
 
     notes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::git::PackageInfo;
+    use crate::models::package::Package;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    fn create_test_package_dir() -> (TempDir, Package) {
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("test-package");
+        fs::create_dir_all(&package_dir).unwrap();
+
+        let manifest_content = r#"[package]
+name = "test-package"
+version = "0.1.0"
+description = "Test package"
+authors = ["test"]
+"#;
+        fs::write(package_dir.join("aikit.toml"), manifest_content).unwrap();
+
+        let package = Package::from_toml_file(&package_dir.join("aikit.toml")).unwrap();
+        (temp_dir, package)
+    }
+
+    fn create_test_zip_file(path: &Path) {
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::ZipWriter;
+        use zip::CompressionMethod;
+
+        let file = File::create(path).unwrap();
+        let mut zip = ZipWriter::new(file);
+
+        zip.start_file(
+            "aikit.toml",
+            zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+
+        zip.write_all(b"[package]\nname = \"test\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn test_find_package_zip_with_custom_path() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        let package_dir = temp_dir.path().join("test-package");
+        let custom_zip = temp_dir.path().join("custom-package.zip");
+        create_test_zip_file(&custom_zip);
+
+        let dist_dir = temp_dir.path().join("dist");
+        fs::create_dir_all(&dist_dir).unwrap();
+        let default_zip = dist_dir.join("test-package-0.1.0.zip");
+        create_test_zip_file(&default_zip);
+
+        let result = find_package_zip(&package, Some(custom_zip.to_str().unwrap()));
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), custom_zip);
+    }
+
+    #[test]
+    fn test_find_package_zip_with_default_path() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        let dist_dir = temp_dir.path().join("dist");
+        fs::create_dir_all(&dist_dir).unwrap();
+        let default_zip = dist_dir.join("test-package-0.1.0.zip");
+        create_test_zip_file(&default_zip);
+
+        let result = find_package_zip(&package, None);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), default_zip);
+    }
+
+    #[test]
+    fn test_find_package_zip_not_found() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        let result = find_package_zip(&package, None);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_package_zip_with_invalid_path() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        let result = find_package_zip(&package, Some("/nonexistent/path.zip"));
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_github_client_upload_release_asset_without_token() {
+        use crate::core::git::GitHubClient;
+
+        let client = GitHubClient::new(None);
+
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test-upload.zip");
+        create_test_zip_file(&test_file);
+
+        let result = client
+            .upload_release_asset("test-owner", "test-repo", 123, &test_file)
+            .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("token"));
+    }
+
+    #[tokio::test]
+    async fn test_github_client_upload_release_asset_file_not_found() {
+        use crate::core::git::GitHubClient;
+
+        let client = GitHubClient::new(Some("test_token".to_string()));
+
+        let nonexistent_file = PathBuf::from("/nonexistent/path/file.zip");
+
+        let result = client
+            .upload_release_asset("test-owner", "test-repo", 123, &nonexistent_file)
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_generate_release_notes() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        let notes = generate_release_notes(&package);
+
+        assert!(notes.contains("Test package"));
+        assert!(notes.contains("0.1.0"));
+        assert!(notes.contains("Initial release"));
+        assert!(notes.contains("Install"));
+    }
+
+    #[test]
+    fn test_release_info_creation() {
+        use crate::core::git::ReleaseInfo;
+
+        let release_info = ReleaseInfo {
+            tag_name: "v1.0.0".to_string(),
+            name: "Release 1.0".to_string(),
+            body: "Test release".to_string(),
+            draft: false,
+            prerelease: false,
+        };
+
+        assert_eq!(release_info.tag_name, "v1.0.0");
+        assert_eq!(release_info.name, "Release 1.0");
+        assert_eq!(release_info.draft, false);
+        assert_eq!(release_info.prerelease, false);
+    }
+
+    #[test]
+    fn test_release_info_prerelease_detection() {
+        use crate::core::git::ReleaseInfo;
+
+        let release_info_alpha = ReleaseInfo {
+            tag_name: "v1.0.0-alpha".to_string(),
+            name: "Alpha Release".to_string(),
+            body: "Test".to_string(),
+            draft: false,
+            prerelease: false,
+        };
+
+        assert!(release_info_alpha.prerelease);
+
+        let release_info_beta = ReleaseInfo {
+            tag_name: "v1.0.0-beta".to_string(),
+            name: "Beta Release".to_string(),
+            body: "Test".to_string(),
+            draft: false,
+            prerelease: false,
+        };
+
+        assert!(release_info_beta.prerelease);
+
+        let release_info_rc = ReleaseInfo {
+            tag_name: "v1.0.0-rc1".to_string(),
+            name: "RC Release".to_string(),
+            body: "Test".to_string(),
+            draft: false,
+            prerelease: false,
+        };
+
+        assert!(release_info_rc.prerelease);
+
+        let release_info_stable = ReleaseInfo {
+            tag_name: "v1.0.0".to_string(),
+            name: "Stable Release".to_string(),
+            body: "Test".to_string(),
+            draft: false,
+            prerelease: false,
+        };
+
+        assert!(!release_info_stable.prerelease);
+    }
+
+    #[test]
+    fn test_package_validate() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        assert!(package.validate().is_ok());
+    }
+
+    #[test]
+    fn test_package_from_toml() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        assert_eq!(package.package.name, "test-package");
+        assert_eq!(package.package.version, "0.1.0");
+        assert_eq!(package.package.description, "Test package");
+    }
+
+    #[test]
+    fn test_package_to_toml_string() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        let toml_str = package.to_toml_string().unwrap();
+
+        assert!(toml_str.contains("name = \"test-package\""));
+        assert!(toml_str.contains("version = \"0.1.0\""));
+        assert!(toml_str.contains("description = \"Test package\""));
+    }
+
+    #[test]
+    fn test_package_create_template() {
+        let package = Package::create_template(
+            "test-package".to_string(),
+            Some("Test description".to_string()),
+            Some("test@example.com".to_string()),
+            Some("0.2.0".to_string()),
+        );
+
+        assert_eq!(package.package.name, "test-package");
+        assert_eq!(package.package.description, "Test description");
+        assert_eq!(package.package.version, "0.2.0");
+        assert!(!package.package.authors.is_empty());
+    }
+
+    #[test]
+    fn test_package_validate_missing_name() {
+        let package = Package::new("".to_string(), "0.1.0".to_string(), "Test".to_string());
+
+        assert!(package.validate().is_err());
+    }
+
+    #[test]
+    fn test_package_validate_missing_version() {
+        let package = Package::new("test".to_string(), "".to_string(), "Test".to_string());
+
+        assert!(package.validate().is_err());
+    }
+
+    #[test]
+    fn test_package_validate_missing_description() {
+        let package = Package::new("test".to_string(), "0.1.0".to_string(), "".to_string());
+
+        assert!(package.validate().is_err());
+    }
+
+    #[test]
+    fn test_package_install_dir() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        assert_eq!(package.install_dir(), "test-package-0.1.0");
+    }
+
+    #[test]
+    fn test_package_get_artifact_mappings() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        let mappings = package.get_artifact_mappings(None);
+
+        assert!(!mappings.is_empty());
+        assert!(mappings.contains_key("templates/*.md"));
+    }
+
+    #[test]
+    fn test_package_get_artifact_mappings_with_agent() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        let mappings = package.get_artifact_mappings(Some("test-agent"));
+
+        assert!(mappings.contains_key("templates/*.md"));
+    }
+
+    #[tokio::test]
+    async fn test_package_build_creates_zip() {
+        use std::fs::File;
+        use zip::write::ZipWriter;
+        use zip::CompressionMethod;
+
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("test-package");
+        fs::create_dir_all(&package_dir).unwrap();
+
+        // Create package.toml
+        let manifest_content = r#"[package]
+name = "test-package"
+version = "0.1.0"
+description = "Test package"
+authors = ["test"]
+"#;
+        fs::write(package_dir.join("aikit.toml"), manifest_content).unwrap();
+
+        // Create templates directory
+        fs::create_dir_all(package_dir.join("templates")).unwrap();
+        fs::write(
+            package_dir.join("templates").join("example.md"),
+            "# Example\n",
+        )
+        .unwrap();
+
+        // Create scripts directory
+        fs::create_dir_all(package_dir.join("scripts")).unwrap();
+
+        // Create docs directory
+        fs::create_dir_all(package_dir.join("docs")).unwrap();
+
+        // Change to temp directory
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        // Run build
+        let args = PackageBuildArgs {
+            output: "dist".to_string(),
+            agents: None,
+            include_sources: false,
+        };
+
+        let result = execute_build(args).await;
+
+        // Restore current directory
+        std::env::set_current_dir("/home/sysuser/ws001/goaikit/aikit").unwrap();
+
+        assert!(result.is_ok());
+
+        // Verify ZIP was created
+        let zip_path = PathBuf::from("dist").join("test-package-0.1.0.zip");
+        assert!(zip_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_package_publish_creates_release() {
+        use crate::core::git::{GitHubClient, ReleaseInfo};
+        use mockito::{Server, ServerGuard};
+
+        // Create mock server
+        let mut mock_server: ServerGuard = mockito::Server::new();
+
+        // Mock the create release endpoint
+        let create_mock = mock_server
+            .mock("POST", "/repos/test-owner/test-repo/releases")
+            .with_header("Authorization", "token test_token")
+            .with_header("User-Agent", "AIKIT-Package-Manager/1.0")
+            .with_status(201)
+            .with_header("content-type", "application/json")
+            .with_body(r#"
+            {
+                "id": 123,
+                "tag_name": "v0.1.0",
+                "name": "Release 0.1.0",
+                "body": "Test release",
+                "html_url": "https://github.com/test-owner/test-repo/releases/v0.1.0",
+                "upload_url": "https://uploads.github.com/repos/test-owner/test-repo/releases/123/assets{?name,label}"
+            }
+            "#)
+            .create();
+
+        // Mock the upload asset endpoint
+        let upload_mock = mock_server
+            .mock("POST", "/repos/test-owner/test-repo/releases/123/assets")
+            .with_header("Authorization", "token test_token")
+            .with_header("Content-Type", "application/zip")
+            .with_status(201)
+            .create();
+
+        // Create a test package directory
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("test-package");
+        fs::create_dir_all(&package_dir).unwrap();
+
+        let manifest_content = r#"[package]
+name = "test-package"
+version = "0.1.0"
+description = "Test package"
+authors = ["test"]
+"#;
+        fs::write(package_dir.join("aikit.toml"), manifest_content).unwrap();
+
+        // Create dist folder with ZIP
+        fs::create_dir_all(temp_dir.path().join("dist")).unwrap();
+        let zip_path = temp_dir.path().join("dist").join("test-package-0.1.0.zip");
+
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::ZipWriter;
+        use zip::CompressionMethod;
+
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file(
+            "aikit.toml",
+            zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+        zip.write_all(b"[package]\nname = \"test\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+        zip.finish().unwrap();
+
+        // Change to temp directory
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        // Run publish
+        let args = PackagePublishArgs {
+            repo: "test-owner/test-repo".to_string(),
+            package: None,
+            tag: Some("v0.1.0".to_string()),
+            title: None,
+            notes: None,
+            token: Some("test_token".to_string()),
+            no_release: false,
+        };
+
+        let result = execute_publish(args).await;
+
+        // Restore current directory
+        std::env::set_current_dir("/home/sysuser/ws001/goaikit/aikit").unwrap();
+
+        // Verify mocks were called
+        create_mock.assert();
+        upload_mock.assert();
+
+        // Check result
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_package_publish_with_no_release_flag() {
+        use crate::core::git::GitHubClient;
+        use mockito::Server;
+
+        // Create mock server
+        let mut mock_server = Server::new();
+
+        // Mock the find release endpoint
+        let find_mock = mock_server
+            .mock("GET", "/repos/test-owner/test-repo/releases/tags/v0.1.0")
+            .with_header("Authorization", "token test_token")
+            .with_header("User-Agent", "AIKIT-Package-Manager/1.0")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"
+            {
+                "id": 123,
+                "tag_name": "v0.1.0",
+                "name": "Release 0.1.0",
+                "body": "Test release",
+                "html_url": "https://github.com/test-owner/test-repo/releases/v0.1.0"
+            }
+            "#,
+            )
+            .create();
+
+        // Create a test package directory
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("test-package");
+        fs::create_dir_all(&package_dir).unwrap();
+
+        let manifest_content = r#"[package]
+name = "test-package"
+version = "0.1.0"
+description = "Test package"
+authors = ["test"]
+"#;
+        fs::write(package_dir.join("aikit.toml"), manifest_content).unwrap();
+
+        // Create dist folder with ZIP
+        fs::create_dir_all(temp_dir.path().join("dist")).unwrap();
+        let zip_path = temp_dir.path().join("dist").join("test-package-0.1.0.zip");
+
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::ZipWriter;
+        use zip::CompressionMethod;
+
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file(
+            "aikit.toml",
+            zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+        zip.write_all(b"[package]\nname = \"test\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+        zip.finish().unwrap();
+
+        // Change to temp directory
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        // Run publish with --no-release flag
+        let args = PackagePublishArgs {
+            repo: "test-owner/test-repo".to_string(),
+            package: None,
+            tag: Some("v0.1.0".to_string()),
+            title: None,
+            notes: None,
+            token: Some("test_token".to_string()),
+            no_release: true,
+        };
+
+        let result = execute_publish(args).await;
+
+        // Restore current directory
+        std::env::set_current_dir("/home/sysuser/ws001/goaikit/aikit").unwrap();
+
+        // Verify mock was called
+        find_mock.assert();
+
+        // Check result - should fail if release not found
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_package_publish_release_not_found() {
+        use mockito::Server;
+
+        // Create mock server
+        let mut mock_server = Server::new();
+
+        // Mock the find release endpoint with 404
+        let find_mock = mock_server
+            .mock("GET", "/repos/test-owner/test-repo/releases/tags/v0.1.0")
+            .with_header("Authorization", "token test_token")
+            .with_header("User-Agent", "AIKIT-Package-Manager/1.0")
+            .with_status(404)
+            .create();
+
+        // Create a test package directory
+        let temp_dir = TempDir::new().unwrap();
+        let package_dir = temp_dir.path().join("test-package");
+        fs::create_dir_all(&package_dir).unwrap();
+
+        let manifest_content = r#"[package]
+name = "test-package"
+version = "0.1.0"
+description = "Test package"
+authors = ["test"]
+"#;
+        fs::write(package_dir.join("aikit.toml"), manifest_content).unwrap();
+
+        // Create dist folder with ZIP
+        fs::create_dir_all(temp_dir.path().join("dist")).unwrap();
+        let zip_path = temp_dir.path().join("dist").join("test-package-0.1.0.zip");
+
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::ZipWriter;
+        use zip::CompressionMethod;
+
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file(
+            "aikit.toml",
+            zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+        zip.write_all(b"[package]\nname = \"test\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+        zip.finish().unwrap();
+
+        // Change to temp directory
+        std::env::set_current_dir(&temp_dir).unwrap();
+
+        // Run publish with --no-release flag
+        let args = PackagePublishArgs {
+            repo: "test-owner/test-repo".to_string(),
+            package: None,
+            tag: Some("v0.1.0".to_string()),
+            title: None,
+            notes: None,
+            token: Some("test_token".to_string()),
+            no_release: true,
+        };
+
+        let result = execute_publish(args).await;
+
+        // Restore current directory
+        std::env::set_current_dir("/home/sysuser/ws001/goaikit/aikit").unwrap();
+
+        // Verify mock was called
+        find_mock.assert();
+
+        // Check result - should fail because release not found
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No release found"));
+    }
+
+    #[test]
+    fn test_generate_release_notes_basic() {
+        let (temp_dir, package) = create_test_package_dir();
+
+        let notes = generate_release_notes(&package);
+
+        assert!(notes.contains("Test package"));
+        assert!(notes.contains("0.1.0"));
+        assert!(notes.contains("Initial release"));
+    }
+
+    #[test]
+    fn test_generate_release_notes_with_commands() {
+        let (temp_dir, mut package) = create_test_package_dir();
+
+        // Add commands
+        package.commands.insert(
+            "run".to_string(),
+            crate::models::package::CommandDefinition {
+                description: "Run tests".to_string(),
+                template: Some("run.md".to_string()),
+            },
+        );
+
+        package.commands.insert(
+            "build".to_string(),
+            crate::models::package::CommandDefinition {
+                description: "Build project".to_string(),
+                template: Some("build.md".to_string()),
+            },
+        );
+
+        let notes = generate_release_notes(&package);
+
+        assert!(notes.contains("Commands"));
+        assert!(notes.contains("run"));
+        assert!(notes.contains("run tests"));
+        assert!(notes.contains("build"));
+        assert!(notes.contains("build project"));
+    }
 }
