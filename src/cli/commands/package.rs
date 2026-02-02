@@ -589,18 +589,21 @@ mod tests {
 
     fn create_test_package_dir() -> (TempDir, Package) {
         let temp_dir = TempDir::new().unwrap();
+        let package = Package::create_template(
+            "test-package".to_string(),
+            Some("Test package".to_string()),
+            Some("test".to_string()),
+            Some("0.1.0".to_string()),
+        );
+
         let package_dir = temp_dir.path().join("test-package");
         fs::create_dir_all(&package_dir).unwrap();
 
-        let manifest_content = r#"[package]
-name = "test-package"
-version = "0.1.0"
-description = "Test package"
-authors = ["test"]
-"#;
-        fs::write(package_dir.join("aikit.toml"), manifest_content).unwrap();
+        // Write aikit.toml
+        package
+            .to_toml_file(&package_dir.join("aikit.toml"))
+            .unwrap();
 
-        let package = Package::from_toml_file(&package_dir.join("aikit.toml")).unwrap();
         (temp_dir, package)
     }
 
