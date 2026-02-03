@@ -67,8 +67,13 @@ pub struct AgentConfig {
     pub skills_dir: Option<String>,
     /// Optional directory for agent subagents
     pub agents_dir: Option<String>,
-    /// Agent key (used for identification)
-    pub key: String,
+}
+
+impl AgentConfig {
+    /// Get the agent key (lowercase name for matching)
+    pub fn key(&self) -> String {
+        self.name.to_lowercase()
+    }
 }
 
 /// Returns the filename for a subagent based on the agent type.
@@ -172,7 +177,6 @@ pub fn all_agents() -> Vec<AgentConfig> {
             commands_dir: entry.commands.to_string(),
             skills_dir: entry.skills.map(|s| s.to_string()),
             agents_dir: entry.subagents.map(|a| a.to_string()),
-            key: entry.key.to_string(),
         })
         .collect()
 }
@@ -189,7 +193,6 @@ pub fn agent(key: &str) -> Option<AgentConfig> {
             commands_dir: entry.commands.to_string(),
             skills_dir: entry.skills.map(|s| s.to_string()),
             agents_dir: entry.subagents.map(|a| a.to_string()),
-            key: entry.key.to_string(),
         })
 }
 

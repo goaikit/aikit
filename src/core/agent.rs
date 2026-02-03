@@ -173,7 +173,7 @@ pub fn get_agent_configs() -> Vec<AgentConfig> {
         .map(|deploy_config| {
             let extras = EXTRAS
                 .iter()
-                .find(|(key, _, _, _, _)| *key == deploy_config.key);
+                .find(|(key, _, _, _, _)| *key == deploy_config.key());
 
             let (install_url, requires_cli, output_format, arg_placeholder, folder) = match extras {
                 Some((_, url, req_cli, placeholder, folder_str)) => (
@@ -188,12 +188,12 @@ pub fn get_agent_configs() -> Vec<AgentConfig> {
                     true,
                     OutputFormat::Markdown,
                     "$ARGUMENTS".to_string(),
-                    deploy_config.key.clone(),
+                    deploy_config.key().clone(),
                 ),
             };
 
             AgentConfig {
-                key: deploy_config.key,
+                key: deploy_config.name.to_lowercase(),
                 name: deploy_config.name,
                 folder,
                 install_url,
@@ -233,7 +233,7 @@ pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
     };
 
     Some(AgentConfig {
-        key: deploy_config.key,
+        key: deploy_config.name.to_lowercase(),
         name: deploy_config.name,
         folder,
         install_url,
