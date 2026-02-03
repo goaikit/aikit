@@ -251,6 +251,22 @@ pub struct ReleaseInfo {
     pub prerelease: bool,
 }
 
+impl ReleaseInfo {
+    /// Create a new ReleaseInfo with automatic prerelease detection from tag name
+    pub fn new(tag_name: String, name: String, body: String, draft: bool) -> Self {
+        let prerelease =
+            tag_name.contains("alpha") || tag_name.contains("beta") || tag_name.contains("rc");
+
+        Self {
+            tag_name,
+            name,
+            body,
+            draft,
+            prerelease,
+        }
+    }
+}
+
 /// Release creation response
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseResponse {

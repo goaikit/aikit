@@ -97,6 +97,11 @@ impl Package {
             return Err("Package name cannot be empty".to_string());
         }
 
+        // Validate description
+        if self.package.description.is_empty() {
+            return Err("Package description cannot be empty".to_string());
+        }
+
         if !self
             .package
             .name
