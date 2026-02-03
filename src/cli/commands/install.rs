@@ -191,66 +191,72 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     let source_type = args.detect_source_type()?;
     spinner.finish_with_message("Source type detected");
 
-    let (package, archive_path): (crate::models::package::Package, Option<std::path::PathBuf>) =
-        match source_type {
-            SourceType::LocalFolder(path) => {
-                let install_spinner = create_spinner(&format!(
-                    "Installing from local directory: {}",
-                    path.display()
-                ));
-                let result = install_from_local_directory(&path);
-                install_spinner.finish_with_message("Local package loaded");
-                result?
-            }
-            SourceType::GitHubRepo {
-                owner,
-                repo,
-                version,
-            } => {
-                show_info(&format!(
-                    "Installing from GitHub: {}/{}@{}",
-                    owner, repo, version
-                ));
+    // Keep temp dir alive for GitHub installs until after extraction (avoid "No such file or directory")
+    let (_temp_guard, package, archive_path): (
+        Option<tempfile::TempDir>,
+        crate::models::package::Package,
+        Option<std::path::PathBuf>,
+    ) = match source_type {
+        SourceType::LocalFolder(path) => {
+            let install_spinner = create_spinner(&format!(
+                "Installing from local directory: {}",
+                path.display()
+            ));
+            let result = install_from_local_directory(&path);
+            install_spinner.finish_with_message("Local package loaded");
+            let (pkg, path_opt) = result?;
+            (None, pkg, path_opt)
+        }
+        SourceType::GitHubRepo {
+            owner,
+            repo,
+            version,
+        } => {
+            show_info(&format!(
+                "Installing from GitHub: {}/{}@{}",
+                owner, repo, version
+            ));
 
-                // Initialize GitHub client with token resolution
-                let github = GitHubClient::new(GitHubApiClient::resolve_token(args.token.clone()));
+            // Initialize GitHub client with token resolution
+            let github = GitHubClient::new(GitHubApiClient::resolve_token(args.token.clone()));
 
-                // Get package manifest
-                let manifest_spinner = create_spinner(&format!(
-                    "Fetching package manifest from {}/{}...",
-                    owner, repo
-                ));
-                let manifest = github
-                    .get_package_manifest(&owner, &repo, Some(&version))
-                    .await?;
-                manifest_spinner.finish_with_message("Package manifest fetched");
+            // Get package manifest
+            let manifest_spinner = create_spinner(&format!(
+                "Fetching package manifest from {}/{}...",
+                owner, repo
+            ));
+            let manifest = github
+                .get_package_manifest(&owner, &repo, Some(&version))
+                .await?;
+            manifest_spinner.finish_with_message("Package manifest fetched");
 
-                // Convert PackageManifest to TOML string for parsing
-                let manifest_toml = toml::to_string(&manifest)?;
-                let package = crate::models::package::Package::from_toml_str(&manifest_toml)
-                    .map_err(|e| AikError::Generic(format!("Failed to parse manifest: {}", e)))?;
+            // Convert PackageManifest to TOML string for parsing
+            let manifest_toml = toml::to_string(&manifest)?;
+            let package = crate::models::package::Package::from_toml_str(&manifest_toml)
+                .map_err(|e| AikError::Generic(format!("Failed to parse manifest: {}", e)))?;
 
-                // Download package archive
-                let download_spinner = create_spinner(&format!(
-                    "Downloading package {} v{}...",
-                    package.package.name, package.package.version
-                ));
+            // Download package archive (temp_dir must outlive install_package_from_archive)
+            let download_spinner = create_spinner(&format!(
+                "Downloading package {} v{}...",
+                package.package.name, package.package.version
+            ));
 
-                // Download package archive
-                let temp_dir = tempfile::tempdir()?;
-                let archive_path = temp_dir.path().join(format!(
-                    "{}-{}.zip",
-                    package.package.name, package.package.version
-                ));
+            let temp_dir = tempfile::tempdir().map_err(|e| {
+                AikError::Generic(format!("Failed to create temp directory: {}", e))
+            })?;
+            let archive_path = temp_dir.path().join(format!(
+                "{}-{}.zip",
+                package.package.name, package.package.version
+            ));
 
-                github
-                    .download_archive(&owner, &repo, Some(&version), &archive_path)
-                    .await?;
-                download_spinner.finish_with_message("Package downloaded");
+            github
+                .download_archive(&owner, &repo, Some(&version), &archive_path)
+                .await?;
+            download_spinner.finish_with_message("Package downloaded");
 
-                (package, Some(archive_path))
-            }
-        };
+            (Some(temp_dir), package, Some(archive_path))
+        }
+    };
 
     // Check if already installed
     let registry_path = aik_dir.registry_path();
@@ -391,8 +397,8 @@ fn install_from_local_directory(
         )));
     };
 
-    // Read and parse package file
-    let package_toml_content = fs::read_to_string(&toml_path).map_err(AikError::Io)?;
+    let package_toml_content = fs::read_to_string(&toml_path)
+        .map_err(|e| crate::error::io_context("Failed to read package manifest", &toml_path, e))?;
 
     let package =
         crate::models::package::Package::from_toml_str(&package_toml_content).map_err(|e| {
@@ -467,31 +473,33 @@ fn install_package_from_archive(
     use std::fs::File;
     use zip::ZipArchive;
 
-    // Open the ZIP archive
-    let file = File::open(archive_path)?;
+    let file = File::open(archive_path)
+        .map_err(|e| crate::error::io_context("Failed to open archive", archive_path, e))?;
     let mut archive = ZipArchive::new(file)?;
 
-    // Extract to packages directory
     let install_path = aik_dir.install_package(
         &package.package.name,
         &package.package.version,
         archive_path.parent().unwrap_or(std::path::Path::new(".")),
     )?;
 
-    // Extract files
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         let outpath = install_path.join(file.name());
 
         if file.name().ends_with('/') {
-            std::fs::create_dir_all(&outpath)?;
+            std::fs::create_dir_all(&outpath)
+                .map_err(|e| crate::error::io_context("Failed to create directory", &outpath, e))?;
         } else {
             if let Some(p) = outpath.parent() {
                 if !p.exists() {
-                    std::fs::create_dir_all(p)?;
+                    std::fs::create_dir_all(p).map_err(|e| {
+                        crate::error::io_context("Failed to create parent directory", p, e)
+                    })?;
                 }
             }
-            let mut outfile = File::create(&outpath)?;
+            let mut outfile = File::create(&outpath)
+                .map_err(|e| crate::error::io_context("Failed to create file", &outpath, e))?;
             std::io::copy(&mut file, &mut outfile)?;
         }
     }
@@ -621,11 +629,13 @@ fn load_template_content(
 
     let full_path = package_dir.join(template_path);
 
-    // Read template file
     fs::read_to_string(&full_path).map_err(|e| {
         format!(
-            "Failed to load template '{}' from package '{}': {}",
-            template_path, package.package.name, e
+            "Failed to load template '{}' from package '{}' (path: {}): {}",
+            template_path,
+            package.package.name,
+            full_path.display(),
+            e
         )
         .into()
     })

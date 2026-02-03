@@ -60,6 +60,9 @@ pub enum Commands {
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    // Initialization banner (binary name and version)
+    eprintln!("aikit {}", env!("CARGO_PKG_VERSION"));
+
     // Set debug mode if enabled
     if cli.debug {
         std::env::set_var("AIKIT_DEBUG", "1");
@@ -87,6 +90,9 @@ pub fn run() -> Result<()> {
         Some(Commands::Package(cmd)) => match cmd {
             commands::package::PackageCommands::Init(args) => rt
                 .block_on(commands::package::execute_init(args))
+                .map_err(|e| anyhow::anyhow!("{}", e))?,
+            commands::package::PackageCommands::Validate(args) => rt
+                .block_on(commands::package::execute_validate(args))
                 .map_err(|e| anyhow::anyhow!("{}", e))?,
             commands::package::PackageCommands::Build(args) => rt
                 .block_on(commands::package::execute_build(args))

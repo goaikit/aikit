@@ -349,6 +349,92 @@ mod tests {
             .stdout(predicate::str::contains("include-sources"));
     }
 
+    /// Test package validate help
+    #[test]
+    fn test_package_validate_help() {
+        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        cmd.args(["package", "validate", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Validate package structure"))
+            .stdout(predicate::str::contains("install-ready"))
+            .stdout(predicate::str::contains("path"));
+    }
+
+    /// Test package validate success when aikit.toml and all templates exist
+    #[test]
+    fn test_package_validate_success() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let work = temp.path();
+
+        Command::cargo_bin("aikit")?
+            .current_dir(work)
+            .args(["package", "init", "validate-test-pkg", "--yes"])
+            .assert()
+            .success();
+
+        let pkg_dir = work.join("validate-test-pkg");
+        assert!(pkg_dir.exists());
+
+        // Init creates templates/help.md but create_template sets template = "help.md" (root).
+        // Ensure the path validate expects exists: default is templates/{cmd}.md, or cmd_def.template.
+        // Init's package has template "help.md", so create help.md at root for validate to pass.
+        std::fs::write(pkg_dir.join("help.md"), "# Help\n")?;
+
+        Command::cargo_bin("aikit")?
+            .current_dir(work)
+            .args(["package", "validate", "--path", "validate-test-pkg"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("valid and install-ready"))
+            .stdout(predicate::str::contains("validate-test-pkg"));
+
+        Ok(())
+    }
+
+    /// Test package validate failure when a template file is missing
+    #[test]
+    fn test_package_validate_missing_template() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let work = temp.path();
+
+        Command::cargo_bin("aikit")?
+            .current_dir(work)
+            .args(["package", "init", "missing-tmpl-pkg", "--yes"])
+            .assert()
+            .success();
+
+        let pkg_dir = work.join("missing-tmpl-pkg");
+        std::fs::remove_file(pkg_dir.join("templates").join("help.md")).ok();
+        std::fs::remove_file(pkg_dir.join("help.md")).ok();
+
+        Command::cargo_bin("aikit")?
+            .current_dir(work)
+            .args(["package", "validate", "--path", "missing-tmpl-pkg"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("template file missing"))
+            .stderr(predicate::str::contains("Validation failed"));
+
+        Ok(())
+    }
+
+    /// Test package validate failure when aikit.toml is missing
+    #[test]
+    fn test_package_validate_no_manifest() {
+        let temp = tempdir().unwrap();
+        let work = temp.path();
+        std::fs::create_dir_all(work.join("empty-dir")).unwrap();
+
+        Command::cargo_bin("aikit")
+            .unwrap()
+            .current_dir(work)
+            .args(["package", "validate", "--path", "empty-dir"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("aikit.toml not found"));
+    }
+
     /// Test install help shows install-version (not version)
     #[test]
     fn test_install_help_shows_install_version() {
@@ -374,6 +460,7 @@ mod tests {
     fn test_all_commands_accessible() {
         let commands = vec![
             vec!["package", "init", "--help"],
+            vec!["package", "validate", "--help"],
             vec!["package", "build", "--help"],
             vec!["package", "publish", "--help"],
             vec!["install", "--help"],

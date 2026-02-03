@@ -12,10 +12,20 @@ use clap::{Args, Subcommand};
 pub enum PackageCommands {
     /// Initialize a new package with aikit.toml
     Init(PackageInitArgs),
+    /// Validate package structure and that templates exist (install-ready)
+    Validate(PackageValidateArgs),
     /// Build package for distribution
     Build(PackageBuildArgs),
     /// Publish package to registry
     Publish(PackagePublishArgs),
+}
+
+/// Arguments for package validate command
+#[derive(Debug, Args)]
+pub struct PackageValidateArgs {
+    /// Package directory (default: current directory)
+    #[arg(short, long, default_value = ".")]
+    pub path: String,
 }
 
 /// Arguments for package init command
@@ -251,6 +261,72 @@ Specify your license here.
     println!("  aikit package build  # Build the package");
 
     Ok(())
+}
+
+/// Execute package validate command
+pub async fn execute_validate(args: PackageValidateArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::models::package::Package;
+    use anyhow::Context;
+    use std::path::Path;
+
+    let root = Path::new(&args.path)
+        .canonicalize()
+        .with_context(|| format!("Package path not found or not accessible: {}", args.path))?;
+    let manifest_path = root.join("aikit.toml");
+
+    if !manifest_path.exists() {
+        return Err(format!(
+            "aikit.toml not found in {} (run from package directory or use --path)",
+            root.display()
+        )
+        .into());
+    }
+
+    let package = Package::from_toml_file(&manifest_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to load package from {}: {}",
+            manifest_path.display(),
+            e
+        )
+    })?;
+
+    package
+        .validate()
+        .map_err(|e| format!("Package validation failed: {}", e))?;
+
+    let mut errors = Vec::new();
+    for (cmd_name, cmd_def) in &package.commands {
+        let template_path_str = cmd_def
+            .template
+            .clone()
+            .unwrap_or_else(|| format!("templates/{}.md", cmd_name));
+        let template_path = root.join(&template_path_str);
+        if !template_path.exists() {
+            errors.push(format!(
+                "Command '{}': template file missing (path: {})",
+                cmd_name,
+                template_path.display()
+            ));
+        }
+    }
+
+    if errors.is_empty() {
+        println!(
+            "Package '{}' v{} is valid and install-ready.",
+            package.package.name, package.package.version
+        );
+        Ok(())
+    } else {
+        eprintln!("Validation failed ({} issue(s)):", errors.len());
+        for e in &errors {
+            eprintln!("  - {}", e);
+        }
+        Err(format!(
+            "Package structure invalid: {} template(s) missing",
+            errors.len()
+        )
+        .into())
+    }
 }
 
 /// Execute package build command
@@ -676,16 +752,12 @@ mod tests {
 
     #[test]
     fn test_find_package_zip_not_found() {
-        // Ensure dist folder doesn't exist from previous tests
-        let dist_path = PathBuf::from("dist");
-        if dist_path.exists() {
-            let _ = fs::remove_dir_all(&dist_path);
-        }
-
-        let (temp_dir, package) = create_test_package_dir();
-
+        let (_temp_dir, package) = create_test_package_dir();
+        let empty = TempDir::new().unwrap();
+        let orig = std::env::current_dir().unwrap();
+        std::env::set_current_dir(empty.path()).unwrap();
         let result = find_package_zip(&package, None);
-
+        let _ = std::env::set_current_dir(&orig);
         assert!(result.is_err());
     }
 
@@ -807,6 +879,53 @@ mod tests {
         let (temp_dir, package) = create_test_package_dir();
 
         assert!(package.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_validate_success() {
+        let (temp_dir, package) = create_test_package_dir();
+        let package_dir = temp_dir.path().join("test-package");
+        fs::create_dir_all(package_dir.join("templates")).unwrap();
+        fs::write(package_dir.join("help.md"), "# Help\n").unwrap();
+
+        let args = PackageValidateArgs {
+            path: package_dir.to_string_lossy().to_string(),
+        };
+        let result = execute_validate(args).await;
+        assert!(result.is_ok(), "validate should pass: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn test_execute_validate_missing_template() {
+        let (temp_dir, _package) = create_test_package_dir();
+        let package_dir = temp_dir.path().join("test-package");
+        assert!(!package_dir.join("help.md").exists());
+
+        let args = PackageValidateArgs {
+            path: package_dir.to_string_lossy().to_string(),
+        };
+        let result = execute_validate(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("template(s) missing"));
+        assert!(err.contains("Package structure invalid"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_validate_no_manifest() {
+        let temp_dir = TempDir::new().unwrap();
+        let empty_dir = temp_dir.path().join("empty");
+        fs::create_dir_all(&empty_dir).unwrap();
+
+        let args = PackageValidateArgs {
+            path: empty_dir.to_string_lossy().to_string(),
+        };
+        let result = execute_validate(args).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("aikit.toml not found"));
     }
 
     #[test]

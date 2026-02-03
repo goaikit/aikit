@@ -52,3 +52,8 @@ impl From<Box<dyn std::error::Error>> for AikError {
         AikError::Generic(err.to_string())
     }
 }
+
+/// Attach path and operation context to an I/O error for clearer diagnostics.
+pub fn io_context(operation: &str, path: &std::path::Path, err: std::io::Error) -> AikError {
+    AikError::Generic(format!("{} (path: {}): {}", operation, path.display(), err))
+}
