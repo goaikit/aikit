@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "aikit-sdk"]
+
 [package]
 name = "aikit"
 version = "0.1.36"
