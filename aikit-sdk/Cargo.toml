@@ -1,9 +1,9 @@
 [package]
-name = "ai-agent-deploy"
+name = "aikit-sdk"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "Agent catalog and deploy service for AI assistant configurations"
+description = "aikit SDK: agent catalog and deploy for AI assistant configurations"
 repository = "https://github.com/goaikit/aikit"
 keywords = ["ai", "agents", "deploy", "catalog", "capabilities"]
 categories = ["command-line-utilities"]

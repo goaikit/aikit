@@ -713,7 +713,7 @@ fn deploy_subagents_for_agent(
         Some(d) => d,
         None => return Ok(()),
     };
-    let _ = agents_dir; // used by deploy_subagent via ai-agent-deploy
+    let _ = agents_dir; // used by deploy_subagent via aikit-sdk
     for (name, def) in &package.subagents {
         let src_path = package_root.join(&def.source);
         let content = std::fs::read_to_string(&src_path).map_err(|e| {
@@ -724,7 +724,7 @@ fn deploy_subagents_for_agent(
                 e
             )
         })?;
-        ai_agent_deploy::deploy_subagent(agent_key, project_root, name, &content)
+        aikit_sdk::deploy_subagent(agent_key, project_root, name, &content)
             .map_err(|e| format!("deploy_subagent {}: {}", name, e))?;
     }
     Ok(())

@@ -168,9 +168,9 @@ static EXTRAS: &[(&str, Option<&str>, bool, &str, &str)] = &[
 /// Get the agent configuration list
 ///
 /// This is the single source of truth for all supported AI agents.
-/// Delegates to ai-agent-deploy for catalog data and uses extras table for aikit-specific fields.
+/// Delegates to aikit-sdk for catalog data and uses extras table for aikit-specific fields.
 pub fn get_agent_configs() -> Vec<AgentConfig> {
-    use ai_agent_deploy::all_agents;
+    use aikit_sdk::all_agents;
 
     all_agents()
         .into_iter()
@@ -214,9 +214,9 @@ pub fn get_agent_configs() -> Vec<AgentConfig> {
 
 /// Get agent configuration by key
 ///
-/// Delegates to ai-agent-deploy for catalog data and uses extras table for aikit-specific fields.
+/// Delegates to aikit-sdk for catalog data and uses extras table for aikit-specific fields.
 pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
-    use ai_agent_deploy::agent;
+    use aikit_sdk::agent;
 
     let deploy_config = agent(key)?;
     let extras = EXTRAS.iter().find(|(k, _, _, _, _)| *k == key);
@@ -254,9 +254,9 @@ pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
 
 /// Validate agent key
 ///
-/// Delegates to ai-agent-deploy for validation.
+/// Delegates to aikit-sdk for validation.
 pub fn validate_agent_key(key: &str) -> Result<(), String> {
-    use ai_agent_deploy::validate_agent_key;
+    use aikit_sdk::validate_agent_key;
 
     validate_agent_key(key).map_err(|e| e.to_string())
 }

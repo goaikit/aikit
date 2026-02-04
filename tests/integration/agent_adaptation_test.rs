@@ -123,7 +123,7 @@ mod tests {
         let agents = get_agent_configs();
         assert_eq!(agents.len(), 17, "Should support exactly 17 agents");
 
-        // Verify all expected agents are present - using actual 17 keys from ai-agent-deploy catalog
+        // Verify all expected agents are present - using actual 17 keys from aikit-sdk catalog
         let expected_agents = vec![
             "claude",
             "gemini",

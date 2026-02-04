@@ -41,7 +41,7 @@ This crate holds the full agent catalog with per-agent capabilities (commands, s
 ### Catalog
 
 ```rust
-use ai_agent_deploy::*;
+use aikit_sdk::*;
 
 // Get all agents
 let agents = all_agents();
@@ -97,7 +97,7 @@ pub enum DeployError {
 
 ## Error Handling
 
-The crate returns `Result` types with `ai_agent_deploy::DeployError` for:
+The crate returns `Result` types with `aikit_sdk::DeployError` for:
 
 - Agent key not found in catalog
 - Attempting to deploy to an agent that doesn't support the concept

@@ -1,0 +1,49 @@
+name: Publish aikit-sdk
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'aikit-sdk-v*.*.*'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  publish:
+    name: Publish aikit-sdk to crates.io
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify version matches tag
+        if: startsWith(github.ref, 'refs/tags/aikit-sdk-v')
+        run: |
+          TAG_VER="${GITHUB_REF#refs/tags/aikit-sdk-v}"
+          CARGO_VER=$(grep '^version = ' aikit-sdk/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          if [ "$TAG_VER" != "$CARGO_VER" ]; then
+            echo "Version mismatch: tag aikit-sdk-v$TAG_VER vs Cargo.toml $CARGO_VER"
+            exit 1
+          fi
+          echo "Version OK: $CARGO_VER"
+
+      - name: Dry-run publish
+        run: cargo publish -p aikit-sdk --dry-run
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish to crates.io
+        run: cargo publish -p aikit-sdk
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
