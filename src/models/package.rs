@@ -33,8 +33,45 @@ pub struct PackageMetadata {
 pub struct CommandDefinition {
     /// Human-readable description of what the command does
     pub description: String,
-    /// Path to the template file within the package (optional, defaults to commands/{name}.md)
+    /// Path to the template file within the package (optional, defaults to templates/{name}.md)
     pub template: Option<String>,
+    /// Explicit source path for the file used for this command (optional; if absent, template is used, then default templates/{name}.md)
+    #[serde(default)]
+    pub source: Option<String>,
+}
+
+impl CommandDefinition {
+    /// Resolve the effective source path: source, then template, then templates/{name}.md
+    pub fn effective_source(&self, command_name: &str) -> String {
+        self.source
+            .clone()
+            .or_else(|| self.template.clone())
+            .unwrap_or_else(|| format!("templates/{}.md", command_name))
+    }
+}
+
+/// Subagent definition from package.toml [subagents] section
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubagentDefinition {
+    /// Relative path to the subagent markdown file (required)
+    pub source: String,
+    /// Override name in frontmatter
+    pub name: Option<String>,
+    /// Override description
+    pub description: Option<String>,
+    /// Override model (fast | inherit | id)
+    pub model: Option<String>,
+    /// Override readonly
+    pub readonly: Option<bool>,
+    /// Override is_background
+    pub is_background: Option<bool>,
+}
+
+/// Skill definition from package.toml [skills] section
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillDefinition {
+    /// Relative path to the skill folder (required); entire folder is copied to agent skills_dir
+    pub source: String,
 }
 
 /// Artifact mapping from package.toml [artifacts] section
@@ -65,6 +102,12 @@ pub struct Package {
     pub package: PackageMetadata,
     /// Available commands in this package
     pub commands: HashMap<String, CommandDefinition>,
+    /// Subagent definitions (source path per subagent)
+    #[serde(default)]
+    pub subagents: HashMap<String, SubagentDefinition>,
+    /// Skill definitions (source folder path per skill)
+    #[serde(default)]
+    pub skills: HashMap<String, SkillDefinition>,
     /// Artifact mappings for installation
     pub artifacts: HashMap<String, String>,
     /// Agent-specific overrides
@@ -85,6 +128,8 @@ impl Package {
                 repository: None,
             },
             commands: HashMap::new(),
+            subagents: HashMap::new(),
+            skills: HashMap::new(),
             artifacts: HashMap::new(),
             agents: HashMap::new(),
         }
@@ -126,12 +171,31 @@ impl Package {
             }
         }
 
-        // Validate command templates exist in artifacts or have valid paths
+        // Validate command source/template paths are non-empty when present
         for (cmd_name, cmd_def) in &self.commands {
-            if let Some(template) = &cmd_def.template {
-                if template.is_empty() {
-                    return Err(format!("Command '{}' has empty template path", cmd_name));
-                }
+            let path = cmd_def
+                .source
+                .as_deref()
+                .or(cmd_def.template.as_deref())
+                .unwrap_or("");
+            if path.is_empty() {
+                continue; // will default to templates/{name}.md
+            }
+            if path.trim().is_empty() {
+                return Err(format!(
+                    "Command '{}' has empty source/template path",
+                    cmd_name
+                ));
+            }
+        }
+        for (name, def) in &self.subagents {
+            if def.source.is_empty() {
+                return Err(format!("Subagent '{}' has empty source path", name));
+            }
+        }
+        for (name, def) in &self.skills {
+            if def.source.is_empty() {
+                return Err(format!("Skill '{}' has empty source path", name));
             }
         }
 
@@ -360,6 +424,7 @@ Specify your license in package.toml
             CommandDefinition {
                 description: "Show help information".to_string(),
                 template: Some("help.md".to_string()),
+                source: None,
             },
         );
 
@@ -383,6 +448,10 @@ struct TomlPackage {
     #[serde(default)]
     commands: HashMap<String, CommandDefinition>,
     #[serde(default)]
+    subagents: HashMap<String, SubagentDefinition>,
+    #[serde(default)]
+    skills: HashMap<String, SkillDefinition>,
+    #[serde(default)]
     artifacts: HashMap<String, String>,
     #[serde(default)]
     agents: HashMap<String, AgentOverride>,
@@ -395,6 +464,8 @@ impl TryFrom<TomlPackage> for Package {
         let package = Package {
             package: toml.package,
             commands: toml.commands,
+            subagents: toml.subagents,
+            skills: toml.skills,
             artifacts: toml.artifacts,
             agents: toml.agents,
         };
@@ -409,6 +480,8 @@ impl From<Package> for TomlPackage {
         Self {
             package: package.package,
             commands: package.commands,
+            subagents: package.subagents,
+            skills: package.skills,
             artifacts: package.artifacts,
             agents: package.agents,
         }

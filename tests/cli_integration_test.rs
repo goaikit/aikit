@@ -413,7 +413,7 @@ mod tests {
             .args(["package", "validate", "--path", "missing-tmpl-pkg"])
             .assert()
             .failure()
-            .stderr(predicate::str::contains("template file missing"))
+            .stderr(predicate::str::contains("source file missing"))
             .stderr(predicate::str::contains("Validation failed"));
 
         Ok(())

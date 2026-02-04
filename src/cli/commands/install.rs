@@ -358,7 +358,44 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     );
     if let Err(e) = generate_agent_commands(&package, &aik_dir, &selected_agents) {
         eprintln!("Warning: Failed to generate agent commands: {}", e);
-        // Don't fail the installation if command generation fails
+    }
+
+    // Resolve installed package root (handles zipball top-level dir)
+    let package_root =
+        match aik_dir.installed_package_root(&package.package.name, &package.package.version) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Warning: Could not resolve package root: {}", e);
+                return Ok(());
+            }
+        };
+    let project_root = aik_dir.project_root();
+
+    // Deploy subagents and skills per agent, then copy artifacts
+    for agent_key in &selected_agents {
+        if let Some(agent_config) = crate::core::agent::get_agent_config(agent_key) {
+            if let Err(e) = deploy_subagents_for_agent(
+                &package,
+                &package_root,
+                &project_root,
+                agent_key,
+                &agent_config,
+            ) {
+                eprintln!("Warning: Deploy subagents for {}: {}", agent_key, e);
+            }
+            if let Err(e) = deploy_skills_for_agent(
+                &package,
+                &package_root,
+                &project_root,
+                agent_key,
+                &agent_config,
+            ) {
+                eprintln!("Warning: Deploy skills for {}: {}", agent_key, e);
+            }
+        }
+    }
+    if let Err(e) = copy_artifacts_to_project(&package, &package_root, &project_root) {
+        eprintln!("Warning: Copy artifacts: {}", e);
     }
 
     println!(
@@ -611,28 +648,15 @@ fn load_template_content(
 ) -> Result<String, Box<dyn std::error::Error>> {
     use std::fs;
 
-    // Determine template path:
-    // 1. Use command_def.template if specified (relative to package root)
-    // 2. Default to templates/{command_name}.md
-    let template_path_str = command_def
-        .template
-        .clone()
-        .unwrap_or_else(|| format!("templates/{}.md", command_name));
-
-    let template_path = template_path_str.as_str();
-
-    // Get installed package directory
-    let package_dir = aik_dir.packages_path().join(format!(
-        "{}-{}",
-        package.package.name, package.package.version
-    ));
-
-    let full_path = package_dir.join(template_path);
+    let template_path_str = command_def.effective_source(command_name);
+    let package_root =
+        aik_dir.installed_package_root(&package.package.name, &package.package.version)?;
+    let full_path = package_root.join(&template_path_str);
 
     fs::read_to_string(&full_path).map_err(|e| {
         format!(
             "Failed to load template '{}' from package '{}' (path: {}): {}",
-            template_path,
+            template_path_str,
             package.package.name,
             full_path.display(),
             e
@@ -674,6 +698,116 @@ fn generate_commands_for_agent(
         fs::write(filepath, content)?;
     }
 
+    Ok(())
+}
+
+/// Deploy package subagents for one agent (skips if agent has no agents_dir).
+fn deploy_subagents_for_agent(
+    package: &crate::models::package::Package,
+    package_root: &std::path::Path,
+    project_root: &std::path::Path,
+    agent_key: &str,
+    agent_config: &crate::core::agent::AgentConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let agents_dir = match &agent_config.agents_dir {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+    let _ = agents_dir; // used by deploy_subagent via ai-agent-deploy
+    for (name, def) in &package.subagents {
+        let src_path = package_root.join(&def.source);
+        let content = std::fs::read_to_string(&src_path).map_err(|e| {
+            format!(
+                "Failed to read subagent '{}' from {}: {}",
+                name,
+                src_path.display(),
+                e
+            )
+        })?;
+        ai_agent_deploy::deploy_subagent(agent_key, project_root, name, &content)
+            .map_err(|e| format!("deploy_subagent {}: {}", name, e))?;
+    }
+    Ok(())
+}
+
+/// Deploy package skills for one agent by copying each skill folder (skips if agent has no skills_dir).
+fn deploy_skills_for_agent(
+    package: &crate::models::package::Package,
+    package_root: &std::path::Path,
+    project_root: &std::path::Path,
+    agent_key: &str,
+    agent_config: &crate::core::agent::AgentConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let skills_dir = match &agent_config.skills_dir {
+        Some(d) => d,
+        None => return Ok(()),
+    };
+    let dest_base = project_root.join(skills_dir);
+    for (name, def) in &package.skills {
+        let src_dir = package_root.join(&def.source);
+        if !src_dir.is_dir() {
+            return Err(format!(
+                "Skill '{}' source is not a directory: {}",
+                name,
+                src_dir.display()
+            )
+            .into());
+        }
+        let dest_dir = dest_base.join(name);
+        std::fs::create_dir_all(&dest_dir)?;
+        copy_package_files(&src_dir, &dest_dir)?;
+    }
+    let _ = agent_key;
+    Ok(())
+}
+
+/// Copy artifact mappings from installed package root to project.
+fn copy_artifacts_to_project(
+    package: &crate::models::package::Package,
+    package_root: &std::path::Path,
+    project_root: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use glob::Pattern;
+    use std::fs;
+    use walkdir::WalkDir;
+
+    for (pattern_str, dest_str) in package.get_artifact_mappings(None) {
+        let glob_pattern = Pattern::new(&pattern_str)?;
+        let prefix = pattern_str
+            .rsplit_once('*')
+            .map(|(p, _)| p.to_string())
+            .unwrap_or_else(String::new);
+        let dest_dir = project_root.join(dest_str.trim_end_matches('/'));
+
+        for entry in WalkDir::new(package_root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(package_root)
+                .map_err(|_| "strip_prefix")?;
+            let path_str = relative.to_string_lossy();
+            if !glob_pattern.matches(&path_str) {
+                continue;
+            }
+            let subpath = if prefix.is_empty() {
+                relative.to_path_buf()
+            } else if let Ok(s) = relative.strip_prefix(&prefix) {
+                std::path::PathBuf::from(s)
+            } else {
+                relative.to_path_buf()
+            };
+            let dest_file = dest_dir.join(&subpath);
+            if let Some(p) = dest_file.parent() {
+                fs::create_dir_all(p)?;
+            }
+            fs::copy(path, &dest_file)?;
+        }
+    }
     Ok(())
 }
 

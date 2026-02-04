@@ -63,6 +63,10 @@ pub struct AgentConfig {
     pub output_format: OutputFormat,
     /// Output directory for command files
     pub output_dir: String,
+    /// Optional directory for agent skills (None if agent does not support skills)
+    pub skills_dir: Option<String>,
+    /// Optional directory for agent subagents (None if agent does not support subagents)
+    pub agents_dir: Option<String>,
     /// Argument placeholder format ("$ARGUMENTS" or "{{args}}")
     pub arg_placeholder: String,
 }
@@ -200,6 +204,8 @@ pub fn get_agent_configs() -> Vec<AgentConfig> {
                 requires_cli,
                 output_format,
                 output_dir: deploy_config.commands_dir.clone(),
+                skills_dir: deploy_config.skills_dir.clone(),
+                agents_dir: deploy_config.agents_dir.clone(),
                 arg_placeholder,
             }
         })
@@ -240,6 +246,8 @@ pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
         requires_cli,
         output_format,
         output_dir: deploy_config.commands_dir.clone(),
+        skills_dir: deploy_config.skills_dir.clone(),
+        agents_dir: deploy_config.agents_dir.clone(),
         arg_placeholder,
     })
 }

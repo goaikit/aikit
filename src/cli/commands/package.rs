@@ -296,16 +296,33 @@ pub async fn execute_validate(args: PackageValidateArgs) -> Result<(), Box<dyn s
 
     let mut errors = Vec::new();
     for (cmd_name, cmd_def) in &package.commands {
-        let template_path_str = cmd_def
-            .template
-            .clone()
-            .unwrap_or_else(|| format!("templates/{}.md", cmd_name));
-        let template_path = root.join(&template_path_str);
-        if !template_path.exists() {
+        let source_path_str = cmd_def.effective_source(cmd_name);
+        let source_path = root.join(&source_path_str);
+        if !source_path.exists() {
             errors.push(format!(
-                "Command '{}': template file missing (path: {})",
+                "Command '{}': source file missing (path: {})",
                 cmd_name,
-                template_path.display()
+                source_path.display()
+            ));
+        }
+    }
+    for (name, def) in &package.subagents {
+        let path = root.join(&def.source);
+        if !path.exists() || !path.is_file() {
+            errors.push(format!(
+                "Subagent '{}': source file missing or not a file (path: {})",
+                name,
+                path.display()
+            ));
+        }
+    }
+    for (name, def) in &package.skills {
+        let path = root.join(&def.source);
+        if !path.exists() || !path.is_dir() {
+            errors.push(format!(
+                "Skill '{}': source directory missing or not a directory (path: {})",
+                name,
+                path.display()
             ));
         }
     }
@@ -322,7 +339,7 @@ pub async fn execute_validate(args: PackageValidateArgs) -> Result<(), Box<dyn s
             eprintln!("  - {}", e);
         }
         Err(format!(
-            "Package structure invalid: {} template(s) missing",
+            "Package structure invalid: {} path(s) missing or invalid",
             errors.len()
         )
         .into())
@@ -907,7 +924,7 @@ mod tests {
         let result = execute_validate(args).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("template(s) missing"));
+        assert!(err.contains("path(s) missing or invalid"));
         assert!(err.contains("Package structure invalid"));
     }
 
@@ -1123,6 +1140,7 @@ authors = ["test"]
             crate::models::package::CommandDefinition {
                 description: "Run tests".to_string(),
                 template: Some("run.md".to_string()),
+                source: None,
             },
         );
 
@@ -1131,6 +1149,7 @@ authors = ["test"]
             crate::models::package::CommandDefinition {
                 description: "Build project".to_string(),
                 template: Some("build.md".to_string()),
+                source: None,
             },
         );
 
