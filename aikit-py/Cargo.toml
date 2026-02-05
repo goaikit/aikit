@@ -1,0 +1,21 @@
+[package]
+name = "aikit-py"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Python bindings for aikit SDK"
+repository = "https://github.com/goaikit/aikit"
+keywords = ["ai", "agents", "deploy", "catalog", "capabilities", "python"]
+categories = ["command-line-utilities"]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+aikit-sdk = { path = "../aikit-sdk" }
+
+[dev-dependencies]
+insta = { version = "1.39", features = ["json"] }
+tempfile = "3.12"
+assert_cmd = "2.0"

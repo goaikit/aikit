@@ -742,11 +742,11 @@ mod tests {
 
     #[test]
     fn test_find_package_zip_with_default_path() {
-        let temp_dir_obj = TempDir::new().unwrap();
+        let temp_dir_obj = TempDir::new().expect("Failed to create main temp dir object");
         let temp_dir_path = temp_dir_obj.path();
 
-        let orig_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(temp_dir_path).unwrap();
+        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
+        std::env::set_current_dir(temp_dir_path).expect("Failed to set CWD for test");
 
         let package = crate::models::package::Package::create_template(
             "test-package".to_string(),
@@ -756,7 +756,7 @@ mod tests {
         );
 
         let dist_dir_abs = temp_dir_path.join("dist"); // This is an absolute path
-        fs::create_dir_all(&dist_dir_abs).unwrap();
+        fs::create_dir_all(&dist_dir_abs).expect("Failed to create dist directory");
 
         let expected_zip_path_abs = dist_dir_abs.join(format!(
             "{}-{}.zip",
@@ -767,13 +767,17 @@ mod tests {
         let result = find_package_zip(&package, None);
 
         // Restore CWD after result is obtained, but before assertions
-        std::env::set_current_dir(orig_cwd).unwrap();
+        std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "Expected find_package_zip to be Ok, but got {:?}",
+            result.err()
+        );
         let found_path_relative = result.unwrap(); // This is PathBuf("dist/test-package-0.1.0.zip")
         let found_path_abs = temp_dir_path.join(found_path_relative); // This should be absolute
 
-        assert_eq!(found_path_abs, expected_zip_path_abs);
+        assert_eq!(found_path_abs, expected_zip_path_abs, "Found path mismatch");
     }
 
     #[test]

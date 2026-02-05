@@ -33,6 +33,28 @@ jobs:
     - name: Run clippy
       run: cargo clippy -- -D warnings
 
+    - name: Verify aikit-sdk and aikit-py versions are in sync
+      run: |
+        SDK_VERSION=$(grep "^version" aikit-sdk/Cargo.toml | head -n 1 | awk -F '"' '{print $2}')
+        PY_CARGO_VERSION=$(grep "^version" aikit-py/Cargo.toml | head -n 1 | awk -F '"' '{print $2}')
+        PY_PYPROJECT_VERSION=$(grep "version =" aikit-py/pyproject.toml | head -n 1 | awk -F '"' '{print $2}')
+
+        echo "SDK Version: $SDK_VERSION"
+        echo "aikit-py Cargo Version: $PY_CARGO_VERSION"
+        echo "aikit-py pyproject Version: $PY_PYPROJECT_VERSION"
+
+        if [ "$SDK_VERSION" != "$PY_CARGO_VERSION" ]; then
+          echo "Error: aikit-sdk/Cargo.toml version ($SDK_VERSION) does not match aikit-py/Cargo.toml version ($PY_CARGO_VERSION)"
+          exit 1
+        fi
+
+        if [ "$SDK_VERSION" != "$PY_PYPROJECT_VERSION" ]; then
+          echo "Error: aikit-sdk/Cargo.toml version ($SDK_VERSION) does not match aikit-py/pyproject.toml version ($PY_PYPROJECT_VERSION)"
+          exit 1
+        fi
+
+        echo "All versions are in sync."
+
     - name: Run unit tests
       run: cargo test --lib
 

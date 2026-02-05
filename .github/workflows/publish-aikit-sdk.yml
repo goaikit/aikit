@@ -47,3 +47,49 @@ jobs:
         run: cargo publish -p aikit-sdk
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  publish-python:
+    name: Publish aikit-py to PyPI
+    runs-on: ubuntu-latest
+    needs: publish
+    if: startsWith(github.ref, 'refs/tags/aikit-sdk-v')
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Verify aikit-py version matches tag
+        run: |
+          TAG_VER="${GITHUB_REF#refs/tags/aikit-sdk-v}"
+          PY_CARGO_VER=$(grep '^version = ' aikit-py/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          PY_PYPROJECT_VER=$(grep 'version = ' aikit-py/pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+
+          if [ "$TAG_VER" != "$PY_CARGO_VER" ]; then
+            echo "Version mismatch: tag aikit-sdk-v$TAG_VER vs aikit-py/Cargo.toml $PY_CARGO_VER"
+            exit 1
+          fi
+
+          if [ "$TAG_VER" != "$PY_PYPROJECT_VER" ]; then
+            echo "Version mismatch: tag aikit-sdk-v$TAG_VER vs aikit-py/pyproject.toml $PY_PYPROJECT_VER"
+            exit 1
+          fi
+          echo "aikit-py versions OK: $TAG_VER"
+
+      - name: Build aikit-py wheel
+        run: maturin build --release --out dist
+        working-directory: aikit-py
+
+      - name: Publish aikit-py to PyPI
+        run: maturin publish -r pypi --token ${{ secrets.PYPI_API_TOKEN }}
+        working-directory: aikit-py
+

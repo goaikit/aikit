@@ -261,9 +261,11 @@ mod tests {
     #[test]
     fn test_sanitize_path_basic() {
         use tempfile::tempdir;
-        let orig_cwd = std::env::current_dir().unwrap();
-        let temp_dir = tempdir().unwrap();
-        std::env::set_current_dir(&temp_dir).unwrap();
+        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
+
+        let temp_dir_obj = tempdir().expect("Failed to create main temp dir");
+        let temp_dir_path = temp_dir_obj.path();
+        std::env::set_current_dir(temp_dir_path).expect("Failed to set CWD to main temp dir");
 
         // Test with a relative path that should work and resolve to current directory
         let result = sanitize_path(".");
@@ -272,27 +274,56 @@ mod tests {
             "Sanitizing '.' should be OK: {:?}",
             result.err()
         );
-        let path_buf = result.unwrap();
-        assert!(path_buf.exists());
+        let path_buf = result.expect("Should get a valid PathBuf for '.'");
+        assert!(
+            path_buf.exists(),
+            "Path '.' should exist after canonicalization"
+        );
         assert_eq!(
-            path_buf.canonicalize().unwrap(),
-            temp_dir.path().canonicalize().unwrap()
+            path_buf.canonicalize().expect("Failed to canonicalize '.'"),
+            temp_dir_path
+                .canonicalize()
+                .expect("Failed to canonicalize main temp dir")
         );
 
         // Test valid relative paths
-        assert!(sanitize_path("foo/bar").is_ok());
-        assert!(sanitize_path("foo/./bar").is_ok());
-        assert!(sanitize_path("foo/bar/").is_ok());
+        assert!(
+            sanitize_path("foo/bar").is_ok(),
+            "Sanitizing 'foo/bar' should be OK"
+        );
+        assert!(
+            sanitize_path("foo/./bar").is_ok(),
+            "Sanitizing 'foo/./bar' should be OK"
+        );
+        assert!(
+            sanitize_path("foo/bar/").is_ok(),
+            "Sanitizing 'foo/bar/' should be OK"
+        );
 
         // Test invalid paths (directory traversal attempts)
-        assert!(sanitize_path("foo/../bar").is_err());
-        assert!(sanitize_path("../bar").is_err());
-        // For absolute path outside current dir, create a temporary directory outside current tempdir
-        let outside_temp_dir = tempdir().unwrap();
-        let outside_path = outside_temp_dir.path().join("file.txt");
-        std::fs::write(&outside_path, "content").unwrap();
-        assert!(sanitize_path(outside_path.to_str().unwrap()).is_err());
+        assert!(
+            sanitize_path("foo/../bar").is_err(),
+            "Sanitizing 'foo/../bar' should be an error"
+        );
+        assert!(
+            sanitize_path("../bar").is_err(),
+            "Sanitizing '../bar' should be an error"
+        );
 
-        std::env::set_current_dir(&orig_cwd).unwrap();
+        // For absolute path outside current dir, create a temporary directory outside current tempdir
+        let outside_temp_dir_obj = tempdir().expect("Failed to create outside temp dir");
+        let outside_temp_dir_path = outside_temp_dir_obj.path();
+        let outside_path = outside_temp_dir_path.join("file.txt");
+        std::fs::write(&outside_path, "content").expect("Failed to write to outside_path");
+
+        let result_outside =
+            sanitize_path(outside_path.to_str().expect("Outside path not valid UTF-8"));
+        assert!(
+            result_outside.is_err(),
+            "Sanitizing outside_path should be an error: {:?}",
+            result_outside
+        );
+
+        std::env::set_current_dir(&orig_cwd).expect("Failed to restore original CWD");
     }
 }

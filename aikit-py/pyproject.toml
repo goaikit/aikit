@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin==1.0.0", "setuptools"]
+build-backend = "maturin"
+
+[project]
+name = "aikit-py"
+version = "0.1.0"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+description = "Python bindings for aikit SDK"
+readme = "README.md"
+authors = [
+    { name = "goaikit", email = "info@goaikit.dev" }
+]
+keywords = ["ai", "agents", "deploy", "catalog", "capabilities", "python"]
+classifiers = [
+    "Programming Language :: Python",
+    "Programming Language :: Rust",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: Apache Software License",
+]
+
+[tool.maturin]
+module-name = "aikit_py"
+
