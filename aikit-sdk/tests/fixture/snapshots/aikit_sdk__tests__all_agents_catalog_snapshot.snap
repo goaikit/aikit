@@ -1,13 +1,13 @@
 ---
-source: src/lib.rs
-assertion_line: 646
-expression: "catalog_str"
+source: aikit-sdk/src/lib.rs
+expression: catalog_str
 ---
 Claude Code
 Google Gemini
 GitHub Copilot
 Cursor
 Qwen Code
+Newton
 opencode
 Codex CLI
 Windsurf

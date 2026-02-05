@@ -13,16 +13,16 @@ AIKit integrates with 17+ AI coding assistants to enhance your development workf
 
 ### Agent Capability Comparison
 
-| Feature | Claude Code | Cursor | GitHub Copilot | Gemini | Continue |
-|---------|-------------|--------|----------------|--------|----------|
-| **Best For** | Complex reasoning, code analysis | Integrated IDE experience | GitHub ecosystem | Fast responses, cost-effective | Flexible model selection |
-| **Setup Complexity** | Medium (CLI required) | Easy (native) | Easy (native) | Easy (native) | Medium (configuration) |
-| **Real-time Integration** | ✅ Excellent | ✅ Excellent | ✅ Excellent | ✅ Good | ✅ Good |
-| **Code Generation** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Code Analysis** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Refactoring** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Documentation** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-| **Cost** | 💰💰💰 | 💰💰 | 💰💰 | 💰 | 💰-💰💰💰 |
+| Feature | Claude Code | Cursor | GitHub Copilot | Gemini | Newton | Continue |
+|---------|-------------|--------|----------------|--------|--------|----------|
+| **Best For** | Complex reasoning, code analysis | Integrated IDE experience | GitHub ecosystem | Fast responses, cost-effective | AI Kit tasks, extensibility | Flexible model selection |
+| **Setup Complexity** | Medium (CLI required) | Easy (native) | Easy (native) | Easy (native) | Medium (configuration) | Medium (configuration) |
+| **Real-time Integration** | ✅ Excellent | ✅ Excellent | ✅ Excellent | ✅ Good | ✅ Excellent | ✅ Good |
+| **Code Generation** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Code Analysis** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Refactoring** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Documentation** | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
+| **Cost** | 💰💰💰 | 💰💰 | 💰💰 | 💰 | 💰💰 | 💰-💰💰💰 |
 
 ### Selection Guidance
 
@@ -76,6 +76,7 @@ AIKit supports the following AI coding assistants:
 | Gemini | ❌ Native | ✅ Full | ✅ Real-time | Production |
 | Continue | ❌ Native | ✅ Full | ✅ Real-time | Production |
 | Qwen | ✅ Required | ✅ Full | ✅ Real-time | Production |
+| Newton | ❌ Native | ✅ Full | ✅ Real-time | Production |
 | OpenCode | ❌ Native | ✅ Full | ⚠️ Limited | Beta |
 | CodeX (Continue) | ❌ Native | ✅ Full | ✅ Real-time | Production |
 | Windsurf | ❌ Native | ✅ Full | ✅ Real-time | Production |
@@ -238,6 +239,34 @@ output_format = "Markdown"
 output_dir = ".gemini/prompts"
 arg_placeholder = "{args}"
 extensions = [".md"]
+```
+
+### Newton
+
+**Overview**: Aikit's extensible AI agent for custom tasks and skills.
+
+**Requirements**:
+- No specific CLI required (managed by AIKit)
+- Python for custom skill scripts (if applicable)
+
+**Setup**:
+```bash
+# Newton is built into AIKit
+# No external setup required
+```
+
+**AIKit Configuration**:
+```toml
+[agents.newton]
+name = "Newton"
+key = "newton"
+folder = ".newton"
+requires_cli = false
+output_format = "Markdown"
+output_dir = ".newton/commands"
+skills_dir = ".newton/skills"
+arg_placeholder = "{args}"
+extensions = [".md", ".py"]
 ```
 
 ### Continue

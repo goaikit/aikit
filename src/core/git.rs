@@ -13,6 +13,10 @@ pub struct GitHubClient {
     token: Option<String>,
 }
 
+fn get_api_base_url() -> String {
+    std::env::var("GITHUB_API_URL").unwrap_or_else(|_| "https://api.github.com".to_string())
+}
+
 impl GitHubClient {
     /// Create a new GitHub client
     pub fn new(token: Option<String>) -> Self {
@@ -93,9 +97,10 @@ impl GitHubClient {
         dest: &PathBuf,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let ref_param = ref_.unwrap_or("main");
+        let base_url = get_api_base_url();
         let url = format!(
-            "https://api.github.com/repos/{}/{}/zipball/{}",
-            owner, repo, ref_param
+            "{}/repos/{}/{}/zipball/{}",
+            base_url, owner, repo, ref_param
         );
 
         let mut request = self.client.get(&url);
@@ -128,7 +133,8 @@ impl GitHubClient {
             return Err("GitHub token required for creating releases".into());
         }
 
-        let url = format!("https://api.github.com/repos/{}/{}/releases", owner, repo);
+        let base_url = get_api_base_url();
+        let url = format!("{}/repos/{}/{}/releases", base_url, owner, repo);
 
         let response = self
             .client

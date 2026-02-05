@@ -325,6 +325,13 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
     },
     AgentEntry {
+        key: "newton",
+        name: "Newton",
+        commands: ".newton/commands",
+        skills: Some(".newton/skills"),
+        subagents: Some(".newton/agents"),
+    },
+    AgentEntry {
         key: "opencode",
         name: "opencode",
         commands: ".opencode/commands",
@@ -428,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_all_agents_count() {
-        assert_eq!(all_agents().len(), 17);
+        assert_eq!(all_agents().len(), 18);
     }
 
     #[test]
@@ -470,6 +477,15 @@ mod tests {
         assert_eq!(config.commands_dir, ".qwen/commands");
         assert!(config.skills_dir.is_none());
         assert!(config.agents_dir.is_none());
+    }
+
+    #[test]
+    fn test_agent_fields_for_newton() {
+        let config = agent("newton").unwrap();
+        assert_eq!(config.name, "Newton");
+        assert_eq!(config.commands_dir, ".newton/commands");
+        assert!(config.skills_dir.is_some());
+        assert!(config.agents_dir.is_some());
     }
 
     #[test]
@@ -584,6 +600,37 @@ mod tests {
     }
 
     #[test]
+    fn test_deploy_skill_for_newton() {
+        let temp_dir = TempDir::new().unwrap();
+        let skill_md = "# Newton Skill\n\nThis is a skill for Newton.";
+        let scripts: &[(&str, &[u8])] =
+            &[("newton_script.sh", b"#!/bin/sh\necho 'Hello from Newton'")];
+
+        let path = deploy_skill(
+            "newton",
+            temp_dir.path(),
+            "newton-skill",
+            skill_md,
+            Some(scripts),
+        )
+        .unwrap();
+
+        assert!(path.exists());
+        assert!(path
+            .parent()
+            .unwrap()
+            .join("scripts/newton_script.sh")
+            .exists());
+
+        let skill_content = fs::read_to_string(&path).unwrap();
+        assert_eq!(skill_content, skill_md);
+
+        let script_content =
+            fs::read_to_string(path.parent().unwrap().join("scripts/newton_script.sh")).unwrap();
+        assert_eq!(script_content, "#!/bin/sh\necho 'Hello from Newton'");
+    }
+
+    #[test]
     fn test_command_filename_convention() {
         assert_eq!(command_filename("claude", "test"), "test.md");
         assert_eq!(command_filename("codex", "test"), "test.prompt");
@@ -604,7 +651,10 @@ mod tests {
             let path = deploy_command("claude", temp_dir.path(), "test-command", content).unwrap();
 
             let deployed_content = fs::read_to_string(&path).unwrap();
-            assert_snapshot!(deployed_content, @"# My Command\nHello World");
+            assert_snapshot!(deployed_content, @"
+            # My Command
+            Hello World
+            ");
         });
     }
 
@@ -627,17 +677,25 @@ mod tests {
         .unwrap();
 
         let skill_content = fs::read_to_string(&path).unwrap();
-        assert_snapshot!(skill_content, @"# Skill Name\n\nDescription here.");
+        assert_snapshot!(skill_content, @"
+        # Skill Name
+
+        Description here.
+        ");
 
         let setup_content =
             fs::read_to_string(path.parent().unwrap().join("scripts/setup.sh")).unwrap();
-        assert_snapshot!(setup_content, @"#!/bin/sh
-echo 'setup'");
+        assert_snapshot!(setup_content, @"
+        #!/bin/sh
+        echo 'setup'
+        ");
 
         let cleanup_content =
             fs::read_to_string(path.parent().unwrap().join("scripts/cleanup.sh")).unwrap();
-        assert_snapshot!(cleanup_content, @"#!/bin/sh
-echo 'cleanup'");
+        assert_snapshot!(cleanup_content, @"
+        #!/bin/sh
+        echo 'cleanup'
+        ");
     }
 
     #[test]
@@ -649,7 +707,10 @@ echo 'cleanup'");
             let path = deploy_subagent("claude", temp_dir.path(), "my-agent", content).unwrap();
 
             let deployed_content = fs::read_to_string(&path).unwrap();
-            assert_snapshot!(deployed_content, @"# My Subagent\nConfig here.");
+            assert_snapshot!(deployed_content, @"
+            # My Subagent
+            Config here.
+            ");
         });
     }
 
@@ -683,7 +744,7 @@ mod catalog_tests {
     #[test]
     fn test_catalog_contains_all_agents() {
         let all = all_agents();
-        assert_eq!(all.len(), 17);
+        assert_eq!(all.len(), 18);
 
         let keys: Vec<_> = all.iter().map(|a| a.name.clone()).collect();
         assert!(keys.contains(&"Claude Code".to_string()));
@@ -691,6 +752,7 @@ mod catalog_tests {
         assert!(keys.contains(&"GitHub Copilot".to_string()));
         assert!(keys.contains(&"Cursor".to_string()));
         assert!(keys.contains(&"Qwen Code".to_string()));
+        assert!(keys.contains(&"Newton".to_string()));
         assert!(keys.contains(&"opencode".to_string()));
         assert!(keys.contains(&"Codex CLI".to_string()));
         assert!(keys.contains(&"Windsurf".to_string()));

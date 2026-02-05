@@ -855,14 +855,38 @@ description = "Test package with invalid name"
             .assert()
             .success();
 
-        // Try to publish without token - should fail
+        // Set up mock GitHub API
+        let mut mock_server = mockito::Server::new();
+        let mock_url = mock_server.url();
+
+        // Mock a 401 Unauthorized response when no token is provided
+        let _mock = mock_server
+            .mock("POST", "/repos/test-owner/test-repo/releases")
+            .with_status(401) // Unauthorized
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                "message": "Bad credentials",
+                "documentation_url": "https://docs.github.com/rest"
+            }"#,
+            )
+            .create();
+
+        // Set environment variable to override GitHub API URL for testing
+        std::env::set_var("GITHUB_API_URL", &mock_url);
+
+        // Try to publish without token - should fail with a 401 message
         Command::cargo_bin("aikit")?
             .current_dir(work.join("no-token-pkg"))
+            .env("GITHUB_API_URL", &mock_url)
             .args(["package", "publish", "test-owner/test-repo"])
             .assert()
             .failure()
-            .stderr(predicate::str::contains("GitHub token required"));
+            .stderr(predicate::str::contains(
+                "Failed to create release: HTTP 401 Unauthorized",
+            ));
 
+        std::env::remove_var("GITHUB_API_URL");
         Ok(())
     }
 

@@ -410,16 +410,17 @@ mod tests {
 
     #[test]
     fn test_all_17_agents_present() {
-        assert_eq!(get_agent_configs().len(), 17);
+        assert_eq!(get_agent_configs().len(), 18);
     }
 
     #[test]
     fn test_extras_table_populated() {
         let configs = get_agent_configs();
-        assert_eq!(configs.len(), 17);
+        assert_eq!(configs.len(), 18);
 
         // Verify extras table covers all agents
         let keys: Vec<_> = configs.iter().map(|c| c.key.as_str()).collect();
         assert!(keys.contains(&"opencode"));
+        assert!(keys.contains(&"newton"));
     }
 }

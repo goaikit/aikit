@@ -742,40 +742,59 @@ mod tests {
 
     #[test]
     fn test_find_package_zip_with_default_path() {
-        let (temp_dir, package) = create_test_package_dir();
+        let temp_dir_obj = TempDir::new().unwrap();
+        let temp_dir_path = temp_dir_obj.path();
 
-        // Create the dist directory in the current working directory
-        let dist_dir = std::path::Path::new("dist");
-        let _ = fs::remove_dir_all(dist_dir); // Clean up first
-        fs::create_dir_all(dist_dir).unwrap();
-        let default_zip = dist_dir.join("test-package-0.1.0.zip");
-        create_test_zip_file(&default_zip);
+        let orig_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(temp_dir_path).unwrap();
+
+        let package = crate::models::package::Package::create_template(
+            "test-package".to_string(),
+            None,
+            None,
+            None,
+        );
+
+        let dist_dir_abs = temp_dir_path.join("dist"); // This is an absolute path
+        fs::create_dir_all(&dist_dir_abs).unwrap();
+
+        let expected_zip_path_abs = dist_dir_abs.join(format!(
+            "{}-{}.zip",
+            package.package.name, package.package.version
+        ));
+        create_test_zip_file(&expected_zip_path_abs);
 
         let result = find_package_zip(&package, None);
 
+        // Restore CWD after result is obtained, but before assertions
+        std::env::set_current_dir(orig_cwd).unwrap();
+
         assert!(result.is_ok());
+        let found_path_relative = result.unwrap(); // This is PathBuf("dist/test-package-0.1.0.zip")
+        let found_path_abs = temp_dir_path.join(found_path_relative); // This should be absolute
 
-        // Clean up
-        // Clean up
-        if let Err(e) = fs::remove_file(&default_zip) {
-            eprintln!("Warning: Failed to remove test file: {}", e);
-        }
-        if let Err(e) = fs::remove_dir_all(dist_dir) {
-            eprintln!("Warning: Failed to remove test directory: {}", e);
-        }
-
-        assert_eq!(result.unwrap(), default_zip);
+        assert_eq!(found_path_abs, expected_zip_path_abs);
     }
 
     #[test]
     fn test_find_package_zip_not_found() {
         let (_temp_dir, package) = create_test_package_dir();
-        let empty = TempDir::new().unwrap();
+        let empty_work_dir_obj = TempDir::new().unwrap();
+        let empty_work_dir = empty_work_dir_obj.path();
+
         let orig = std::env::current_dir().unwrap();
-        std::env::set_current_dir(empty.path()).unwrap();
+        std::env::set_current_dir(empty_work_dir).unwrap();
+
+        // Ensure no 'dist' directory exists in this empty temp dir
+        let dist_path = empty_work_dir.join("dist");
+        if dist_path.exists() {
+            fs::remove_dir_all(&dist_path).unwrap();
+        }
+
         let result = find_package_zip(&package, None);
-        let _ = std::env::set_current_dir(&orig);
-        assert!(result.is_err());
+        std::env::set_current_dir(&orig).unwrap(); // Restore CWD
+
+        assert!(result.is_err()); // Should now correctly return an error
     }
 
     #[test]

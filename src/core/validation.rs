@@ -63,28 +63,34 @@ pub fn validate_version_format(version: &str) -> Result<(), AikError> {
 pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
     let path_buf = PathBuf::from(path);
 
-    // For relative paths, try canonicalization but fall back to absolute path if it fails
-    // This handles cases where canonicalize fails due to permissions or other issues
+    // Explicitly check for ".." components
+    // This prevents directory traversal attempts
+    if path_buf
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(AikError::InvalidSource(
+            "Path cannot contain '..' components".to_string(),
+        ));
+    }
+
+    // After checking for "..", then proceed with canonicalization and other checks
+    // This part of the logic remains mostly the same, but now it's guaranteed that
+    // ".." are not present, so canonicalize won't "escape" unexpectedly.
     let canonical = if path_buf.is_relative() {
-        path_buf.canonicalize().or_else(|_| {
-            // Fall back to making it absolute relative to current dir
-            std::env::current_dir().map(|cwd| cwd.join(&path_buf))
-        })
+        path_buf
+            .canonicalize()
+            .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(&path_buf)))
     } else {
         path_buf.canonicalize()
     }
     .map_err(|e| AikError::InvalidSource(format!("Invalid path '{}': {}", path, e)))?;
 
     // Prevent absolute paths that go outside current working directory
-    // This is a basic check - more sophisticated validation might be needed
     if canonical.is_absolute() {
         let current_dir = std::env::current_dir()?;
-
-        // Canonicalize the current directory for comparison
         let canonical_current_dir = current_dir.canonicalize()?;
 
-        // Allow paths that start with the canonicalized current directory
-        // This handles cases where relative paths get canonicalized to absolute paths
         if !canonical.starts_with(&canonical_current_dir) {
             return Err(AikError::InvalidSource(
                 "Path must be within current working directory".to_string(),
@@ -254,12 +260,28 @@ mod tests {
 
     #[test]
     fn test_sanitize_path_basic() {
-        // Test with a relative path that should work
-        let test_path = ".";
-        let result = sanitize_path(test_path);
-        // Current directory should always be valid
-        assert!(result.is_ok());
+        // Test with a relative path that should work and resolve to current directory
+        let result = sanitize_path(".");
+        assert!(
+            result.is_ok(),
+            "Sanitizing '.' should be OK: {:?}",
+            result.err()
+        );
         let path_buf = result.unwrap();
         assert!(path_buf.exists());
+        assert_eq!(
+            path_buf.canonicalize().unwrap(),
+            std::env::current_dir().unwrap().canonicalize().unwrap()
+        );
+
+        // Test valid relative paths
+        assert!(sanitize_path("foo/bar").is_ok());
+        assert!(sanitize_path("foo/./bar").is_ok());
+        assert!(sanitize_path("foo/bar/").is_ok());
+
+        // Test invalid paths (directory traversal attempts)
+        assert!(sanitize_path("foo/../bar").is_err());
+        assert!(sanitize_path("../bar").is_err());
+        assert!(sanitize_path("/foo/bar").is_err()); // Absolute path outside current dir
     }
 }
