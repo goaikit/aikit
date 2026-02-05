@@ -260,6 +260,11 @@ mod tests {
 
     #[test]
     fn test_sanitize_path_basic() {
+        use tempfile::tempdir;
+        let orig_cwd = std::env::current_dir().unwrap();
+        let temp_dir = tempdir().unwrap();
+        std::env::set_current_dir(&temp_dir).unwrap();
+
         // Test with a relative path that should work and resolve to current directory
         let result = sanitize_path(".");
         assert!(
@@ -271,7 +276,7 @@ mod tests {
         assert!(path_buf.exists());
         assert_eq!(
             path_buf.canonicalize().unwrap(),
-            std::env::current_dir().unwrap().canonicalize().unwrap()
+            temp_dir.path().canonicalize().unwrap()
         );
 
         // Test valid relative paths
@@ -282,6 +287,12 @@ mod tests {
         // Test invalid paths (directory traversal attempts)
         assert!(sanitize_path("foo/../bar").is_err());
         assert!(sanitize_path("../bar").is_err());
-        assert!(sanitize_path("/foo/bar").is_err()); // Absolute path outside current dir
+        // For absolute path outside current dir, create a temporary directory outside current tempdir
+        let outside_temp_dir = tempdir().unwrap();
+        let outside_path = outside_temp_dir.path().join("file.txt");
+        std::fs::write(&outside_path, "content").unwrap();
+        assert!(sanitize_path(outside_path.to_str().unwrap()).is_err());
+
+        std::env::set_current_dir(&orig_cwd).unwrap();
     }
 }
