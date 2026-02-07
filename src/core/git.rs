@@ -354,8 +354,8 @@ mod tests {
             prerelease: false,
         };
 
-        assert_eq!(info.draft, false);
-        assert_eq!(info.prerelease, false);
+        assert!(!info.draft);
+        assert!(!info.prerelease);
     }
 
     #[tokio::test]

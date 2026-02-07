@@ -674,7 +674,6 @@ fn generate_release_notes(package: &crate::models::package::Package) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::git::PackageInfo;
     use crate::models::package::Package;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -725,7 +724,7 @@ mod tests {
     fn test_find_package_zip_with_custom_path() {
         let (temp_dir, package) = create_test_package_dir();
 
-        let package_dir = temp_dir.path().join("test-package");
+        let _package_dir = temp_dir.path().join("test-package");
         let custom_zip = temp_dir.path().join("custom-package.zip");
         create_test_zip_file(&custom_zip);
 
@@ -803,7 +802,7 @@ mod tests {
 
     #[test]
     fn test_find_package_zip_with_invalid_path() {
-        let (temp_dir, package) = create_test_package_dir();
+        let (_temp_dir, package) = create_test_package_dir();
 
         let result = find_package_zip(&package, Some("/nonexistent/path.zip"));
 
@@ -845,7 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_generate_release_notes() {
-        let (temp_dir, package) = create_test_package_dir();
+        let (_temp_dir, package) = create_test_package_dir();
 
         let notes = generate_release_notes(&package);
 
@@ -869,8 +868,8 @@ mod tests {
 
         assert_eq!(release_info.tag_name, "v1.0.0");
         assert_eq!(release_info.name, "Release 1.0");
-        assert_eq!(release_info.draft, false);
-        assert_eq!(release_info.prerelease, false);
+        assert!(!release_info.draft);
+        assert!(!release_info.prerelease);
     }
 
     #[test]
@@ -916,14 +915,14 @@ mod tests {
 
     #[test]
     fn test_package_validate() {
-        let (temp_dir, package) = create_test_package_dir();
+        let (_temp_dir, package) = create_test_package_dir();
 
         assert!(package.validate().is_ok());
     }
 
     #[tokio::test]
     async fn test_execute_validate_success() {
-        let (temp_dir, package) = create_test_package_dir();
+        let (temp_dir, _package) = create_test_package_dir();
         let package_dir = temp_dir.path().join("test-package");
         fs::create_dir_all(package_dir.join("templates")).unwrap();
         fs::write(package_dir.join("help.md"), "# Help\n").unwrap();
@@ -970,7 +969,7 @@ mod tests {
 
     #[test]
     fn test_package_from_toml() {
-        let (temp_dir, package) = create_test_package_dir();
+        let (_temp_dir, package) = create_test_package_dir();
 
         assert_eq!(package.package.name, "test-package");
         assert_eq!(package.package.version, "0.1.0");
@@ -979,7 +978,7 @@ mod tests {
 
     #[test]
     fn test_package_to_toml_string() {
-        let (temp_dir, package) = create_test_package_dir();
+        let (_temp_dir, package) = create_test_package_dir();
 
         let toml_str = package.to_toml_string().unwrap();
 
@@ -1026,14 +1025,14 @@ mod tests {
 
     #[test]
     fn test_package_install_dir() {
-        let (temp_dir, package) = create_test_package_dir();
+        let (_temp_dir, package) = create_test_package_dir();
 
         assert_eq!(package.install_dir(), "test-package-0.1.0");
     }
 
     #[test]
     fn test_package_get_artifact_mappings() {
-        let (temp_dir, package) = create_test_package_dir();
+        let (_temp_dir, package) = create_test_package_dir();
 
         let mappings = package.get_artifact_mappings(None);
 
@@ -1043,7 +1042,7 @@ mod tests {
 
     #[test]
     fn test_package_get_artifact_mappings_with_agent() {
-        let (temp_dir, package) = create_test_package_dir();
+        let (_temp_dir, package) = create_test_package_dir();
 
         let mappings = package.get_artifact_mappings(Some("test-agent"));
 
@@ -1053,10 +1052,6 @@ mod tests {
     #[tokio::test]
     #[ignore] // TODO: Fix test isolation issue when run with full test suite
     async fn test_package_build_creates_zip() {
-        use std::fs::File;
-        use zip::write::ZipWriter;
-        use zip::CompressionMethod;
-
         let temp_dir = TempDir::new().unwrap();
         let package_dir = temp_dir.path().join("test-package");
         fs::create_dir_all(&package_dir).unwrap();
@@ -1144,7 +1139,7 @@ authors = ["test"]
 
     #[test]
     fn test_generate_release_notes_basic() {
-        let (temp_dir, package) = create_test_package_dir();
+        let (_temp_dir, package) = create_test_package_dir();
 
         let notes = generate_release_notes(&package);
 
@@ -1155,7 +1150,7 @@ authors = ["test"]
 
     #[test]
     fn test_generate_release_notes_with_commands() {
-        let (temp_dir, mut package) = create_test_package_dir();
+        let (_temp_dir, mut package) = create_test_package_dir();
 
         // Add commands
         package.commands.insert(
