@@ -2,7 +2,7 @@
 //!
 //! These tests verify the complete publish workflow including release creation and asset upload.
 
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
@@ -19,7 +19,7 @@ mod tests {
         let work = temp.path();
 
         // Step 1: Initialize package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -40,7 +40,7 @@ mod tests {
             ));
 
         // Step 2: Build package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("publish-test"))
             .args(["package", "build"])
             .assert()
@@ -52,7 +52,7 @@ mod tests {
         // Step 3: Publish package (simulated with mocked GitHub)
         // Note: This test would need mock GitHub server to work fully
         // For now, we test the publish command structure
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("publish-test"))
             .args([
                 "package",
@@ -82,7 +82,7 @@ mod tests {
         let work = temp.path();
 
         // Initialize and build package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -95,7 +95,7 @@ mod tests {
             .assert()
             .success();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("no-release-test"))
             .args(["package", "build"])
             .assert()
@@ -109,7 +109,7 @@ mod tests {
         assert!(zip_path.exists());
 
         // Test --no-release flag (will fail without valid release)
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("no-release-test"))
             .args([
                 "package",
@@ -133,7 +133,7 @@ mod tests {
         let work = temp.path();
 
         // Initialize package with custom version
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -151,7 +151,7 @@ mod tests {
             .success();
 
         // Build package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("tag-test"))
             .args(["package", "build"])
             .assert()
@@ -165,7 +165,7 @@ mod tests {
         assert!(zip_path.exists());
 
         // Test publish with custom tag
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("tag-test"))
             .args([
                 "package",
@@ -189,7 +189,7 @@ mod tests {
         let work = temp.path();
 
         // Initialize package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -203,14 +203,14 @@ mod tests {
             .success();
 
         // Build package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("metadata-test"))
             .args(["package", "build"])
             .assert()
             .success();
 
         // Test publish with custom title and notes
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("metadata-test"))
             .args([
                 "package",
@@ -236,7 +236,7 @@ mod tests {
         let work = temp.path();
 
         // Initialize package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -250,7 +250,7 @@ mod tests {
             .success();
 
         // Build with custom output directory
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("output-test"))
             .args(["package", "build", "--output", "my-output"])
             .assert()
@@ -276,7 +276,7 @@ mod tests {
         let work = temp.path();
 
         // Initialize package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -291,7 +291,7 @@ mod tests {
 
         // Build with custom output directory with spaces
         let custom_output = "output with spaces";
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("spaces-test"))
             .args(["package", "build", "--output", custom_output])
             .assert()
@@ -314,7 +314,7 @@ mod tests {
         let work = temp.path();
 
         // Initialize package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -328,14 +328,14 @@ mod tests {
             .success();
 
         // Build package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("custom-pkg-test"))
             .args(["package", "build"])
             .assert()
             .success();
 
         // Test publish with custom package path (will fail without valid file)
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("custom-pkg-test"))
             .args([
                 "package",
@@ -360,7 +360,7 @@ mod tests {
         let work = temp.path();
 
         // Initialize package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -374,7 +374,7 @@ mod tests {
             .success();
 
         // Test publish without valid package (should fail)
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("validation-test"))
             .args([
                 "package",
@@ -400,7 +400,7 @@ mod tests {
         std::env::set_var("GITHUB_TOKEN", "env_token");
 
         // Initialize package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -414,14 +414,14 @@ mod tests {
             .success();
 
         // Build package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("env-token-test"))
             .args(["package", "build"])
             .assert()
             .success();
 
         // Test publish without explicit token (should use env var)
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("env-token-test"))
             .args(["package", "publish", "test-owner/test-repo"])
             .assert()
@@ -440,7 +440,7 @@ mod tests {
         let work = temp.path();
 
         // Initialize package with prerelease version
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -456,7 +456,7 @@ mod tests {
             .success();
 
         // Build package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("prerelease-test"))
             .args(["package", "build"])
             .assert()

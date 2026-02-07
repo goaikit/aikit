@@ -3,7 +3,7 @@
 //! These tests run the actual aikit binary using assert_cmd to verify
 //! command-line interface behavior and catch runtime issues.
 
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use std::fs;
 use tempfile::tempdir;
@@ -18,7 +18,7 @@ mod tests {
         let temp = tempdir()?; // Auto-creates unique temp dir
         let work = temp.path(); // Path to temp directory
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work) // Sets cwd ONLY for spawned process
             .args(["package", "init", "test-package", "--yes"])
             .assert()
@@ -45,7 +45,7 @@ mod tests {
         let temp = tempdir()?; // Auto-creates unique temp dir
         let work = temp.path(); // Path to temp directory
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work) // Sets cwd ONLY for spawned process
             .args([
                 "package",
@@ -89,7 +89,7 @@ mod tests {
         // Verify directory was created
         assert!(work.join("existing-package").exists());
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work) // Sets cwd ONLY for spawned process
             .args(["package", "init", "existing-package"])
             .assert()
@@ -106,14 +106,14 @@ mod tests {
         let work = temp.path(); // Path to temp directory
 
         // First create a package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "build-test", "--yes"])
             .assert()
             .success();
 
         // Build the package (in package subdirectory)
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("build-test")) // Different cwd for this process
             .args(["package", "build"])
             .assert()
@@ -139,7 +139,7 @@ mod tests {
         let temp_dir = tempdir()?; // Auto-creates unique temp dir
         let work = temp_dir.path(); // Path to temp directory
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work) // Sets cwd ONLY for spawned process
             .args(["package", "build"])
             .assert()
@@ -156,7 +156,7 @@ mod tests {
         let work = temp.path(); // Path to temp directory
 
         // Create package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "custom-output-test", "--yes"])
             .assert()
@@ -166,7 +166,7 @@ mod tests {
         assert!(work.join("custom-output-test").exists());
 
         // Build with custom output (in package subdirectory)
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("custom-output-test")) // Different cwd for this process
             .args(["package", "build", "--output", "custom-dist"])
             .assert()
@@ -185,7 +185,7 @@ mod tests {
     /// Test global version flag
     #[test]
     fn test_global_version_flag() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.arg("--version")
             .assert()
             .success()
@@ -195,7 +195,7 @@ mod tests {
     /// Test global short version flag
     #[test]
     fn test_global_short_version_flag() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.arg("-V")
             .assert()
             .success()
@@ -205,7 +205,7 @@ mod tests {
     /// Test debug flag
     #[test]
     fn test_debug_flag() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args(["--debug", "check"])
             .assert()
             .success()
@@ -219,7 +219,7 @@ mod tests {
         let temp_dir = tempdir()?; // Auto-creates unique temp dir
         let work = temp_dir.path(); // Path to temp directory
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work) // Sets cwd ONLY for spawned process
             .args(["init", "test-project", "--force"]) // --force to skip git checks
             .assert()
@@ -235,7 +235,7 @@ mod tests {
     /// Test check command
     #[test]
     fn test_check_command() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.arg("check")
             .assert()
             .success()
@@ -248,7 +248,7 @@ mod tests {
         let temp = tempdir()?; // Auto-creates unique temp dir
         let work = temp.path(); // Path to temp directory
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work) // Sets cwd ONLY for spawned process
             .arg("list")
             .assert()
@@ -261,7 +261,7 @@ mod tests {
     /// Test list command with detailed flag
     #[test]
     fn test_list_detailed() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args(["list", "--detailed"]).assert().success();
     }
 
@@ -275,7 +275,7 @@ mod tests {
         let package_name = format!("install-test-{}", std::process::id());
 
         // Create a test package first
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", &package_name, "--yes"])
             .assert()
@@ -285,7 +285,7 @@ mod tests {
         assert!(work.join(&package_name).exists());
 
         // Try to install it from local path
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "install",
@@ -303,7 +303,7 @@ mod tests {
     /// Test install error with invalid source
     #[test]
     fn test_install_invalid_source() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args(["install", "nonexistent-source"])
             .assert()
             .failure()
@@ -313,7 +313,7 @@ mod tests {
     /// Test help output
     #[test]
     fn test_help_output() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.arg("--help")
             .assert()
             .success()
@@ -328,7 +328,7 @@ mod tests {
     /// Test package init help
     #[test]
     fn test_package_init_help() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args(["package", "init", "--help"])
             .assert()
             .success()
@@ -340,7 +340,7 @@ mod tests {
     /// Test package build help
     #[test]
     fn test_package_build_help() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args(["package", "build", "--help"])
             .assert()
             .success()
@@ -352,7 +352,7 @@ mod tests {
     /// Test package validate help
     #[test]
     fn test_package_validate_help() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args(["package", "validate", "--help"])
             .assert()
             .success()
@@ -367,7 +367,7 @@ mod tests {
         let temp = tempdir()?;
         let work = temp.path();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "validate-test-pkg", "--yes"])
             .assert()
@@ -381,7 +381,7 @@ mod tests {
         // Init's package has template "help.md", so create help.md at root for validate to pass.
         std::fs::write(pkg_dir.join("help.md"), "# Help\n")?;
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "validate", "--path", "validate-test-pkg"])
             .assert()
@@ -398,7 +398,7 @@ mod tests {
         let temp = tempdir()?;
         let work = temp.path();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "missing-tmpl-pkg", "--yes"])
             .assert()
@@ -408,7 +408,7 @@ mod tests {
         std::fs::remove_file(pkg_dir.join("templates").join("help.md")).ok();
         std::fs::remove_file(pkg_dir.join("help.md")).ok();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "validate", "--path", "missing-tmpl-pkg"])
             .assert()
@@ -426,8 +426,7 @@ mod tests {
         let work = temp.path();
         std::fs::create_dir_all(work.join("empty-dir")).unwrap();
 
-        Command::cargo_bin("aikit")
-            .unwrap()
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "validate", "--path", "empty-dir"])
             .assert()
@@ -438,7 +437,7 @@ mod tests {
     /// Test install help shows install-version (not version)
     #[test]
     fn test_install_help_shows_install_version() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args(["install", "--help"])
             .assert()
             .success()
@@ -448,7 +447,7 @@ mod tests {
     /// Test release help shows release-version
     #[test]
     fn test_release_help_shows_release_version() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args(["release", "--help"])
             .assert()
             .success()
@@ -471,7 +470,7 @@ mod tests {
         ];
 
         for cmd_args in commands {
-            let mut cmd = Command::cargo_bin("aikit").unwrap();
+            let mut cmd = cargo_bin_cmd!("aikit");
             cmd.args(&cmd_args)
                 .assert()
                 .success()
@@ -482,7 +481,7 @@ mod tests {
     /// Test error handling for missing subcommands
     #[test]
     fn test_missing_subcommand_error() {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args(["package"]) // Missing subcommand
             .assert()
             .failure() // clap returns error code but shows help
@@ -496,7 +495,7 @@ mod tests {
         let work = temp.path(); // Path to temp directory
 
         // Try to create package with invalid name (spaces, special chars)
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "invalid name!", "--yes"])
             .assert()
@@ -518,7 +517,7 @@ description = "Test package with invalid name"
         std::fs::write(invalid_dir.join("aikit.toml"), toml_content)?;
 
         // Test build validation (in invalid directory)
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(&invalid_dir) // Different cwd for this process
             .args(["package", "build"])
             .assert()
@@ -532,8 +531,7 @@ description = "Test package with invalid name"
     fn test_no_arguments_shows_help() {
         // With arg_required_else_help, clap should show help and exit with code 2
         // This is a basic test to ensure the CLI behaves as expected
-        let output = Command::cargo_bin("aikit")
-            .unwrap()
+        let output = cargo_bin_cmd!("aikit")
             .output()
             .expect("Failed to run command");
 
@@ -549,8 +547,7 @@ description = "Test package with invalid name"
     /// Test that --help output includes version flag
     #[test]
     fn test_help_includes_version_flag() {
-        let output = Command::cargo_bin("aikit")
-            .unwrap()
+        let output = cargo_bin_cmd!("aikit")
             .arg("--help")
             .output()
             .expect("Failed to run command");
@@ -572,26 +569,26 @@ description = "Test package with invalid name"
         let work = temp.path();
 
         // Create and install a package first
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "update-test-pkg", "--yes"])
             .assert()
             .success();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("update-test-pkg"))
             .args(["package", "build"])
             .assert()
             .success();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["install", "./update-test-pkg", "--yes", "--ai", "claude"])
             .assert()
             .success();
 
         // Now test updating the package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["update", "update-test-pkg"])
             .assert()
@@ -620,7 +617,7 @@ description = "Test package with invalid name"
         std::fs::write(&registry_path, "[packages]\n")?; // Empty registry
 
         // Try to update a package that doesn't exist
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["update", "nonexistent-package"])
             .assert()
@@ -637,7 +634,7 @@ description = "Test package with invalid name"
         let work = temp.path();
 
         // Try to update without any .aikit directory
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["update", "any-package"])
             .assert()
@@ -654,26 +651,26 @@ description = "Test package with invalid name"
         let work = temp.path();
 
         // Create and install a package first
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "remove-test-pkg", "--yes"])
             .assert()
             .success();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("remove-test-pkg"))
             .args(["package", "build"])
             .assert()
             .success();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["install", "./remove-test-pkg", "--yes", "--ai", "claude"])
             .assert()
             .success();
 
         // Verify package is installed
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["list"])
             .assert()
@@ -681,7 +678,7 @@ description = "Test package with invalid name"
             .stdout(predicate::str::contains("remove-test-pkg"));
 
         // Now remove the package with force flag
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["remove", "remove-test-pkg", "--force"])
             .assert()
@@ -691,7 +688,7 @@ description = "Test package with invalid name"
             ));
 
         // Verify package is no longer in list
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["list"])
             .assert()
@@ -714,7 +711,7 @@ description = "Test package with invalid name"
         std::fs::write(&registry_path, "[packages]\n")?; // Empty registry
 
         // Try to remove a package that doesn't exist
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["remove", "nonexistent-package", "--force"])
             .assert()
@@ -731,7 +728,7 @@ description = "Test package with invalid name"
         let work = temp.path();
 
         // Try to remove without any .aikit directory
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["remove", "any-package", "--force"])
             .assert()
@@ -748,13 +745,13 @@ description = "Test package with invalid name"
         let work = temp.path();
 
         // Create and build a package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "publish-test-pkg", "--yes"])
             .assert()
             .success();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("publish-test-pkg"))
             .args(["package", "build"])
             .assert()
@@ -785,7 +782,7 @@ description = "Test package with invalid name"
         std::env::set_var("GITHUB_API_URL", &mock_url);
 
         // Try to publish (this will likely fail due to incomplete implementation)
-        let result = Command::cargo_bin("aikit")?
+        let result = cargo_bin_cmd!("aikit")
             .current_dir(work.join("publish-test-pkg"))
             .env("GITHUB_API_URL", &mock_url)
             .args([
@@ -814,14 +811,14 @@ description = "Test package with invalid name"
         let work = temp.path();
 
         // Create package but don't build it
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "unbuilt-pkg", "--yes"])
             .assert()
             .success();
 
         // Try to publish without building - should fail
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("unbuilt-pkg"))
             .args([
                 "package",
@@ -843,13 +840,13 @@ description = "Test package with invalid name"
         let work = temp.path();
 
         // Create and build a package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "no-token-pkg", "--yes"])
             .assert()
             .success();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("no-token-pkg"))
             .args(["package", "build"])
             .assert()
@@ -877,7 +874,7 @@ description = "Test package with invalid name"
 
         // Try to publish without token - should fail with token required message
         // Explicitly remove GITHUB_TOKEN to test the validation
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("no-token-pkg"))
             .env("GITHUB_API_URL", &mock_url)
             .env_remove("GITHUB_TOKEN")
@@ -905,7 +902,7 @@ description = "Test package with invalid name"
         std::fs::write(&zip_path, "mock zip content")?;
 
         // Test release command (this will likely fail due to GitHub CLI requirement)
-        let result = Command::cargo_bin("aikit")?
+        let result = cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["release", "v1.0.0", "--github-token", "test-token"])
             .output()?;
@@ -936,7 +933,7 @@ description = "Test package with invalid name"
         std::fs::create_dir_all(&genreleases_dir)?;
 
         // Test release command - should fail because no ZIP files
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["release", "v1.0.0"])
             .assert()
@@ -957,7 +954,7 @@ description = "Test package with invalid name"
         // Don't create .genreleases directory
 
         // Test release command - should fail because .genreleases doesn't exist
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["release", "v1.0.0"])
             .assert()
@@ -976,7 +973,7 @@ description = "Test package with invalid name"
         let work = temp.path();
 
         // Test release with invalid version format (missing 'v' prefix)
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["release", "1.0.0"]) // Should start with 'v'
             .assert()

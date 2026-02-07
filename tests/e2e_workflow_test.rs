@@ -3,9 +3,8 @@
 //! These tests verify complete workflows from start to finish,
 //! ensuring all components work together correctly.
 
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
-use std::fs;
 
 #[cfg(test)]
 mod tests {
@@ -18,7 +17,7 @@ mod tests {
         let work = temp.path();
 
         // Step 1: Initialize package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -43,7 +42,7 @@ mod tests {
         assert!(work.join("workflow-test").join("aikit.toml").exists());
 
         // Step 2: Build package in the package directory
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("workflow-test"))
             .args(["package", "build"])
             .assert()
@@ -59,7 +58,7 @@ mod tests {
         assert!(zip_path.exists(), "ZIP file should exist at {:?}", zip_path);
 
         // Step 3: Install the package from the parent directory
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["install", "./workflow-test", "--yes", "--ai", "claude"])
             .assert()
@@ -67,7 +66,7 @@ mod tests {
             .stdout(predicate::str::contains("Installing"));
 
         // Step 4: Verify package appears in list
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["list", "--detailed"])
             .assert()
@@ -86,7 +85,7 @@ mod tests {
         let work = temp.path();
 
         // Create a package to install
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -100,14 +99,14 @@ mod tests {
             .success();
 
         // Build the package first
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("install-workflow-test"))
             .args(["package", "build"])
             .assert()
             .success();
 
         // Install the package
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "install",
@@ -120,7 +119,7 @@ mod tests {
             .success();
 
         // Verify installation by checking list output
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["list", "--detailed"])
             .assert()
@@ -150,7 +149,7 @@ mod tests {
         let work = temp.path();
 
         // Step 1: Create and install initial package v1.0.0
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -163,20 +162,20 @@ mod tests {
             .assert()
             .success();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("update-test"))
             .args(["package", "build"])
             .assert()
             .success();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["install", "./update-test", "--yes", "--ai", "claude"])
             .assert()
             .success();
 
         // Verify initial installation
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["list"])
             .assert()
@@ -184,7 +183,7 @@ mod tests {
             .stdout(predicate::str::contains("update-test"));
 
         // Step 2: Create updated package v2.0.0
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
                 "package",
@@ -197,7 +196,7 @@ mod tests {
             .assert()
             .success();
 
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("update-test-v2"))
             .args(["package", "build"])
             .assert()
@@ -222,7 +221,7 @@ mod tests {
         let work = temp.path();
 
         // Try to build package without aikit.toml (should fail)
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "build"])
             .assert()
@@ -230,14 +229,14 @@ mod tests {
             .stderr(predicate::str::contains("aikit.toml not found"));
 
         // Now create a valid package and try again
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["package", "init", "recovery-test", "--yes"])
             .assert()
             .success();
 
         // Now build should succeed
-        Command::cargo_bin("aikit")?
+        cargo_bin_cmd!("aikit")
             .current_dir(work.join("recovery-test"))
             .args(["package", "build"])
             .assert()
@@ -257,7 +256,7 @@ mod tests {
         let package_names = vec!["package-a", "package-b", "package-c"];
 
         for package_name in &package_names {
-            Command::cargo_bin("aikit")?
+            cargo_bin_cmd!("aikit")
                 .current_dir(work)
                 .args([
                     "package",
@@ -271,14 +270,14 @@ mod tests {
                 .success();
 
             // Build each package
-            Command::cargo_bin("aikit")?
+            cargo_bin_cmd!("aikit")
                 .current_dir(work.join(package_name))
                 .args(["package", "build"])
                 .assert()
                 .success();
 
             // Install each package
-            Command::cargo_bin("aikit")?
+            cargo_bin_cmd!("aikit")
                 .current_dir(work)
                 .args([
                     "install",
@@ -292,7 +291,7 @@ mod tests {
         }
 
         // Verify all packages are listed
-        let output = Command::cargo_bin("aikit")?
+        let output = cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["list", "--detailed"])
             .output()?;
@@ -328,7 +327,7 @@ mod tests {
         ];
 
         for help_cmd in help_commands {
-            let mut cmd = Command::cargo_bin("aikit").unwrap();
+            let mut cmd = cargo_bin_cmd!("aikit");
             cmd.args(&help_cmd)
                 .assert()
                 .success()

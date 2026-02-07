@@ -3,7 +3,7 @@
 //! This module provides shared utilities for all test types to reduce duplication
 //! and ensure consistent test setup and teardown.
 
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use mockito::Server;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ impl TestEnv {
     pub fn create_test_package(&self, name: &str) -> PathBuf {
         let package_path = self.path().join(name);
 
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args([
             "package", "init", name,
             "--description", &format!("Test package: {}", name),
@@ -57,7 +57,7 @@ impl TestEnv {
         let original_dir = std::env::current_dir().unwrap();
         std::env::set_current_dir(package_path).unwrap();
 
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args(["package", "build"])
             .assert()
             .success();
@@ -67,7 +67,7 @@ impl TestEnv {
 
     /// Install a package from the specified path
     pub fn install_package(&self, package_path: &Path) {
-        let mut cmd = Command::cargo_bin("aikit").unwrap();
+        let mut cmd = cargo_bin_cmd!("aikit");
         cmd.args([
             "install",
             &package_path.to_string_lossy(),
@@ -89,7 +89,7 @@ impl Drop for TestEnv {
 pub fn create_minimal_test_package(dir: &Path, name: &str) -> PathBuf {
     let package_path = dir.join(name);
 
-    let mut cmd = Command::cargo_bin("aikit").unwrap();
+    let mut cmd = cargo_bin_cmd!("aikit");
     cmd.args([
         "package", "init", name,
         "--description", "Minimal test package",
@@ -105,7 +105,7 @@ pub fn create_minimal_test_package(dir: &Path, name: &str) -> PathBuf {
 pub fn create_custom_test_package(dir: &Path, name: &str, version: &str, author: &str) -> PathBuf {
     let package_path = dir.join(name);
 
-    let mut cmd = Command::cargo_bin("aikit").unwrap();
+    let mut cmd = cargo_bin_cmd!("aikit");
     cmd.args([
         "package", "init", name,
         "--description", &format!("Custom test package: {}", name),
@@ -124,7 +124,7 @@ pub fn build_test_package(package_path: &Path) -> PathBuf {
     let original_dir = std::env::current_dir().unwrap();
     std::env::set_current_dir(package_path).unwrap();
 
-    let mut cmd = Command::cargo_bin("aikit").unwrap();
+    let mut cmd = cargo_bin_cmd!("aikit");
     cmd.args(["package", "build"])
         .assert()
         .success();
@@ -255,7 +255,7 @@ pub fn assert_zip_exists(zip_path: &Path) {
 
 /// Helper to run a command and get its output as string
 pub fn run_command(args: &[&str]) -> (String, String) {
-    let mut cmd = Command::cargo_bin("aikit").unwrap();
+    let mut cmd = cargo_bin_cmd!("aikit");
     let output = cmd.args(args)
         .output()
         .unwrap();
