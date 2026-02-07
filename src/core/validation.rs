@@ -74,12 +74,15 @@ pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
         ));
     }
 
+    // Get and canonicalize current directory first for consistent comparison
+    let current_dir = std::env::current_dir()?;
+    let canonical_current_dir = current_dir.canonicalize()?;
+
     // Normalize the path without requiring it to exist
-    // For relative paths, join with current directory
+    // For relative paths, join with canonicalized current directory
     // For absolute paths, use as-is
     let normalized = if path_buf.is_relative() {
-        let current_dir = std::env::current_dir()?;
-        current_dir.join(&path_buf)
+        canonical_current_dir.join(&path_buf)
     } else {
         path_buf.clone()
     };
@@ -95,9 +98,6 @@ pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
     };
 
     // Prevent absolute paths that go outside current working directory
-    let current_dir = std::env::current_dir()?;
-    let canonical_current_dir = current_dir.canonicalize()?;
-
     if !canonical.starts_with(&canonical_current_dir) {
         return Err(AikError::InvalidSource(
             "Path must be within current working directory".to_string(),
