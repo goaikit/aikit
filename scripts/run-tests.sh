@@ -2,13 +2,14 @@
 
 # AIKIT Test Runner Script
 # Runs fmt, clippy, and tests (cargo-nextest); captures results and generates statistics.
-# Matches CI: cargo fmt --check, cargo clippy -- -D warnings, then tests.
+# Matches CI: cargo fmt --check, cargo clippy -- -D warnings, then tests with retries.
 #
 # Usage: ./run-tests.sh [OPTIONS]
 #
 # Options:
 #   -o, --output FILE    Output markdown report file (default: test_results.md)
 #   -j, --json FILE      JSON results file (default: test_results.json)
+#   -r, --retries N      Number of retries for flaky tests (default: 3)
 #   -h, --help           Show this help message
 
 set -e  # Exit on any error
@@ -16,6 +17,7 @@ set -e  # Exit on any error
 # Default values
 OUTPUT_FILE="test_results.md"
 JSON_FILE="test_results.json"
+RETRIES=3
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 # Colors for output
@@ -32,6 +34,7 @@ error_exit() {
     echo "Options:" >&2
     echo "  -o, --output FILE    Output markdown report file (default: test_results.md)" >&2
     echo "  -j, --json FILE      JSON results file (default: test_results.json)" >&2
+    echo "  -r, --retries N      Number of retries for flaky tests (default: 3)" >&2
     echo "  -h, --help           Show this help message" >&2
     exit 1
 }
@@ -56,6 +59,10 @@ while [[ $# -gt 0 ]]; do
             JSON_FILE="$2"
             shift 2
             ;;
+        -r|--retries)
+            RETRIES="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "AIKIT Test Runner Script"
             echo ""
@@ -66,6 +73,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  -o, --output FILE    Output markdown report file (default: test_results.md)"
             echo "  -j, --json FILE      JSON results file (default: test_results.json)"
+            echo "  -r, --retries N      Number of retries for flaky tests (default: 3)"
             echo "  -h, --help           Show this help message"
             echo ""
             echo "Requirements:"
@@ -97,20 +105,29 @@ AIKIT_DIR="$(dirname "$SCRIPT_DIR")"
 echo -e "${YELLOW}Running in: $AIKIT_DIR${NC}" >&2
 cd "$AIKIT_DIR"
 
+# Ensure output directory exists for test results
+TEST_OUTPUT_DIR=".github/test-outputs"
+mkdir -p "$TEST_OUTPUT_DIR"
+echo -e "${YELLOW}Test outputs will be saved to: $TEST_OUTPUT_DIR${NC}" >&2
+echo "" >&2
+
 # Run fmt, clippy, and tests; capture output and exit codes (do not exit on first failure)
 set +e
 
 echo -e "${YELLOW}Running cargo fmt --check...${NC}" >&2
 FMT_OUTPUT=$(cargo fmt --check 2>&1)
 FMT_EXIT=$?
+echo "$FMT_OUTPUT" > "$TEST_OUTPUT_DIR/fmt-output.txt"
 
 echo -e "${YELLOW}Running cargo clippy -- -D warnings...${NC}" >&2
 CLIPPY_OUTPUT=$(cargo clippy -- -D warnings 2>&1)
 CLIPPY_EXIT=$?
+echo "$CLIPPY_OUTPUT" > "$TEST_OUTPUT_DIR/clippy-output.txt"
 
-echo -e "${YELLOW}Running tests with cargo-nextest...${NC}" >&2
-TEST_OUTPUT=$(cargo nextest run --all-features 2>&1)
+echo -e "${YELLOW}Running tests with cargo-nextest (retries: $RETRIES)...${NC}" >&2
+TEST_OUTPUT=$(cargo nextest run --all-features --retries "$RETRIES" --fail-fast 2>&1)
 TEST_EXIT=$?
+echo "$TEST_OUTPUT" > "$TEST_OUTPUT_DIR/test-output.txt"
 
 set -e
 

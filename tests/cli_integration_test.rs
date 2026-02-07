@@ -875,16 +875,16 @@ description = "Test package with invalid name"
         // Set environment variable to override GitHub API URL for testing
         std::env::set_var("GITHUB_API_URL", &mock_url);
 
-        // Try to publish without token - should fail with a 401 message
+        // Try to publish without token - should fail with token required message
+        // Explicitly remove GITHUB_TOKEN to test the validation
         Command::cargo_bin("aikit")?
             .current_dir(work.join("no-token-pkg"))
             .env("GITHUB_API_URL", &mock_url)
+            .env_remove("GITHUB_TOKEN")
             .args(["package", "publish", "test-owner/test-repo"])
             .assert()
             .failure()
-            .stderr(predicate::str::contains(
-                "Failed to create release: HTTP 401 Unauthorized",
-            ));
+            .stderr(predicate::str::contains("GitHub token required"));
 
         std::env::remove_var("GITHUB_API_URL");
         Ok(())

@@ -74,28 +74,34 @@ pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
         ));
     }
 
-    // After checking for "..", then proceed with canonicalization and other checks
-    // This part of the logic remains mostly the same, but now it's guaranteed that
-    // ".." are not present, so canonicalize won't "escape" unexpectedly.
-    let canonical = if path_buf.is_relative() {
-        path_buf
-            .canonicalize()
-            .or_else(|_| std::env::current_dir().map(|cwd| cwd.join(&path_buf)))
+    // Normalize the path without requiring it to exist
+    // For relative paths, join with current directory
+    // For absolute paths, use as-is
+    let normalized = if path_buf.is_relative() {
+        let current_dir = std::env::current_dir()?;
+        current_dir.join(&path_buf)
     } else {
-        path_buf.canonicalize()
-    }
-    .map_err(|e| AikError::InvalidSource(format!("Invalid path '{}': {}", path, e)))?;
+        path_buf.clone()
+    };
+
+    // Try to canonicalize if the path exists, otherwise use the normalized path
+    let canonical = if normalized.exists() {
+        normalized
+            .canonicalize()
+            .map_err(|e| AikError::InvalidSource(format!("Invalid path '{}': {}", path, e)))?
+    } else {
+        // Path doesn't exist yet, use normalized version
+        normalized
+    };
 
     // Prevent absolute paths that go outside current working directory
-    if canonical.is_absolute() {
-        let current_dir = std::env::current_dir()?;
-        let canonical_current_dir = current_dir.canonicalize()?;
+    let current_dir = std::env::current_dir()?;
+    let canonical_current_dir = current_dir.canonicalize()?;
 
-        if !canonical.starts_with(&canonical_current_dir) {
-            return Err(AikError::InvalidSource(
-                "Path must be within current working directory".to_string(),
-            ));
-        }
+    if !canonical.starts_with(&canonical_current_dir) {
+        return Err(AikError::InvalidSource(
+            "Path must be within current working directory".to_string(),
+        ));
     }
 
     Ok(canonical)
@@ -263,8 +269,14 @@ mod tests {
         use tempfile::tempdir;
         let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
 
+        // Create temp directory and canonicalize the expected path before changing CWD
         let temp_dir_obj = tempdir().expect("Failed to create main temp dir");
         let temp_dir_path = temp_dir_obj.path();
+        let temp_dir_canonical = temp_dir_path
+            .canonicalize()
+            .expect("Failed to canonicalize main temp dir");
+
+        // Change to temp directory
         std::env::set_current_dir(temp_dir_path).expect("Failed to set CWD to main temp dir");
 
         // Test with a relative path that should work and resolve to current directory
@@ -281,9 +293,7 @@ mod tests {
         );
         assert_eq!(
             path_buf.canonicalize().expect("Failed to canonicalize '.'"),
-            temp_dir_path
-                .canonicalize()
-                .expect("Failed to canonicalize main temp dir")
+            temp_dir_canonical
         );
 
         // Test valid relative paths
@@ -324,6 +334,9 @@ mod tests {
             result_outside
         );
 
+        // Restore CWD BEFORE temp directories are dropped
         std::env::set_current_dir(&orig_cwd).expect("Failed to restore original CWD");
+
+        // Temp directories will be dropped here automatically
     }
 }

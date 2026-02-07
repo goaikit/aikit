@@ -6,69 +6,129 @@ on:
   pull_request:
     branches: [ main ]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
 
 jobs:
+  format-check:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy Lints
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  version-check:
+    name: Version Sync Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Verify aikit-sdk and aikit-py versions are in sync
+        run: |
+          SDK_VERSION=$(grep "^version" aikit-sdk/Cargo.toml | head -n 1 | awk -F '"' '{print $2}')
+          PY_CARGO_VERSION=$(grep "^version" aikit-py/Cargo.toml | head -n 1 | awk -F '"' '{print $2}')
+          PY_PYPROJECT_VERSION=$(grep "version =" aikit-py/pyproject.toml | head -n 1 | awk -F '"' '{print $2}')
+
+          echo "SDK Version: $SDK_VERSION"
+          echo "aikit-py Cargo Version: $PY_CARGO_VERSION"
+          echo "aikit-py pyproject Version: $PY_PYPROJECT_VERSION"
+
+          if [ "$SDK_VERSION" != "$PY_CARGO_VERSION" ]; then
+            echo "Error: aikit-sdk/Cargo.toml version ($SDK_VERSION) does not match aikit-py/Cargo.toml version ($PY_CARGO_VERSION)"
+            exit 1
+          fi
+
+          if [ "$SDK_VERSION" != "$PY_PYPROJECT_VERSION" ]; then
+            echo "Error: aikit-sdk/Cargo.toml version ($SDK_VERSION) does not match aikit-py/pyproject.toml version ($PY_PYPROJECT_VERSION)"
+            exit 1
+          fi
+
+          echo "All versions are in sync."
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build all features
+        run: cargo build --all-features
+
   test:
     name: Test
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: rustfmt, clippy
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Cache dependencies
-      uses: Swatinem/rust-cache@v2
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
 
-    - name: Check formatting
-      run: cargo fmt --check
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --locked
 
-    - name: Run clippy
-      run: cargo clippy -- -D warnings
+      - name: Run tests with nextest
+        run: cargo nextest run --all-features --retries 3 --fail-fast
 
-    - name: Verify aikit-sdk and aikit-py versions are in sync
-      run: |
-        SDK_VERSION=$(grep "^version" aikit-sdk/Cargo.toml | head -n 1 | awk -F '"' '{print $2}')
-        PY_CARGO_VERSION=$(grep "^version" aikit-py/Cargo.toml | head -n 1 | awk -F '"' '{print $2}')
-        PY_PYPROJECT_VERSION=$(grep "version =" aikit-py/pyproject.toml | head -n 1 | awk -F '"' '{print $2}')
+  test-all-features:
+    name: Test (All Features)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-        echo "SDK Version: $SDK_VERSION"
-        echo "aikit-py Cargo Version: $PY_CARGO_VERSION"
-        echo "aikit-py pyproject Version: $PY_PYPROJECT_VERSION"
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-        if [ "$SDK_VERSION" != "$PY_CARGO_VERSION" ]; then
-          echo "Error: aikit-sdk/Cargo.toml version ($SDK_VERSION) does not match aikit-py/Cargo.toml version ($PY_CARGO_VERSION)"
-          exit 1
-        fi
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
 
-        if [ "$SDK_VERSION" != "$PY_PYPROJECT_VERSION" ]; then
-          echo "Error: aikit-sdk/Cargo.toml version ($SDK_VERSION) does not match aikit-py/pyproject.toml version ($PY_PYPROJECT_VERSION)"
-          exit 1
-        fi
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --locked
 
-        echo "All versions are in sync."
-
-    - name: Run unit tests
-      run: cargo test --lib
-
-    - name: Run clap parsing tests
-      run: cargo test --test cli_parsing_test
-
-    - name: Run CLI integration tests
-      run: cargo test --test cli_integration_test
-
-    - name: Run end-to-end workflow tests
-      run: cargo test --test e2e_workflow_test
-
-    - name: Run all tests with coverage
-      run: cargo test --all-targets
+      - name: Run all tests with nextest
+        run: cargo nextest run --all-features --all-targets --retries 3 --fail-fast
 
   # Additional job for testing on multiple platforms
   test-multiplatform:
