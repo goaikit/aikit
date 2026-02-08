@@ -984,4 +984,21 @@ description = "Test package with invalid name"
 
         Ok(())
     }
+
+    /// Test run command help output
+    #[test]
+    fn test_aikit_run_help() -> Result<(), Box<dyn std::error::Error>> {
+        cargo_bin_cmd!("aikit")
+            .args(["run", "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Run a coding agent with a prompt"))
+            .stdout(predicate::str::contains("--agent"))
+            .stdout(predicate::str::contains("--model"))
+            .stdout(predicate::str::contains("--prompt"))
+            .stdout(predicate::str::contains("--yolo"))
+            .stdout(predicate::str::contains("--stream"));
+
+        Ok(())
+    }
 }

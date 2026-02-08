@@ -329,6 +329,7 @@ mod tests {
             vec!["aikit", "check"],
             vec!["aikit", "list"],
             vec!["aikit", "release", "v1.0.0"],
+            vec!["aikit", "run", "--agent", "opencode", "-p", "hello"],
         ];
 
         for args in test_cases {
@@ -336,6 +337,53 @@ mod tests {
             let _cli = Cli::try_parse_from(&args).unwrap_or_else(|e| {
                 panic!("Failed to parse args {:?}: {}", args, e);
             });
+        }
+    }
+
+    /// Test run command basic parsing
+    #[test]
+    fn test_run_parsing_minimal() {
+        let cli =
+            Cli::try_parse_from(["aikit", "run", "--agent", "opencode", "-p", "hello"]).unwrap();
+
+        match cli.command.unwrap() {
+            aikit::cli::Commands::Run(args) => {
+                assert_eq!(args.agent, Some("opencode".to_string()));
+                assert_eq!(args.prompt, Some("hello".to_string()));
+                assert!(args.model.is_none());
+                assert!(!args.yolo);
+                assert!(!args.stream);
+            }
+            _ => panic!("Expected Commands::Run"),
+        }
+    }
+
+    /// Test run command with all options
+    #[test]
+    fn test_run_parsing_with_options() {
+        let cli = Cli::try_parse_from([
+            "aikit",
+            "run",
+            "--agent",
+            "claude",
+            "--model",
+            "claude-3-opus",
+            "--yolo",
+            "--stream",
+            "-p",
+            "task",
+        ])
+        .unwrap();
+
+        match cli.command.unwrap() {
+            aikit::cli::Commands::Run(args) => {
+                assert_eq!(args.agent, Some("claude".to_string()));
+                assert_eq!(args.model, Some("claude-3-opus".to_string()));
+                assert_eq!(args.prompt, Some("task".to_string()));
+                assert!(args.yolo);
+                assert!(args.stream);
+            }
+            _ => panic!("Expected Commands::Run"),
         }
     }
 

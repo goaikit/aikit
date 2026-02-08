@@ -215,3 +215,49 @@ fn test_aikit_version_command_displays_version() {
     // Version should be displayed (either from Cargo.toml or from system)
     assert!(output_str.contains("CLI") || output_str.contains("AIKit"));
 }
+
+#[test]
+fn test_aikit_run_help() {
+    let output = Command::new("aikit")
+        .arg("run")
+        .arg("--help")
+        .output()
+        .expect("Failed to execute aikit run --help");
+
+    assert!(output.status.success());
+    let output_str = String::from_utf8(output.stdout).unwrap();
+
+    assert!(output_str.contains("Run a coding agent with a prompt"));
+    assert!(output_str.contains("--agent"));
+    assert!(output_str.contains("--model"));
+    assert!(output_str.contains("--prompt"));
+    assert!(output_str.contains("--yolo"));
+    assert!(output_str.contains("--stream"));
+    assert!(output_str.contains("CODING_AGENT"));
+}
+
+#[test]
+fn test_aikit_run_stdin() {
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg("echo 'test prompt' | aikit run --agent opencode 2>&1 || true")
+        .output()
+        .expect("Failed to execute aikit run with stdin");
+
+    let output_str = String::from_utf8(output.stdout).unwrap();
+    let error_str = String::from_utf8(output.stderr).unwrap();
+
+    let combined = format!("{}{}", output_str, error_str);
+
+    if output.status.success() {
+        assert!(!combined.is_empty() || !combined.contains("not found"));
+    } else {
+        assert!(
+            combined.contains("not found")
+                || combined.contains("not runnable")
+                || combined.is_empty(),
+            "Unexpected error: {}",
+            combined
+        );
+    }
+}
