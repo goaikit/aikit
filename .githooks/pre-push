@@ -19,7 +19,7 @@ echo "✅ Repository structure verified"
 # Run full test suite
 echo ""
 echo "🧪 Running full test suite..."
-if cargo test --quiet; then
+if cargo test --quiet -- --test-threads=1; then
     echo "✅ All tests passed"
 else
     echo "❌ Tests failed. Fix the issues before pushing."

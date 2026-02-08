@@ -1358,6 +1358,9 @@ authors = ["test"]
 
     #[tokio::test]
     async fn test_package_publish_missing_token() {
+        let saved_token = std::env::var("GITHUB_TOKEN").ok();
+        std::env::remove_var("GITHUB_TOKEN");
+
         let (temp_dir, package) = create_test_package_dir();
         let package_dir = temp_dir.path().join("test-package");
 
@@ -1386,6 +1389,9 @@ authors = ["test"]
         let result = execute_publish(args).await;
 
         let _ = std::env::set_current_dir(orig_cwd);
+        if let Some(t) = saved_token {
+            std::env::set_var("GITHUB_TOKEN", t);
+        }
 
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
