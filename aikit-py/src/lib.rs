@@ -16,7 +16,7 @@ fn to_py_result<T>(result: Result<T, DeployError>) -> PyResult<T> {
 }
 
 // Implement the PyO3 bindings for DeployConcept enum.
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PyDeployConcept {
     Command,
@@ -44,7 +44,7 @@ impl From<PyDeployConcept> for DeployConcept {
     }
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyAgentConfig {
     #[pyo3(get)]
@@ -57,7 +57,7 @@ pub struct PyAgentConfig {
     pub agents_dir: Option<String>,
 }
 
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyRunOptions {
     #[pyo3(get, set)]
