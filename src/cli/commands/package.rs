@@ -1179,4 +1179,328 @@ authors = ["test"]
         assert!(notes.contains("build"));
         assert!(notes.contains("Build project"));
     }
+
+    #[tokio::test]
+    async fn test_package_publish_full_workflow_snapshot() {
+        let (temp_dir, package) = create_test_package_dir();
+        let package_dir = temp_dir.path().join("test-package");
+
+        let dist_dir = package_dir.join("dist");
+        fs::create_dir_all(&dist_dir).unwrap();
+
+        let zip_path = dist_dir.join(format!(
+            "{}-{}.zip",
+            package.package.name, package.package.version
+        ));
+        create_test_zip_file(&zip_path);
+
+        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
+        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+
+        let args = PackagePublishArgs {
+            repo: "test-owner/test-repo".to_string(),
+            package: None,
+            tag: None,
+            title: None,
+            notes: None,
+            token: Some("test_token".to_string()),
+            no_release: false,
+        };
+
+        let result = execute_publish(args).await;
+
+        let _ = std::env::set_current_dir(orig_cwd);
+
+        assert!(result.is_err());
+        insta::assert_snapshot!(
+            "package_publish_full_workflow",
+            result.unwrap_err().to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_package_publish_with_custom_package_snapshot() {
+        let (temp_dir, _package) = create_test_package_dir();
+        let package_dir = temp_dir.path().join("test-package");
+
+        let custom_zip = temp_dir.path().join("custom-package.zip");
+        create_test_zip_file(&custom_zip);
+
+        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
+        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+
+        let args = PackagePublishArgs {
+            repo: "test-owner/test-repo".to_string(),
+            package: Some(custom_zip.to_string_lossy().to_string()),
+            tag: Some("v1.0.0".to_string()),
+            title: Some("Custom Release".to_string()),
+            notes: Some("Custom release notes".to_string()),
+            token: Some("test_token".to_string()),
+            no_release: false,
+        };
+
+        let result = execute_publish(args).await;
+
+        let _ = std::env::set_current_dir(orig_cwd);
+
+        assert!(result.is_err());
+        insta::assert_snapshot!(
+            "package_publish_custom_package",
+            result.unwrap_err().to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_package_publish_no_release_snapshot() {
+        let (temp_dir, package) = create_test_package_dir();
+        let package_dir = temp_dir.path().join("test-package");
+
+        let dist_dir = package_dir.join("dist");
+        fs::create_dir_all(&dist_dir).unwrap();
+
+        let zip_path = dist_dir.join(format!(
+            "{}-{}.zip",
+            package.package.name, package.package.version
+        ));
+        create_test_zip_file(&zip_path);
+
+        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
+        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+
+        let args = PackagePublishArgs {
+            repo: "test-owner/test-repo".to_string(),
+            package: None,
+            tag: Some("v1.0.0".to_string()),
+            title: None,
+            notes: None,
+            token: Some("test_token".to_string()),
+            no_release: true,
+        };
+
+        let result = execute_publish(args).await;
+
+        let _ = std::env::set_current_dir(orig_cwd);
+
+        assert!(result.is_err());
+        insta::assert_snapshot!(
+            "package_publish_no_release",
+            result.unwrap_err().to_string()
+        );
+    }
+
+    #[test]
+    fn test_generate_release_notes_snapshot() {
+        let (_temp_dir, mut package) = create_test_package_dir();
+
+        package.commands.insert(
+            "run".to_string(),
+            crate::models::package::CommandDefinition {
+                description: "Run tests".to_string(),
+                template: Some("run.md".to_string()),
+                source: None,
+            },
+        );
+
+        package.commands.insert(
+            "build".to_string(),
+            crate::models::package::CommandDefinition {
+                description: "Build project".to_string(),
+                template: Some("build.md".to_string()),
+                source: None,
+            },
+        );
+
+        let notes = generate_release_notes(&package);
+
+        insta::assert_snapshot!("generate_release_notes_with_commands", notes);
+    }
+
+    #[tokio::test]
+    async fn test_package_publish_with_env_token() {
+        let (temp_dir, package) = create_test_package_dir();
+        let package_dir = temp_dir.path().join("test-package");
+
+        let dist_dir = package_dir.join("dist");
+        fs::create_dir_all(&dist_dir).unwrap();
+
+        let zip_path = dist_dir.join(format!(
+            "{}-{}.zip",
+            package.package.name, package.package.version
+        ));
+        create_test_zip_file(&zip_path);
+
+        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
+        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+
+        std::env::set_var("GITHUB_TOKEN", "env_test_token");
+
+        let args = PackagePublishArgs {
+            repo: "test-owner/test-repo".to_string(),
+            package: None,
+            tag: None,
+            title: None,
+            notes: None,
+            token: None,
+            no_release: false,
+        };
+
+        let result = execute_publish(args).await;
+
+        std::env::remove_var("GITHUB_TOKEN");
+        let _ = std::env::set_current_dir(orig_cwd);
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_package_publish_missing_token() {
+        let (temp_dir, package) = create_test_package_dir();
+        let package_dir = temp_dir.path().join("test-package");
+
+        let dist_dir = package_dir.join("dist");
+        fs::create_dir_all(&dist_dir).unwrap();
+
+        let zip_path = dist_dir.join(format!(
+            "{}-{}.zip",
+            package.package.name, package.package.version
+        ));
+        create_test_zip_file(&zip_path);
+
+        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
+        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+
+        let args = PackagePublishArgs {
+            repo: "test-owner/test-repo".to_string(),
+            package: None,
+            tag: None,
+            title: None,
+            notes: None,
+            token: None,
+            no_release: false,
+        };
+
+        let result = execute_publish(args).await;
+
+        let _ = std::env::set_current_dir(orig_cwd);
+
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("token") || error_msg.contains("GitHub token required"));
+    }
+
+    #[tokio::test]
+    async fn test_package_publish_invalid_repo_format() {
+        let (temp_dir, _package) = create_test_package_dir();
+        let package_dir = temp_dir.path().join("test-package");
+
+        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
+        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+
+        let args = PackagePublishArgs {
+            repo: "invalid-repo".to_string(),
+            package: None,
+            tag: None,
+            title: None,
+            notes: None,
+            token: Some("test_token".to_string()),
+            no_release: false,
+        };
+
+        let result = execute_publish(args).await;
+
+        let _ = std::env::set_current_dir(orig_cwd);
+
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("owner/repo")
+                || error_msg.contains("format")
+                || error_msg.contains("GitHub token")
+                || error_msg.contains("Failed to create release")
+        );
+    }
+
+    #[test]
+    fn test_build_package_snapshot() {
+        let (temp_dir, package) = create_test_package_dir();
+        let package_dir = temp_dir.path().join("test-package");
+
+        let templates_dir = package_dir.join("templates");
+        fs::create_dir_all(&templates_dir).unwrap();
+        fs::write(templates_dir.join("help.md"), "# Help\n").unwrap();
+
+        let dist_dir = temp_dir.path().join("dist");
+        fs::create_dir_all(&dist_dir).unwrap();
+
+        let args = PackageBuildArgs {
+            output: dist_dir.to_string_lossy().to_string(),
+            agents: None,
+            include_sources: false,
+        };
+
+        let result = build_package(&package, &package_dir, &args);
+
+        assert!(result.is_ok(), "build_package failed: {:?}", result.err());
+        let zip_path = result.unwrap();
+
+        // Check that the ZIP was created in the expected location
+        let zip_str = zip_path.to_string_lossy().to_string();
+        assert!(zip_str.contains("test-package-0.1.0.zip"));
+        assert!(zip_str.ends_with("test-package-0.1.0.zip"));
+    }
+
+    #[tokio::test]
+    async fn test_complete_workflow_snapshot() {
+        let temp_dir_obj = TempDir::new().expect("Failed to create main temp dir object");
+        let temp_dir_path = temp_dir_obj.path();
+
+        let package = crate::models::package::Package::create_template(
+            "test-package".to_string(),
+            Some("Test description".to_string()),
+            Some("test@example.com".to_string()),
+            Some("1.0.0".to_string()),
+        );
+
+        let package_dir = temp_dir_path.join("test-package");
+        fs::create_dir_all(&package_dir).expect("Failed to create package directory");
+        package
+            .to_toml_file(&package_dir.join("aikit.toml"))
+            .expect("Failed to write package.toml");
+
+        let templates_dir = package_dir.join("templates");
+        fs::create_dir_all(&templates_dir).unwrap();
+        fs::write(templates_dir.join("help.md"), "# Help\n").unwrap();
+
+        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
+        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+
+        let build_args = PackageBuildArgs {
+            output: "dist".to_string(),
+            agents: None,
+            include_sources: false,
+        };
+
+        let build_result = execute_build(build_args).await;
+
+        assert!(build_result.is_ok());
+
+        let publish_args = PackagePublishArgs {
+            repo: "test-owner/test-repo".to_string(),
+            package: None,
+            tag: None,
+            title: None,
+            notes: None,
+            token: Some("test_token".to_string()),
+            no_release: false,
+        };
+
+        let publish_result = execute_publish(publish_args).await;
+
+        let _ = std::env::set_current_dir(orig_cwd);
+
+        insta::assert_snapshot!(
+            "complete_workflow_publish_result",
+            publish_result.unwrap_err().to_string()
+        );
+    }
 }

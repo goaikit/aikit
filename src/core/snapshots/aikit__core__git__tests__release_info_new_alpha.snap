@@ -1,0 +1,9 @@
+---
+source: src/core/git.rs
+expression: yaml_str_alpha
+---
+tag_name: v1.0.0-alpha
+name: Alpha Release
+body: Test
+draft: false
+prerelease: true

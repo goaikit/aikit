@@ -1,0 +1,5 @@
+---
+source: src/cli/commands/package.rs
+expression: result.unwrap_err().to_string()
+---
+No release found with tag 'v1.0.0'. Use --no-release only with an existing release.

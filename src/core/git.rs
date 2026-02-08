@@ -500,4 +500,94 @@ authors = ["test"]
         assert_eq!(manifest.package.version, "1.0.0");
         assert_eq!(manifest.package.description, "Test description");
     }
+
+    #[tokio::test]
+    async fn test_upload_release_asset_success_snapshot() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("test-upload.zip");
+
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::ZipWriter;
+        use zip::CompressionMethod;
+
+        let file = File::create(&test_file).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file(
+            "aikit.toml",
+            zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+        zip.write_all(b"[package]\nname = \"test\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+        zip.finish().unwrap();
+
+        let client = GitHubClient::new(Some("test_token".to_string()));
+
+        let result = client
+            .upload_release_asset("test-owner", "test-repo", 123, &test_file)
+            .await;
+
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("HTTP"));
+        assert!(error_msg.contains("Unauthorized"));
+    }
+
+    #[tokio::test]
+    async fn test_upload_release_asset_large_file() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let test_file = temp_dir.path().join("large-test-upload.zip");
+
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::ZipWriter;
+        use zip::CompressionMethod;
+
+        let file = File::create(&test_file).unwrap();
+        let mut zip = ZipWriter::new(file);
+        zip.start_file(
+            "aikit.toml",
+            zip::write::FileOptions::default().compression_method(CompressionMethod::Deflated),
+        )
+        .unwrap();
+        zip.write_all(b"[package]\nname = \"test\"\nversion = \"0.1.0\"\n")
+            .unwrap();
+        zip.finish().unwrap();
+
+        let client = GitHubClient::new(Some("test_token".to_string()));
+
+        let result = client
+            .upload_release_asset("test-owner", "test-repo", 123, &test_file)
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_release_info_new_snapshot() {
+        let release_info = ReleaseInfo::new(
+            "v1.0.0".to_string(),
+            "Release 1.0".to_string(),
+            "Test release".to_string(),
+            false,
+        );
+
+        let yaml_str = serde_yaml::to_string(&release_info).unwrap();
+        insta::assert_snapshot!("release_info_new_stable", yaml_str);
+
+        let release_info_alpha = ReleaseInfo::new(
+            "v1.0.0-alpha".to_string(),
+            "Alpha Release".to_string(),
+            "Test".to_string(),
+            false,
+        );
+
+        let yaml_str_alpha = serde_yaml::to_string(&release_info_alpha).unwrap();
+        insta::assert_snapshot!("release_info_new_alpha", yaml_str_alpha);
+    }
 }

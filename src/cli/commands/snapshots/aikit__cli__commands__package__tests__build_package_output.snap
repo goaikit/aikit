@@ -1,0 +1,5 @@
+---
+source: src/cli/commands/package.rs
+expression: zip_path.to_string_lossy().to_string()
+---
+/tmp/.tmpm4XJ5n/dist/test-package-0.1.0.zip

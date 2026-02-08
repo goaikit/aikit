@@ -1,0 +1,24 @@
+---
+source: src/cli/commands/package.rs
+expression: notes
+---
+# test-package v0.1.0
+
+Test package
+
+## Commands
+
+- `build` - Build project
+- `run` - Run tests
+- `help` - Show help information
+
+## Installation
+
+```bash
+aikit install test-package/<repo>
+```
+
+## What's New
+
+- Initial release
+- Add your release notes here

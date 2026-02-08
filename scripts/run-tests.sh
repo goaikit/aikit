@@ -9,6 +9,7 @@
 # Options:
 #   -o, --output FILE    Output markdown report file (default: test_results.md)
 #   -j, --json FILE      JSON results file (default: test_results.json)
+#   -d, --output-dir DIR Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)
 #   -r, --retries N      Number of retries for flaky tests (default: 3)
 #   -h, --help           Show this help message
 
@@ -34,6 +35,7 @@ error_exit() {
     echo "Options:" >&2
     echo "  -o, --output FILE    Output markdown report file (default: test_results.md)" >&2
     echo "  -j, --json FILE      JSON results file (default: test_results.json)" >&2
+    echo "  -d, --output-dir DIR Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)" >&2
     echo "  -r, --retries N      Number of retries for flaky tests (default: 3)" >&2
     echo "  -h, --help           Show this help message" >&2
     exit 1
@@ -59,6 +61,10 @@ while [[ $# -gt 0 ]]; do
             JSON_FILE="$2"
             shift 2
             ;;
+        -d|--output-dir)
+            TEST_OUTPUT_DIR_ARG="$2"
+            shift 2
+            ;;
         -r|--retries)
             RETRIES="$2"
             shift 2
@@ -73,6 +79,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  -o, --output FILE    Output markdown report file (default: test_results.md)"
             echo "  -j, --json FILE      JSON results file (default: test_results.json)"
+            echo "  -d, --output-dir DIR Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)"
             echo "  -r, --retries N      Number of retries for flaky tests (default: 3)"
             echo "  -h, --help           Show this help message"
             echo ""
@@ -106,7 +113,11 @@ echo -e "${YELLOW}Running in: $AIKIT_DIR${NC}" >&2
 cd "$AIKIT_DIR"
 
 # Ensure output directory exists for test results
-TEST_OUTPUT_DIR=".github/test-outputs"
+if [[ -n "${TEST_OUTPUT_DIR_ARG:-}" ]]; then
+    TEST_OUTPUT_DIR="$TEST_OUTPUT_DIR_ARG"
+else
+    TEST_OUTPUT_DIR=".github/test-outputs"
+fi
 mkdir -p "$TEST_OUTPUT_DIR"
 echo -e "${YELLOW}Test outputs will be saved to: $TEST_OUTPUT_DIR${NC}" >&2
 echo "" >&2

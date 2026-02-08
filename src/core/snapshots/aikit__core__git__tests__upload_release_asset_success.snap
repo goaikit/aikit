@@ -1,0 +1,5 @@
+---
+source: src/core/git.rs
+expression: error_msg
+---
+Failed to upload asset: HTTP 401 Unauthorized - {"message":"Bad credentials","request_id":"C03C:2836B0:696D5:392083:69887176","documentation_url":"https://docs.github.com/rest"}
