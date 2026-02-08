@@ -16,7 +16,7 @@ fn to_py_result<T>(result: Result<T, DeployError>) -> PyResult<T> {
 }
 
 // Implement the PyO3 bindings for DeployConcept enum.
-#[pyclass(from_py_object)]
+#[pyclass]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PyDeployConcept {
     Command,
@@ -44,7 +44,7 @@ impl From<PyDeployConcept> for DeployConcept {
     }
 }
 
-#[pyclass(from_py_object)]
+#[pyclass]
 #[derive(Debug, Clone)]
 pub struct PyAgentConfig {
     #[pyo3(get)]
@@ -55,6 +55,17 @@ pub struct PyAgentConfig {
     pub skills_dir: Option<String>,
     #[pyo3(get)]
     pub agents_dir: Option<String>,
+}
+
+#[pyclass]
+#[derive(Debug, Clone)]
+pub struct PyRunOptions {
+    #[pyo3(get, set)]
+    pub model: Option<String>,
+    #[pyo3(get, set)]
+    pub yolo: bool,
+    #[pyo3(get, set)]
+    pub stream: bool,
 }
 
 impl From<AgentConfig> for PyAgentConfig {
@@ -188,17 +199,6 @@ fn deploy_subagent(
         aikit_sdk::deploy_subagent(agent_key, &project_root, name, content)
             .map(|path| path.to_string_lossy().into_owned()),
     )
-}
-
-#[pyclass]
-#[derive(Debug, Clone)]
-pub struct PyRunOptions {
-    #[pyo3(get, set)]
-    pub model: Option<String>,
-    #[pyo3(get, set)]
-    pub yolo: bool,
-    #[pyo3(get, set)]
-    pub stream: bool,
 }
 
 impl From<RunOptions> for PyRunOptions {
