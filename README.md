@@ -85,6 +85,7 @@ aikit list
 | `aikit update <pkg>` | Update a package to latest version (optional: `--breaking`) |
 | `aikit remove <pkg>` | Uninstall a package (optional: `--force`) |
 | `aikit check` | Check git, VS Code, and AI agent CLIs availability |
+| `aikit run` | Run a coding agent with a prompt |
 | `aikit version` | Show version |
 | `aikit package init <name>` | Create a new package with aikit.toml |
 | `aikit package build` | Build distributable package (output: dist/ or .genreleases/) |
@@ -117,6 +118,36 @@ Example `.env`:
 ```bash
 GITHUB_TOKEN=your_github_token_here
 ```
+
+## Running agents
+
+The `aikit run` command allows you to execute AI coding agents directly. It can replace agent CLI wrappers like coder.sh in workflows like Newton.
+
+```bash
+# Run an agent with a prompt
+aikit run --agent opencode -p "Help me refactor this code"
+
+# Read prompt from stdin
+echo "Add error handling" | aikit run --agent claude
+
+# Use environment variables for default agent and model
+export CODING_AGENT=opencode
+export CODING_AGENT_MODEL=zai-coding-plan/glm-4.7
+echo "Write tests" | aikit run
+
+# Available options
+aikit run --agent claude --model claude-3-opus --yolo --stream -p "Task description"
+```
+
+**Supported agents:** `codex`, `claude`, `gemini`, `opencode`, `agent`
+
+**Environment variables:**
+- `CODING_AGENT`: Default agent (falls back to `opencode`)
+- `CODING_AGENT_MODEL`: Default model (falls back to `zai-coding-plan/glm-4.7`)
+
+**Programmatic use:**
+- Rust SDK: `aikit_sdk::run_agent()`
+- Python: `aikit_py.run_agent()`
 
 ## Supported AI assistants
 

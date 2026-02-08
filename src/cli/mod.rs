@@ -5,6 +5,7 @@
 mod check;
 mod init;
 mod release;
+mod run;
 mod template_package; // Old template zip archive builder (used by release command)
 mod version;
 
@@ -54,6 +55,8 @@ pub enum Commands {
     Package(commands::package::PackageCommands),
     /// Create GitHub release with package files
     Release(release::ReleaseArgs),
+    /// Run a coding agent with a prompt (stdin or -p)
+    Run(run::RunArgs),
 }
 
 /// Run the CLI application
@@ -102,6 +105,7 @@ pub fn run() -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("{}", e))?,
         },
         Some(Commands::Release(args)) => rt.block_on(release::execute(args))?,
+        Some(Commands::Run(args)) => run::execute(args)?,
         // This should never be reached due to arg_required_else_help = true
         None => unreachable!("arg_required_else_help should prevent None commands"),
     }

@@ -279,6 +279,10 @@ pub fn deploy_subagent(
     Ok(subagent_path)
 }
 
+pub mod runner;
+
+pub use runner::{is_runnable, run_agent, runnable_agents, RunError, RunOptions, RunResult};
+
 /// Agent catalog entry containing all supported agents and their capabilities.
 struct AgentEntry<'a> {
     key: &'a str,

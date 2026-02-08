@@ -1,7 +1,10 @@
-use aikit_sdk::DeployConcept;
-use aikit_sdk::{AgentConfig, DeployError};
+use aikit_sdk::{
+    is_runnable, run_agent as run_agent_impl, runnable_agents, AgentConfig, DeployConcept,
+    DeployError, RunOptions,
+};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::path::PathBuf;
 
 // Removed PyDeployError struct and its #[pyclass]
@@ -52,6 +55,17 @@ pub struct PyAgentConfig {
     pub skills_dir: Option<String>,
     #[pyo3(get)]
     pub agents_dir: Option<String>,
+}
+
+#[pyclass(from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyRunOptions {
+    #[pyo3(get, set)]
+    pub model: Option<String>,
+    #[pyo3(get, set)]
+    pub yolo: bool,
+    #[pyo3(get, set)]
+    pub stream: bool,
 }
 
 impl From<AgentConfig> for PyAgentConfig {
@@ -187,12 +201,81 @@ fn deploy_subagent(
     )
 }
 
+impl From<RunOptions> for PyRunOptions {
+    fn from(options: RunOptions) -> Self {
+        PyRunOptions {
+            model: options.model,
+            yolo: options.yolo,
+            stream: options.stream,
+        }
+    }
+}
+
+impl From<PyRunOptions> for RunOptions {
+    fn from(options: PyRunOptions) -> Self {
+        RunOptions {
+            model: options.model,
+            yolo: options.yolo,
+            stream: options.stream,
+        }
+    }
+}
+
+#[pymethods]
+impl PyRunOptions {
+    #[new]
+    #[pyo3(signature = (model=None, yolo=false, stream=false))]
+    fn new(model: Option<String>, yolo: bool, stream: bool) -> Self {
+        PyRunOptions {
+            model,
+            yolo,
+            stream,
+        }
+    }
+}
+
+#[pyfunction]
+fn run_agent(
+    py: Python<'_>,
+    agent_key: &str,
+    prompt: &str,
+    model: Option<String>,
+    yolo: bool,
+    stream: bool,
+) -> PyResult<Py<PyDict>> {
+    let options = RunOptions {
+        model,
+        yolo,
+        stream,
+    };
+
+    let result = run_agent_impl(agent_key, prompt, options)
+        .map_err(|e| PyException::new_err(format!("{}", e)))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("status_code", result.status.code())?;
+    dict.set_item("stdout", result.stdout)?;
+    dict.set_item("stderr", result.stderr)?;
+    Ok(dict.into())
+}
+
+#[pyfunction]
+fn runnable_agents_list() -> Vec<String> {
+    runnable_agents().iter().map(|s| s.to_string()).collect()
+}
+
+#[pyfunction]
+fn is_runnable_py(agent_key: &str) -> bool {
+    is_runnable(agent_key)
+}
+
 #[pymodule]
 fn aikit_py(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("DeployError", _py.get_type::<PyException>())?; // Corrected to get_type
+    m.add("DeployError", _py.get_type::<PyException>())?;
 
     m.add_class::<PyDeployConcept>()?;
     m.add_class::<PyAgentConfig>()?;
+    m.add_class::<PyRunOptions>()?;
     m.add_wrapped(wrap_pyfunction!(subagent_filename))?;
     m.add_wrapped(wrap_pyfunction!(command_filename))?;
     m.add_wrapped(wrap_pyfunction!(subagent_path))?;
@@ -204,5 +287,8 @@ fn aikit_py(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(deploy_command))?;
     m.add_wrapped(wrap_pyfunction!(deploy_skill))?;
     m.add_wrapped(wrap_pyfunction!(deploy_subagent))?;
+    m.add_wrapped(wrap_pyfunction!(run_agent))?;
+    m.add_wrapped(wrap_pyfunction!(runnable_agents_list))?;
+    m.add_wrapped(wrap_pyfunction!(is_runnable_py))?;
     Ok(())
 }
