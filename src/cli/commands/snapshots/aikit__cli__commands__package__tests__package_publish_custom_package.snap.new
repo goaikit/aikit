@@ -1,6 +1,0 @@
----
-source: src/cli/commands/package.rs
-assertion_line: 1251
-expression: result.unwrap_err().to_string()
----
-aikit.toml not found. Run 'aikit package init' first.
