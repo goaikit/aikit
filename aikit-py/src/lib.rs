@@ -1,10 +1,10 @@
-use aikit_sdk::run_agent as run_agent_impl;
-use aikit_sdk::{is_runnable, run_agent, runnable_agents};
-use aikit_sdk::{is_runnable, run_agent as run_agent_impl, runnable_agents};
-use aikit_sdk::{is_runnable, runnable_agents};
-use aikit_sdk::{AgentConfig, DeployConcept, DeployError, RunOptions, RunResult};
+use aikit_sdk::{
+    is_runnable, run_agent as run_agent_impl, runnable_agents, AgentConfig, DeployConcept,
+    DeployError, RunOptions,
+};
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use std::path::PathBuf;
 
 // Removed PyDeployError struct and its #[pyclass]
@@ -242,23 +242,21 @@ fn run_agent(
     model: Option<String>,
     yolo: bool,
     stream: bool,
-) -> PyResult<PyObject> {
+) -> PyResult<Py<PyDict>> {
     let options = RunOptions {
         model,
         yolo,
         stream,
     };
 
-    match run_agent_impl(agent_key, prompt, options) {
-        Ok(result) => {
-            let dict = pyo3::types::PyDict::new(py);
-            dict.set_item("status_code", result.status.code())?;
-            dict.set_item("stdout", result.stdout)?;
-            dict.set_item("stderr", result.stderr)?;
-            Ok(dict.into())
-        }
-        Err(e) => Err(PyException::new_err(format!("{}", e))),
-    }
+    let result = run_agent_impl(agent_key, prompt, options)
+        .map_err(|e| PyException::new_err(format!("{}", e)))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("status_code", result.status.code())?;
+    dict.set_item("stdout", result.stdout)?;
+    dict.set_item("stderr", result.stderr)?;
+    Ok(dict.into())
 }
 
 #[pyfunction]

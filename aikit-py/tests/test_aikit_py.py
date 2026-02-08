@@ -190,7 +190,7 @@ def test_run_agent_not_runnable():
 
 
 def test_run_options_defaults():
-    options = aikit_py.PyRunOptions(None, None, None)
+    options = aikit_py.PyRunOptions()
     assert options.model is None
     assert options.yolo == False
     assert options.stream == False
