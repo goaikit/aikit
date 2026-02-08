@@ -653,8 +653,12 @@ fn generate_release_notes(package: &crate::models::package::Package) -> String {
 
     if !package.commands.is_empty() {
         notes.push_str("## Commands\n\n");
-        for (name, cmd) in &package.commands {
-            notes.push_str(&format!("- `{}` - {}\n", name, cmd.description));
+        let mut command_names: Vec<&String> = package.commands.keys().collect();
+        command_names.sort();
+        for name in command_names {
+            if let Some(cmd) = package.commands.get(name) {
+                notes.push_str(&format!("- `{}` - {}\n", name, cmd.description));
+            }
         }
         notes.push('\n');
     }
@@ -1390,8 +1394,16 @@ authors = ["test"]
 
     #[tokio::test]
     async fn test_package_publish_invalid_repo_format() {
-        let (temp_dir, _package) = create_test_package_dir();
+        let (temp_dir, package) = create_test_package_dir();
         let package_dir = temp_dir.path().join("test-package");
+
+        let dist_dir = package_dir.join("dist");
+        fs::create_dir_all(&dist_dir).unwrap();
+        let zip_path = dist_dir.join(format!(
+            "{}-{}.zip",
+            package.package.name, package.package.version
+        ));
+        create_test_zip_file(&zip_path);
 
         let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
         std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");

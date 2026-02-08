@@ -39,7 +39,7 @@ fi
 # Run quick unit tests
 echo ""
 echo "🧪 Running unit tests..."
-if cargo test --lib --quiet; then
+if cargo test --lib --quiet -- --test-threads=1; then
     echo "✅ Unit tests passed"
 else
     echo "❌ Unit tests failed. Fix the issues before committing."

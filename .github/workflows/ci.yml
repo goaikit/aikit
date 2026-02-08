@@ -105,11 +105,8 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-nextest
-        run: cargo install cargo-nextest --locked
-
-      - name: Run tests with nextest
-        run: cargo nextest run --all-features --retries 3 --fail-fast
+      - name: Run tests
+        run: cargo test --all-features -- --test-threads=1
 
   test-all-features:
     name: Test (All Features)
@@ -124,11 +121,8 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Install cargo-nextest
-        run: cargo install cargo-nextest --locked
-
-      - name: Run all tests with nextest
-        run: cargo nextest run --all-features --all-targets --retries 3 --fail-fast
+      - name: Run all tests
+        run: cargo test --all-features --all-targets -- --test-threads=1
 
   # Additional job for testing on multiple platforms
   test-multiplatform:

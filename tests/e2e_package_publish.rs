@@ -4,8 +4,10 @@
 //! through building and publishing with asset upload.
 
 use std::fs;
-use std::path::PathBuf;
 use tempfile::TempDir;
+
+use aikit::cli::commands::package as pkg_cmd;
+use aikit::models::package::Package;
 
 #[tokio::test]
 async fn test_complete_publish_workflow_e2e() {
@@ -50,13 +52,13 @@ help = {{ description = "Show help information" }}
     let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
     std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
 
-    let build_args = crate::cli::commands::package::PackageBuildArgs {
+    let build_args = pkg_cmd::PackageBuildArgs {
         output: "dist".to_string(),
         agents: None,
         include_sources: false,
     };
 
-    let build_result = crate::cli::commands::package::execute_build(build_args).await;
+    let build_result = pkg_cmd::execute_build(build_args).await;
 
     assert!(
         build_result.is_ok(),
@@ -74,7 +76,7 @@ help = {{ description = "Show help information" }}
         expected_zip
     );
 
-    let publish_args = crate::cli::commands::package::PackagePublishArgs {
+    let publish_args = pkg_cmd::PackagePublishArgs {
         repo: "test-owner/test-repo".to_string(),
         package: None,
         tag: None,
@@ -84,7 +86,7 @@ help = {{ description = "Show help information" }}
         no_release: false,
     };
 
-    let publish_result = crate::cli::commands::package::execute_publish(publish_args).await;
+    let publish_result = pkg_cmd::execute_publish(publish_args).await;
 
     std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
@@ -125,13 +127,13 @@ authors = ["test@example.com"]
     let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
     std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
 
-    let build_args = crate::cli::commands::package::PackageBuildArgs {
+    let build_args = pkg_cmd::PackageBuildArgs {
         output: "dist".to_string(),
         agents: None,
         include_sources: false,
     };
 
-    let build_result = crate::cli::commands::package::execute_build(build_args).await;
+    let build_result = pkg_cmd::execute_build(build_args).await;
 
     assert!(
         build_result.is_ok(),
@@ -139,7 +141,7 @@ authors = ["test@example.com"]
         build_result.err()
     );
 
-    let publish_args = crate::cli::commands::package::PackagePublishArgs {
+    let publish_args = pkg_cmd::PackagePublishArgs {
         repo: "test-owner/test-repo".to_string(),
         package: None,
         tag: Some("v1.0.0".to_string()),
@@ -149,7 +151,7 @@ authors = ["test@example.com"]
         no_release: true,
     };
 
-    let publish_result = crate::cli::commands::package::execute_publish(publish_args).await;
+    let publish_result = pkg_cmd::execute_publish(publish_args).await;
 
     std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
@@ -181,7 +183,7 @@ authors = ["test@example.com"]
 "#,
         package_name, package_version
     );
-    fs::write(package_dir.join("aikit.toml"), manifest_content)
+    fs::write(package_dir.join("aikit.toml"), &manifest_content)
         .expect("Failed to write aikit.toml");
 
     fs::write(templates_dir.join("help.md"), "# Help\n\nE2E test help.")
@@ -210,7 +212,7 @@ authors = ["test@example.com"]
     let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
     std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
 
-    let publish_args = crate::cli::commands::package::PackagePublishArgs {
+    let publish_args = pkg_cmd::PackagePublishArgs {
         repo: "test-owner/test-repo".to_string(),
         package: Some(custom_zip_path.to_string_lossy().to_string()),
         tag: Some("v1.0.0".to_string()),
@@ -220,7 +222,7 @@ authors = ["test@example.com"]
         no_release: false,
     };
 
-    let publish_result = crate::cli::commands::package::execute_publish(publish_args).await;
+    let publish_result = pkg_cmd::execute_publish(publish_args).await;
 
     std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
@@ -258,7 +260,7 @@ authors = ["test@example.com"]
     fs::write(templates_dir.join("help.md"), "# Help\n\nE2E test help.")
         .expect("Failed to write help.md");
 
-    let build_args = crate::cli::commands::package::PackageBuildArgs {
+    let build_args = pkg_cmd::PackageBuildArgs {
         output: "dist".to_string(),
         agents: None,
         include_sources: false,
@@ -267,7 +269,7 @@ authors = ["test@example.com"]
     let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
     std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
 
-    let build_result = crate::cli::commands::package::execute_build(build_args).await;
+    let build_result = pkg_cmd::execute_build(build_args).await;
     assert!(
         build_result.is_ok(),
         "Build failed: {:?}",
@@ -276,7 +278,7 @@ authors = ["test@example.com"]
 
     std::env::set_var("GITHUB_TOKEN", "env_test_token_12345");
 
-    let publish_args = crate::cli::commands::package::PackagePublishArgs {
+    let publish_args = pkg_cmd::PackagePublishArgs {
         repo: "test-owner/test-repo".to_string(),
         package: None,
         tag: None,
@@ -286,7 +288,7 @@ authors = ["test@example.com"]
         no_release: false,
     };
 
-    let publish_result = crate::cli::commands::package::execute_publish(publish_args).await;
+    let publish_result = pkg_cmd::execute_publish(publish_args).await;
 
     std::env::remove_var("GITHUB_TOKEN");
     std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
@@ -301,7 +303,7 @@ authors = ["test@example.com"]
 async fn test_e2e_validate_version_number_availability() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
 
-    let package = crate::models::package::Package::create_template(
+    let package = Package::create_template(
         "version-test-package".to_string(),
         Some("Test version number availability".to_string()),
         Some("test@example.com".to_string()),
@@ -322,13 +324,13 @@ async fn test_e2e_validate_version_number_availability() {
     let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
     std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
 
-    let build_args = crate::cli::commands::package::PackageBuildArgs {
+    let build_args = pkg_cmd::PackageBuildArgs {
         output: "dist".to_string(),
         agents: None,
         include_sources: false,
     };
 
-    let build_result = crate::cli::commands::package::execute_build(build_args).await;
+    let build_result = pkg_cmd::execute_build(build_args).await;
 
     assert!(
         build_result.is_ok(),
@@ -345,7 +347,7 @@ async fn test_e2e_validate_version_number_availability() {
         expected_zip
     );
 
-    let publish_args = crate::cli::commands::package::PackagePublishArgs {
+    let publish_args = pkg_cmd::PackagePublishArgs {
         repo: "test-owner/test-repo".to_string(),
         package: None,
         tag: Some("v2.3.4".to_string()),
@@ -355,7 +357,7 @@ async fn test_e2e_validate_version_number_availability() {
         no_release: false,
     };
 
-    let publish_result = crate::cli::commands::package::execute_publish(publish_args).await;
+    let publish_result = pkg_cmd::execute_publish(publish_args).await;
 
     std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
@@ -410,13 +412,13 @@ description = "Deploy to production"
     let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
     std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
 
-    let build_args = crate::cli::commands::package::PackageBuildArgs {
+    let build_args = pkg_cmd::PackageBuildArgs {
         output: "dist".to_string(),
         agents: None,
         include_sources: false,
     };
 
-    let build_result = crate::cli::commands::package::execute_build(build_args).await;
+    let build_result = pkg_cmd::execute_build(build_args).await;
 
     assert!(
         build_result.is_ok(),
@@ -424,7 +426,7 @@ description = "Deploy to production"
         build_result.err()
     );
 
-    let publish_args = crate::cli::commands::package::PackagePublishArgs {
+    let publish_args = pkg_cmd::PackagePublishArgs {
         repo: "test-owner/test-repo".to_string(),
         package: None,
         tag: None,
@@ -434,7 +436,7 @@ description = "Deploy to production"
         no_release: false,
     };
 
-    let publish_result = crate::cli::commands::package::execute_publish(publish_args).await;
+    let publish_result = pkg_cmd::execute_publish(publish_args).await;
 
     std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 

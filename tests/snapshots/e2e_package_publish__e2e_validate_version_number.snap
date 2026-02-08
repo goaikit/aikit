@@ -1,0 +1,5 @@
+---
+source: tests/e2e_package_publish.rs
+expression: publish_result.unwrap_err().to_string()
+---
+Failed to create release: Failed to create release: HTTP 401 Unauthorized

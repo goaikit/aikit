@@ -9,8 +9,8 @@ Test package
 ## Commands
 
 - `build` - Build project
-- `run` - Run tests
 - `help` - Show help information
+- `run` - Run tests
 
 ## Installation
 
