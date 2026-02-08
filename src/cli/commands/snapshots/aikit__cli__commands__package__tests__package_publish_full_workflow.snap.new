@@ -1,6 +1,6 @@
 ---
 source: src/cli/commands/package.rs
-assertion_line: 1289
+assertion_line: 1219
 expression: result.unwrap_err().to_string()
 ---
 Package ZIP not found: test-package-0.1.0.zip. Run 'aikit package build' first, or specify path with --package.
