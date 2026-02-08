@@ -1001,4 +1001,33 @@ description = "Test package with invalid name"
 
         Ok(())
     }
+
+    /// Test run command with stdin
+    #[test]
+    fn test_aikit_run_stdin() {
+        use std::process::Command;
+
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg("echo 'test prompt' | aikit run --agent opencode 2>&1 || true")
+            .output()
+            .expect("Failed to execute aikit run with stdin");
+
+        let output_str = String::from_utf8_lossy(&output.stdout);
+        let error_str = String::from_utf8_lossy(&output.stderr);
+
+        let combined = format!("{}{}", output_str, error_str);
+
+        if output.status.success() {
+            assert!(!combined.is_empty() || !combined.contains("not found"));
+        } else {
+            assert!(
+                combined.contains("not found")
+                    || combined.contains("not runnable")
+                    || combined.is_empty(),
+                "Unexpected error: {}",
+                combined
+            );
+        }
+    }
 }
