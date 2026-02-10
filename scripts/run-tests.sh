@@ -2,7 +2,7 @@
 
 # AIKIT Test Runner Script
 # Runs fmt, clippy, and tests (cargo-nextest); captures results and generates statistics.
-# Matches CI: cargo fmt --check, cargo clippy -- -D warnings, then tests with retries.
+# Matches CI: cargo fmt --check, cargo clippy --workspace --all-targets --all-features -- -D warnings, then tests with retries.
 #
 # Usage: ./run-tests.sh [OPTIONS]
 #
@@ -130,8 +130,8 @@ FMT_OUTPUT=$(cargo fmt --check 2>&1)
 FMT_EXIT=$?
 echo "$FMT_OUTPUT" > "$TEST_OUTPUT_DIR/fmt-output.txt"
 
-echo -e "${YELLOW}Running cargo clippy -- -D warnings...${NC}" >&2
-CLIPPY_OUTPUT=$(cargo clippy -- -D warnings 2>&1)
+echo -e "${YELLOW}Running cargo clippy --workspace --all-targets --all-features -- -D warnings...${NC}" >&2
+CLIPPY_OUTPUT=$(cargo clippy --workspace --all-targets --all-features -- -D warnings 2>&1)
 CLIPPY_EXIT=$?
 echo "$CLIPPY_OUTPUT" > "$TEST_OUTPUT_DIR/clippy-output.txt"
 
@@ -291,7 +291,7 @@ echo -e "${YELLOW}Generating report: $OUTPUT_FILE${NC}" >&2
 
     echo "## Checks"
     echo "- **fmt (cargo fmt --check):** $([ "$FMT_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
-    echo "- **clippy (cargo clippy -- -D warnings):** $([ "$CLIPPY_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
+    echo "- **clippy (cargo clippy --workspace --all-targets --all-features -- -D warnings):** $([ "$CLIPPY_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
     echo "- **tests (cargo nextest run):** $([ "$TEST_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
     echo ""
     if [ "$FMT_EXIT" -ne 0 ] && [ -n "$FMT_OUTPUT" ]; then
