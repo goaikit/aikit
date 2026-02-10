@@ -1,0 +1,8 @@
+[package]
+name = "newton-templates"
+version = "1.0.0"
+description = "Newton workspace template with evaluator, advisor, post-success, post-failure scripts"
+authors = ["AIKit"]
+
+[artifacts]
+"newton/**" = ".newton"
