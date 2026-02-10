@@ -773,10 +773,21 @@ fn copy_artifacts_to_project(
 
     for (pattern_str, dest_str) in package.get_artifact_mappings(None) {
         let glob_pattern = Pattern::new(&pattern_str)?;
-        let prefix = pattern_str
-            .rsplit_once('*')
-            .map(|(p, _)| p.to_string())
-            .unwrap_or_else(String::new);
+
+        // Extract the prefix: the part before the first glob pattern
+        // This handles patterns like "newton/**" (prefix = "newton/")
+        // and "templates/*.md" (prefix = "templates/")
+        let prefix = if pattern_str.contains("**") {
+            // Split on ** to get the part before
+            pattern_str.split("**").next().unwrap_or("").to_string()
+        } else if pattern_str.contains('*') {
+            // Split on * to get the part before
+            pattern_str.split('*').next().unwrap_or("").to_string()
+        } else {
+            // No glob pattern, use the whole string as prefix
+            pattern_str.clone()
+        };
+
         let dest_dir = project_root.join(dest_str.trim_end_matches('/'));
 
         for entry in WalkDir::new(package_root)
@@ -1071,5 +1082,135 @@ mod tests {
 
         let result = args.detect_source_type();
         assert!(result.is_err());
+    }
+
+    /// Test artifact copy with Newton template pattern (newton/** -> .newton)
+    #[test]
+    fn test_copy_artifacts_newton_template() -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs;
+
+        let temp = TempDir::new()?;
+        let work = temp.path();
+
+        // Create a mock package root with newton/ structure
+        let package_root = work.join("package_root");
+        fs::create_dir_all(package_root.join("newton/scripts"))?;
+
+        // Create test files
+        fs::write(package_root.join("newton/README.md"), "# Newton Template")?;
+        fs::write(
+            package_root.join("newton/scripts/advisor.sh"),
+            "#!/bin/sh\necho advisor",
+        )?;
+        fs::write(
+            package_root.join("newton/scripts/evaluator.sh"),
+            "#!/bin/sh\necho evaluator",
+        )?;
+
+        // Create project root
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root)?;
+
+        // Create a mock package with artifact mapping
+        let mut package = crate::models::package::Package::new(
+            "newton-templates".to_string(),
+            "1.0.0".to_string(),
+            "Newton workspace template".to_string(),
+        );
+        package
+            .artifacts
+            .insert("newton/**".to_string(), ".newton".to_string());
+
+        // Copy artifacts
+        copy_artifacts_to_project(&package, &package_root, &project_root)?;
+
+        // Verify files were copied correctly
+        assert!(project_root.join(".newton/README.md").exists());
+        assert!(project_root.join(".newton/scripts/advisor.sh").exists());
+        assert!(project_root.join(".newton/scripts/evaluator.sh").exists());
+
+        // Verify content
+        let readme = fs::read_to_string(project_root.join(".newton/README.md"))?;
+        assert!(readme.contains("Newton Template"));
+
+        let advisor = fs::read_to_string(project_root.join(".newton/scripts/advisor.sh"))?;
+        assert!(advisor.contains("echo advisor"));
+
+        Ok(())
+    }
+
+    /// Test artifact copy with nested directory structure
+    #[test]
+    fn test_copy_artifacts_nested_structure() -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs;
+
+        let temp = TempDir::new()?;
+        let work = temp.path();
+
+        // Create package root with nested structure
+        let package_root = work.join("package_root");
+        fs::create_dir_all(package_root.join("newton/deeply/nested/dir"))?;
+
+        // Create files at various depths
+        fs::write(package_root.join("newton/top.txt"), "top")?;
+        fs::write(package_root.join("newton/deeply/nested/file.txt"), "nested")?;
+
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root)?;
+
+        let mut package = crate::models::package::Package::new(
+            "test-pkg".to_string(),
+            "1.0.0".to_string(),
+            "Test".to_string(),
+        );
+        package
+            .artifacts
+            .insert("newton/**".to_string(), ".newton".to_string());
+
+        copy_artifacts_to_project(&package, &package_root, &project_root)?;
+
+        // Verify nested files were copied
+        assert!(project_root.join(".newton/top.txt").exists());
+        assert!(project_root.join(".newton/deeply/nested/file.txt").exists());
+
+        Ok(())
+    }
+
+    /// Test artifact copy with glob pattern filtering
+    #[test]
+    fn test_copy_artifacts_glob_pattern() -> Result<(), Box<dyn std::error::Error>> {
+        use std::fs;
+
+        let temp = TempDir::new()?;
+        let work = temp.path();
+
+        let package_root = work.join("package_root");
+        fs::create_dir_all(package_root.join("newton/scripts"))?;
+        fs::create_dir_all(package_root.join("other"))?;
+
+        // Create files in both directories
+        fs::write(package_root.join("newton/scripts/advisor.sh"), "#!/bin/sh")?;
+        fs::write(package_root.join("other/ignore.txt"), "ignore")?;
+
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root)?;
+
+        let mut package = crate::models::package::Package::new(
+            "test-pkg".to_string(),
+            "1.0.0".to_string(),
+            "Test".to_string(),
+        );
+        // Only copy newton/**, not other/**
+        package
+            .artifacts
+            .insert("newton/**".to_string(), ".newton".to_string());
+
+        copy_artifacts_to_project(&package, &package_root, &project_root)?;
+
+        // Verify only newton/** files were copied
+        assert!(project_root.join(".newton/scripts/advisor.sh").exists());
+        assert!(!project_root.join("other/ignore.txt").exists());
+
+        Ok(())
     }
 }

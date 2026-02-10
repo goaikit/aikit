@@ -32,6 +32,20 @@ Download from [GitHub Releases](https://github.com/goaikit/aikit/releases/latest
 
 ## Quick Start
 
+### Install Newton template (workspace with scripts)
+
+```bash
+# Install Newton template from GitHub or local path
+aikit install gonewton/newton-templates --ai newton --yes
+
+# This creates .newton/ with:
+#   .newton/README.md - Template documentation
+#   .newton/scripts/advisor.sh - Planning advisor
+#   .newton/scripts/evaluator.sh - Progress evaluator
+#   .newton/scripts/post-success.sh - Post-success hook
+#   .newton/scripts/post-failure.sh - Post-failure hook
+```
+
 ### Create a package and deploy to Cursor and Claude
 
 ```bash
@@ -80,7 +94,7 @@ aikit list
 | Command | Description |
 |---------|-------------|
 | `aikit init [name]` | Initialize a Spec-Driven Development project with AI assistant templates |
-| `aikit install <source>` | Install packages from GitHub (owner/repo) or local directory |
+| `aikit install <source>` | Install packages from GitHub (owner/repo) or local directory (use `--ai <agent>` to specify agent) |
 | `aikit list` | Show installed packages (optional: `--author`, `--detailed`) |
 | `aikit update <pkg>` | Update a package to latest version (optional: `--breaking`) |
 | `aikit remove <pkg>` | Uninstall a package (optional: `--force`) |
