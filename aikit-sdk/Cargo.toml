@@ -1,6 +1,6 @@
 [package]
 name = "aikit-sdk"
-version = "0.1.0"
+version = "0.1.49"
 edition = "2021"
 license = "Apache-2.0"
 description = "aikit SDK: agent catalog and deploy for AI assistant configurations"

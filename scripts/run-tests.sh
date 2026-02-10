@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # AIKIT Test Runner Script
-# Runs fmt, clippy, and tests (cargo-nextest); captures results and generates statistics.
-# Matches CI: cargo fmt --check, cargo clippy --workspace --all-targets --all-features -- -D warnings, then tests with retries.
+# Runs build, fmt, clippy, and tests (cargo-nextest); captures results and generates statistics.
+# Matches CI: full workspace build (catches compile errors in all crates e.g. aikit-py), fmt, clippy, then tests with retries.
 #
 # Usage: ./run-tests.sh [OPTIONS]
 #
@@ -122,8 +122,16 @@ mkdir -p "$TEST_OUTPUT_DIR"
 echo -e "${YELLOW}Test outputs will be saved to: $TEST_OUTPUT_DIR${NC}" >&2
 echo "" >&2
 
-# Run fmt, clippy, and tests; capture output and exit codes (do not exit on first failure)
+# Run build, fmt, clippy, and tests; capture output and exit codes (do not exit on first failure)
 set +e
+
+echo -e "${YELLOW}Running cargo build --workspace --all-targets --all-features...${NC}" >&2
+BUILD_OUTPUT=$(cargo build --workspace --all-targets --all-features 2>&1)
+BUILD_EXIT=$?
+echo "$BUILD_OUTPUT" > "$TEST_OUTPUT_DIR/build-output.txt"
+if [ "$BUILD_EXIT" -ne 0 ]; then
+    echo -e "${RED}Workspace build failed (compile errors in any crate, e.g. aikit-py, will fail CI).${NC}" >&2
+fi
 
 echo -e "${YELLOW}Running cargo fmt --check...${NC}" >&2
 FMT_OUTPUT=$(cargo fmt --check 2>&1)
@@ -142,8 +150,9 @@ echo "$TEST_OUTPUT" > "$TEST_OUTPUT_DIR/test-output.txt"
 
 set -e
 
-# Overall pass only if all three passed
+# Overall pass only if build, fmt, clippy, and tests passed
 EXIT_CODE=0
+[ "$BUILD_EXIT" -ne 0 ] && EXIT_CODE=1
 [ "$FMT_EXIT" -ne 0 ] && EXIT_CODE=1
 [ "$CLIPPY_EXIT" -ne 0 ] && EXIT_CODE=1
 [ "$TEST_EXIT" -ne 0 ] && EXIT_CODE=1
@@ -151,6 +160,7 @@ EXIT_CODE=0
 if [ "$EXIT_CODE" -eq 0 ]; then
     echo -e "${GREEN}All checks and tests passed.${NC}" >&2
 else
+    [ "$BUILD_EXIT" -ne 0 ] && echo -e "${RED}Workspace build failed.${NC}" >&2
     [ "$FMT_EXIT" -ne 0 ] && echo -e "${RED}Format check failed.${NC}" >&2
     [ "$CLIPPY_EXIT" -ne 0 ] && echo -e "${RED}Clippy failed.${NC}" >&2
     [ "$TEST_EXIT" -ne 0 ] && echo -e "${RED}Some tests failed.${NC}" >&2
@@ -230,9 +240,10 @@ fi
 
 # Create structured JSON output
 echo -e "${YELLOW}Generating JSON output...${NC}" >&2
+BUILD_STATUS="$([ "$BUILD_EXIT" -eq 0 ] && echo ok || echo failed)"
 FMT_STATUS="$([ "$FMT_EXIT" -eq 0 ] && echo ok || echo failed)"
 CLIPPY_STATUS="$([ "$CLIPPY_EXIT" -eq 0 ] && echo ok || echo failed)"
-if [ "$COMPILATION_FAILED" = true ]; then
+if [ "$COMPILATION_FAILED" = true ] || [ "$BUILD_EXIT" -ne 0 ]; then
     # Create JSON for compilation errors
     cat > "$JSON_FILE" << EOF
 {
@@ -240,7 +251,7 @@ if [ "$COMPILATION_FAILED" = true ]; then
   "timestamp": "$TIMESTAMP",
   "command": "$0",
   "exit_code": $EXIT_CODE,
-  "checks": { "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS" },
+  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS" },
   "test_statistics": {
     "total": 0,
     "passed": 0,
@@ -258,7 +269,7 @@ else
   "timestamp": "$TIMESTAMP",
   "command": "$0",
   "exit_code": $EXIT_CODE,
-  "checks": { "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS" },
+  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS" },
   "test_statistics": {
     "total": $TOTAL,
     "passed": ${PASSED:-0},
@@ -290,10 +301,19 @@ echo -e "${YELLOW}Generating report: $OUTPUT_FILE${NC}" >&2
     echo ""
 
     echo "## Checks"
+    echo "- **build (cargo build --workspace --all-targets --all-features):** $([ "$BUILD_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
     echo "- **fmt (cargo fmt --check):** $([ "$FMT_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
     echo "- **clippy (cargo clippy --workspace --all-targets --all-features -- -D warnings):** $([ "$CLIPPY_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
     echo "- **tests (cargo nextest run):** $([ "$TEST_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
     echo ""
+    if [ "$BUILD_EXIT" -ne 0 ] && [ -n "$BUILD_OUTPUT" ]; then
+        echo "### Build failure output"
+        echo ""
+        echo "\`\`\`"
+        echo "$BUILD_OUTPUT"
+        echo "\`\`\`"
+        echo ""
+    fi
     if [ "$FMT_EXIT" -ne 0 ] && [ -n "$FMT_OUTPUT" ]; then
         echo "### fmt failure output"
         echo ""
@@ -403,6 +423,7 @@ echo -e "${GREEN}Report generated successfully!${NC}" >&2
 echo "" >&2
 
 echo "📊 Summary:" >&2
+echo "  build:  $([ "$BUILD_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 echo "  fmt:    $([ "$FMT_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 echo "  clippy: $([ "$CLIPPY_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 if [ "$COMPILATION_FAILED" = true ]; then

@@ -1502,6 +1502,7 @@ authors = ["test"]
 
         assert!(build_result.is_ok());
 
+        std::env::set_current_dir(&package_dir).expect("Restore CWD before publish (Windows)");
         let publish_args = PackagePublishArgs {
             repo: "test-owner/test-repo".to_string(),
             package: None,

@@ -55,6 +55,8 @@ pub struct PyAgentConfig {
     pub skills_dir: Option<String>,
     #[pyo3(get)]
     pub agents_dir: Option<String>,
+    #[pyo3(get)]
+    pub scripts_dir: Option<String>,
 }
 
 #[pyclass(from_py_object)]
@@ -75,6 +77,7 @@ impl From<AgentConfig> for PyAgentConfig {
             commands_dir: config.commands_dir,
             skills_dir: config.skills_dir,
             agents_dir: config.agents_dir,
+            scripts_dir: config.scripts_dir,
         }
     }
 }
@@ -88,6 +91,7 @@ impl PyAgentConfig {
             commands_dir: self.commands_dir.clone(),
             skills_dir: self.skills_dir.clone(),
             agents_dir: self.agents_dir.clone(),
+            scripts_dir: self.scripts_dir.clone(),
         }
         .key()
     }
