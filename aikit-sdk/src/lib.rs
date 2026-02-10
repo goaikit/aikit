@@ -67,6 +67,8 @@ pub struct AgentConfig {
     pub skills_dir: Option<String>,
     /// Optional directory for agent subagents
     pub agents_dir: Option<String>,
+    /// Optional directory for agent scripts (e.g., template scripts)
+    pub scripts_dir: Option<String>,
 }
 
 impl AgentConfig {
@@ -158,6 +160,14 @@ pub fn skill_dir(
     Ok(path.join(skill_name))
 }
 
+/// Returns the scripts directory for an agent.
+///
+/// Returns `None` if the agent does not have a `scripts_dir`.
+pub fn scripts_dir(project_root: &Path, agent_key: &str) -> Option<PathBuf> {
+    let config = agent(agent_key)?;
+    config.scripts_dir.map(|dir| project_root.join(dir))
+}
+
 /// Validates an agent key.
 ///
 /// Returns an error if the agent is not in the catalog.
@@ -177,6 +187,7 @@ pub fn all_agents() -> Vec<AgentConfig> {
             commands_dir: entry.commands.to_string(),
             skills_dir: entry.skills.map(|s| s.to_string()),
             agents_dir: entry.subagents.map(|a| a.to_string()),
+            scripts_dir: entry.scripts.map(|s| s.to_string()),
         })
         .collect()
 }
@@ -193,6 +204,7 @@ pub fn agent(key: &str) -> Option<AgentConfig> {
             commands_dir: entry.commands.to_string(),
             skills_dir: entry.skills.map(|s| s.to_string()),
             agents_dir: entry.subagents.map(|a| a.to_string()),
+            scripts_dir: entry.scripts.map(|s| s.to_string()),
         })
 }
 
@@ -290,6 +302,7 @@ struct AgentEntry<'a> {
     commands: &'a str,
     skills: Option<&'a str>,
     subagents: Option<&'a str>,
+    scripts: Option<&'a str>,
 }
 
 const AGENTS: &[AgentEntry] = &[
@@ -299,6 +312,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".claude/commands",
         skills: Some(".claude/skills"),
         subagents: Some(".claude/agents"),
+        scripts: None,
     },
     AgentEntry {
         key: "gemini",
@@ -306,6 +320,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".gemini/commands",
         skills: Some(".gemini/skills"),
         subagents: Some(".gemini/agents"),
+        scripts: None,
     },
     AgentEntry {
         key: "copilot",
@@ -313,6 +328,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".github/agents",
         skills: None,
         subagents: Some(".github/agents"),
+        scripts: None,
     },
     AgentEntry {
         key: "cursor-agent",
@@ -320,6 +336,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".cursor/commands",
         skills: Some(".cursor/skills"),
         subagents: Some(".cursor/agents"),
+        scripts: None,
     },
     AgentEntry {
         key: "qwen",
@@ -327,6 +344,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".qwen/commands",
         skills: None,
         subagents: None,
+        scripts: None,
     },
     AgentEntry {
         key: "newton",
@@ -334,6 +352,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".newton/commands",
         skills: Some(".newton/skills"),
         subagents: Some(".newton/agents"),
+        scripts: Some(".newton/scripts"),
     },
     AgentEntry {
         key: "opencode",
@@ -341,6 +360,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".opencode/commands",
         skills: None,
         subagents: None,
+        scripts: None,
     },
     AgentEntry {
         key: "codex",
@@ -348,6 +368,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".codex/prompts",
         skills: Some(".codex/skills"),
         subagents: None,
+        scripts: None,
     },
     AgentEntry {
         key: "windsurf",
@@ -355,6 +376,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".windsurf/workflows",
         skills: Some(".windsurf/skills"),
         subagents: None,
+        scripts: None,
     },
     AgentEntry {
         key: "kilocode",
@@ -362,6 +384,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".kilocode/workflows",
         skills: Some(".kilocode/skills"),
         subagents: None,
+        scripts: None,
     },
     AgentEntry {
         key: "auggie",
@@ -369,6 +392,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".augment/commands",
         skills: Some(".augment/skills"),
         subagents: Some(".augment/agents"),
+        scripts: None,
     },
     AgentEntry {
         key: "roo",
@@ -376,6 +400,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".roo/commands",
         skills: Some(".roo/skills"),
         subagents: None,
+        scripts: None,
     },
     AgentEntry {
         key: "codebuddy",
@@ -383,6 +408,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".codebuddy/commands",
         skills: None,
         subagents: None,
+        scripts: None,
     },
     AgentEntry {
         key: "qoder",
@@ -390,6 +416,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".qoder/commands",
         skills: None,
         subagents: Some(".qoder/agents"),
+        scripts: None,
     },
     AgentEntry {
         key: "amp",
@@ -397,6 +424,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".agents/commands",
         skills: None,
         subagents: None,
+        scripts: None,
     },
     AgentEntry {
         key: "shai",
@@ -404,6 +432,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".shai/commands",
         skills: None,
         subagents: None,
+        scripts: None,
     },
     AgentEntry {
         key: "q",
@@ -411,6 +440,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".amazonq/prompts",
         skills: None,
         subagents: None,
+        scripts: None,
     },
     AgentEntry {
         key: "bob",
@@ -418,6 +448,7 @@ const AGENTS: &[AgentEntry] = &[
         commands: ".bob/commands",
         skills: None,
         subagents: None,
+        scripts: None,
     },
 ];
 
@@ -463,6 +494,7 @@ mod tests {
         assert_eq!(config.commands_dir, ".claude/commands");
         assert!(config.skills_dir.is_some());
         assert!(config.agents_dir.is_some());
+        assert!(config.scripts_dir.is_none());
     }
 
     #[test]
@@ -490,6 +522,7 @@ mod tests {
         assert_eq!(config.commands_dir, ".newton/commands");
         assert!(config.skills_dir.is_some());
         assert!(config.agents_dir.is_some());
+        assert_eq!(config.scripts_dir, Some(".newton/scripts".to_string()));
     }
 
     #[test]
@@ -716,6 +749,24 @@ mod tests {
             Config here.
             ");
         });
+    }
+
+    #[test]
+    fn test_scripts_dir_for_newton() {
+        let temp_dir = TempDir::new().unwrap();
+        let scripts_path = scripts_dir(temp_dir.path(), "newton");
+        assert!(scripts_path.is_some());
+        assert_eq!(
+            scripts_path.unwrap(),
+            temp_dir.path().join(".newton/scripts")
+        );
+    }
+
+    #[test]
+    fn test_scripts_dir_for_agents_without_scripts() {
+        let temp_dir = TempDir::new().unwrap();
+        assert!(scripts_dir(temp_dir.path(), "claude").is_none());
+        assert!(scripts_dir(temp_dir.path(), "qwen").is_none());
     }
 
     #[test]
