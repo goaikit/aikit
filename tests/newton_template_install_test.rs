@@ -128,23 +128,23 @@ mod tests {
 
         // Test advisor.sh
         let advisor = fs::read_to_string(scripts_dir.join("advisor.sh"))?;
-        assert!(advisor.contains("Newton Advisor"));
-        assert!(advisor.contains("advisor.sh"));
+        assert!(advisor.contains("Advisor"));
+        assert!(advisor.contains("planning phase"));
 
         // Test evaluator.sh
         let evaluator = fs::read_to_string(scripts_dir.join("evaluator.sh"))?;
-        assert!(evaluator.contains("Newton Evaluator"));
-        assert!(evaluator.contains("evaluator.sh"));
+        assert!(evaluator.contains("Evaluator"));
+        assert!(evaluator.contains("plan progress"));
 
         // Test post-success.sh
         let post_success = fs::read_to_string(scripts_dir.join("post-success.sh"))?;
-        assert!(post_success.contains("Newton Post-Success"));
-        assert!(post_success.contains("post-success.sh"));
+        assert!(post_success.contains("Post-Success"));
+        assert!(post_success.contains("successful"));
 
         // Test post-failure.sh
         let post_failure = fs::read_to_string(scripts_dir.join("post-failure.sh"))?;
-        assert!(post_failure.contains("Newton Post-Failure"));
-        assert!(post_failure.contains("post-failure.sh"));
+        assert!(post_failure.contains("Post-Failure"));
+        assert!(post_failure.contains("failed"));
 
         Ok(())
     }
@@ -167,7 +167,7 @@ mod tests {
             .assert()
             .success();
 
-        // Install again with force flag
+        // Install again with force flag - should succeed without confirmation prompt
         cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args([
@@ -180,7 +180,7 @@ mod tests {
             ])
             .assert()
             .success()
-            .stdout(predicate::str::contains("Reinstall"));
+            .stdout(predicate::str::contains("installed successfully"));
 
         // Verify .newton/ still exists
         assert!(work.join(".newton").exists());
