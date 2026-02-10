@@ -160,8 +160,9 @@ aikit run --agent claude --model claude-3-opus --yolo --stream -p "Task descript
 - `CODING_AGENT_MODEL`: Default model (falls back to `zai-coding-plan/glm-4.7`)
 
 **Programmatic use:**
-- Rust SDK: `aikit_sdk::run_agent()`
-- Python: `aikit_py.run_agent()`
+
+- **Rust:** Add `aikit-sdk` to your `Cargo.toml`, then call `aikit_sdk::run_agent(agent_key, prompt, RunOptions { model, yolo, stream })`. Returns `Result<RunResult, RunError>`. See [aikit-sdk README](aikit-sdk/README.md) for full API (catalog, deploy, run).
+- **Python:** `pip install aikit-py`, then `aikit_py.run_agent(agent_key, prompt, model=None, yolo=False, stream=False)` returns a dict with `status_code`, `stdout`, `stderr`. See [aikit-py README](aikit-py/README.md) for catalog, deploy, and run APIs.
 
 ## Supported AI assistants
 

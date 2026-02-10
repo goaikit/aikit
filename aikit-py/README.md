@@ -146,6 +146,23 @@ print('Skill executed!')")
 Expected error when deploying skill to 'qwen': {e.message} (Kind: {e.kind})")
 ```
 
+## Running agents
+
+You can run a coding agent from Python. Only these agent keys are runnable: `codex`, `claude`, `gemini`, `opencode`, `agent`. Use `aikit_py.is_runnable_py(agent_key)` or `aikit_py.runnable_agents_list()` to check.
+
+```python
+import aikit_py
+
+# Optional: check before calling
+if aikit_py.is_runnable_py("claude"):
+    result = aikit_py.run_agent("claude", "Suggest a refactor", model=None, yolo=False, stream=False)
+    # result is a dict: status_code (int | None), stdout (bytes), stderr (bytes)
+    print(result["stdout"].decode())
+    exit(result["status_code"] or 1)
+```
+
+Raises an exception if the agent is not runnable or the process fails to start.
+
 ## API Overview
 
 The `aikit_py` module exposes functions and classes that mirror the `aikit-sdk` Rust library:
@@ -161,6 +178,10 @@ The `aikit_py` module exposes functions and classes that mirror the `aikit-sdk` 
 -   `deploy_subagent(agent_key: str, project_root: str, name: str, content: str)`: Deploys a subagent file.
 -   `command_filename(agent_key: str, name: str)`: Returns the conventional filename for a command.
 -   `subagent_filename(agent_key: str, name: str)`: Returns the conventional filename for a subagent.
+-   `run_agent(agent_key, prompt, model=None, yolo=False, stream=False)`: Runs the agent CLI; returns a dict with `status_code`, `stdout`, `stderr`. Raises on invalid agent or spawn failure.
+-   `runnable_agents_list()`: Returns list of runnable agent keys (`codex`, `claude`, `gemini`, `opencode`, `agent`).
+-   `is_runnable_py(agent_key: str)`: Returns whether the agent can be run via `run_agent`.
+-   `PyRunOptions`: Optional builder for run options (model, yolo, stream); used internally by `run_agent`.
 -   `AgentConfig`: A Python class representing an agent's configuration, with properties like `name`, `commands_dir`, `skills_dir`, `agents_dir`, and `key()`.
 -   `PyDeployError`: A custom Python exception class for errors originating from the `aikit-sdk`.
 -   `PyDeployConcept`: A Python enum mirroring `DeployConcept` (Command, Skill, Subagent).

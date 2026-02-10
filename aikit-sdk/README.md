@@ -32,7 +32,7 @@ This crate holds the full agent catalog with per-agent capabilities (commands, s
 | codebuddy    | CodeBuddy CLI      | ✓        | ✗      | ✗         |
 | qoder        | Qoder CLI          | ✓        | ✗      | ✓         |
 | amp          | Amp                | ✓        | ✗      | ✗         |
-| shai         | SHAI               | ✓        | ✗      ✗         |
+| shai         | SHAI               | ✓        | ✗      | ✗         |
 | q            | Amazon Q Developer | ✓        | ✗      | ✗         |
 | bob          | IBM Bob            | ✓        | ✗      | ✗         |
 
@@ -84,6 +84,35 @@ let path = deploy_skill(
 // Deploy a subagent
 let path = deploy_subagent("claude", project_root, "my-agent", "# Agent content")?;
 ```
+
+### Running agents
+
+Only some agents have a runnable CLI; use `runnable_agents()` or `is_runnable(key)` before calling `run_agent`.
+
+Runnable agent keys: `codex`, `claude`, `gemini`, `opencode`, `agent`.
+
+```rust
+use aikit_sdk::{run_agent, RunOptions, RunResult};
+
+let options = RunOptions::default()
+    .with_model("claude-3-opus")
+    .with_yolo(true)
+    .with_stream(false);
+
+let result: Result<RunResult, _> = run_agent("claude", "Refactor this function", options);
+match result {
+    Ok(r) => {
+        println!("stdout: {}", String::from_utf8_lossy(&r.stdout));
+        println!("stderr: {}", String::from_utf8_lossy(&r.stderr));
+        std::process::exit(r.exit_code().unwrap_or(1));
+    }
+    Err(e) => eprintln!("{}", e),
+}
+```
+
+- `RunOptions`: optional `model`, `yolo`, `stream`.
+- `RunResult`: `status`, `stdout`, `stderr`; `.exit_code()`, `.success()`.
+- `RunError`: `AgentNotRunnable(key)`, `SpawnFailed`, `StdinFailed`, `OutputFailed`.
 
 ## Error Types
 
