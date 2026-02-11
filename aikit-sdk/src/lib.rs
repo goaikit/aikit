@@ -295,12 +295,16 @@ pub mod runner;
 
 pub use runner::{is_runnable, run_agent, runnable_agents, RunError, RunOptions, RunResult};
 
+pub mod fetch;
 pub mod install;
+pub mod manifest;
 
+pub use fetch::TemplateSource;
 pub use install::{
-    copy_artifacts, install_template_to_path, installed_package_root, InstallError,
-    InstallTemplateOptions,
+    copy_artifacts, install_template_from_source, install_template_to_path, installed_package_root,
+    InstallError, InstallTemplateFromSourceOptions, InstallTemplateOptions,
 };
+pub use manifest::{PackageInfo, TemplateManifest};
 
 /// Agent catalog entry containing all supported agents and their capabilities.
 struct AgentEntry<'a> {
