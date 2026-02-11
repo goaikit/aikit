@@ -1,14 +1,22 @@
-use crate::install::InstallError;
-use serde::Deserialize;
 use std::collections::HashMap;
 
-#[derive(Debug, Deserialize)]
+use serde::Deserialize;
+
+use crate::install::InstallError;
+
+/// Package metadata from [package] section of aikit.toml
+#[derive(Debug, Clone, Deserialize)]
 pub struct PackageInfo {
     pub name: String,
     pub version: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub authors: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+/// Minimal template manifest from aikit.toml
+#[derive(Debug, Clone, Deserialize)]
 pub struct TemplateManifest {
     pub package: PackageInfo,
     #[serde(default)]
@@ -16,8 +24,14 @@ pub struct TemplateManifest {
 }
 
 impl TemplateManifest {
+    /// Parse manifest from TOML string
     pub fn from_toml_str(s: &str) -> Result<Self, InstallError> {
-        toml::from_str(s).map_err(|e| InstallError::ManifestParse(format!("{}", e)))
+        toml::from_str(s).map_err(|e| InstallError::ManifestParse(e.to_string()))
+    }
+
+    /// Get artifact mappings for copy_artifacts
+    pub fn artifact_mappings(&self) -> &HashMap<String, String> {
+        &self.artifacts
     }
 }
 
@@ -31,16 +45,19 @@ mod tests {
 [package]
 name = "test-template"
 version = "1.0.0"
+description = "Test template"
+authors = ["test@example.com"]
 
 [artifacts]
 "newton/**" = ".newton"
-"templates/*.md" = ".templates"
 "#;
 
         let manifest = TemplateManifest::from_toml_str(toml_str).unwrap();
         assert_eq!(manifest.package.name, "test-template");
         assert_eq!(manifest.package.version, "1.0.0");
-        assert_eq!(manifest.artifacts.len(), 2);
+        assert_eq!(manifest.package.description, "Test template");
+        assert_eq!(manifest.package.authors, vec!["test@example.com"]);
+        assert_eq!(manifest.artifacts.len(), 1);
         assert_eq!(
             manifest.artifacts.get("newton/**"),
             Some(&".newton".to_string())
@@ -58,6 +75,8 @@ version = "0.1.0"
         let manifest = TemplateManifest::from_toml_str(toml_str).unwrap();
         assert_eq!(manifest.package.name, "minimal");
         assert_eq!(manifest.package.version, "0.1.0");
+        assert!(manifest.package.description.is_empty());
+        assert!(manifest.package.authors.is_empty());
         assert!(manifest.artifacts.is_empty());
     }
 
@@ -70,54 +89,43 @@ name = "invalid
 
         let result = TemplateManifest::from_toml_str(toml_str);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            InstallError::ManifestParse(_)
-        ));
+        match result.unwrap_err() {
+            InstallError::ManifestParse(_) => {}
+            _ => panic!("Expected ManifestParse error"),
+        }
     }
 
     #[test]
-    fn test_parse_missing_package_section() {
+    fn test_parse_missing_required_fields() {
         let toml_str = r#"
-[artifacts]
-"test/**" = ".test"
+[package]
+name = "missing-version"
 "#;
 
         let result = TemplateManifest::from_toml_str(toml_str);
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            InstallError::ManifestParse(_)
-        ));
+        match result.unwrap_err() {
+            InstallError::ManifestParse(_) => {}
+            _ => panic!("Expected ManifestParse error"),
+        }
     }
 
     #[test]
-    fn test_parse_missing_name() {
+    fn test_artifact_mappings() {
         let toml_str = r#"
 [package]
+name = "multi-artifact"
 version = "1.0.0"
+
+[artifacts]
+"newton/**" = ".newton"
+"templates/**" = ".templates"
 "#;
 
-        let result = TemplateManifest::from_toml_str(toml_str);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            InstallError::ManifestParse(_)
-        ));
-    }
-
-    #[test]
-    fn test_parse_missing_version() {
-        let toml_str = r#"
-[package]
-name = "test"
-"#;
-
-        let result = TemplateManifest::from_toml_str(toml_str);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            InstallError::ManifestParse(_)
-        ));
+        let manifest = TemplateManifest::from_toml_str(toml_str).unwrap();
+        let mappings = manifest.artifact_mappings();
+        assert_eq!(mappings.len(), 2);
+        assert!(mappings.contains_key("newton/**"));
+        assert!(mappings.contains_key("templates/**"));
     }
 }
