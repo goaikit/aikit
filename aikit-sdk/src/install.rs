@@ -1,3 +1,4 @@
+use crate::fetch::TemplateSource;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -10,6 +11,12 @@ pub enum InstallError {
     Io(io::Error),
     /// Package not found (base directory does not exist)
     NotFound,
+    /// Failed to fetch from source (HTTP/download failure)
+    FetchFailed(String),
+    /// Invalid or unsupported source
+    InvalidSource(String),
+    /// Failed to parse manifest file
+    ManifestParse(String),
 }
 
 impl std::fmt::Display for InstallError {
@@ -17,6 +24,9 @@ impl std::fmt::Display for InstallError {
         match self {
             InstallError::Io(err) => write!(f, "Filesystem error: {}", err),
             InstallError::NotFound => write!(f, "Package not found"),
+            InstallError::FetchFailed(msg) => write!(f, "Failed to fetch: {}", msg),
+            InstallError::InvalidSource(msg) => write!(f, "Invalid source: {}", msg),
+            InstallError::ManifestParse(msg) => write!(f, "Failed to parse manifest: {}", msg),
         }
     }
 }
@@ -26,6 +36,9 @@ impl std::error::Error for InstallError {
         match self {
             InstallError::Io(err) => Some(err),
             InstallError::NotFound => None,
+            InstallError::FetchFailed(_) => None,
+            InstallError::InvalidSource(_) => None,
+            InstallError::ManifestParse(_) => None,
         }
     }
 }
@@ -33,6 +46,12 @@ impl std::error::Error for InstallError {
 impl From<io::Error> for InstallError {
     fn from(err: io::Error) -> Self {
         InstallError::Io(err)
+    }
+}
+
+impl From<zip::result::ZipError> for InstallError {
+    fn from(err: zip::result::ZipError) -> Self {
+        InstallError::Io(io::Error::other(err.to_string()))
     }
 }
 
@@ -187,6 +206,19 @@ pub struct InstallTemplateOptions {
     pub agent_key: Option<String>,
 }
 
+/// Options for installing a template from a source (GitHub, URL, or local path).
+pub struct InstallTemplateFromSourceOptions {
+    /// Source of the template package
+    pub source: TemplateSource,
+    /// Project root directory where artifacts will be installed
+    pub project_root: PathBuf,
+    /// Optional packages directory to cache fetched packages
+    ///
+    /// - If Some(path): fetch into `packages_dir/{name}-{version}` and keep after install
+    /// - If None: use a temporary directory for fetch, delete after install
+    pub packages_dir: Option<PathBuf>,
+}
+
 /// Install a template to a project path.
 ///
 /// This is a convenience function that combines resolving the package root
@@ -212,9 +244,72 @@ pub fn install_template_to_path(options: InstallTemplateOptions) -> Result<(), I
     )
 }
 
+/// Install a template from a source (GitHub, URL, or local path).
+///
+/// This function fetches the template package from the specified source,
+/// resolves the package manifest, and copies artifacts to the project root.
+///
+/// # Arguments
+///
+/// * `options` - Installation options including source and project root
+///
+/// # Returns
+///
+/// Ok(()) if the template was installed successfully.
+///
+/// # Example
+///
+/// ```no_run
+/// use aikit_sdk::{TemplateSource, install_template_from_source, InstallTemplateFromSourceOptions};
+/// use std::path::PathBuf;
+///
+/// let options = InstallTemplateFromSourceOptions {
+///     source: TemplateSource::parse("owner/repo").unwrap(),
+///     project_root: PathBuf::from("."),
+///     packages_dir: Some(PathBuf::from(".aikit/packages")),
+/// };
+/// install_template_from_source(options).unwrap();
+/// ```
+pub fn install_template_from_source(
+    options: InstallTemplateFromSourceOptions,
+) -> Result<(), InstallError> {
+    use crate::fetch;
+
+    let fetch_dir = if let Some(ref packages_dir) = options.packages_dir {
+        packages_dir.to_path_buf()
+    } else {
+        #[cfg(test)]
+        {
+            use tempfile::TempDir;
+            TempDir::new()
+                .map_err(|e| InstallError::Io(io::Error::new(io::ErrorKind::Other, e)))?
+                .into_path()
+        }
+        #[cfg(not(test))]
+        {
+            let temp_path = std::env::temp_dir().join(format!("aikit-sdk-{}", std::process::id()));
+            fs::create_dir_all(&temp_path)?;
+            temp_path
+        }
+    };
+
+    let (manifest, package_root) = fetch::fetch_package_to_dir(&options.source, &fetch_dir)?;
+
+    let artifact_mappings = &manifest.artifacts;
+
+    copy_artifacts(&package_root, &options.project_root, artifact_mappings)?;
+
+    if options.packages_dir.is_none() {
+        let _ = fs::remove_dir_all(&fetch_dir);
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fetch::TemplateSource;
     use std::fs;
     use tempfile::TempDir;
 
@@ -412,5 +507,108 @@ mod tests {
         assert!(project_root.join(".templates/file.txt").exists());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_install_template_from_source_path() -> Result<(), InstallError> {
+        let temp = TempDir::new().map_err(InstallError::Io)?;
+        let work = temp.path();
+
+        // Create source package directory
+        let source_dir = work.join("source");
+        fs::create_dir_all(source_dir.join("newton/scripts")).map_err(InstallError::Io)?;
+
+        // Create aikit.toml and test files
+        fs::write(
+            source_dir.join("aikit.toml"),
+            "[package]\nname = \"newton-template\"\nversion = \"1.0.0\"\n\n[artifacts]\n\"newton/**\" = \".newton\"",
+        )
+        .map_err(InstallError::Io)?;
+        fs::write(source_dir.join("newton/README.md"), "# Newton Template")
+            .map_err(InstallError::Io)?;
+        fs::write(
+            source_dir.join("newton/scripts/advisor.sh"),
+            "#!/bin/sh\necho advisor",
+        )
+        .map_err(InstallError::Io)?;
+
+        // Create project root
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root).map_err(InstallError::Io)?;
+
+        // Install template from source
+        let options = InstallTemplateFromSourceOptions {
+            source: TemplateSource::Path(source_dir.clone()),
+            project_root: project_root.clone(),
+            packages_dir: None,
+        };
+        install_template_from_source(options)?;
+
+        // Verify files were copied
+        assert!(project_root.join(".newton/README.md").exists());
+        assert!(project_root.join(".newton/scripts/advisor.sh").exists());
+
+        // Verify content
+        let readme =
+            fs::read_to_string(project_root.join(".newton/README.md")).map_err(InstallError::Io)?;
+        assert!(readme.contains("Newton Template"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_install_template_from_source_with_packages_dir() -> Result<(), InstallError> {
+        let temp = TempDir::new().map_err(InstallError::Io)?;
+        let work = temp.path();
+
+        // Create source package directory
+        let source_dir = work.join("source");
+        fs::create_dir_all(source_dir.join("templates")).map_err(InstallError::Io)?;
+
+        fs::write(
+            source_dir.join("aikit.toml"),
+            "[package]\nname = \"test-pkg\"\nversion = \"1.0.0\"\n\n[artifacts]\n\"templates/**\" = \".templates\"",
+        )
+        .map_err(InstallError::Io)?;
+        fs::write(source_dir.join("templates/file.txt"), "content").map_err(InstallError::Io)?;
+
+        // Create project root
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root).map_err(InstallError::Io)?;
+
+        // Create packages directory
+        let packages_dir = work.join("packages");
+
+        // Install template from source with packages_dir
+        let options = InstallTemplateFromSourceOptions {
+            source: TemplateSource::Path(source_dir.clone()),
+            project_root: project_root.clone(),
+            packages_dir: Some(packages_dir.clone()),
+        };
+        install_template_from_source(options)?;
+
+        // Verify files were copied
+        assert!(project_root.join(".templates/file.txt").exists());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_install_template_from_source_invalid_source() {
+        let temp = TempDir::new().unwrap();
+        let work = temp.path();
+
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root).unwrap();
+
+        // Try to install from non-existent source
+        let options = InstallTemplateFromSourceOptions {
+            source: TemplateSource::parse("nonexistent/repo").unwrap(),
+            project_root,
+            packages_dir: None,
+        };
+
+        let result = install_template_from_source(options);
+        assert!(result.is_err());
     }
 }
