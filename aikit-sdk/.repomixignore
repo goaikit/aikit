@@ -2,12 +2,6 @@
 # Example:
 # *.log
 # tmp/
-spec-kit
-specs
-.specify
-.cursor
 *.md
-.github
-webdocs
-tests
-aikit-sdk
+.gitignore
+.repomixignore
