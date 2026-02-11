@@ -19,37 +19,33 @@ pub fn build_cli() -> Command {
                 .subcommand(
                     Command::new("init")
                         .about("Initialize a new package")
-                        .arg(
-                            clap::Arg::new("name")
-                                .help("Package name")
-                                .required(true)
-                        )
+                        .arg(clap::Arg::new("name").help("Package name").required(true))
                         .arg(
                             clap::Arg::new("description")
                                 .long("description")
                                 .short('d')
-                                .help("Package description")
+                                .help("Package description"),
                         )
                         .arg(
                             clap::Arg::new("version")
                                 .long("version")
                                 .short('v')
                                 .default_value("0.1.0")
-                                .help("Package version")
+                                .help("Package version"),
                         )
                         .arg(
                             clap::Arg::new("author")
                                 .long("author")
                                 .short('a')
-                                .help("Author name")
+                                .help("Author name"),
                         )
                         .arg(
                             clap::Arg::new("yes")
                                 .long("yes")
                                 .short('y')
                                 .help("Skip interactive prompts")
-                                .action(clap::ArgAction::SetTrue)
-                        )
+                                .action(clap::ArgAction::SetTrue),
+                        ),
                 )
                 .subcommand(
                     Command::new("build")
@@ -59,19 +55,19 @@ pub fn build_cli() -> Command {
                                 .long("output")
                                 .short('o')
                                 .default_value("dist")
-                                .help("Output directory")
+                                .help("Output directory"),
                         )
                         .arg(
                             clap::Arg::new("agents")
                                 .long("agents")
-                                .help("Target agents (comma-separated)")
+                                .help("Target agents (comma-separated)"),
                         )
                         .arg(
                             clap::Arg::new("include-sources")
                                 .long("include-sources")
                                 .help("Include source files")
-                                .action(clap::ArgAction::SetTrue)
-                        )
+                                .action(clap::ArgAction::SetTrue),
+                        ),
                 )
                 .subcommand(
                     Command::new("publish")
@@ -79,21 +75,21 @@ pub fn build_cli() -> Command {
                         .arg(
                             clap::Arg::new("registry")
                                 .long("registry")
-                                .help("Registry URL")
+                                .help("Registry URL"),
                         )
                         .arg(
                             clap::Arg::new("repo")
                                 .long("repo")
                                 .short('r')
-                                .help("Repository URL")
+                                .help("Repository URL"),
                         )
                         .arg(
                             clap::Arg::new("release")
                                 .long("release")
                                 .help("Create GitHub release")
-                                .action(clap::ArgAction::SetTrue)
-                        )
-                )
+                                .action(clap::ArgAction::SetTrue),
+                        ),
+                ),
         )
         .subcommand(
             Command::new("install")
@@ -101,28 +97,28 @@ pub fn build_cli() -> Command {
                 .arg(
                     clap::Arg::new("source")
                         .help("Package source (GitHub URL or package name)")
-                        .required(true)
+                        .required(true),
                 )
                 .arg(
                     clap::Arg::new("version")
                         .long("version")
                         .short('v')
-                        .help("Specific version to install")
+                        .help("Specific version to install"),
                 )
                 .arg(
                     clap::Arg::new("force")
                         .long("force")
                         .short('f')
                         .help("Force reinstall if already installed")
-                        .action(clap::ArgAction::SetTrue)
+                        .action(clap::ArgAction::SetTrue),
                 )
                 .arg(
                     clap::Arg::new("yes")
                         .long("yes")
                         .short('y')
                         .help("Skip .gitignore modification prompt")
-                        .action(clap::ArgAction::SetTrue)
-                )
+                        .action(clap::ArgAction::SetTrue),
+                ),
         )
         .subcommand(
             Command::new("update")
@@ -130,14 +126,14 @@ pub fn build_cli() -> Command {
                 .arg(
                     clap::Arg::new("package")
                         .help("Package name to update")
-                        .required(true)
+                        .required(true),
                 )
                 .arg(
                     clap::Arg::new("breaking")
                         .long("breaking")
                         .help("Allow breaking changes")
-                        .action(clap::ArgAction::SetTrue)
-                )
+                        .action(clap::ArgAction::SetTrue),
+                ),
         )
         .subcommand(
             Command::new("remove")
@@ -145,15 +141,15 @@ pub fn build_cli() -> Command {
                 .arg(
                     clap::Arg::new("package")
                         .help("Package name to remove")
-                        .required(true)
+                        .required(true),
                 )
                 .arg(
                     clap::Arg::new("force")
                         .long("force")
                         .short('f')
                         .help("Force removal without confirmation")
-                        .action(clap::ArgAction::SetTrue)
-                )
+                        .action(clap::ArgAction::SetTrue),
+                ),
         )
         .subcommand(
             Command::new("list")
@@ -162,15 +158,15 @@ pub fn build_cli() -> Command {
                     clap::Arg::new("author")
                         .long("author")
                         .short('a')
-                        .help("Filter by author")
+                        .help("Filter by author"),
                 )
                 .arg(
                     clap::Arg::new("detailed")
                         .long("detailed")
                         .short('d')
                         .help("Show detailed information")
-                        .action(clap::ArgAction::SetTrue)
-                )
+                        .action(clap::ArgAction::SetTrue),
+                ),
         )
         .subcommand(
             Command::new("init")
@@ -180,20 +176,17 @@ pub fn build_cli() -> Command {
                         .long("ai")
                         .short('a')
                         .help("AI agent to initialize for")
-                        .value_parser(["claude", "cursor", "copilot", "gemini", "continue"])
+                        .value_parser(["claude", "cursor", "copilot", "gemini", "continue"]),
                 )
                 .arg(
                     clap::Arg::new("force")
                         .long("force")
                         .short('f')
                         .help("Overwrite existing configuration")
-                        .action(clap::ArgAction::SetTrue)
-                )
+                        .action(clap::ArgAction::SetTrue),
+                ),
         )
-        .subcommand(
-            Command::new("check")
-                .about("Check AIKIT installation and configuration")
-        )
+        .subcommand(Command::new("check").about("Check AIKIT installation and configuration"))
 }
 
 /// Parse CLI arguments and return matches
@@ -206,8 +199,9 @@ pub fn get_command_help(command: &str) -> String {
     match build_cli().find_subcommand(command) {
         Some(cmd) => {
             let mut help = Vec::new();
-            cmd.write_help(&mut help).unwrap();
-            String::from_utf8(help).unwrap()
+            cmd.write_help(&mut help)
+                .expect("Failed to write help text");
+            String::from_utf8(help).expect("Help text is not valid UTF-8")
         }
         None => format!("Unknown command: {}", command),
     }

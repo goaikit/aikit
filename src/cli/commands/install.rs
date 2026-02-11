@@ -572,12 +572,29 @@ fn install_package_from_archive(
             )));
         }
 
-        // Normalize the entry name to prevent path traversal
+        // Normalize the entry name to prevent path traversal (resolves . components)
         let normalized = normalize_path(std::path::Path::new(entry_name));
+
+        // Validate that the normalized path is relative (prevents absolute paths like /etc/passwd)
+        if !normalized.is_relative() {
+            return Err(AikError::Generic(format!(
+                "Absolute path detected in zip entry: {}",
+                entry_name
+            )));
+        }
+
         let outpath = install_path.join(&normalized);
 
         // Validate that the output path is under install_path
-        let outpath_canonical = outpath.canonicalize().unwrap_or_else(|_| outpath.clone());
+        // First try to canonicalize, if the path doesn't exist yet we compute the canonical form
+        // of the install_path and join it with the normalized relative path
+        let outpath_canonical = if outpath.exists() {
+            outpath.canonicalize().map_err(|e| {
+                AikError::Generic(format!("Failed to canonicalize output path: {}", e))
+            })?
+        } else {
+            install_canonical.join(&normalized)
+        };
 
         if !outpath_canonical.starts_with(&install_canonical) {
             return Err(AikError::Generic(format!(
@@ -1266,7 +1283,7 @@ mod tests {
         zip.finish().unwrap();
 
         // Create a mock package
-        let mut package = crate::models::package::Package::new(
+        let package = crate::models::package::Package::new(
             "test-pkg".to_string(),
             "1.0.0".to_string(),
             "Test package".to_string(),
@@ -1320,6 +1337,75 @@ mod tests {
             files_outside.is_empty(),
             "Found unexpected files outside install directory: {:?}",
             files_outside
+        );
+    }
+
+    /// Test that install_package_from_archive rejects absolute path attempts
+    #[test]
+    fn test_install_package_from_archive_absolute_path() {
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::FileOptions;
+        use zip::ZipWriter;
+
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("package.zip");
+
+        // Create a malicious zip with absolute path
+        let file = File::create(&archive_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = FileOptions::default();
+
+        // Add an absolute path file first (should be blocked)
+        zip.start_file("/etc/passwd", options).unwrap();
+        zip.write_all(b"malicious content").unwrap();
+
+        // Add a benign file (should not be created due to error above)
+        zip.start_file("safe.txt", options).unwrap();
+        zip.write_all(b"safe content").unwrap();
+
+        zip.finish().unwrap();
+
+        // Create a mock package
+        let package = crate::models::package::Package::new(
+            "test-pkg".to_string(),
+            "1.0.0".to_string(),
+            "Test package".to_string(),
+        );
+
+        // Create a mock AikDirectory
+        let aik_dir = crate::core::filesystem::AikDirectory::new(temp_dir.path().join(".aikit"));
+
+        // Create the install directory
+        let install_path = aik_dir.packages_path().join(format!(
+            "{}-{}",
+            package.package.name, package.package.version
+        ));
+        std::fs::create_dir_all(&install_path).unwrap();
+
+        // Create InstallArgs
+        let args = InstallArgs {
+            source: "test".to_string(),
+            install_version: None,
+            token: None,
+            force: false,
+            yes: false,
+            ai: None,
+        };
+
+        // Try to install from the malicious archive
+        let result = install_package_from_archive(&package, &archive_path, &aik_dir, &args);
+
+        // Should fail due to absolute path
+        assert!(
+            result.is_err(),
+            "Expected installation to fail, but it succeeded"
+        );
+
+        // Verify safe.txt was NOT created (since extraction stopped at the absolute path error)
+        assert!(
+            !install_path.join("safe.txt").exists(),
+            "No files should have been created due to absolute path error"
         );
     }
 

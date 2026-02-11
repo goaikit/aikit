@@ -362,8 +362,9 @@ fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
             InstallError::FetchFailed(format!("Failed to access zip entry {}: {}", i, e))
         })?;
 
-        // Check for path traversal in the entry name before any processing
         let entry_name = file.name();
+
+        // Check for path traversal in the entry name before any processing
         if entry_name.contains("..") {
             return Err(InstallError::FetchFailed(format!(
                 "Path traversal detected in zip entry: {}",
@@ -371,25 +372,32 @@ fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
             )));
         }
 
-        // Normalize the entry name to prevent path traversal
+        // Normalize the entry name to prevent path traversal (resolves . components)
         let normalized = normalize_path(Path::new(entry_name));
-        let outpath = dest_dir.join(&normalized);
 
-        // Validate that the normalized path is still a relative path
+        // Validate that the normalized path is relative (prevents absolute paths like /etc/passwd)
         if !normalized.is_relative() {
             return Err(InstallError::FetchFailed(format!(
                 "Absolute path detected in zip entry: {}",
-                file.name()
+                entry_name
             )));
         }
 
+        let outpath = dest_dir.join(&normalized);
+
         // Validate that the output path is under dest_dir
-        let outpath_canonical = outpath.canonicalize().unwrap_or_else(|_| outpath.clone());
+        // First try to canonicalize, if the path doesn't exist yet we compute the canonical form
+        // of the dest_dir and join it with the normalized relative path
+        let outpath_canonical = if outpath.exists() {
+            outpath.canonicalize().map_err(InstallError::Io)?
+        } else {
+            dest_canonical.join(&normalized)
+        };
 
         if !outpath_canonical.starts_with(&dest_canonical) {
             return Err(InstallError::FetchFailed(format!(
                 "Path traversal detected in zip entry: {}",
-                file.name()
+                entry_name
             )));
         }
 
@@ -656,5 +664,53 @@ mod tests {
 
         // Verify that safe.txt was created in dest_dir
         assert!(dest_dir.join("safe.txt").exists());
+    }
+
+    #[test]
+    fn test_extract_zip_absolute_path() {
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let temp_dir = TempDir::new().unwrap();
+        let zip_path = temp_dir.path().join("test.zip");
+
+        // Create a malicious zip with absolute path
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+
+        // Add an absolute path file first (should be blocked)
+        zip.start_file("/etc/passwd", options).unwrap();
+        zip.write_all(b"malicious content").unwrap();
+
+        // Add a benign file (should not be created due to error above)
+        zip.start_file("safe.txt", options).unwrap();
+        zip.write_all(b"safe content").unwrap();
+
+        zip.finish().unwrap();
+
+        // Read zip bytes
+        let zip_bytes = fs::read(&zip_path).unwrap();
+
+        // Try to extract
+        let dest_dir = temp_dir.path().join("dest");
+        let result = extract_zip(&zip_bytes, &dest_dir);
+
+        // Should fail due to absolute path
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            InstallError::FetchFailed(msg) => {
+                assert!(msg.contains("Absolute path"));
+            }
+            _ => panic!("Expected FetchFailed error with Absolute path message"),
+        }
+
+        // Verify that safe.txt was NOT created (since extraction stopped at the absolute path error)
+        assert!(
+            !dest_dir.join("safe.txt").exists(),
+            "No files should have been created due to absolute path error"
+        );
     }
 }
