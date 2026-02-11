@@ -283,7 +283,7 @@ pub fn install_template_from_source(
             use tempfile::TempDir;
             TempDir::new()
                 .map_err(|e| InstallError::Io(io::Error::new(io::ErrorKind::Other, e)))?
-                .into_path()
+                .keep()
         }
         #[cfg(not(test))]
         {
