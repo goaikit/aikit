@@ -10,11 +10,24 @@ echo "==============================="
 
 # Check if we're in the right directory
 if [ ! -f "Cargo.toml" ]; then
-    echo "❌ Error: Run this script from the project root (aikit directory)"
+    echo "Error: Run this script from the project root (aikit directory)"
     exit 1
 fi
 
-echo "✅ Repository structure verified"
+# Block Rust .rcgu.o artifacts outside target/
+staged_rcgu=$(git diff --cached --name-only 2>/dev/null | grep '\.rcgu\.o$' || true)
+if [ -n "$staged_rcgu" ]; then
+  bad=""
+  for f in $staged_rcgu; do
+    case "$f" in target/*) ;; *) bad="$bad $f";; esac
+  done
+  if [ -n "$bad" ]; then
+    echo "Error: Rust .rcgu.o artifacts must not be committed outside target/:$bad"
+    exit 1
+  fi
+fi
+
+echo "Repository structure verified"
 
 # Check code formatting
 echo ""
