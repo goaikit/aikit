@@ -148,6 +148,14 @@ TEST_OUTPUT=$(cargo nextest run --all-features --retries "$RETRIES" --fail-fast 
 TEST_EXIT=$?
 echo "$TEST_OUTPUT" > "$TEST_OUTPUT_DIR/test-output.txt"
 
+echo -e "${YELLOW}Running cargo test --lib --release (CI multiplatform job)...${NC}" >&2
+LIB_RELEASE_OUTPUT=$(cargo test --lib --release -- --test-threads=1 2>&1)
+LIB_RELEASE_EXIT=$?
+echo "$LIB_RELEASE_OUTPUT" > "$TEST_OUTPUT_DIR/test-lib-release-output.txt"
+if [ "$LIB_RELEASE_EXIT" -ne 0 ]; then
+    echo -e "${RED}Lib release tests failed (same command as CI test-multiplatform on Windows/macOS).${NC}" >&2
+fi
+
 set -e
 
 # Overall pass only if build, fmt, clippy, and tests passed
@@ -156,6 +164,7 @@ EXIT_CODE=0
 [ "$FMT_EXIT" -ne 0 ] && EXIT_CODE=1
 [ "$CLIPPY_EXIT" -ne 0 ] && EXIT_CODE=1
 [ "$TEST_EXIT" -ne 0 ] && EXIT_CODE=1
+[ "$LIB_RELEASE_EXIT" -ne 0 ] && EXIT_CODE=1
 
 if [ "$EXIT_CODE" -eq 0 ]; then
     echo -e "${GREEN}All checks and tests passed.${NC}" >&2
@@ -164,6 +173,7 @@ else
     [ "$FMT_EXIT" -ne 0 ] && echo -e "${RED}Format check failed.${NC}" >&2
     [ "$CLIPPY_EXIT" -ne 0 ] && echo -e "${RED}Clippy failed.${NC}" >&2
     [ "$TEST_EXIT" -ne 0 ] && echo -e "${RED}Some tests failed.${NC}" >&2
+    [ "$LIB_RELEASE_EXIT" -ne 0 ] && echo -e "${RED}Lib release tests failed.${NC}" >&2
 fi
 echo "" >&2
 
@@ -251,7 +261,7 @@ if [ "$COMPILATION_FAILED" = true ] || [ "$BUILD_EXIT" -ne 0 ]; then
   "timestamp": "$TIMESTAMP",
   "command": "$0",
   "exit_code": $EXIT_CODE,
-  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS" },
+  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo ok || echo failed)" },
   "test_statistics": {
     "total": 0,
     "passed": 0,
@@ -269,7 +279,7 @@ else
   "timestamp": "$TIMESTAMP",
   "command": "$0",
   "exit_code": $EXIT_CODE,
-  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS" },
+  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo ok || echo failed)" },
   "test_statistics": {
     "total": $TOTAL,
     "passed": ${PASSED:-0},
@@ -294,9 +304,9 @@ echo -e "${YELLOW}Generating report: $OUTPUT_FILE${NC}" >&2
 
     echo "## Overall Status"
     if [ "$EXIT_CODE" -eq 0 ]; then
-        echo "✅ **PASSED** - fmt, clippy, and tests all passed"
+        echo "✅ **PASSED** - build, fmt, clippy, nextest, and lib-release all passed"
     else
-        echo "❌ **FAILED** - One or more of fmt, clippy, or tests failed"
+        echo "❌ **FAILED** - One or more checks failed"
     fi
     echo ""
 
@@ -305,6 +315,7 @@ echo -e "${YELLOW}Generating report: $OUTPUT_FILE${NC}" >&2
     echo "- **fmt (cargo fmt --check):** $([ "$FMT_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
     echo "- **clippy (cargo clippy --workspace --all-targets --all-features -- -D warnings):** $([ "$CLIPPY_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
     echo "- **tests (cargo nextest run):** $([ "$TEST_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
+    echo "- **lib release (cargo test --lib --release, CI multiplatform):** $([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
     echo ""
     if [ "$BUILD_EXIT" -ne 0 ] && [ -n "$BUILD_OUTPUT" ]; then
         echo "### Build failure output"
@@ -327,6 +338,14 @@ echo -e "${YELLOW}Generating report: $OUTPUT_FILE${NC}" >&2
         echo ""
         echo "\`\`\`"
         echo "$CLIPPY_OUTPUT"
+        echo "\`\`\`"
+        echo ""
+    fi
+    if [ "$LIB_RELEASE_EXIT" -ne 0 ] && [ -n "$LIB_RELEASE_OUTPUT" ]; then
+        echo "### lib release (CI multiplatform) failure output"
+        echo ""
+        echo "\`\`\`"
+        echo "$LIB_RELEASE_OUTPUT"
         echo "\`\`\`"
         echo ""
     fi
@@ -423,9 +442,10 @@ echo -e "${GREEN}Report generated successfully!${NC}" >&2
 echo "" >&2
 
 echo "📊 Summary:" >&2
-echo "  build:  $([ "$BUILD_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
-echo "  fmt:    $([ "$FMT_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
-echo "  clippy: $([ "$CLIPPY_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
+echo "  build:       $([ "$BUILD_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
+echo "  fmt:         $([ "$FMT_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
+echo "  clippy:      $([ "$CLIPPY_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
+echo "  lib-release: $([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 if [ "$COMPILATION_FAILED" = true ]; then
     echo "  tests:  COMPILATION FAILED - no tests executed" >&2
     echo -e "${RED}❌ Check $OUTPUT_FILE for details.${NC}" >&2

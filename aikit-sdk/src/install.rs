@@ -144,13 +144,19 @@ pub fn copy_artifacts(
             let relative = path
                 .strip_prefix(package_root)
                 .map_err(|_| InstallError::Io(io::Error::other("Failed to strip prefix")))?;
-            let path_str = relative.to_string_lossy();
+            // Normalize to forward slashes so glob patterns (e.g. "newton/**") match on Windows
+            let path_str: String = relative
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
             if !glob_pattern.matches(&path_str) {
                 continue;
             }
-            let subpath = if prefix.is_empty() {
+            let prefix_path = Path::new(prefix.trim_end_matches('/'));
+            let subpath = if prefix.is_empty() || prefix.trim_end_matches('/').is_empty() {
                 relative.to_path_buf()
-            } else if let Ok(s) = relative.strip_prefix(&prefix) {
+            } else if let Ok(s) = relative.strip_prefix(prefix_path) {
                 PathBuf::from(s)
             } else {
                 relative.to_path_buf()
