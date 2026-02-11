@@ -315,12 +315,43 @@ fn fetch_from_url(url: &str, dest_dir: &Path) -> Result<(TemplateManifest, PathB
     Ok((manifest, package_root))
 }
 
+/// Normalize a path by resolving `..` and `.` components in memory
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        use std::path::Component;
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                result.push(component);
+            }
+            Component::CurDir => {
+                // Skip `.` - it doesn't change anything
+            }
+            Component::ParentDir => {
+                // Pop the last normal component if possible
+                if !result.pop() {
+                    // Can't pop past root - just skip
+                }
+            }
+            Component::Normal(c) => {
+                result.push(c);
+            }
+        }
+    }
+    result
+}
+
 /// Extract zip bytes to destination directory
 fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
     use std::io::Cursor;
 
     // Create dest_dir if it doesn't exist
     fs::create_dir_all(dest_dir)?;
+
+    // Canonicalize dest_dir once for comparison
+    let dest_canonical = dest_dir.canonicalize().map_err(|e| {
+        InstallError::FetchFailed(format!("Failed to canonicalize dest_dir: {}", e))
+    })?;
 
     let cursor = Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor)
@@ -330,7 +361,37 @@ fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
         let mut file = archive.by_index(i).map_err(|e| {
             InstallError::FetchFailed(format!("Failed to access zip entry {}: {}", i, e))
         })?;
-        let outpath = dest_dir.join(file.mangled_name());
+
+        // Check for path traversal in the entry name before any processing
+        let entry_name = file.name();
+        if entry_name.contains("..") {
+            return Err(InstallError::FetchFailed(format!(
+                "Path traversal detected in zip entry: {}",
+                entry_name
+            )));
+        }
+
+        // Normalize the entry name to prevent path traversal
+        let normalized = normalize_path(Path::new(entry_name));
+        let outpath = dest_dir.join(&normalized);
+
+        // Validate that the normalized path is still a relative path
+        if !normalized.is_relative() {
+            return Err(InstallError::FetchFailed(format!(
+                "Absolute path detected in zip entry: {}",
+                file.name()
+            )));
+        }
+
+        // Validate that the output path is under dest_dir
+        let outpath_canonical = outpath.canonicalize().unwrap_or_else(|_| outpath.clone());
+
+        if !outpath_canonical.starts_with(&dest_canonical) {
+            return Err(InstallError::FetchFailed(format!(
+                "Path traversal detected in zip entry: {}",
+                file.name()
+            )));
+        }
 
         if file.name().ends_with('/') {
             fs::create_dir_all(&outpath)?;
@@ -546,5 +607,54 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let result = find_package_root(temp_dir.path());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_zip_path_traversal() {
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let temp_dir = TempDir::new().unwrap();
+        let zip_path = temp_dir.path().join("test.zip");
+
+        // Create a malicious zip with path traversal
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+
+        // Add a benign file
+        zip.start_file("safe.txt", options).unwrap();
+        zip.write_all(b"safe content").unwrap();
+
+        // Add a path traversal file (should be blocked)
+        zip.start_file("../../../escape.txt", options).unwrap();
+        zip.write_all(b"malicious content").unwrap();
+
+        zip.finish().unwrap();
+
+        // Read zip bytes
+        let zip_bytes = fs::read(&zip_path).unwrap();
+
+        // Try to extract
+        let dest_dir = temp_dir.path().join("dest");
+        let result = extract_zip(&zip_bytes, &dest_dir);
+
+        // Should fail due to path traversal
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            InstallError::FetchFailed(msg) => {
+                assert!(msg.contains("Path traversal"));
+            }
+            _ => panic!("Expected FetchFailed error with Path traversal message"),
+        }
+
+        // Verify that the escape file was NOT created outside dest_dir
+        let escape_file = temp_dir.path().join("escape.txt");
+        assert!(!escape_file.exists());
+
+        // Verify that safe.txt was created in dest_dir
+        assert!(dest_dir.join("safe.txt").exists());
     }
 }

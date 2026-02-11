@@ -508,6 +508,32 @@ fn parse_github_url(
     Ok((owner, repo, version))
 }
 
+/// Normalize a path by resolving `..` and `.` components in memory
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut result = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                result.push(component);
+            }
+            Component::CurDir => {
+                // Skip `.` - it doesn't change anything
+            }
+            Component::ParentDir => {
+                // Pop the last normal component if possible
+                if !result.pop() {
+                    // Can't pop past root - just skip
+                }
+            }
+            Component::Normal(c) => {
+                result.push(c);
+            }
+        }
+    }
+    result
+}
+
 /// Install package from downloaded archive
 fn install_package_from_archive(
     package: &crate::models::package::Package,
@@ -528,9 +554,37 @@ fn install_package_from_archive(
         archive_path.parent().unwrap_or(std::path::Path::new(".")),
     )?;
 
+    // Canonicalize install_path once for comparison
+    let install_canonical = install_path
+        .canonicalize()
+        .map_err(|e| AikError::Generic(format!("Failed to canonicalize install_path: {}", e)))?;
+
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
-        let outpath = install_path.join(file.name());
+
+        let entry_name = file.name();
+
+        // Check for path traversal in the entry name before any processing
+        if entry_name.contains("..") {
+            return Err(AikError::Generic(format!(
+                "Path traversal detected in zip entry: {}",
+                entry_name
+            )));
+        }
+
+        // Normalize the entry name to prevent path traversal
+        let normalized = normalize_path(std::path::Path::new(entry_name));
+        let outpath = install_path.join(&normalized);
+
+        // Validate that the output path is under install_path
+        let outpath_canonical = outpath.canonicalize().unwrap_or_else(|_| outpath.clone());
+
+        if !outpath_canonical.starts_with(&install_canonical) {
+            return Err(AikError::Generic(format!(
+                "Path traversal detected in zip entry: {}",
+                entry_name
+            )));
+        }
 
         if file.name().ends_with('/') {
             std::fs::create_dir_all(&outpath)
@@ -1183,5 +1237,129 @@ mod tests {
         assert!(!project_root.join("other/ignore.txt").exists());
 
         Ok(())
+    }
+
+    /// Test that install_package_from_archive rejects path traversal attempts
+    #[test]
+    fn test_install_package_from_archive_path_traversal() {
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::FileOptions;
+        use zip::ZipWriter;
+
+        let temp_dir = TempDir::new().unwrap();
+        let archive_path = temp_dir.path().join("package.zip");
+
+        // Create a malicious zip with path traversal
+        let file = File::create(&archive_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = FileOptions::default();
+
+        // Add a benign file
+        zip.start_file("safe.txt", options).unwrap();
+        zip.write_all(b"safe content").unwrap();
+
+        // Add a path traversal file (should be blocked)
+        zip.start_file("../../../escape.txt", options).unwrap();
+        zip.write_all(b"malicious content").unwrap();
+
+        zip.finish().unwrap();
+
+        // Create a mock package
+        let mut package = crate::models::package::Package::new(
+            "test-pkg".to_string(),
+            "1.0.0".to_string(),
+            "Test package".to_string(),
+        );
+
+        // Create a mock AikDirectory
+        let aik_dir = crate::core::filesystem::AikDirectory::new(temp_dir.path().join(".aikit"));
+
+        // Create the install directory
+        let install_path = aik_dir.packages_path().join(format!(
+            "{}-{}",
+            package.package.name, package.package.version
+        ));
+        std::fs::create_dir_all(&install_path).unwrap();
+
+        // Create InstallArgs (the function doesn't use args in the current implementation)
+        let args = InstallArgs {
+            source: "test".to_string(),
+            install_version: None,
+            token: None,
+            force: false,
+            yes: false,
+            ai: None,
+        };
+
+        // Try to install from the malicious archive
+        let result = install_package_from_archive(&package, &archive_path, &aik_dir, &args);
+
+        // Should fail (either due to path traversal or file system error)
+        assert!(
+            result.is_err(),
+            "Expected installation to fail, but it succeeded"
+        );
+
+        // Verify that the escape file was NOT created outside the install directory
+        let escape_file = temp_dir.path().join("escape.txt");
+        assert!(
+            !escape_file.exists(),
+            "Malicious file was created outside install directory!"
+        );
+
+        // Verify no files were created in the temp directory outside the install directory
+        let files_outside = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_file() && p.file_name().unwrap() != "package.zip")
+            .collect::<Vec<_>>();
+
+        assert!(
+            files_outside.is_empty(),
+            "Found unexpected files outside install directory: {:?}",
+            files_outside
+        );
+    }
+
+    /// Test that normalize_path correctly resolves .. and . components
+    #[test]
+    fn test_normalize_path() {
+        use std::path::Path;
+
+        // Test basic normalization
+        assert_eq!(
+            normalize_path(Path::new("foo/../bar")),
+            PathBuf::from("bar")
+        );
+        assert_eq!(
+            normalize_path(Path::new("foo/./bar")),
+            PathBuf::from("foo/bar")
+        );
+        assert_eq!(
+            normalize_path(Path::new("foo/bar/../baz")),
+            PathBuf::from("foo/baz")
+        );
+        assert_eq!(normalize_path(Path::new("../foo")), PathBuf::from("foo"));
+        assert_eq!(normalize_path(Path::new("../../foo")), PathBuf::from("foo"));
+        assert_eq!(
+            normalize_path(Path::new("foo/bar/.")),
+            PathBuf::from("foo/bar")
+        );
+
+        // Test multiple levels
+        assert_eq!(
+            normalize_path(Path::new("a/b/c/../../d")),
+            PathBuf::from("a/d")
+        );
+        assert_eq!(
+            normalize_path(Path::new("a/./b/./c/./d")),
+            PathBuf::from("a/b/c/d")
+        );
+
+        // Test edge cases
+        assert_eq!(normalize_path(Path::new(".")), PathBuf::from(""));
+        assert_eq!(normalize_path(Path::new("..")), PathBuf::from(""));
     }
 }

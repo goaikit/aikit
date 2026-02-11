@@ -48,7 +48,7 @@ pub fn ensure_directory<P: AsRef<Path>>(path: P) -> anyhow::Result<()> {
 /// - Resolves relative paths to absolute paths
 /// - Normalizes path separators (though Rust's Path already handles this)
 /// - Resolves `~` to home directory on Unix systems
-/// - Handles `.` and `..` components
+/// - Handles `.` and `..` components (resolves in memory when path doesn't exist)
 pub fn normalize_path<P: AsRef<Path>>(path: P) -> anyhow::Result<PathBuf> {
     let path = path.as_ref();
 
@@ -74,14 +74,56 @@ pub fn normalize_path<P: AsRef<Path>>(path: P) -> anyhow::Result<PathBuf> {
         path.to_path_buf()
     };
 
-    // Resolve to absolute path and normalize
-    if expanded.is_absolute() {
-        Ok(expanded.canonicalize().unwrap_or(expanded))
+    // Try to canonicalize first (resolves symlinks and checks existence)
+    let result = if expanded.is_absolute() {
+        expanded.canonicalize()
     } else {
         let current_dir = std::env::current_dir()?;
         let absolute = current_dir.join(&expanded);
-        Ok(absolute.canonicalize().unwrap_or(absolute))
+        absolute.canonicalize()
+    };
+
+    // If canonicalize succeeds, return the result
+    if let Ok(canonical) = result {
+        return Ok(canonical);
     }
+
+    // If canonicalize fails (path doesn't exist), resolve .. and . in memory
+    let normalized = resolve_path_components(&expanded);
+
+    // Ensure we have an absolute path
+    if normalized.is_absolute() {
+        Ok(normalized)
+    } else {
+        let current_dir = std::env::current_dir()?;
+        Ok(current_dir.join(&normalized))
+    }
+}
+
+/// Resolve path components (., ..) in memory without touching the filesystem
+fn resolve_path_components(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                result.push(component);
+            }
+            Component::CurDir => {
+                // Skip `.` - it doesn't change anything
+            }
+            Component::ParentDir => {
+                // Pop the last normal component if possible
+                if !result.pop() {
+                    // Can't pop past root - just skip
+                }
+            }
+            Component::Normal(c) => {
+                result.push(c);
+            }
+        }
+    }
+    result
 }
 
 /// Convert a path to a string with forward slashes (for display/cross-platform compatibility)
@@ -157,5 +199,28 @@ mod tests {
     fn test_home_dir() {
         // Just verify it doesn't panic
         let _ = home_dir();
+    }
+
+    #[test]
+    fn test_normalize_path_with_nonexistent() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let work = temp_dir.path();
+
+        // Test with non-existent paths containing ..
+        let result = normalize_path(work.join("foo/../bar")).unwrap();
+        // The path should not contain ".." after normalization
+        let result_str = result.to_string_lossy();
+        assert!(!result_str.contains(".."));
+
+        // Test with multiple .. components
+        let result = normalize_path(work.join("a/b/c/../../d")).unwrap();
+        let result_str = result.to_string_lossy();
+        assert!(!result_str.contains(".."));
+
+        // Test that the result is still under the base directory
+        let result = normalize_path(work.join("foo/../bar")).unwrap();
+        assert!(result.starts_with(work));
     }
 }
