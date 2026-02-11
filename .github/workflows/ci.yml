@@ -147,4 +147,4 @@ jobs:
       uses: Swatinem/rust-cache@v2
 
     - name: Run tests
-      run: cargo test --lib --release
+      run: cargo test --lib --release -- --test-threads=1

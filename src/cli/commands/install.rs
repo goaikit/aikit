@@ -361,14 +361,17 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     }
 
     // Resolve installed package root (handles zipball top-level dir)
-    let package_root =
-        match aik_dir.installed_package_root(&package.package.name, &package.package.version) {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Warning: Could not resolve package root: {}", e);
-                return Ok(());
-            }
-        };
+    let package_root = match aikit_sdk::installed_package_root(
+        &aik_dir.packages_path(),
+        &package.package.name,
+        &package.package.version,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Warning: Could not resolve package root: {}", e);
+            return Ok(());
+        }
+    };
     let project_root = aik_dir.project_root();
 
     // Deploy subagents and skills per agent, then copy artifacts
@@ -394,7 +397,12 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
             }
         }
     }
-    if let Err(e) = copy_artifacts_to_project(&package, &package_root, &project_root) {
+
+    // Build mappings with agent scope (first selected agent, or None for default mappings)
+    let agent_scope = selected_agents.first().map(|s| s.as_str());
+    let mappings = package.get_artifact_mappings(agent_scope);
+
+    if let Err(e) = aikit_sdk::copy_artifacts(&package_root, &project_root, &mappings) {
         eprintln!("Warning: Copy artifacts: {}", e);
     }
 
@@ -649,8 +657,12 @@ fn load_template_content(
     use std::fs;
 
     let template_path_str = command_def.effective_source(command_name);
-    let package_root =
-        aik_dir.installed_package_root(&package.package.name, &package.package.version)?;
+    let package_root = aikit_sdk::installed_package_root(
+        &aik_dir.packages_path(),
+        &package.package.name,
+        &package.package.version,
+    )
+    .map_err(|e| format!("Failed to resolve package root: {}", e))?;
     let full_path = package_root.join(&template_path_str);
 
     fs::read_to_string(&full_path).map_err(|e| {
@@ -762,64 +774,18 @@ fn deploy_skills_for_agent(
 }
 
 /// Copy artifact mappings from installed package root to project.
+///
+/// This function is deprecated in favor of using aikit_sdk::copy_artifacts directly.
+/// It is kept for backward compatibility but delegates to the SDK.
+#[deprecated(note = "Use aikit_sdk::copy_artifacts directly")]
 fn copy_artifacts_to_project(
     package: &crate::models::package::Package,
     package_root: &std::path::Path,
     project_root: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use glob::Pattern;
-    use std::fs;
-    use walkdir::WalkDir;
-
-    for (pattern_str, dest_str) in package.get_artifact_mappings(None) {
-        let glob_pattern = Pattern::new(&pattern_str)?;
-
-        // Extract the prefix: the part before the first glob pattern
-        // This handles patterns like "newton/**" (prefix = "newton/")
-        // and "templates/*.md" (prefix = "templates/")
-        let prefix = if pattern_str.contains("**") {
-            // Split on ** to get the part before
-            pattern_str.split("**").next().unwrap_or("").to_string()
-        } else if pattern_str.contains('*') {
-            // Split on * to get the part before
-            pattern_str.split('*').next().unwrap_or("").to_string()
-        } else {
-            // No glob pattern, use the whole string as prefix
-            pattern_str.clone()
-        };
-
-        let dest_dir = project_root.join(dest_str.trim_end_matches('/'));
-
-        for entry in WalkDir::new(package_root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            if path.is_dir() {
-                continue;
-            }
-            let relative = path
-                .strip_prefix(package_root)
-                .map_err(|_| "strip_prefix")?;
-            let path_str = relative.to_string_lossy();
-            if !glob_pattern.matches(&path_str) {
-                continue;
-            }
-            let subpath = if prefix.is_empty() {
-                relative.to_path_buf()
-            } else if let Ok(s) = relative.strip_prefix(&prefix) {
-                std::path::PathBuf::from(s)
-            } else {
-                relative.to_path_buf()
-            };
-            let dest_file = dest_dir.join(&subpath);
-            if let Some(p) = dest_file.parent() {
-                fs::create_dir_all(p)?;
-            }
-            fs::copy(path, &dest_file)?;
-        }
-    }
-    Ok(())
+    let mappings = package.get_artifact_mappings(None);
+    aikit_sdk::copy_artifacts(package_root, project_root, &mappings)
+        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
 /// Execute update command
@@ -1121,8 +1087,9 @@ mod tests {
             .artifacts
             .insert("newton/**".to_string(), ".newton".to_string());
 
-        // Copy artifacts
-        copy_artifacts_to_project(&package, &package_root, &project_root)?;
+        // Build mappings and use SDK copy_artifacts
+        let mappings = package.get_artifact_mappings(None);
+        aikit_sdk::copy_artifacts(&package_root, &project_root, &mappings)?;
 
         // Verify files were copied correctly
         assert!(project_root.join(".newton/README.md").exists());
@@ -1167,7 +1134,9 @@ mod tests {
             .artifacts
             .insert("newton/**".to_string(), ".newton".to_string());
 
-        copy_artifacts_to_project(&package, &package_root, &project_root)?;
+        // Build mappings and use SDK copy_artifacts
+        let mappings = package.get_artifact_mappings(None);
+        aikit_sdk::copy_artifacts(&package_root, &project_root, &mappings)?;
 
         // Verify nested files were copied
         assert!(project_root.join(".newton/top.txt").exists());
@@ -1205,7 +1174,9 @@ mod tests {
             .artifacts
             .insert("newton/**".to_string(), ".newton".to_string());
 
-        copy_artifacts_to_project(&package, &package_root, &project_root)?;
+        // Build mappings and use SDK copy_artifacts
+        let mappings = package.get_artifact_mappings(None);
+        aikit_sdk::copy_artifacts(&package_root, &project_root, &mappings)?;
 
         // Verify only newton/** files were copied
         assert!(project_root.join(".newton/scripts/advisor.sh").exists());

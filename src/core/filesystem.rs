@@ -152,6 +152,8 @@ impl AikDirectory {
     }
 
     /// Resolve the installed package root: where aikit.toml and sources live.
+    ///
+    /// This is a thin wrapper around `aikit_sdk::installed_package_root`.
     /// If {packages_path}/{name}-{version}/aikit.toml exists, return that dir.
     /// Else if there is exactly one child directory and it contains aikit.toml, return that child (zipball case).
     /// Otherwise return get_package_path(name, version).
@@ -160,23 +162,8 @@ impl AikDirectory {
         package_name: &str,
         version: &str,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let base = self.get_package_path(package_name, version);
-        let manifest = base.join("aikit.toml");
-        if manifest.exists() {
-            return Ok(base);
-        }
-        let children: Vec<PathBuf> = fs::read_dir(&base)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect();
-        if children.len() == 1 {
-            let child = &children[0];
-            if child.join("aikit.toml").exists() {
-                return Ok(child.clone());
-            }
-        }
-        Ok(base)
+        aikit_sdk::installed_package_root(&self.packages_path(), package_name, version)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
     }
 
     /// Check if package is installed
