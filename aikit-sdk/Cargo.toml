@@ -14,7 +14,7 @@ walkdir = "2"
 toml = "0.8"
 serde = { version = "1.0", features = ["derive"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
-zip = "2.3"
+zip = "7.4"
 tempfile = "3.12"
 
 [dev-dependencies]
