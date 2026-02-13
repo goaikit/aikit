@@ -64,3 +64,4 @@ echo "🎉 All pre-commit checks passed!"
 echo ""
 
 exit 0
+exit 0

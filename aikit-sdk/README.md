@@ -8,11 +8,14 @@ This crate holds the full agent catalog with per-agent capabilities (commands, s
 
 ## Features
 
-- **Complete Agent Catalog**: All 17 supported agents including their capabilities
+- **Complete Agent Catalog**: All 18 supported agents including their capabilities
 - **Path Resolution**: Resolves target paths per agent and concept
 - **File Deployment**: Creates directories and writes files for commands, skills, and subagents
 - **Error Handling**: Clear error types when concepts are unsupported
 - **Filename Conventions**: Proper filename formats per agent type
+- **Agent Detection**: Identify which AI coding agents are installed and available
+- **CLI Execution**: Run agents with full parameter support matching coder.sh
+- **Output Capture**: Capture stdout/stderr for programmatic forwarding
 
 ## Agents Supported
 
@@ -113,6 +116,53 @@ match result {
 - `RunOptions`: optional `model`, `yolo`, `stream`.
 - `RunResult`: `status`, `stdout`, `stderr`; `.exit_code()`, `.success()`.
 - `RunError`: `AgentNotRunnable(key)`, `SpawnFailed`, `StdinFailed`, `OutputFailed`.
+
+### Agent Detection
+
+Check if agent CLI tools are installed and available on the system.
+
+```rust
+use aikit_sdk::*;
+
+// Check if a specific agent is available
+if is_agent_available("claude") {
+    println!("Claude is installed and ready to run");
+} else {
+    println!("Claude is not available");
+}
+
+// Get all installed runnable agents
+let installed = get_installed_agents();
+println!("Installed agents: {:?}", installed);
+// Output: ["claude", "gemini", "opencode"]
+
+// Get detailed status for all runnable agents
+let status = get_agent_status();
+for (agent_key, agent_status) in status {
+    println!("{}: {}",
+        agent_key,
+        if agent_status.available { "Available" } else { "Not available" }
+    );
+    if let Some(reason) = agent_status.reason {
+        println!("  Reason: {}", reason);
+    }
+}
+```
+
+**Functions**:
+
+- `is_agent_available(agent_key: &str) -> bool` - Check if agent binary is in PATH and responds to `--version`
+- `get_installed_agents() -> Vec<String>` - List all runnable agents that are installed
+- `get_agent_status() -> HashMap<String, AgentStatus>` - Get detailed availability info for all runnable agents
+
+**AgentStatus**:
+
+```rust
+pub struct AgentStatus {
+    pub available: bool,
+    pub reason: Option<String>,
+}
+```
 
 ## Error Types
 

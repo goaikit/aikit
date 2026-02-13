@@ -5,3 +5,5 @@
 *.md
 .gitignore
 .repomixignore
+tests
+cargo.toml
