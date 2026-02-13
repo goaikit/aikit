@@ -26,6 +26,10 @@ pub struct RunArgs {
     /// Enable streaming output
     #[arg(long)]
     pub stream: bool,
+
+    /// Dry-run mode: validate inputs but don't execute agent (for testing)
+    #[arg(long, hide = true)]
+    pub dry_run: bool,
 }
 
 pub fn execute(args: RunArgs) -> Result<()> {
@@ -47,6 +51,18 @@ pub fn execute(args: RunArgs) -> Result<()> {
             buffer
         }
     };
+
+    // Dry-run mode: validate inputs but don't execute
+    if args.dry_run {
+        println!("Dry-run mode enabled");
+        println!("Agent: {}", agent);
+        println!("Model: {}", model);
+        println!("Prompt length: {} chars", prompt.len());
+        println!("Yolo mode: {}", args.yolo);
+        println!("Stream mode: {}", args.stream);
+        println!("Configuration validated successfully (dry-run)");
+        return Ok(());
+    }
 
     let options = RunOptions {
         model: Some(model),

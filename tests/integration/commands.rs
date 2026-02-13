@@ -236,28 +236,119 @@ fn test_aikit_run_help() {
     assert!(output_str.contains("CODING_AGENT"));
 }
 
+/// Test run command with stdin (using dry-run mode)
 #[test]
 fn test_aikit_run_stdin() {
-    let output = Command::new("bash")
-        .arg("-c")
-        .arg("echo 'test prompt' | aikit run --agent opencode 2>&1 || true")
-        .output()
-        .expect("Failed to execute aikit run with stdin");
+    use std::process::Stdio;
+    use std::io::Write;
+
+    // Use dry-run mode to test without requiring API credentials
+    let mut child = Command::new("aikit")
+        .args(["run", "--agent", "opencode", "--dry-run"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aikit run");
+
+    // Write to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        // Ignore write errors - we'll wait for the process anyway to avoid zombie
+        let _ = stdin.write_all(b"test prompt\n");
+        drop(stdin); // Close stdin to signal EOF
+    }
+
+    // Wait for process to complete (always wait to avoid zombie process)
+    let output = child.wait_with_output().expect("Failed to wait for output");
 
     let output_str = String::from_utf8(output.stdout).unwrap();
     let error_str = String::from_utf8(output.stderr).unwrap();
 
-    let combined = format!("{}{}", output_str, error_str);
+    // Verify dry-run output
+    assert!(
+        output.status.success(),
+        "Command should succeed in dry-run mode. stdout: {}, stderr: {}",
+        output_str,
+        error_str
+    );
+    assert!(
+        output_str.contains("Dry-run mode enabled")
+            || output_str.contains("Agent: opencode")
+            || output_str.contains("validated successfully"),
+        "Should show dry-run validation output. Got: {}",
+        output_str
+    );
+}
 
-    if output.status.success() {
-        assert!(!combined.is_empty() || !combined.contains("not found"));
-    } else {
-        assert!(
-            combined.contains("not found")
-                || combined.contains("not runnable")
-                || combined.is_empty(),
-            "Unexpected error: {}",
-            combined
-        );
+/// Test run command with stdin and real API (ignored by default)
+/// Run with: cargo test test_aikit_run_stdin_real -- --ignored
+#[test]
+#[ignore] // Requires API credentials and network access
+fn test_aikit_run_stdin_real() {
+    use std::process::Stdio;
+    use std::time::Duration;
+    use std::io::Write;
+
+    // Only run if ANTHROPIC_API_KEY is set
+    if std::env::var("ANTHROPIC_API_KEY").is_err() {
+        eprintln!("Skipping test_aikit_run_stdin_real: ANTHROPIC_API_KEY not set");
+        return;
+    }
+
+    // Spawn process with timeout
+    let mut child = Command::new("aikit")
+        .args(["run", "--agent", "opencode"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aikit run");
+
+    // Write to stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        // Ignore write errors - we'll wait for the process anyway to avoid zombie
+        let _ = stdin.write_all(b"test prompt\n");
+    }
+
+    // Wait with timeout (30 seconds for real API call)
+    let timeout = Duration::from_secs(30);
+    let start = std::time::Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().unwrap_or_else(|_| {
+                    panic!("Failed to read output")
+                });
+
+                let output_str = String::from_utf8(output.stdout).unwrap();
+                let error_str = String::from_utf8(output.stderr).unwrap();
+                let combined = format!("{}{}", output_str, error_str);
+
+                if status.success() {
+                    assert!(!combined.is_empty());
+                } else {
+                    assert!(
+                        combined.contains("error") || !combined.is_empty(),
+                        "Unexpected error: {}",
+                        combined
+                    );
+                }
+                return;
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    // Timeout reached - kill and wait for process to avoid zombie
+                    child.kill().ok();
+                    let _ = child.wait(); // Reap zombie
+                    panic!("Test timed out after {:?}", timeout);
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = child.wait(); // Ensure we wait even on error
+                panic!("Error waiting for process: {}", e);
+            }
+        }
     }
 }

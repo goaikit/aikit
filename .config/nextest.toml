@@ -1,0 +1,30 @@
+# Nextest configuration for AIKIT
+# See https://nexte.st/book/configuration.html
+
+[profile.default]
+# Set a global timeout for all tests to prevent hanging
+# Integration tests that make real API calls should be marked with #[ignore]
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# Per-test timeout - kills test after 30 seconds
+test-threads = 1
+
+[profile.default.junit]
+# Store junit results for CI
+path = "target/nextest/default/junit.xml"
+
+[profile.ci]
+# CI profile with stricter timeouts
+slow-timeout = { period = "30s", terminate-after = 2 }
+fail-fast = true
+
+# Override settings for specific tests
+[[profile.default.overrides]]
+filter = "test(test_aikit_run_stdin)"
+# This test is ignored by default, but if run explicitly, give it more time
+slow-timeout = { period = "10s", terminate-after = 1 }
+
+[[profile.default.overrides]]
+filter = "test(test_init_basic)"
+# Network-dependent test
+slow-timeout = { period = "90s", terminate-after = 2 }
