@@ -163,6 +163,51 @@ if aikit_py.is_runnable_py("claude"):
 
 Raises an exception if the agent is not runnable or the process fails to start.
 
+## Agent Detection
+
+### Check if Agent is Installed
+
+```python
+import aikit_py
+
+# Check if a specific agent is available
+if aikit_py.is_agent_available_py("claude"):
+    print("Claude is installed and ready to run")
+else:
+    print("Claude is not available")
+```
+
+### List Installed Agents
+
+```python
+import aikit_py
+
+# Get all installed runnable agents
+installed = aikit_py.get_installed_agents_py()
+print(f"Installed agents: {installed}")
+# Output: ['claude', 'gemini', 'opencode']
+```
+
+### Get Detailed Agent Status
+
+```python
+import aikit_py
+
+# Get status for all runnable agents
+status = aikit_py.get_agent_status_py()
+for agent_key, agent_status in status.items():
+    print(f"{agent_key}: {'Available' if agent_status.available else 'Not available'}")
+    if agent_status.reason:
+        print(f"  Reason: {agent_status.reason}")
+```
+
+### PyAgentStatus Structure
+
+The `PyAgentStatus` class provides availability information:
+
+- `available: bool` - Whether the agent is installed and runnable
+- `reason: Optional[str]` - Optional explanation if not available
+
 ## API Overview
 
 The `aikit_py` module exposes functions and classes that mirror the `aikit-sdk` Rust library:
