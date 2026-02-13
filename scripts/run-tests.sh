@@ -143,8 +143,10 @@ CLIPPY_OUTPUT=$(cargo clippy --workspace --all-targets --all-features -- -D warn
 CLIPPY_EXIT=$?
 echo "$CLIPPY_OUTPUT" > "$TEST_OUTPUT_DIR/clippy-output.txt"
 
-echo -e "${YELLOW}Running tests with cargo-nextest (retries: $RETRIES)...${NC}" >&2
-TEST_OUTPUT=$(cargo nextest run --all-features --retries "$RETRIES" --fail-fast 2>&1)
+echo -e "${YELLOW}Running tests with cargo-nextest (retries: $RETRIES, per-test timeout: 60s)...${NC}" >&2
+# Use nextest config from .config/nextest.toml for timeout settings
+# --test-threads=1 to avoid resource contention in integration tests
+TEST_OUTPUT=$(cargo nextest run --all-features --retries "$RETRIES" --fail-fast --test-threads=1 2>&1)
 TEST_EXIT=$?
 echo "$TEST_OUTPUT" > "$TEST_OUTPUT_DIR/test-output.txt"
 

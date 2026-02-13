@@ -42,6 +42,7 @@ test_results/
 test_results.json
 test_results.md
 test_artifacts/
+.github/test-outputs/
 
 # Test snapshots
 tests/snapshots/*.snap
