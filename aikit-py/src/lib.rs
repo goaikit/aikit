@@ -1,6 +1,7 @@
 use aikit_sdk::{
-    is_runnable, run_agent as run_agent_impl, runnable_agents, AgentConfig, DeployConcept,
-    DeployError, RunOptions,
+    get_agent_status as get_agent_status_impl, get_installed_agents as get_installed_agents_impl,
+    is_agent_available as is_agent_available_impl, is_runnable, run_agent as run_agent_impl,
+    runnable_agents, AgentConfig, AgentStatus, DeployConcept, DeployError, RunOptions,
 };
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
@@ -70,6 +71,15 @@ pub struct PyRunOptions {
     pub stream: bool,
 }
 
+#[pyclass(from_py_object)]
+#[derive(Debug, Clone)]
+pub struct PyAgentStatus {
+    #[pyo3(get)]
+    pub available: bool,
+    #[pyo3(get)]
+    pub reason: Option<String>,
+}
+
 impl From<AgentConfig> for PyAgentConfig {
     fn from(config: AgentConfig) -> Self {
         PyAgentConfig {
@@ -78,6 +88,15 @@ impl From<AgentConfig> for PyAgentConfig {
             skills_dir: config.skills_dir,
             agents_dir: config.agents_dir,
             scripts_dir: config.scripts_dir,
+        }
+    }
+}
+
+impl From<AgentStatus> for PyAgentStatus {
+    fn from(status: AgentStatus) -> Self {
+        PyAgentStatus {
+            available: status.available,
+            reason: status.reason.map(|r| r.to_string()),
         }
     }
 }
@@ -273,6 +292,52 @@ fn is_runnable_py(agent_key: &str) -> bool {
     is_runnable(agent_key)
 }
 
+#[pyfunction]
+fn is_agent_available(agent_key: &str) -> bool {
+    is_agent_available_impl(agent_key)
+}
+
+#[pyfunction]
+fn is_agent_available_py(agent_key: &str) -> bool {
+    is_agent_available_impl(agent_key)
+}
+
+#[pyfunction]
+fn get_installed_agents() -> Vec<String> {
+    get_installed_agents_impl()
+}
+
+#[pyfunction]
+fn get_installed_agents_py() -> Vec<String> {
+    get_installed_agents_impl()
+}
+
+#[pyfunction]
+fn get_agent_status(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    let status_map = get_agent_status_impl();
+    let dict = PyDict::new(py);
+
+    for (agent_key, agent_status) in status_map {
+        let status_dict = PyDict::new(py);
+        status_dict.set_item("available", agent_status.available)?;
+
+        if let Some(reason) = agent_status.reason {
+            status_dict.set_item("reason", reason.to_string())?;
+        } else {
+            status_dict.set_item("reason", py.None())?;
+        }
+
+        dict.set_item(agent_key, status_dict)?;
+    }
+
+    Ok(dict.into())
+}
+
+#[pyfunction]
+fn get_agent_status_py(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    get_agent_status(py)
+}
+
 #[pymodule]
 fn aikit_py(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("DeployError", _py.get_type::<PyException>())?;
@@ -280,6 +345,7 @@ fn aikit_py(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDeployConcept>()?;
     m.add_class::<PyAgentConfig>()?;
     m.add_class::<PyRunOptions>()?;
+    m.add_class::<PyAgentStatus>()?;
     m.add_wrapped(wrap_pyfunction!(subagent_filename))?;
     m.add_wrapped(wrap_pyfunction!(command_filename))?;
     m.add_wrapped(wrap_pyfunction!(subagent_path))?;
@@ -294,5 +360,11 @@ fn aikit_py(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(run_agent))?;
     m.add_wrapped(wrap_pyfunction!(runnable_agents_list))?;
     m.add_wrapped(wrap_pyfunction!(is_runnable_py))?;
+    m.add_wrapped(wrap_pyfunction!(is_agent_available))?;
+    m.add_wrapped(wrap_pyfunction!(is_agent_available_py))?;
+    m.add_wrapped(wrap_pyfunction!(get_installed_agents))?;
+    m.add_wrapped(wrap_pyfunction!(get_installed_agents_py))?;
+    m.add_wrapped(wrap_pyfunction!(get_agent_status))?;
+    m.add_wrapped(wrap_pyfunction!(get_agent_status_py))?;
     Ok(())
 }

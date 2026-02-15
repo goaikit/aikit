@@ -201,3 +201,80 @@ def test_run_options_with_values():
     assert options.model == "test-model"
     assert options.yolo == True
     assert options.stream == True
+
+
+def test_is_agent_available_returns_bool():
+    assert isinstance(aikit_py.is_agent_available("claude"), bool)
+    assert isinstance(aikit_py.is_agent_available("codex"), bool)
+    assert isinstance(aikit_py.is_agent_available("unknown"), bool)
+
+
+def test_is_agent_available_false_for_non_runnable():
+    assert aikit_py.is_agent_available("copilot") == False
+    assert aikit_py.is_agent_available("cursor-agent") == False
+    assert aikit_py.is_agent_available("unknown") == False
+
+
+def test_is_agent_available_py_matches_canonical():
+    assert aikit_py.is_agent_available("claude") == aikit_py.is_agent_available_py(
+        "claude"
+    )
+    assert aikit_py.is_agent_available("codex") == aikit_py.is_agent_available_py(
+        "codex"
+    )
+    assert aikit_py.is_agent_available("unknown") == aikit_py.is_agent_available_py(
+        "unknown"
+    )
+
+
+def test_get_installed_agents_returns_list():
+    installed = aikit_py.get_installed_agents()
+    assert isinstance(installed, list)
+    assert all(isinstance(item, str) for item in installed)
+
+
+def test_get_installed_agents_is_subset_of_runnable():
+    installed = set(aikit_py.get_installed_agents())
+    runnable = set(aikit_py.runnable_agents_list())
+    assert installed.issubset(runnable)
+
+
+def test_get_installed_agents_sorted():
+    installed = aikit_py.get_installed_agents()
+    assert installed == sorted(installed)
+
+
+def test_get_installed_agents_py_matches_canonical():
+    assert aikit_py.get_installed_agents() == aikit_py.get_installed_agents_py()
+
+
+def test_get_agent_status_returns_dict():
+    status = aikit_py.get_agent_status()
+    assert isinstance(status, dict)
+
+
+def test_get_agent_status_keys_are_strings():
+    status = aikit_py.get_agent_status()
+    assert all(isinstance(key, str) for key in status.keys())
+
+
+def test_get_agent_status_values_have_available_and_reason():
+    status = aikit_py.get_agent_status()
+    for agent_key, agent_status in status.items():
+        assert isinstance(agent_status, dict)
+        assert "available" in agent_status
+        assert "reason" in agent_status
+        assert isinstance(agent_status["available"], bool)
+        assert agent_status["reason"] is None or isinstance(agent_status["reason"], str)
+
+
+def test_get_agent_status_unavailable_has_reason():
+    status = aikit_py.get_agent_status()
+    for agent_key, agent_status in status.items():
+        if not agent_status["available"]:
+            assert agent_status["reason"] is not None
+            assert isinstance(agent_status["reason"], str)
+
+
+def test_get_agent_status_py_matches_canonical():
+    assert aikit_py.get_agent_status() == aikit_py.get_agent_status_py()

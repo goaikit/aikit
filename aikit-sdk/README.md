@@ -131,10 +131,10 @@ if is_agent_available("claude") {
     println!("Claude is not available");
 }
 
-// Get all installed runnable agents
+// Get all installed runnable agents (sorted alphabetically)
 let installed = get_installed_agents();
 println!("Installed agents: {:?}", installed);
-// Output: ["claude", "gemini", "opencode"]
+// Output: ["agent", "claude", "codex", "gemini", "opencode"]
 
 // Get detailed status for all runnable agents
 let status = get_agent_status();
@@ -152,17 +152,35 @@ for (agent_key, agent_status) in status {
 **Functions**:
 
 - `is_agent_available(agent_key: &str) -> bool` - Check if agent binary is in PATH and responds to `--version`
-- `get_installed_agents() -> Vec<String>` - List all runnable agents that are installed
-- `get_agent_status() -> HashMap<String, AgentStatus>` - Get detailed availability info for all runnable agents
+- `get_installed_agents() -> Vec<String>` - List all runnable agents that are installed (sorted alphabetically)
+- `get_agent_status() -> BTreeMap<String, AgentStatus>` - Get detailed availability info for all runnable agents (deterministic ordering)
+
+**AgentAvailabilityReason**:
+
+```rust
+pub enum AgentAvailabilityReason {
+    NotRunnable,        // Agent is not in runnable_agents list
+    BinaryNotFound,     // Binary not found in PATH
+    VersionCheckFailed, // Binary found but --version failed
+    TimedOut,          // Probe timed out
+}
+```
 
 **AgentStatus**:
 
 ```rust
 pub struct AgentStatus {
     pub available: bool,
-    pub reason: Option<String>,
+    pub reason: Option<AgentAvailabilityReason>,
 }
 ```
+
+**Detection behavior**:
+
+- Detection is bounded by a 1500ms timeout per binary probe
+- The `opencode` agent checks multiple binary candidates: `opencode` and `opencode-desktop`
+- `get_agent_status()` returns a BTreeMap for deterministic ordering
+- `get_installed_agents()` returns a sorted list of available agents
 
 ## Error Types
 
