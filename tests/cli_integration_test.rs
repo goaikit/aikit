@@ -239,7 +239,7 @@ mod tests {
         cmd.arg("check")
             .assert()
             .success()
-            .stdout(predicate::str::contains("Tree display not implemented"));
+            .stdout(predicate::str::contains("git: ✓ Found"));
     }
 
     /// Test list command when no packages installed
