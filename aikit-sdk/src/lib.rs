@@ -9,6 +9,7 @@ pub enum DeployConcept {
     Command,
     Skill,
     Subagent,
+    InstructionFile,
 }
 
 impl std::fmt::Display for DeployConcept {
@@ -17,6 +18,7 @@ impl std::fmt::Display for DeployConcept {
             DeployConcept::Command => write!(f, "command"),
             DeployConcept::Skill => write!(f, "skill"),
             DeployConcept::Subagent => write!(f, "subagent"),
+            DeployConcept::InstructionFile => write!(f, "instruction file"),
         }
     }
 }
@@ -69,6 +71,8 @@ pub struct AgentConfig {
     pub agents_dir: Option<String>,
     /// Optional directory for agent scripts (e.g., template scripts)
     pub scripts_dir: Option<String>,
+    /// Optional primary instruction file name (e.g., "CLAUDE.md", "GEMINI.md", "AGENTS.md")
+    pub instruction_file: Option<String>,
 }
 
 impl AgentConfig {
@@ -188,6 +192,7 @@ pub fn all_agents() -> Vec<AgentConfig> {
             skills_dir: entry.skills.map(|s| s.to_string()),
             agents_dir: entry.subagents.map(|a| a.to_string()),
             scripts_dir: entry.scripts.map(|s| s.to_string()),
+            instruction_file: entry.instruction_file.map(|f| f.to_string()),
         })
         .collect()
 }
@@ -205,7 +210,125 @@ pub fn agent(key: &str) -> Option<AgentConfig> {
             skills_dir: entry.skills.map(|s| s.to_string()),
             agents_dir: entry.subagents.map(|a| a.to_string()),
             scripts_dir: entry.scripts.map(|s| s.to_string()),
+            instruction_file: entry.instruction_file.map(|f| f.to_string()),
         })
+}
+
+/// Returns the primary instruction file path for a specific agent.
+///
+/// Returns `None` if the agent does not have an instruction file (e.g., copilot).
+/// Returns an error if the agent key is not found in the catalog.
+pub fn instruction_file(
+    project_root: &Path,
+    agent_key: &str,
+) -> Result<Option<PathBuf>, DeployError> {
+    let config =
+        agent(agent_key).ok_or_else(|| DeployError::AgentNotFound(agent_key.to_string()))?;
+
+    Ok(config.instruction_file.map(|f| project_root.join(f)))
+}
+
+/// Checks if an agent supports instruction files.
+pub fn agent_has_instruction_file(agent_key: &str) -> bool {
+    agent(agent_key)
+        .map(|config| config.instruction_file.is_some())
+        .unwrap_or(false)
+}
+
+/// Returns all agents that support instruction files.
+pub fn instruction_file_agents() -> Vec<AgentConfig> {
+    all_agents()
+        .into_iter()
+        .filter(|config| config.instruction_file.is_some())
+        .collect()
+}
+
+/// Resolves the instruction file path for a specific agent with fallback logic.
+///
+/// If `agent_key` is provided:
+/// - Validates agent exists; returns `AgentNotFound` if not.
+/// - Returns `UnsupportedConcept(InstructionFile)` if agent doesn't support instruction files.
+/// - Checks for agent's primary file, then `AGENTS.md` as fallback.
+/// - Returns first existing file, or the primary file path if neither exists (for creation flow).
+///
+/// If `agent_key` is `None`:
+/// - Scans project root in order: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`.
+/// - Returns first existing file.
+/// - If none exist, infers from installed agents or defaults to `AGENTS.md`.
+pub fn resolve_instruction_file(
+    project_root: &Path,
+    agent_key: Option<&str>,
+) -> Result<PathBuf, DeployError> {
+    if let Some(key) = agent_key {
+        let config = agent(key).ok_or_else(|| DeployError::AgentNotFound(key.to_string()))?;
+
+        let instruction_file_name =
+            config
+                .instruction_file
+                .ok_or_else(|| DeployError::UnsupportedConcept {
+                    agent_key: key.to_string(),
+                    concept: DeployConcept::InstructionFile,
+                })?;
+
+        let primary_path = project_root.join(instruction_file_name);
+        let fallback_path = project_root.join("AGENTS.md");
+
+        if primary_path.exists() {
+            return Ok(primary_path);
+        }
+
+        if fallback_path.exists() {
+            return Ok(fallback_path);
+        }
+
+        Ok(primary_path)
+    } else {
+        let universal_files = ["AGENTS.md", "CLAUDE.md", "GEMINI.md"];
+
+        for filename in universal_files {
+            let path = project_root.join(filename);
+            if path.exists() {
+                return Ok(path);
+            }
+        }
+
+        for config in all_agents() {
+            if let Some(commands_path) = Path::new(&config.commands_dir).parent() {
+                if commands_path.exists() {
+                    if let Some(instruction_file) = config.instruction_file {
+                        let path = project_root.join(instruction_file);
+                        if path.exists() {
+                            return Ok(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(project_root.join("AGENTS.md"))
+    }
+}
+
+/// Resolves the instruction file path with optional override support.
+///
+/// If `override_path` is `Some`, it takes precedence:
+/// - If absolute, returns as-is.
+/// - If relative, resolves as `project_root.join(override_path)`.
+///
+/// If `override_path` is `None`, defers to `resolve_instruction_file`.
+pub fn instruction_file_with_override(
+    project_root: &Path,
+    agent_key: Option<&str>,
+    override_path: Option<&Path>,
+) -> Result<PathBuf, DeployError> {
+    if let Some(override_path) = override_path {
+        if override_path.is_absolute() {
+            return Ok(override_path.to_path_buf());
+        }
+        return Ok(project_root.join(override_path));
+    }
+
+    resolve_instruction_file(project_root, agent_key)
 }
 
 /// Deploys a command to an agent's commands directory.
@@ -317,6 +440,7 @@ struct AgentEntry<'a> {
     skills: Option<&'a str>,
     subagents: Option<&'a str>,
     scripts: Option<&'a str>,
+    instruction_file: Option<&'a str>,
 }
 
 const AGENTS: &[AgentEntry] = &[
@@ -327,6 +451,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: Some(".claude/skills"),
         subagents: Some(".claude/agents"),
         scripts: None,
+        instruction_file: Some("CLAUDE.md"),
     },
     AgentEntry {
         key: "gemini",
@@ -335,6 +460,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: Some(".gemini/skills"),
         subagents: Some(".gemini/agents"),
         scripts: None,
+        instruction_file: Some("GEMINI.md"),
     },
     AgentEntry {
         key: "copilot",
@@ -343,6 +469,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: None,
         subagents: Some(".github/agents"),
         scripts: None,
+        instruction_file: None,
     },
     AgentEntry {
         key: "cursor-agent",
@@ -351,6 +478,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: Some(".cursor/skills"),
         subagents: Some(".cursor/agents"),
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "qwen",
@@ -359,6 +487,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: None,
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "newton",
@@ -367,6 +496,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: Some(".newton/skills"),
         subagents: Some(".newton/agents"),
         scripts: Some(".newton/scripts"),
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "opencode",
@@ -375,6 +505,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: None,
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "codex",
@@ -383,6 +514,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: Some(".codex/skills"),
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "windsurf",
@@ -391,6 +523,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: Some(".windsurf/skills"),
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "kilocode",
@@ -399,6 +532,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: Some(".kilocode/skills"),
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "auggie",
@@ -407,6 +541,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: Some(".augment/skills"),
         subagents: Some(".augment/agents"),
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "roo",
@@ -415,6 +550,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: Some(".roo/skills"),
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "codebuddy",
@@ -423,6 +559,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: None,
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "qoder",
@@ -431,6 +568,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: None,
         subagents: Some(".qoder/agents"),
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "amp",
@@ -439,6 +577,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: None,
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "shai",
@@ -447,6 +586,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: None,
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "q",
@@ -455,6 +595,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: None,
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
     AgentEntry {
         key: "bob",
@@ -463,6 +604,7 @@ const AGENTS: &[AgentEntry] = &[
         skills: None,
         subagents: None,
         scripts: None,
+        instruction_file: Some("AGENTS.md"),
     },
 ];
 
@@ -485,6 +627,228 @@ mod tests {
     #[test]
     fn test_all_agents_count() {
         assert_eq!(all_agents().len(), 18);
+    }
+
+    #[test]
+    fn test_instruction_file_claude() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = instruction_file(temp_dir.path(), "claude").unwrap();
+        assert!(path.is_some());
+        assert_eq!(path.unwrap(), temp_dir.path().join("CLAUDE.md"));
+    }
+
+    #[test]
+    fn test_instruction_file_gemini() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = instruction_file(temp_dir.path(), "gemini").unwrap();
+        assert!(path.is_some());
+        assert_eq!(path.unwrap(), temp_dir.path().join("GEMINI.md"));
+    }
+
+    #[test]
+    fn test_instruction_file_cursor_agent() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = instruction_file(temp_dir.path(), "cursor-agent").unwrap();
+        assert!(path.is_some());
+        assert_eq!(path.unwrap(), temp_dir.path().join("AGENTS.md"));
+    }
+
+    #[test]
+    fn test_instruction_file_copilot() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = instruction_file(temp_dir.path(), "copilot").unwrap();
+        assert!(path.is_none());
+    }
+
+    #[test]
+    fn test_instruction_file_invalid_agent() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = instruction_file(temp_dir.path(), "invalid-agent");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DeployError::AgentNotFound(_)));
+    }
+
+    #[test]
+    fn test_agent_has_instruction_file_claude() {
+        assert!(agent_has_instruction_file("claude"));
+    }
+
+    #[test]
+    fn test_agent_has_instruction_file_gemini() {
+        assert!(agent_has_instruction_file("gemini"));
+    }
+
+    #[test]
+    fn test_agent_has_instruction_file_copilot() {
+        assert!(!agent_has_instruction_file("copilot"));
+    }
+
+    #[test]
+    fn test_agent_has_instruction_file_invalid() {
+        assert!(!agent_has_instruction_file("invalid-agent"));
+    }
+
+    #[test]
+    fn test_instruction_file_agents() {
+        let agents = instruction_file_agents();
+        assert!(!agents.is_empty());
+
+        let claude = agents.iter().find(|a| a.name == "Claude Code");
+        assert!(claude.is_some());
+        assert!(claude.unwrap().instruction_file.is_some());
+
+        let copilot = agents.iter().find(|a| a.name == "GitHub Copilot");
+        assert!(copilot.is_none());
+    }
+
+    #[test]
+    fn test_resolve_instruction_file_none_prefers_agents_md() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("AGENTS.md"), "# AGENTS.md content").unwrap();
+
+        let path = resolve_instruction_file(temp_dir.path(), None).unwrap();
+        assert_eq!(path, temp_dir.path().join("AGENTS.md"));
+    }
+
+    #[test]
+    fn test_resolve_instruction_file_none_fallback_to_claude() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("CLAUDE.md"), "# CLAUDE.md content").unwrap();
+
+        let path = resolve_instruction_file(temp_dir.path(), None).unwrap();
+        assert_eq!(path, temp_dir.path().join("CLAUDE.md"));
+    }
+
+    #[test]
+    fn test_resolve_instruction_file_none_fallback_to_gemini() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("GEMINI.md"), "# GEMINI.md content").unwrap();
+
+        let path = resolve_instruction_file(temp_dir.path(), None).unwrap();
+        assert_eq!(path, temp_dir.path().join("GEMINI.md"));
+    }
+
+    #[test]
+    fn test_resolve_instruction_file_none_default() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = resolve_instruction_file(temp_dir.path(), None).unwrap();
+        assert_eq!(path, temp_dir.path().join("AGENTS.md"));
+    }
+
+    #[test]
+    fn test_resolve_instruction_file_claude_existing() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("CLAUDE.md"), "# CLAUDE.md content").unwrap();
+
+        let path = resolve_instruction_file(temp_dir.path(), Some("claude")).unwrap();
+        assert_eq!(path, temp_dir.path().join("CLAUDE.md"));
+    }
+
+    #[test]
+    fn test_resolve_instruction_file_claude_fallback_to_agents_md() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("AGENTS.md"), "# AGENTS.md content").unwrap();
+
+        let path = resolve_instruction_file(temp_dir.path(), Some("claude")).unwrap();
+        assert_eq!(path, temp_dir.path().join("AGENTS.md"));
+    }
+
+    #[test]
+    fn test_resolve_instruction_file_claude_no_file_exists() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let path = resolve_instruction_file(temp_dir.path(), Some("claude")).unwrap();
+        assert_eq!(path, temp_dir.path().join("CLAUDE.md"));
+    }
+
+    #[test]
+    fn test_resolve_instruction_file_gemini_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("AGENTS.md"), "# AGENTS.md content").unwrap();
+
+        let path = resolve_instruction_file(temp_dir.path(), Some("gemini")).unwrap();
+        assert_eq!(path, temp_dir.path().join("AGENTS.md"));
+    }
+
+    #[test]
+    fn test_resolve_instruction_file_copilot_unsupported() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = resolve_instruction_file(temp_dir.path(), Some("copilot"));
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            DeployError::UnsupportedConcept { .. }
+        ));
+    }
+
+    #[test]
+    fn test_resolve_instruction_file_invalid_agent() {
+        let temp_dir = TempDir::new().unwrap();
+        let result = resolve_instruction_file(temp_dir.path(), Some("invalid-agent"));
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DeployError::AgentNotFound(_)));
+    }
+
+    #[test]
+    fn test_instruction_file_with_override_absolute() {
+        let temp_dir = TempDir::new().unwrap();
+        let override_path = Path::new("/absolute/path/to/file.md");
+
+        let path =
+            instruction_file_with_override(temp_dir.path(), None, Some(override_path)).unwrap();
+        assert_eq!(path, PathBuf::from("/absolute/path/to/file.md"));
+    }
+
+    #[test]
+    fn test_instruction_file_with_override_relative() {
+        let temp_dir = TempDir::new().unwrap();
+        let override_path = Path::new("custom/path.md");
+
+        let path =
+            instruction_file_with_override(temp_dir.path(), None, Some(override_path)).unwrap();
+        assert_eq!(path, temp_dir.path().join("custom/path.md"));
+    }
+
+    #[test]
+    fn test_instruction_file_with_override_none() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("AGENTS.md"), "# AGENTS.md content").unwrap();
+
+        let path = instruction_file_with_override(temp_dir.path(), None, None).unwrap();
+        assert_eq!(path, temp_dir.path().join("AGENTS.md"));
+    }
+
+    #[test]
+    fn test_instruction_file_with_override_agent() {
+        let temp_dir = TempDir::new().unwrap();
+        fs::write(temp_dir.path().join("CLAUDE.md"), "# CLAUDE.md content").unwrap();
+
+        let path = instruction_file_with_override(temp_dir.path(), Some("claude"), None).unwrap();
+        assert_eq!(path, temp_dir.path().join("CLAUDE.md"));
+    }
+
+    #[test]
+    fn test_agent_fields_include_instruction_file() {
+        let config = agent("claude").unwrap();
+        assert_eq!(config.name, "Claude Code");
+        assert_eq!(config.commands_dir, ".claude/commands");
+        assert_eq!(config.instruction_file, Some("CLAUDE.md".to_string()));
+    }
+
+    #[test]
+    fn test_agent_fields_gemini_instruction_file() {
+        let config = agent("gemini").unwrap();
+        assert_eq!(config.name, "Google Gemini");
+        assert_eq!(config.instruction_file, Some("GEMINI.md".to_string()));
+    }
+
+    #[test]
+    fn test_agent_fields_copilot_no_instruction_file() {
+        let config = agent("copilot").unwrap();
+        assert_eq!(config.name, "GitHub Copilot");
+        assert_eq!(config.instruction_file, None);
     }
 
     #[test]

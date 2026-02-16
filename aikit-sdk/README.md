@@ -10,6 +10,7 @@ This crate holds the full agent catalog with per-agent capabilities (commands, s
 
 - **Complete Agent Catalog**: All 18 supported agents including their capabilities
 - **Path Resolution**: Resolves target paths per agent and concept
+- **Instruction File Resolution**: Resolve project-level instruction files (CLAUDE.md, GEMINI.md, AGENTS.md) with deterministic precedence
 - **File Deployment**: Creates directories and writes files for commands, skills, and subagents
 - **Error Handling**: Clear error types when concepts are unsupported
 - **Filename Conventions**: Proper filename formats per agent type
@@ -68,6 +69,60 @@ let skill_dir = skill_dir(project_root, "claude", "my-skill")?;
 // Subagent path (only if agent supports subagents)
 let subagent_path = subagent_path(project_root, "claude", "my-agent")?;
 ```
+
+### Instruction File Resolution
+
+Instruction files are project-root files used for agent guidance (e.g., `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`).
+
+```rust
+// Direct lookup: Get the primary instruction file for an agent
+let claude_md = instruction_file(project_root, "claude")?;
+// Returns Some(project_root/CLAUDE.md) for claude
+
+// Check if an agent supports instruction files
+if agent_has_instruction_file("claude") {
+    println!("Claude supports instruction files");
+}
+
+// Get all agents that support instruction files
+let agents = instruction_file_agents();
+
+// Auto-resolve: Find the best instruction file with fallback logic
+let resolved = resolve_instruction_file(project_root, None)?;
+// Scans for AGENTS.md, CLAUDE.md, GEMINI.md in order
+
+// With specific agent
+let resolved = resolve_instruction_file(project_root, Some("claude"))?;
+// Returns CLAUDE.md if exists, else AGENTS.md, else CLAUDE.md path for creation
+
+// With override path (takes precedence)
+let override_path = Path::new("custom/instructions.md");
+let resolved = instruction_file_with_override(project_root, Some("claude"), Some(override_path))?;
+```
+
+**Instruction File Support Table:**
+
+| Agent Key | Name | Primary Instruction File | Fallback |
+|-----------|------|-------------------------|----------|
+| claude | Claude Code | CLAUDE.md | AGENTS.md |
+| gemini | Google Gemini | GEMINI.md | AGENTS.md |
+| cursor-agent | Cursor | AGENTS.md | - |
+| codex | Codex CLI | AGENTS.md | - |
+| newton | Newton | AGENTS.md | - |
+| qwen | Qwen Code | AGENTS.md | - |
+| opencode | opencode | AGENTS.md | - |
+| windsurf | Windsurf | AGENTS.md | - |
+| kilocode | Kilo Code | AGENTS.md | - |
+| auggie | Auggie CLI | AGENTS.md | - |
+| roo | Roo Code | AGENTS.md | - |
+| codebuddy | CodeBuddy CLI | AGENTS.md | - |
+| qoder | Qoder CLI | AGENTS.md | - |
+| amp | Amp | AGENTS.md | - |
+| shai | SHAI | AGENTS.md | - |
+| q | Amazon Q Developer | AGENTS.md | - |
+| bob | IBM Bob | AGENTS.md | - |
+| copilot | GitHub Copilot | Not supported | - |
+
 
 ### Deployment
 
@@ -189,6 +244,13 @@ pub enum DeployError {
     AgentNotFound(String),
     UnsupportedConcept { agent_key: String, concept: DeployConcept },
     Io(std::io::Error),
+}
+
+pub enum DeployConcept {
+    Command,
+    Skill,
+    Subagent,
+    InstructionFile,
 }
 ```
 
