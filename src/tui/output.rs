@@ -15,10 +15,13 @@ impl TreeItem {
     }
 }
 
-/// Format tree structure (stub implementation)
-pub fn format_tree(_items: &[TreeItem]) -> String {
-    // TODO: Implement tree formatting
-    "Tree display not implemented".to_string()
+/// Format tree structure
+pub fn format_tree(items: &[TreeItem]) -> String {
+    items
+        .iter()
+        .map(|item| item.label.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Format panel (stub implementation)
