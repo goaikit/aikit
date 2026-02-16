@@ -171,10 +171,14 @@ Raises an exception if the agent is not runnable or the process fails to start.
 import aikit_py
 
 # Check if a specific agent is available
-if aikit_py.is_agent_available_py("claude"):
+if aikit_py.is_agent_available("claude"):
     print("Claude is installed and ready to run")
 else:
     print("Claude is not available")
+
+# Compatibility alias (same behavior)
+if aikit_py.is_agent_available_py("claude"):
+    print("Claude is installed and ready to run")
 ```
 
 ### List Installed Agents
@@ -182,10 +186,13 @@ else:
 ```python
 import aikit_py
 
-# Get all installed runnable agents
-installed = aikit_py.get_installed_agents_py()
+# Get all installed runnable agents (sorted alphabetically)
+installed = aikit_py.get_installed_agents()
 print(f"Installed agents: {installed}")
-# Output: ['claude', 'gemini', 'opencode']
+# Output: ['agent', 'claude', 'codex', 'gemini', 'opencode']
+
+# Compatibility alias (same behavior)
+installed_py = aikit_py.get_installed_agents_py()
 ```
 
 ### Get Detailed Agent Status
@@ -194,19 +201,40 @@ print(f"Installed agents: {installed}")
 import aikit_py
 
 # Get status for all runnable agents
-status = aikit_py.get_agent_status_py()
+status = aikit_py.get_agent_status()
 for agent_key, agent_status in status.items():
-    print(f"{agent_key}: {'Available' if agent_status.available else 'Not available'}")
-    if agent_status.reason:
-        print(f"  Reason: {agent_status.reason}")
+    print(f"{agent_key}: {'Available' if agent_status['available'] else 'Not available'}")
+    if agent_status['reason']:
+        print(f"  Reason: {agent_status['reason']}")
+
+# Compatibility alias (same behavior)
+status_py = aikit_py.get_agent_status_py()
 ```
 
-### PyAgentStatus Structure
+### Agent Status Structure
 
-The `PyAgentStatus` class provides availability information:
+Agent status is returned as a dictionary with the following structure:
 
-- `available: bool` - Whether the agent is installed and runnable
-- `reason: Optional[str]` - Optional explanation if not available
+```python
+{
+    "agent_key": {
+        "available": bool,       # Whether the agent is installed and runnable
+        "reason": Optional[str]  # Optional explanation if not available
+    }
+}
+```
+
+The `reason` field contains one of the following values when unavailable:
+- `"not_runnable"` - Agent is not in runnable_agents list
+- `"binary_not_found"` - Binary not found in PATH
+- `"version_check_failed"` - Binary found but --version failed
+- `"timed_out"` - Probe timed out (1500ms timeout)
+
+**Detection behavior**:
+- Detection is bounded by a 1500ms timeout per binary probe
+- The `opencode` agent checks multiple binary candidates: `opencode` and `opencode-desktop`
+- Status is returned in deterministic order (sorted by agent key)
+- Only runnable agents are included in the status map
 
 ## API Overview
 
