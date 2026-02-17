@@ -23,6 +23,7 @@ pub enum PyDeployConcept {
     Command,
     Skill,
     Subagent,
+    InstructionFile,
 }
 
 impl From<DeployConcept> for PyDeployConcept {
@@ -31,6 +32,7 @@ impl From<DeployConcept> for PyDeployConcept {
             DeployConcept::Command => PyDeployConcept::Command,
             DeployConcept::Skill => PyDeployConcept::Skill,
             DeployConcept::Subagent => PyDeployConcept::Subagent,
+            DeployConcept::InstructionFile => PyDeployConcept::InstructionFile,
         }
     }
 }
@@ -41,6 +43,7 @@ impl From<PyDeployConcept> for DeployConcept {
             PyDeployConcept::Command => DeployConcept::Command,
             PyDeployConcept::Skill => DeployConcept::Skill,
             PyDeployConcept::Subagent => DeployConcept::Subagent,
+            PyDeployConcept::InstructionFile => DeployConcept::InstructionFile,
         }
     }
 }
@@ -58,6 +61,8 @@ pub struct PyAgentConfig {
     pub agents_dir: Option<String>,
     #[pyo3(get)]
     pub scripts_dir: Option<String>,
+    #[pyo3(get)]
+    pub instruction_file: Option<String>,
 }
 
 #[pyclass(from_py_object)]
@@ -88,6 +93,7 @@ impl From<AgentConfig> for PyAgentConfig {
             skills_dir: config.skills_dir,
             agents_dir: config.agents_dir,
             scripts_dir: config.scripts_dir,
+            instruction_file: config.instruction_file,
         }
     }
 }
@@ -111,6 +117,7 @@ impl PyAgentConfig {
             skills_dir: self.skills_dir.clone(),
             agents_dir: self.agents_dir.clone(),
             scripts_dir: self.scripts_dir.clone(),
+            instruction_file: self.instruction_file.clone(),
         }
         .key()
     }

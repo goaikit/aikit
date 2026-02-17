@@ -291,6 +291,54 @@ arg_placeholder = "{args}"
 extensions = [".json", ".md"]
 ```
 
+## Instruction File Conventions
+
+Each AI agent can have a project-level instruction file that provides guidance for the agent's behavior. These files are typically placed at the project root.
+
+### Instruction File Support Table
+
+| Agent | Primary Instruction File | Fallback | Notes |
+|-------|-------------------------|----------|-------|
+| Claude Code | `CLAUDE.md` | `AGENTS.md` | Main configuration for Claude |
+| Google Gemini | `GEMINI.md` | `AGENTS.md` | Gemini-specific instructions |
+| Cursor | `AGENTS.md` | - | Universal instruction file |
+| Codex CLI | `AGENTS.md` | - | Universal instruction file |
+| Newton | `AGENTS.md` | - | Universal instruction file |
+| Qwen Code | `AGENTS.md` | - | Universal instruction file |
+| OpenCode | `AGENTS.md` | - | Universal instruction file |
+| Windsurf | `AGENTS.md` | - | Universal instruction file |
+| Kilo Code | `AGENTS.md` | - | Universal instruction file |
+| Auggie CLI | `AGENTS.md` | - | Universal instruction file |
+| Roo Code | `AGENTS.md` | - | Universal instruction file |
+| CodeBuddy CLI | `AGENTS.md` | - | Universal instruction file |
+| Qoder CLI | `AGENTS.md` | - | Universal instruction file |
+| Amp | `AGENTS.md` | - | Universal instruction file |
+| SHAI | `AGENTS.md` | - | Universal instruction file |
+| Amazon Q Developer | `AGENTS.md` | - | Universal instruction file |
+| IBM Bob | `AGENTS.md` | - | Universal instruction file |
+| GitHub Copilot | Not supported | - | Directory-based `.github/agents/*.md` model |
+
+### Instruction File Precedence
+
+When resolving instruction files, AIKit follows this precedence order:
+
+1. **With specific agent** (e.g., `claude`):
+   - Primary instruction file (e.g., `CLAUDE.md`)
+   - Universal fallback: `AGENTS.md`
+   - If neither exists, returns the primary file path for creation
+
+2. **Without agent specification**:
+   - `AGENTS.md` (checked first)
+   - `CLAUDE.md`
+   - `GEMINI.md`
+   - Inferred from installed agents
+   - Default: `AGENTS.md`
+
+### Instruction Files vs Skills
+
+- **Instruction Files** (`CLAUDE.md`, `AGENTS.md`, etc.): Project-level configuration that provides overall guidance to the agent. Located at the project root.
+- **Skills** (`SKILL.md`): Reusable functionality packages that can be deployed to agents. Located in agent-specific directories like `.claude/skills/`.
+
 ## Advanced Agent Configurations
 
 ### Multi-Agent Project Setup
