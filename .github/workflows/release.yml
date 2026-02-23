@@ -502,12 +502,10 @@ NOTES
   commit-package-manager-updates:
     name: Commit Package Manager Updates
     needs:
-      [
-        verify-version,
-        update-package-managers,
-        validate-homebrew-macos-arm64,
-        validate-homebrew-macos-intel,
-      ]
+      - verify-version
+      - update-package-managers
+      - validate-homebrew-macos-arm64
+      - validate-homebrew-macos-intel
     runs-on: ubuntu-latest
     permissions:
       contents: write
