@@ -1,11 +1,11 @@
 name: 'Update Homebrew Formula'
-description: 'Update Homebrew formula with new version and binary URLs/hashes'
+description: 'Generate and validate Homebrew formula for a release version'
 inputs:
   version:
     description: 'New version to update to'
     required: true
   gh_token:
-    description: 'GitHub token for git operations'
+    description: 'GitHub token for gh API operations'
     required: true
   formula_path:
     description: 'Path to the formula file'
@@ -22,69 +22,39 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Update Homebrew formula
+    - name: Generate Homebrew formula
+      shell: bash
+      run: |
+        HOMEBREW_REPO="${{ inputs.repo_path }}"
+
+        if [ ! -d "$HOMEBREW_REPO" ]; then
+          echo "❌ $HOMEBREW_REPO repository not checked out"
+          exit 1
+        fi
+
+        cd "$HOMEBREW_REPO"
+        chmod +x generate_formula.sh
+        ./generate_formula.sh --version "${{ inputs.version }}"
+      env:
+        GH_TOKEN: ${{ inputs.gh_token }}
+
+    - name: Validate generated Homebrew formula
       shell: bash
       run: |
         HOMEBREW_REPO="${{ inputs.repo_path }}"
         FORMULA_PATH="${{ inputs.formula_path }}"
+        VERSION="${{ inputs.version }}"
 
-        if [ ! -d "$HOMEBREW_REPO" ]; then
-          echo "⚠️  $HOMEBREW_REPO repository not checked out, skipping Homebrew update"
-          exit 0
-        fi
+        cd "$HOMEBREW_REPO"
 
-        cd $HOMEBREW_REPO
+        [ -f "$FORMULA_PATH" ] || { echo "❌ Formula file missing: $FORMULA_PATH"; exit 1; }
+        grep -q "version \"$VERSION\"" "$FORMULA_PATH" || { echo "❌ Formula version mismatch: expected $VERSION"; exit 1; }
 
-        # Make script executable
-        chmod +x generate_formula.sh
+        grep -q 'aikit-aarch64-apple-darwin.tar.gz' "$FORMULA_PATH" || { echo "❌ Missing macOS arm64 URL"; exit 1; }
+        grep -q 'aikit-x86_64-apple-darwin.tar.gz' "$FORMULA_PATH" || { echo "❌ Missing macOS x86_64 URL"; exit 1; }
+        grep -q 'aikit-x86_64-unknown-linux-gnu.tar.gz' "$FORMULA_PATH" || { echo "❌ Missing Linux GNU URL"; exit 1; }
+        grep -q 'aikit-x86_64-unknown-linux-musl.tar.gz' "$FORMULA_PATH" || { echo "❌ Missing Linux MUSL URL"; exit 1; }
 
-        # Run script with version
-        ./generate_formula.sh --version "${{ inputs.version }}"
-
-        echo "✅ Homebrew formula updated to version ${{ inputs.version }}"
-      env:
-        GH_TOKEN: ${{ inputs.gh_token }}
-
-    - name: Validate Homebrew formula
-      shell: bash
-      run: |
-        if [ ! -d "${{ inputs.repo_path }}" ]; then
-          echo "⚠️  ${{ inputs.repo_path }} repository not checked out, skipping validation"
-          exit 0
-        fi
-
-        echo "Validating Homebrew formula..."
-        cd ${{ inputs.repo_path }}
-        brew audit --strict ${{ inputs.formula_path }} || echo "Warning: Formula validation failed, but continuing..."
-
-    - name: Commit and push Homebrew changes
-      shell: bash
-      run: |
-        if [ ! -d "${{ inputs.repo_path }}" ]; then
-          echo "❌ ${{ inputs.repo_path }} repository not checked out"
-          exit 1
-        fi
-
-        cd ${{ inputs.repo_path }}
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "github-actions[bot]@users.noreply.github.com"
-
-        # Configure git to use token
-        git remote set-url origin https://${{ inputs.gh_token }}@github.com/goaikit/homebrew-cli.git
-
-        if git diff --quiet; then
-          echo "No changes to commit for Homebrew"
-        else
-          git add ${{ inputs.formula_path }}
-          git commit -m "Update ${{ inputs.formula_name }} to version ${{ inputs.version }}"
-          git push origin HEAD:refs/heads/main
-
-          # Verify push succeeded
-          if [ $? -ne 0 ]; then
-            echo "❌ Failed to push Homebrew changes"
-            exit 1
-          fi
-          echo "✅ Homebrew formula updated and pushed"
-        fi
+        echo "✅ Homebrew formula validated for version $VERSION"
       env:
         GH_TOKEN: ${{ inputs.gh_token }}

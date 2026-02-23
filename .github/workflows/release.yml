@@ -49,7 +49,6 @@ jobs:
           TAG_VER="${{ steps.detect-version.outputs.version }}"
           CARGO_VER="${{ steps.cargo-version.outputs.cargo-version }}"
 
-          # Skip version verification for test/pre-release tags (containing hyphens)
           if [[ "$TAG_VER" == *"-"* ]]; then
             echo "⚠️  Skipping version verification for pre-release tag: $TAG_VER"
             echo "Cargo.toml version: $CARGO_VER"
@@ -63,7 +62,7 @@ jobs:
           fi
 
   build:
-    name: Build ${{ matrix.os }} binary
+    name: Build ${{ matrix.target }}
     needs: verify-version
     runs-on: ${{ matrix.os }}
     strategy:
@@ -74,21 +73,27 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary-name: aikit
             archive-format: tar.gz
-            archive-name: aikit-x86_64-unknown-linux-gnu.tar.gz
             use-cross: false
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             binary-name: aikit
             archive-format: tar.gz
-            archive-name: aikit-x86_64-unknown-linux-musl.tar.gz
             use-cross: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary-name: aikit
             archive-format: zip
-            archive-name: aikit-x86_64-pc-windows-msvc.zip
             use-cross: false
-
+          - os: macos-14
+            target: aarch64-apple-darwin
+            binary-name: aikit
+            archive-format: tar.gz
+            use-cross: false
+          - os: macos-13
+            target: x86_64-apple-darwin
+            binary-name: aikit
+            archive-format: tar.gz
+            use-cross: false
 
     steps:
       - name: Checkout code
@@ -113,46 +118,54 @@ jobs:
     if: always() && needs.verify-version.result == 'success'
 
     steps:
-      - name: Download Linux artifact
+      - name: Download Linux GNU artifact
         uses: actions/download-artifact@v4
         with:
           name: aikit-x86_64-unknown-linux-gnu.tar.gz
           path: ./artifacts
-        continue-on-error: true
+
+      - name: Download Linux MUSL artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aikit-x86_64-unknown-linux-musl.tar.gz
+          path: ./artifacts
 
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
           name: aikit-x86_64-pc-windows-msvc.zip
           path: ./artifacts
-        continue-on-error: true
 
-      - name: Download Linux musl artifact
+      - name: Download macOS arm64 artifact
         uses: actions/download-artifact@v4
         with:
-          name: aikit-x86_64-unknown-linux-musl.tar.gz
+          name: aikit-aarch64-apple-darwin.tar.gz
           path: ./artifacts
-        continue-on-error: true
 
-      - name: Verify artifacts
+      - name: Download macOS x86_64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aikit-x86_64-apple-darwin.tar.gz
+          path: ./artifacts
+
+      - name: Assert all required artifacts exist
         run: |
-          echo "Checking artifacts..."
-          ls -lh ./artifacts/ || echo "No artifacts found"
-          if [ -f "./artifacts/aikit-x86_64-unknown-linux-gnu.tar.gz" ]; then
-            echo "✅ Linux (glibc) binary found"
-          else
-            echo "⚠️  Linux (glibc) binary missing"
-          fi
-          if [ -f "./artifacts/aikit-x86_64-unknown-linux-musl.tar.gz" ]; then
-            echo "✅ Linux (musl/static) binary found"
-          else
-            echo "⚠️  Linux (musl/static) binary missing"
-          fi
-          if [ -f "./artifacts/aikit-x86_64-pc-windows-msvc.zip" ]; then
-            echo "✅ Windows binary found"
-          else
-            echo "⚠️  Windows binary missing"
-          fi
+          REQUIRED=(
+            "aikit-x86_64-unknown-linux-gnu.tar.gz"
+            "aikit-x86_64-unknown-linux-musl.tar.gz"
+            "aikit-x86_64-pc-windows-msvc.zip"
+            "aikit-aarch64-apple-darwin.tar.gz"
+            "aikit-x86_64-apple-darwin.tar.gz"
+          )
+
+          ls -lh ./artifacts
+          for asset in "${REQUIRED[@]}"; do
+            if [ ! -f "./artifacts/$asset" ]; then
+              echo "❌ Missing required artifact: $asset"
+              exit 1
+            fi
+            echo "✅ Found required artifact: $asset"
+          done
 
       - name: Upload collected artifacts
         uses: actions/upload-artifact@v4
@@ -165,7 +178,7 @@ jobs:
     name: Create GitHub Release
     needs: [verify-version, collect-artifacts]
     runs-on: ubuntu-latest
-    if: always() && needs.verify-version.result == 'success'
+    if: needs.verify-version.result == 'success' && needs.collect-artifacts.result == 'success'
     permissions:
       contents: write
 
@@ -185,58 +198,34 @@ jobs:
       - name: Prepare file list for release
         id: prepare-files
         run: |
-          # Build newline-separated list of files (required by softprops/action-gh-release)
-          FILES=""
+          REQUIRED=(
+            "artifacts/aikit-x86_64-unknown-linux-gnu.tar.gz"
+            "artifacts/aikit-x86_64-unknown-linux-musl.tar.gz"
+            "artifacts/aikit-x86_64-pc-windows-msvc.zip"
+            "artifacts/aikit-aarch64-apple-darwin.tar.gz"
+            "artifacts/aikit-x86_64-apple-darwin.tar.gz"
+          )
 
-          if [ -f "artifacts/aikit-x86_64-unknown-linux-gnu.tar.gz" ]; then
-            FILES="artifacts/aikit-x86_64-unknown-linux-gnu.tar.gz"
-            echo "✅ Linux (glibc) artifact found"
-          else
-            echo "⚠️  Linux (glibc) artifact missing"
-          fi
+          for file in "${REQUIRED[@]}"; do
+            [ -f "$file" ] || { echo "❌ Required file missing for release upload: $file"; exit 1; }
+          done
 
-          if [ -f "artifacts/aikit-x86_64-unknown-linux-musl.tar.gz" ]; then
-            if [ -n "$FILES" ]; then
-              FILES="$FILES"$'\n'"artifacts/aikit-x86_64-unknown-linux-musl.tar.gz"
-            else
-              FILES="artifacts/aikit-x86_64-unknown-linux-musl.tar.gz"
-            fi
-            echo "✅ Linux (musl/static) artifact found"
-          else
-            echo "⚠️  Linux (musl/static) artifact missing"
-          fi
-
-          if [ -f "artifacts/aikit-x86_64-pc-windows-msvc.zip" ]; then
-            if [ -n "$FILES" ]; then
-              FILES="$FILES"$'\n'"artifacts/aikit-x86_64-pc-windows-msvc.zip"
-            else
-              FILES="artifacts/aikit-x86_64-pc-windows-msvc.zip"
-            fi
-            echo "✅ Windows artifact found"
-          else
-            echo "⚠️  Windows artifact missing"
-          fi
-
-          echo "Files to upload:"
-          echo "$FILES"
-
-          # Output as multiline string
-          echo "files<<EOF" >> $GITHUB_OUTPUT
-          echo "$FILES" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          {
+            echo "files<<EOF"
+            printf '%s\n' "${REQUIRED[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Delete existing releases if present
         continue-on-error: true
         run: |
           TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
 
-          # Delete from main repository
           echo "Checking for existing release ..."
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists, deleting it..."
             gh release delete "$TAG" --yes
             sleep 2
-            # Verify deletion
             if gh release view "$TAG" >/dev/null 2>&1; then
               echo "Warning: Release $TAG still exists in aikit repo after deletion attempt"
               exit 1
@@ -254,8 +243,6 @@ jobs:
         run: |
           VERSION="${{ needs.verify-version.outputs.version }}"
           TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
-
-          # Get previous tag
           PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
 
           if [ -n "$PREV_TAG" ]; then
@@ -268,31 +255,23 @@ jobs:
             echo "- Initial release" >> release_notes.md
           fi
 
-          echo "" >> release_notes.md
-          echo "## Installation" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "Download the pre-built binary for your platform:" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "### Linux" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "- **Linux (glibc)**: \`aikit-x86_64-unknown-linux-gnu.tar.gz\` - for FIPS/compliance environments requiring dynamic linking" >> release_notes.md
-          echo "- **Linux (musl/static)**: \`aikit-x86_64-unknown-linux-musl.tar.gz\` - universal compatibility, containers, CI/CD (works on Ubuntu 20.04+, RHEL 8+, Alpine, etc.)" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "**Which Linux binary should I use?**" >> release_notes.md
-          echo "- Use **musl** for maximum compatibility (containers, CI/CD, older distributions)" >> release_notes.md
-          echo "- Use **glibc** only if you require dynamic linking for FIPS or compliance reasons" >> release_notes.md
-          echo "" >> release_notes.md
+          cat >> release_notes.md <<'NOTES'
 
-          # Check if Windows artifact exists
-          if [ -f "artifacts/aikit-x86_64-pc-windows-msvc.zip" ]; then
-            echo "### Windows" >> release_notes.md
-            echo "" >> release_notes.md
-            echo "- **Windows**: \`aikit-x86_64-pc-windows-msvc.zip\`" >> release_notes.md
-          else
-            echo "### Windows" >> release_notes.md
-            echo "" >> release_notes.md
-            echo "- **Windows**: Not available in this release (build issue - see [Windows Build Issue](https://github.com/goaikit/aikit/blob/main/docs/WINDOWS_BUILD_ISSUE.md))" >> release_notes.md
-          fi
+## Installation
+
+Download the pre-built binary for your platform:
+
+### Linux
+- **Linux (glibc)**: `aikit-x86_64-unknown-linux-gnu.tar.gz` - for FIPS/compliance environments requiring dynamic linking
+- **Linux (musl/static)**: `aikit-x86_64-unknown-linux-musl.tar.gz` - universal compatibility, containers, CI/CD
+
+### macOS
+- **Apple Silicon (arm64)**: `aikit-aarch64-apple-darwin.tar.gz`
+- **Intel (x86_64)**: `aikit-x86_64-apple-darwin.tar.gz`
+
+### Windows
+- **Windows**: `aikit-x86_64-pc-windows-msvc.zip`
+NOTES
 
           cat release_notes.md
 
@@ -305,7 +284,7 @@ jobs:
           files: ${{ steps.prepare-files.outputs.files }}
           draft: true
           prerelease: false
-          fail_on_unmatched_files: false
+          fail_on_unmatched_files: true
           generate_release_notes: false
 
       - name: Publish release (remove draft status)
@@ -318,13 +297,14 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   update-package-managers:
-    name: Update Package Managers
+    name: Prepare Package Manager Updates
     needs: [verify-version, create-release]
     runs-on: ubuntu-latest
-    if: always() && needs.create-release.result == 'success'
+    if: needs.create-release.result == 'success'
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+    outputs:
+      version: ${{ steps.release-info.outputs.version }}
 
     steps:
       - name: Checkout code
@@ -346,9 +326,7 @@ jobs:
             echo "❌ Failed to generate GitHub App token"
             exit 1
           fi
-          echo "✅ GitHub App token generated successfully"
-          # Verify token has required permissions
-          gh auth status --hostname github.com || exit 1
+          gh auth status --hostname github.com
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
@@ -371,132 +349,219 @@ jobs:
           path: scoop-bucket
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Get release metadata
+      - name: Validate release metadata contract
         id: release-info
         run: |
           TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
-          echo "Getting release metadata for $TAG"
-
-          # Get release assets from the newly created release
+          VERSION="${{ needs.verify-version.outputs.version }}"
           ASSETS=$(gh release view "$TAG" --repo ${{ github.repository }} --json assets --jq '.assets')
 
-          echo "version=${{ needs.verify-version.outputs.version }}" >> $GITHUB_OUTPUT
+          required_assets=(
+            "aikit-x86_64-unknown-linux-gnu.tar.gz"
+            "aikit-x86_64-unknown-linux-musl.tar.gz"
+            "aikit-x86_64-pc-windows-msvc.zip"
+            "aikit-aarch64-apple-darwin.tar.gz"
+            "aikit-x86_64-apple-darwin.tar.gz"
+          )
 
-          # Linux GNU
-          LINUX_GNU_URL=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-unknown-linux-gnu.tar.gz") | .browser_download_url')
-          LINUX_GNU_HASH=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-unknown-linux-gnu.tar.gz") | .digest' | sed 's/sha256://')
-          echo "linux_gnu_url=$LINUX_GNU_URL" >> $GITHUB_OUTPUT
-          echo "linux_gnu_hash=$LINUX_GNU_HASH" >> $GITHUB_OUTPUT
-
-          # Linux MUSL
-          LINUX_MUSL_URL=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-unknown-linux-musl.tar.gz") | .browser_download_url')
-          LINUX_MUSL_HASH=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-unknown-linux-musl.tar.gz") | .digest' | sed 's/sha256://')
-          echo "linux_musl_url=$LINUX_MUSL_URL" >> $GITHUB_OUTPUT
-          echo "linux_musl_hash=$LINUX_MUSL_HASH" >> $GITHUB_OUTPUT
-
-          # Windows
-          # browser_download_url can be null, so construct it from the release if needed
-          WINDOWS_ASSET=$(echo $ASSETS | jq -r '.[] | select(.name == "aikit-x86_64-pc-windows-msvc.zip")')
-          if [ -n "$WINDOWS_ASSET" ]; then
-            WINDOWS_URL=$(echo $WINDOWS_ASSET | jq -r '.browser_download_url // empty')
-            # If browser_download_url is null, construct it from the release tag
-            if [ -z "$WINDOWS_URL" ] || [ "$WINDOWS_URL" = "null" ]; then
-              RELEASE_TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
-              WINDOWS_URL="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/aikit-x86_64-pc-windows-msvc.zip"
-              echo "⚠️  browser_download_url was null, constructed URL: $WINDOWS_URL"
+          for asset in "${required_assets[@]}"; do
+            count=$(echo "$ASSETS" | jq -r --arg name "$asset" '[.[] | select(.name == $name)] | length')
+            if [ "$count" -ne 1 ]; then
+              echo "❌ Expected exactly one asset named $asset, found $count"
+              exit 1
             fi
-            WINDOWS_HASH=$(echo $WINDOWS_ASSET | jq -r '.digest' | sed 's/sha256://')
-          else
-            WINDOWS_URL=""
-            WINDOWS_HASH=""
-            echo "⚠️  Warning: Windows asset not found in release"
-          fi
-          echo "windows_url=$WINDOWS_URL" >> $GITHUB_OUTPUT
-          echo "windows_hash=$WINDOWS_HASH" >> $GITHUB_OUTPUT
 
-          echo "Release metadata extracted successfully"
+            url=$(echo "$ASSETS" | jq -r --arg name "$asset" '.[] | select(.name == $name) | .browser_download_url')
+            digest=$(echo "$ASSETS" | jq -r --arg name "$asset" '.[] | select(.name == $name) | .digest')
+
+            if [ -z "$url" ] || [ "$url" = "null" ]; then
+              echo "❌ Missing browser_download_url for $asset"
+              exit 1
+            fi
+            if [ -z "$digest" ] || [ "$digest" = "null" ] || [[ "$digest" != sha256:* ]]; then
+              echo "❌ Missing valid sha256 digest for $asset"
+              exit 1
+            fi
+
+            echo "✅ Asset metadata valid: $asset"
+          done
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      - name: Update Homebrew formula
-        if: success() || failure()
-        run: |
-          cd homebrew-cli
-
-          # Make script executable
-          chmod +x generate_formula.sh
-
-          # Run script with version from release
-          VERSION="${{ steps.release-info.outputs.version }}"
-          ./generate_formula.sh --version "$VERSION"
-
-          # Verify formula was updated
-          if ! grep -q "version \"$VERSION\"" Formula/aikit.rb; then
-            echo "❌ Formula version not updated correctly"
-            exit 1
-          fi
-
-          echo "✅ Homebrew formula updated to version $VERSION"
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Update Homebrew formula (strict)
+        uses: ./.github/actions/update-homebrew
+        with:
+          version: ${{ steps.release-info.outputs.version }}
+          gh_token: ${{ steps.app-token.outputs.token }}
+          repo_path: homebrew-cli
 
       - name: Update Scoop bucket
-        if: success() || failure()
         run: |
           cd scoop-bucket
-
-          # Make script executable
           chmod +x generate_manifest.sh
 
-          # Run script with version from release
           VERSION="${{ steps.release-info.outputs.version }}"
           ./generate_manifest.sh --version "$VERSION"
 
-          # Verify manifest was updated
           if ! jq -e ".version == \"$VERSION\"" bucket/aikit.json > /dev/null; then
             echo "❌ Manifest version not updated correctly"
             exit 1
           fi
 
-          echo "✅ Scoop manifest updated to version $VERSION"
+          jq . bucket/aikit.json > /dev/null
+          echo "✅ Scoop manifest updated and validated"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      - name: Validate Homebrew formula
-        run: |
-          echo "Validating Homebrew formula..."
-          cd homebrew-cli
-          brew audit --strict Formula/aikit.rb || echo "Warning: Formula validation failed, but continuing..."
+  validate-homebrew-macos-arm64:
+    name: Validate Homebrew Install (macOS arm64)
+    needs: [verify-version, update-package-managers]
+    runs-on: macos-14
 
-      - name: Validate Scoop bucket
-        if: success() || failure()
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: goaikit
+
+      - name: Checkout homebrew-cli repo
+        uses: actions/checkout@v4
+        with:
+          repository: goaikit/homebrew-cli
+          path: homebrew-cli
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Generate formula for target release
         run: |
-          if [ ! -d "scoop-bucket" ]; then
-            echo "⚠️  scoop-bucket repository not checked out, skipping validation"
-            exit 0
-          fi
-          echo "Validating Scoop bucket..."
+          cd homebrew-cli
+          chmod +x generate_formula.sh
+          ./generate_formula.sh --version "${{ needs.verify-version.outputs.version }}"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Run brew audit
+        run: |
+          cd homebrew-cli
+          brew audit --strict Formula/aikit.rb
+
+      - name: Install and verify version
+        run: |
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          brew install --formula ./homebrew-cli/Formula/aikit.rb
+          INSTALLED="$(aikit --version)"
+          echo "Installed version output: $INSTALLED"
+          [[ "$INSTALLED" == *"$VERSION"* ]]
+
+  validate-homebrew-macos-intel:
+    name: Validate Homebrew Install (macOS x86_64)
+    needs: [verify-version, update-package-managers]
+    runs-on: macos-13
+
+    steps:
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: goaikit
+
+      - name: Checkout homebrew-cli repo
+        uses: actions/checkout@v4
+        with:
+          repository: goaikit/homebrew-cli
+          path: homebrew-cli
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Generate formula for target release
+        run: |
+          cd homebrew-cli
+          chmod +x generate_formula.sh
+          ./generate_formula.sh --version "${{ needs.verify-version.outputs.version }}"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Run brew audit
+        run: |
+          cd homebrew-cli
+          brew audit --strict Formula/aikit.rb
+
+      - name: Install and verify version
+        run: |
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          brew install --formula ./homebrew-cli/Formula/aikit.rb
+          INSTALLED="$(aikit --version)"
+          echo "Installed version output: $INSTALLED"
+          [[ "$INSTALLED" == *"$VERSION"* ]]
+
+  commit-package-manager-updates:
+    name: Commit Package Manager Updates
+    needs:
+      [
+        verify-version,
+        update-package-managers,
+        validate-homebrew-macos-arm64,
+        validate-homebrew-macos-intel,
+      ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
+
+      - name: Generate GitHub App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: goaikit
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Checkout homebrew-cli repo
+        uses: actions/checkout@v4
+        with:
+          repository: goaikit/homebrew-cli
+          path: homebrew-cli
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Checkout scoop-bucket repo
+        uses: actions/checkout@v4
+        with:
+          repository: goaikit/scoop-bucket
+          path: scoop-bucket
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Regenerate Homebrew formula (strict)
+        uses: ./.github/actions/update-homebrew
+        with:
+          version: ${{ needs.verify-version.outputs.version }}
+          gh_token: ${{ steps.app-token.outputs.token }}
+          repo_path: homebrew-cli
+
+      - name: Regenerate Scoop manifest
+        run: |
           cd scoop-bucket
-          # Try common locations for scoop bucket files
-          if [ -f "bucket/aikit.json" ]; then
-            jq . bucket/aikit.json > /dev/null && echo "Scoop bucket JSON is valid"
-          elif [ -f "aikit.json" ]; then
-            jq . aikit.json > /dev/null && echo "Scoop bucket JSON is valid"
-          else
-            echo "⚠️  aikit.json not found in scoop-bucket, skipping validation"
-            echo "Available files:"
-            find . -name "*.json" -type f | head -10
-            exit 0
-          fi
+          chmod +x generate_manifest.sh
+          VERSION="${{ needs.verify-version.outputs.version }}"
+          ./generate_manifest.sh --version "$VERSION"
+          jq -e ".version == \"$VERSION\"" bucket/aikit.json > /dev/null
 
       - name: Commit and push Homebrew changes
-        continue-on-error: true
         run: |
-          if [ ! -d "homebrew-cli" ]; then
-            echo "⚠️  homebrew-cli repository not checked out, skipping Homebrew push"
-            exit 0
-          fi
-
           cd homebrew-cli
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -504,20 +569,14 @@ jobs:
           if git diff --quiet; then
             echo "No changes to commit for Homebrew"
           else
-            git add Formula/aikit.rb
-            git commit -m "Update aikit to version ${{ steps.release-info.outputs.version }}"
+            git add Formula/aikit.rb README.md
+            git commit -m "Update aikit to version ${{ needs.verify-version.outputs.version }}"
             git push origin main
-            echo "Homebrew formula updated and pushed"
+            echo "✅ Homebrew formula updated and pushed"
           fi
 
       - name: Commit and push Scoop changes
-        continue-on-error: true
         run: |
-          if [ ! -d "scoop-bucket" ]; then
-            echo "⚠️  scoop-bucket repository not checked out, skipping Scoop push"
-            exit 0
-          fi
-
           cd scoop-bucket
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -526,7 +585,7 @@ jobs:
             echo "No changes to commit for Scoop"
           else
             git add bucket/aikit.json
-            git commit -m "Update aikit to version ${{ steps.release-info.outputs.version }}"
+            git commit -m "Update aikit to version ${{ needs.verify-version.outputs.version }}"
             git push origin main
-            echo "Scoop bucket updated and pushed"
+            echo "✅ Scoop bucket updated and pushed"
           fi

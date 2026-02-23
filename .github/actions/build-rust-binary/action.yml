@@ -187,6 +187,31 @@ runs:
         ${{ inputs.binary_name }}.exe --version
         \`\`\`
 
+        ### macOS
+
+        Two macOS binaries are available:
+
+        | Binary | Architecture |
+        |--------|--------------|
+        | \`${{ inputs.binary_name }}-aarch64-apple-darwin.tar.gz\` | Apple Silicon (M1/M2/M3/M4) |
+        | \`${{ inputs.binary_name }}-x86_64-apple-darwin.tar.gz\` | Intel |
+
+        \`\`\`bash
+        # Apple Silicon
+        tar -xzf ${{ inputs.binary_name }}-aarch64-apple-darwin.tar.gz
+        chmod +x ${{ inputs.binary_name }}
+        sudo mv ${{ inputs.binary_name }} /usr/local/bin/
+        ${{ inputs.binary_name }} --version
+        \`\`\`
+
+        \`\`\`bash
+        # Intel
+        tar -xzf ${{ inputs.binary_name }}-x86_64-apple-darwin.tar.gz
+        chmod +x ${{ inputs.binary_name }}
+        sudo mv ${{ inputs.binary_name }} /usr/local/bin/
+        ${{ inputs.binary_name }} --version
+        \`\`\`
+
         For more information, visit: $HOMEPAGE
         EOF
 
