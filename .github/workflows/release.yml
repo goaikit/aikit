@@ -347,11 +347,19 @@ NOTES
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Update Homebrew formula
-        uses: ./.github/actions/update-homebrew
-        with:
-          version: ${{ steps.release-info.outputs.version }}
-          gh_token: ${{ steps.app-token.outputs.token }}
-          repo_path: homebrew-cli
+        run: |
+          cd homebrew-cli
+          chmod +x generate_formula.sh
+          VERSION="${{ steps.release-info.outputs.version }}"
+          ./generate_formula.sh --version "$VERSION"
+
+          grep -q "version \"$VERSION\"" Formula/aikit.rb || { echo "Formula version mismatch"; exit 1; }
+          grep -q 'aikit-aarch64-apple-darwin.tar.gz' Formula/aikit.rb || { echo "Missing macOS arm64 URL"; exit 1; }
+          grep -q 'aikit-x86_64-apple-darwin.tar.gz' Formula/aikit.rb || { echo "Missing macOS x86_64 URL"; exit 1; }
+          grep -q 'aikit-x86_64-unknown-linux-gnu.tar.gz' Formula/aikit.rb || { echo "Missing Linux GNU URL"; exit 1; }
+          grep -q 'aikit-x86_64-unknown-linux-musl.tar.gz' Formula/aikit.rb || { echo "Missing Linux MUSL URL"; exit 1; }
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Validate Homebrew formula
         run: |
