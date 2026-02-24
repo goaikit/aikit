@@ -3,7 +3,7 @@ members = [".", "aikit-sdk", "aikit-py"]
 
 [package]
 name = "aikit"
-version = "0.1.60"
+version = "0.1.61"
 edition = "2021"
 authors = ["@aroff"]
 description = "AIKIT - Rust Spec Kit CLI Complete Reimplementation"
