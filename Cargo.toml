@@ -50,7 +50,7 @@ tempfile = "3.10"
 atty = "0.2"
 
 # TOML parsing
-toml = "0.9"
+toml = "1.0"
 
 # Date/time handling
 chrono = { version = "0.4", features = ["serde"] }
