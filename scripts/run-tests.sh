@@ -1,25 +1,28 @@
 #!/bin/bash
 
 # AIKIT Test Runner Script
-# Runs build, fmt, clippy, and tests (cargo-nextest); captures results and generates statistics.
-# Matches CI: full workspace build (catches compile errors in all crates e.g. aikit-py), fmt, clippy, then tests with retries.
+# Runs build, fmt, clippy, and tests (cargo-nextest); captures results and emits report to stdout (text or JSON).
+# Matches CI: full workspace build, fmt, clippy, then tests with retries.
 #
 # Usage: ./run-tests.sh [OPTIONS]
 #
 # Options:
-#   -o, --output FILE    Output markdown report file (default: test_results.md)
-#   -j, --json FILE      JSON results file (default: test_results.json)
+#   -f, --format FORMAT  Output format: text (default) or json. Report goes to stdout.
+#   -o, --output FILE    Optional: write markdown report to FILE.
+#   -j, --json FILE      Optional: write JSON results to FILE.
 #   -d, --output-dir DIR Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)
 #   -r, --retries N      Number of retries for flaky tests (default: 3)
-#   -h, --help           Show this help message
+#   -h, --help           Show this help message.
+#
+# Default: text report to stdout only. Use -o/-j to write to files.
 
 set -e  # Exit on any error
 
-# Default values
-OUTPUT_FILE="test_results.md"
-JSON_FILE="test_results.json"
-RETRIES=3
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+OUTPUT_FORMAT="text"
+OUTPUT_FILE=""
+JSON_FILE=""
+RETRIES=3
 
 # Colors for output
 RED='\033[0;31m'
@@ -33,11 +36,12 @@ error_exit() {
     echo "Usage: $0 [OPTIONS]" >&2
     echo "" >&2
     echo "Options:" >&2
-    echo "  -o, --output FILE    Output markdown report file (default: test_results.md)" >&2
-    echo "  -j, --json FILE      JSON results file (default: test_results.json)" >&2
-    echo "  -d, --output-dir DIR Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)" >&2
-    echo "  -r, --retries N      Number of retries for flaky tests (default: 3)" >&2
-    echo "  -h, --help           Show this help message" >&2
+    echo "  -f, --format FORMAT   Output format: text (default) or json. Report to stdout." >&2
+    echo "  -o, --output FILE     Optional: write markdown report to FILE." >&2
+    echo "  -j, --json FILE       Optional: write JSON results to FILE." >&2
+    echo "  -d, --output-dir DIR  Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)" >&2
+    echo "  -r, --retries N       Number of retries for flaky tests (default: 3)" >&2
+    echo "  -h, --help            Show this help message." >&2
     exit 1
 }
 
@@ -53,6 +57,13 @@ check_command() {
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -f|--format)
+            if [[ "$2" != "text" && "$2" != "json" ]]; then
+                error_exit "Format must be 'text' or 'json', got: $2"
+            fi
+            OUTPUT_FORMAT="$2"
+            shift 2
+            ;;
         -o|--output)
             OUTPUT_FILE="$2"
             shift 2
@@ -72,16 +83,19 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "AIKIT Test Runner Script"
             echo ""
-            echo "Runs fmt, clippy, and tests (cargo-nextest); captures results and generates statistics"
+            echo "Runs build, fmt, clippy, and tests (cargo-nextest); captures results and emits report to stdout (text or JSON)."
             echo ""
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  -o, --output FILE    Output markdown report file (default: test_results.md)"
-            echo "  -j, --json FILE      JSON results file (default: test_results.json)"
-            echo "  -d, --output-dir DIR Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)"
-            echo "  -r, --retries N      Number of retries for flaky tests (default: 3)"
-            echo "  -h, --help           Show this help message"
+            echo "  -f, --format FORMAT   Output format: text (default) or json. Report goes to stdout."
+            echo "  -o, --output FILE     Optional: write markdown report to FILE."
+            echo "  -j, --json FILE       Optional: write JSON results to FILE."
+            echo "  -d, --output-dir DIR  Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)"
+            echo "  -r, --retries N       Number of retries for flaky tests (default: 3)"
+            echo "  -h, --help            Show this help message."
+            echo ""
+            echo "Default: text report to stdout only. -o and -j are optional and only write when a path is given."
             echo ""
             echo "Requirements:"
             echo "  - rustfmt, clippy (same as CI), cargo-nextest: cargo install cargo-nextest"
@@ -245,25 +259,24 @@ fi
 
 # Get failed test names (if any)
 FAILED_TESTS=""
-if [ "$FAILED" -gt 0 ]; then
+if [ "${FAILED:-0}" -gt 0 ]; then
     # Extract failed test names from output
     FAILED_TESTS=$(echo "$TEST_OUTPUT" | grep -A 5 -B 1 "FAIL\|✗" | grep "^\s*[^-]*test.*" | sed 's/.*--- \(.*\) ---.*/\1/' | grep -v "^\s*$" | head -10)
 fi
 
-# Create structured JSON output
-echo -e "${YELLOW}Generating JSON output...${NC}" >&2
+# Build JSON content (for stdout and/or file)
 BUILD_STATUS="$([ "$BUILD_EXIT" -eq 0 ] && echo ok || echo failed)"
 FMT_STATUS="$([ "$FMT_EXIT" -eq 0 ] && echo ok || echo failed)"
 CLIPPY_STATUS="$([ "$CLIPPY_EXIT" -eq 0 ] && echo ok || echo failed)"
+LIB_RELEASE_STATUS="$([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo ok || echo failed)"
 if [ "$COMPILATION_FAILED" = true ] || [ "$BUILD_EXIT" -ne 0 ]; then
-    # Create JSON for compilation errors
-    cat > "$JSON_FILE" << EOF
+    JSON_CONTENT=$(cat << EOF
 {
   "status": "compilation_failed",
   "timestamp": "$TIMESTAMP",
   "command": "$0",
   "exit_code": $EXIT_CODE,
-  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo ok || echo failed)" },
+  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$LIB_RELEASE_STATUS" },
   "test_statistics": {
     "total": 0,
     "passed": 0,
@@ -273,15 +286,15 @@ if [ "$COMPILATION_FAILED" = true ] || [ "$BUILD_EXIT" -ne 0 ]; then
   }
 }
 EOF
+)
 else
-    # Create JSON for successful test runs
-    cat > "$JSON_FILE" << EOF
+    JSON_CONTENT=$(cat << EOF
 {
   "status": "completed",
   "timestamp": "$TIMESTAMP",
   "command": "$0",
   "exit_code": $EXIT_CODE,
-  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo ok || echo failed)" },
+  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$LIB_RELEASE_STATUS" },
   "test_statistics": {
     "total": $TOTAL,
     "passed": ${PASSED:-0},
@@ -291,178 +304,182 @@ else
   }
 }
 EOF
+)
 fi
 
-# Generate comprehensive report
-echo -e "${YELLOW}Generating report: $OUTPUT_FILE${NC}" >&2
+# Progress message
+if [ -n "$OUTPUT_FILE" ] || [ -n "$JSON_FILE" ]; then
+    echo -e "${YELLOW}Generating report...${NC}" >&2
+    [ -n "$OUTPUT_FILE" ] && echo -e "${YELLOW}  Markdown: $OUTPUT_FILE${NC}" >&2
+    [ -n "$JSON_FILE" ] && echo -e "${YELLOW}  JSON: $JSON_FILE${NC}" >&2
+else
+    echo -e "${YELLOW}Generating report (stdout, format: $OUTPUT_FORMAT)...${NC}" >&2
+fi
 
-{
-    echo "# AIKIT Test Results Report"
-    echo "Generated: $TIMESTAMP"
-    echo "Command: $0"
-    echo "Output File: $OUTPUT_FILE"
-    echo "JSON File: $JSON_FILE"
-    echo ""
+# Emit report: stdout and/or files
+if [ "$OUTPUT_FORMAT" = "json" ]; then
+    echo "$JSON_CONTENT"
+    if [ -n "$JSON_FILE" ]; then
+        mkdir -p "$(dirname "$JSON_FILE")"
+        echo "$JSON_CONTENT" > "$JSON_FILE"
+    fi
+else
+    print_text_report() {
+        echo "# AIKIT Test Results Report"
+        echo "Generated: $TIMESTAMP"
+        echo "Command: $0"
+        echo ""
 
-    echo "## Overall Status"
-    if [ "$EXIT_CODE" -eq 0 ]; then
-        echo "✅ **PASSED** - build, fmt, clippy, nextest, and lib-release all passed"
-    else
-        echo "❌ **FAILED** - One or more checks failed"
-    fi
-    echo ""
+        echo "## Overall Status"
+        if [ "$EXIT_CODE" -eq 0 ]; then
+            echo "PASSED - build, fmt, clippy, nextest, and lib-release all passed"
+        else
+            echo "FAILED - One or more checks failed"
+        fi
+        echo ""
 
-    echo "## Checks"
-    echo "- **build (cargo build --workspace --all-targets --all-features):** $([ "$BUILD_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
-    echo "- **fmt (cargo fmt --check):** $([ "$FMT_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
-    echo "- **clippy (cargo clippy --workspace --all-targets --all-features -- -D warnings):** $([ "$CLIPPY_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
-    echo "- **tests (cargo nextest run):** $([ "$TEST_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
-    echo "- **lib release (cargo test --lib --release, CI multiplatform):** $([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo '✅ PASSED' || echo '❌ FAILED')"
-    echo ""
-    if [ "$BUILD_EXIT" -ne 0 ] && [ -n "$BUILD_OUTPUT" ]; then
-        echo "### Build failure output"
+        echo "## Checks"
+        echo "- build: $([ "$BUILD_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
+        echo "- fmt: $([ "$FMT_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
+        echo "- clippy: $([ "$CLIPPY_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
+        echo "- tests (nextest): $([ "$TEST_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
+        echo "- lib release: $([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
         echo ""
-        echo "\`\`\`"
-        echo "$BUILD_OUTPUT"
-        echo "\`\`\`"
-        echo ""
-    fi
-    if [ "$FMT_EXIT" -ne 0 ] && [ -n "$FMT_OUTPUT" ]; then
-        echo "### fmt failure output"
-        echo ""
-        echo "\`\`\`"
-        echo "$FMT_OUTPUT"
-        echo "\`\`\`"
-        echo ""
-    fi
-    if [ "$CLIPPY_EXIT" -ne 0 ] && [ -n "$CLIPPY_OUTPUT" ]; then
-        echo "### clippy failure output"
-        echo ""
-        echo "\`\`\`"
-        echo "$CLIPPY_OUTPUT"
-        echo "\`\`\`"
-        echo ""
-    fi
-    if [ "$LIB_RELEASE_EXIT" -ne 0 ] && [ -n "$LIB_RELEASE_OUTPUT" ]; then
-        echo "### lib release (CI multiplatform) failure output"
-        echo ""
-        echo "\`\`\`"
-        echo "$LIB_RELEASE_OUTPUT"
-        echo "\`\`\`"
-        echo ""
-    fi
-
-    echo "## Test Statistics"
-    if [ "$COMPILATION_FAILED" = true ]; then
-        echo "- **Status:** Compilation failed - no tests executed"
-        echo "- **Total Tests:** N/A"
-        echo "- **Passed:** N/A"
-        echo "- **Failed:** N/A"
-        echo "- **Skipped:** N/A"
-        echo "- **Passing Rate:** N/A"
-    else
-        echo "- **Total Tests:** $TOTAL"
-        echo "- **Passed:** $PASSED"
-        echo "- **Failed:** $FAILED"
-        echo "- **Skipped:** $SKIPPED"
-        echo "- **Passing Rate:** ${PASSING_PERCENTAGE}%"
-    fi
-    echo ""
-
-    # Progress bar visualization
-    if [ "$COMPILATION_FAILED" = true ]; then
-        echo "## Progress Visualization"
-        echo "\`\`\`"
-        echo "[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] COMPILATION FAILED"
-        echo "\`\`\`"
-        echo ""
-    elif [ "$TOTAL" -gt 0 ]; then
-        echo "## Progress Visualization"
-        BAR_WIDTH=30
-        FILLED=$((PASSED * BAR_WIDTH / TOTAL))
-        EMPTY=$((BAR_WIDTH - FILLED))
-
-        echo "\`\`\`"
-        printf "["
-        for ((i=0; i<FILLED; i++)); do printf "█"; done
-        for ((i=0; i<EMPTY; i++)); do printf "░"; done
-        printf "] %d%% (%d/%d)\n" "$PASSING_PERCENTAGE" "$PASSED" "$TOTAL"
-        echo "\`\`\`"
-        echo ""
-    else
-        echo "## Progress Visualization"
-        echo "\`\`\`"
-        echo "[░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] No tests found"
-        echo "\`\`\`"
-        echo ""
-    fi
-
-    # Failed tests section
-    if [ -n "$FAILED_TESTS" ] && [ "$FAILED" -gt 0 ]; then
-        echo "## Failed Tests"
-        echo ""
-        echo "The following tests failed:"
-        echo ""
-        echo "\`\`\`"
-        echo "$FAILED_TESTS"
-        echo "\`\`\`"
-        echo ""
-    fi
-
-    # Test duration (if available in summary)
-    DURATION_LINE=$(echo "$TEST_OUTPUT" | grep "Summary.*\[" | head -1)
-    if [ -n "$DURATION_LINE" ]; then
-        DURATION=$(echo "$DURATION_LINE" | sed -n 's/.*\[\s*\([0-9.]*\)s\].*/\1/p')
-        if [ -n "$DURATION" ]; then
-            echo "## Performance"
-            echo "- **Test Duration:** ${DURATION}s"
+        if [ "$BUILD_EXIT" -ne 0 ] && [ -n "$BUILD_OUTPUT" ]; then
+            echo "### Build failure output"
+            echo ""
+            echo "$BUILD_OUTPUT"
             echo ""
         fi
+        if [ "$FMT_EXIT" -ne 0 ] && [ -n "$FMT_OUTPUT" ]; then
+            echo "### fmt failure output"
+            echo ""
+            echo "$FMT_OUTPUT"
+            echo ""
+        fi
+        if [ "$CLIPPY_EXIT" -ne 0 ] && [ -n "$CLIPPY_OUTPUT" ]; then
+            echo "### clippy failure output"
+            echo ""
+            echo "$CLIPPY_OUTPUT"
+            echo ""
+        fi
+        if [ "$LIB_RELEASE_EXIT" -ne 0 ] && [ -n "$LIB_RELEASE_OUTPUT" ]; then
+            echo "### lib release failure output"
+            echo ""
+            echo "$LIB_RELEASE_OUTPUT"
+            echo ""
+        fi
+
+        echo "## Test Statistics"
+        if [ "$COMPILATION_FAILED" = true ]; then
+            echo "- Status: Compilation failed - no tests executed"
+            echo "- Total Tests: N/A"
+            echo "- Passed: N/A"
+            echo "- Failed: N/A"
+            echo "- Skipped: N/A"
+            echo "- Passing Rate: N/A"
+        else
+            echo "- Total Tests: $TOTAL"
+            echo "- Passed: ${PASSED:-0}"
+            echo "- Failed: ${FAILED:-0}"
+            echo "- Skipped: ${SKIPPED:-0}"
+            echo "- Passing Rate: ${PASSING_PERCENTAGE}%"
+        fi
+        echo ""
+
+        if [ "$COMPILATION_FAILED" = true ]; then
+            echo "## Progress Visualization"
+            echo "[..............................] COMPILATION FAILED"
+            echo ""
+        elif [ "$TOTAL" -gt 0 ]; then
+            echo "## Progress Visualization"
+            BAR_WIDTH=30
+            FILLED=$((PASSED * BAR_WIDTH / TOTAL))
+            EMPTY=$((BAR_WIDTH - FILLED))
+            printf "["
+            for ((i=0; i<FILLED; i++)); do printf "#"; done
+            for ((i=0; i<EMPTY; i++)); do printf "."; done
+            printf "] %d%% (%d/%d)\n" "$PASSING_PERCENTAGE" "${PASSED:-0}" "$TOTAL"
+            echo ""
+        else
+            echo "## Progress Visualization"
+            echo "[..............................] No tests found"
+            echo ""
+        fi
+
+        if [ -n "$FAILED_TESTS" ] && [ "${FAILED:-0}" -gt 0 ]; then
+            echo "## Failed Tests"
+            echo ""
+            echo "$FAILED_TESTS"
+            echo ""
+        fi
+
+        DURATION_LINE=$(echo "$TEST_OUTPUT" | grep "Summary.*\[" | head -1)
+        if [ -n "$DURATION_LINE" ]; then
+            DURATION=$(echo "$DURATION_LINE" | sed -n 's/.*\[\s*\([0-9.]*\)s\].*/\1/p')
+            if [ -n "$DURATION" ]; then
+                echo "## Performance"
+                echo "- Test Duration: ${DURATION}s"
+                echo ""
+            fi
+        fi
+    }
+
+    print_text_report
+    if [ -n "$OUTPUT_FILE" ]; then
+        mkdir -p "$(dirname "$OUTPUT_FILE")"
+        {
+            print_text_report
+            echo "## Files"
+            echo "- Markdown Report: $OUTPUT_FILE"
+            [ -n "$JSON_FILE" ] && echo "- JSON results: $JSON_FILE"
+            echo ""
+        } > "$OUTPUT_FILE"
     fi
+    if [ -n "$JSON_FILE" ]; then
+        mkdir -p "$(dirname "$JSON_FILE")"
+        echo "$JSON_CONTENT" > "$JSON_FILE"
+    fi
+fi
 
-    echo "## Files"
-    echo "- **Raw Test Output:** \`$JSON_FILE\`"
-    echo "- **Markdown Report:** \`$OUTPUT_FILE\`"
-    echo ""
-
-    echo "## Raw Test Output"
-    echo "Complete test output is saved in: \`$JSON_FILE\`"
-    echo ""
-    echo "You can analyze it with standard Unix tools:"
-    echo "\`\`\`bash"
-    echo "# Count total tests"
-    echo "grep -c 'PASS\\|FAIL\\|SKIP' $JSON_FILE"
-    echo ""
-    echo "# Show failed tests"
-    echo "grep -A 2 -B 2 'FAIL' $JSON_FILE"
-    echo "\`\`\`"
-
-} > "$OUTPUT_FILE"
-
-# Console output summary
-echo -e "${GREEN}Report generated successfully!${NC}" >&2
+# Console summary (stderr)
+if [ -n "$OUTPUT_FILE" ] || [ -n "$JSON_FILE" ]; then
+    echo -e "${GREEN}Report generated successfully!${NC}" >&2
+else
+    echo -e "${GREEN}Report written to stdout.${NC}" >&2
+fi
 echo "" >&2
 
-echo "📊 Summary:" >&2
+echo "Summary:" >&2
 echo "  build:       $([ "$BUILD_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 echo "  fmt:         $([ "$FMT_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 echo "  clippy:      $([ "$CLIPPY_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 echo "  lib-release: $([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 if [ "$COMPILATION_FAILED" = true ]; then
     echo "  tests:  COMPILATION FAILED - no tests executed" >&2
-    echo -e "${RED}❌ Check $OUTPUT_FILE for details.${NC}" >&2
-else
-    echo "  tests:  $TOTAL total, $PASSED passed, $FAILED failed (${PASSING_PERCENTAGE}%)" >&2
-    if [ "$EXIT_CODE" -eq 0 ]; then
-        echo -e "${GREEN}✅ All checks and tests passed.${NC}" >&2
+    if [ -n "$OUTPUT_FILE" ]; then
+        echo -e "${RED}Check $OUTPUT_FILE for details.${NC}" >&2
     else
-        echo -e "${RED}❌ One or more failed. Check $OUTPUT_FILE for details.${NC}" >&2
+        echo -e "${RED}See report above.${NC}" >&2
+    fi
+else
+    echo "  tests:  $TOTAL total, ${PASSED:-0} passed, ${FAILED:-0} failed (${PASSING_PERCENTAGE}%)" >&2
+    if [ "$EXIT_CODE" -eq 0 ]; then
+        echo -e "${GREEN}All checks and tests passed.${NC}" >&2
+    else
+        if [ -n "$OUTPUT_FILE" ]; then
+            echo -e "${RED}One or more failed. Check $OUTPUT_FILE for details.${NC}" >&2
+        else
+            echo -e "${RED}One or more failed. See report above.${NC}" >&2
+        fi
     fi
 fi
 
 echo "" >&2
-echo "📁 Files created:" >&2
-echo "  Markdown report: $OUTPUT_FILE" >&2
-echo "  Raw output: $JSON_FILE" >&2
+if [ -n "$OUTPUT_FILE" ] || [ -n "$JSON_FILE" ]; then
+    echo "Files created:" >&2
+    [ -n "$OUTPUT_FILE" ] && echo "  Markdown report: $OUTPUT_FILE" >&2
+    [ -n "$JSON_FILE" ] && echo "  JSON: $JSON_FILE" >&2
+fi
 
 exit $EXIT_CODE
