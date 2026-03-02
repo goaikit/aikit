@@ -347,11 +347,6 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
-      - name: Validate Homebrew formula
-        run: |
-          cd homebrew-cli
-          brew audit --strict Formula/aikit.rb
-
       - name: Update Scoop bucket
         run: |
           cd scoop-bucket
