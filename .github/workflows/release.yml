@@ -356,6 +356,8 @@ jobs:
           ./generate_manifest.sh --version "$VERSION"
 
           jq -e ".version == \"$VERSION\"" bucket/aikit.json > /dev/null
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Commit and push Homebrew changes
         run: |
