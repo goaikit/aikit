@@ -42,6 +42,8 @@ test_results/
 test_results.json
 test_results.md
 test_artifacts/
+# Accidental local test binary; never commit
+/test_instruction_file_api
 .github/test-outputs/
 
 # Test snapshots
