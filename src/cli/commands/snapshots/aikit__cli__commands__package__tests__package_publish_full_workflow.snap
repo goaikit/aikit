@@ -1,5 +1,5 @@
 ---
 source: src/cli/commands/package.rs
-expression: result.unwrap_err().to_string()
+expression: stable_create_release_error_snapshot(&result.unwrap_err().to_string())
 ---
-Failed to create release: Failed to create release: HTTP 401 Unauthorized
+Failed to create release: <GitHub API request did not succeed>

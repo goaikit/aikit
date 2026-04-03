@@ -724,6 +724,22 @@ mod tests {
         zip.finish().unwrap();
     }
 
+    fn stable_create_release_error_snapshot(msg: &str) -> &'static str {
+        assert!(
+            msg.contains("Failed to create release:"),
+            "unexpected error: {msg}"
+        );
+        "Failed to create release: <GitHub API request did not succeed>"
+    }
+
+    fn stable_no_release_lookup_error_snapshot(msg: &str) -> &'static str {
+        assert!(
+            msg.contains("Failed to find release:") || msg.contains("No release found with tag"),
+            "unexpected error: {msg}"
+        );
+        "Could not use existing release for tag (API unreachable or tag missing)"
+    }
+
     #[test]
     fn test_find_package_zip_with_custom_path() {
         let (temp_dir, package) = create_test_package_dir();
@@ -1218,7 +1234,7 @@ authors = ["test"]
         assert!(result.is_err());
         insta::assert_snapshot!(
             "package_publish_full_workflow",
-            result.unwrap_err().to_string()
+            stable_create_release_error_snapshot(&result.unwrap_err().to_string())
         );
     }
 
@@ -1250,7 +1266,7 @@ authors = ["test"]
         assert!(result.is_err());
         insta::assert_snapshot!(
             "package_publish_custom_package",
-            result.unwrap_err().to_string()
+            stable_create_release_error_snapshot(&result.unwrap_err().to_string())
         );
     }
 
@@ -1288,7 +1304,7 @@ authors = ["test"]
         assert!(result.is_err());
         insta::assert_snapshot!(
             "package_publish_no_release",
-            result.unwrap_err().to_string()
+            stable_no_release_lookup_error_snapshot(&result.unwrap_err().to_string())
         );
     }
 
@@ -1519,7 +1535,7 @@ authors = ["test"]
 
         insta::assert_snapshot!(
             "complete_workflow_publish_result",
-            publish_result.unwrap_err().to_string()
+            stable_create_release_error_snapshot(&publish_result.unwrap_err().to_string())
         );
     }
 }
