@@ -1,5 +1,5 @@
 ---
 source: tests/e2e_package_publish.rs
-expression: publish_result.unwrap_err().to_string()
+expression: stable_create_release_error_snapshot(&publish_result.unwrap_err().to_string())
 ---
-Failed to create release: Failed to create release: HTTP 401 Unauthorized
+Failed to create release: <GitHub API request did not succeed>

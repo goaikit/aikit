@@ -5,6 +5,10 @@ inputs:
     description: 'Path to release config file (optional)'
     required: false
     default: '.github/release-config.yml'
+  version:
+    description: 'Semantic version without v prefix (required for workflow_dispatch)'
+    required: false
+    default: ''
 outputs:
   version:
     description: 'The extracted version (without v prefix)'
@@ -33,6 +37,10 @@ runs:
 
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
           VERSION="${{ inputs.version }}"
+          if [ -z "$VERSION" ]; then
+            echo "Error: workflow_dispatch requires the version input (e.g. 0.1.68)"
+            exit 1
+          fi
           TAG_VERSION="v$VERSION"
         elif [ "${{ github.event_name }}" = "workflow_run" ]; then
           # When triggered via workflow_run, get the latest tag

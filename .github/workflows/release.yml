@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g., 0.1.1)'
-        required: false
+        description: 'Version to release (e.g., 0.1.1); required for manual runs'
+        required: true
         type: string
   workflow_run:
     workflows: ["Auto Release"]
@@ -33,6 +33,20 @@ jobs:
       - name: Detect version
         id: detect-version
         uses: ./.github/actions/detect-version
+        with:
+          version: ${{ inputs.version }}
+
+      - name: Require valid release tag
+        run: |
+          TAG="${{ steps.detect-version.outputs.tag }}"
+          if [ -z "$TAG" ]; then
+            echo "::error::detect-version produced an empty tag (do not fall back to branch name)"
+            exit 1
+          fi
+          if [ "$TAG" = "main" ] || [ "$TAG" = "master" ]; then
+            echo "::error::Refusing branch-shaped release tag: $TAG"
+            exit 1
+          fi
 
       - name: Read version from Cargo.toml
         id: cargo-version
@@ -207,7 +221,7 @@ jobs:
       - name: Delete existing release if present
         continue-on-error: true
         run: |
-          TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
+          TAG="${{ needs.verify-version.outputs.tag }}"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release delete "$TAG" --yes
           fi
@@ -248,7 +262,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.verify-version.outputs.tag || github.ref_name }}
+          tag_name: ${{ needs.verify-version.outputs.tag }}
           name: Release ${{ needs.verify-version.outputs.version }}
           body_path: release_notes.md
           files: ${{ steps.prepare-files.outputs.files }}
@@ -259,7 +273,7 @@ jobs:
 
       - name: Publish release
         run: |
-          TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
+          TAG="${{ needs.verify-version.outputs.tag }}"
           gh release edit "$TAG" --draft=false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -309,7 +323,7 @@ jobs:
       - name: Validate release metadata contract
         id: release-info
         run: |
-          TAG="${{ needs.verify-version.outputs.tag || github.ref_name }}"
+          TAG="${{ needs.verify-version.outputs.tag }}"
           VERSION="${{ needs.verify-version.outputs.version }}"
           ASSETS=$(gh release view "$TAG" --repo ${{ github.repository }} --json assets --jq '.assets')
 

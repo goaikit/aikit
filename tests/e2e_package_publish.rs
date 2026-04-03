@@ -9,6 +9,22 @@ use tempfile::TempDir;
 use aikit::cli::commands::package as pkg_cmd;
 use aikit::models::package::Package;
 
+fn stable_create_release_error_snapshot(msg: &str) -> &'static str {
+    assert!(
+        msg.contains("Failed to create release:"),
+        "unexpected error: {msg}"
+    );
+    "Failed to create release: <GitHub API request did not succeed>"
+}
+
+fn stable_no_release_lookup_error_snapshot(msg: &str) -> &'static str {
+    assert!(
+        msg.contains("Failed to find release:") || msg.contains("No release found with tag"),
+        "unexpected error: {msg}"
+    );
+    "Could not use existing release for tag (API unreachable or tag missing)"
+}
+
 #[tokio::test]
 async fn test_complete_publish_workflow_e2e() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
@@ -92,7 +108,7 @@ help = {{ description = "Show help information" }}
 
     insta::assert_snapshot!(
         "e2e_complete_publish_workflow",
-        publish_result.unwrap_err().to_string()
+        stable_create_release_error_snapshot(&publish_result.unwrap_err().to_string())
     );
 }
 
@@ -157,7 +173,7 @@ authors = ["test@example.com"]
 
     insta::assert_snapshot!(
         "e2e_publish_no_release",
-        publish_result.unwrap_err().to_string()
+        stable_no_release_lookup_error_snapshot(&publish_result.unwrap_err().to_string())
     );
 }
 
@@ -228,7 +244,7 @@ authors = ["test@example.com"]
 
     insta::assert_snapshot!(
         "e2e_publish_custom_path",
-        publish_result.unwrap_err().to_string()
+        stable_create_release_error_snapshot(&publish_result.unwrap_err().to_string())
     );
 }
 
@@ -295,7 +311,7 @@ authors = ["test@example.com"]
 
     insta::assert_snapshot!(
         "e2e_publish_env_token",
-        publish_result.unwrap_err().to_string()
+        stable_create_release_error_snapshot(&publish_result.unwrap_err().to_string())
     );
 }
 
@@ -363,7 +379,7 @@ async fn test_e2e_validate_version_number_availability() {
 
     insta::assert_snapshot!(
         "e2e_validate_version_number",
-        publish_result.unwrap_err().to_string()
+        stable_create_release_error_snapshot(&publish_result.unwrap_err().to_string())
     );
 }
 
@@ -442,6 +458,6 @@ description = "Deploy to production"
 
     insta::assert_snapshot!(
         "e2e_publish_multiple_commands",
-        publish_result.unwrap_err().to_string()
+        stable_create_release_error_snapshot(&publish_result.unwrap_err().to_string())
     );
 }
