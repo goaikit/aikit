@@ -1,0 +1,5 @@
+{"type":"message","role":"system","content":"Codex session started"}
+{"type":"message","role":"assistant","content":"Processing your request..."}
+{"type":"action","action":"shell","command":"ls -la"}
+{"type":"output","stdout":"total 0\n","stderr":""}
+{"type":"message","role":"assistant","content":"Done."}

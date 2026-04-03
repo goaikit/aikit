@@ -1,0 +1,5 @@
+#!/bin/sh
+printf '{"event":"start","agent":"agent"}\n'
+printf '{"event":"message","role":"assistant","text":"Stub response."}\n'
+printf '{"event":"end","status":"success"}\n'
+exit 0

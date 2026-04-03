@@ -1,0 +1,5 @@
+#!/bin/sh
+printf '{"type":"message","role":"system","content":"Codex session started"}\n'
+printf '{"type":"message","role":"assistant","content":"Processing..."}\n'
+printf '{"type":"message","role":"assistant","content":"Done."}\n'
+exit 0

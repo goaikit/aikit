@@ -1,0 +1,4 @@
+#!/bin/sh
+printf '{"candidates":[{"content":{"parts":[{"text":"Stub response."}],"role":"model"}}]}\n'
+printf '{"candidates":[{"content":{"parts":[{"text":"Done."}],"role":"model"}}]}\n'
+exit 0

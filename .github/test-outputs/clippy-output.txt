@@ -1,1 +1,4 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.16s
+    Checking pyo3-ffi v0.28.0
+    Checking pyo3 v0.28.0
+    Checking aikit-py v0.1.49 (/home/sysuser/ws001/goaikit/aikit/aikit-py)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.48s

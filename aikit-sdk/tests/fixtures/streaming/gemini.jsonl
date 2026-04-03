@@ -1,0 +1,3 @@
+{"candidates":[{"content":{"parts":[{"text":"Starting..."}],"role":"model"}}],"usageMetadata":{"promptTokenCount":5}}
+{"candidates":[{"content":{"parts":[{"text":"Processing..."}],"role":"model"}}]}
+{"candidates":[{"content":{"parts":[{"text":"Complete."}],"role":"model"}}],"usageMetadata":{"totalTokenCount":20}}

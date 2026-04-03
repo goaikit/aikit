@@ -1,0 +1,6 @@
+{"type":"start","agent":"opencode","session":"abc123"}
+{"type":"message","role":"assistant","content":"Starting task..."}
+{"type":"tool_call","tool":"read_file","args":{"path":"main.rs"}}
+{"type":"tool_result","tool":"read_file","status":"ok"}
+{"type":"message","role":"assistant","content":"Task complete."}
+{"type":"end","exit_code":0}

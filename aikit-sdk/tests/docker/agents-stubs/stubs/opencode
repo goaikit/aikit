@@ -1,0 +1,5 @@
+#!/bin/sh
+printf '{"type":"start","agent":"opencode"}\n'
+printf '{"type":"message","role":"assistant","content":"Stub response."}\n'
+printf '{"type":"end","exit_code":0}\n'
+exit 0

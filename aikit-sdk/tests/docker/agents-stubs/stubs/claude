@@ -1,0 +1,5 @@
+#!/bin/sh
+printf '{"type":"system","subtype":"init","session_id":"stub001"}\n'
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Stub response."}]}}\n'
+printf '{"type":"result","subtype":"success","result":"OK"}\n'
+exit 0

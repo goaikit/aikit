@@ -1,9 +1,12 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
+use std::{panic, thread};
 
 /// Extension trait for adding timeout support to Child.
 trait ChildTimeoutExt {
@@ -131,6 +134,13 @@ pub enum RunError {
     StdinFailed(io::Error),
     /// Failed to read stdout/stderr
     OutputFailed(io::Error),
+    /// User callback panicked during event processing
+    CallbackPanic(Box<dyn std::any::Any + Send>),
+    /// Reader thread encountered an I/O error
+    ReaderFailed {
+        stream: AgentEventStream,
+        source: io::Error,
+    },
 }
 
 impl std::fmt::Display for RunError {
@@ -146,6 +156,10 @@ impl std::fmt::Display for RunError {
             RunError::SpawnFailed(err) => write!(f, "Failed to spawn process: {}", err),
             RunError::StdinFailed(err) => write!(f, "Failed to write to stdin: {}", err),
             RunError::OutputFailed(err) => write!(f, "Failed to read output: {}", err),
+            RunError::CallbackPanic(_) => write!(f, "Event callback panicked"),
+            RunError::ReaderFailed { stream, source } => {
+                write!(f, "Reader failed on {:?} stream: {}", stream, source)
+            }
         }
     }
 }
@@ -156,9 +170,56 @@ impl std::error::Error for RunError {
             RunError::SpawnFailed(err) => Some(err),
             RunError::StdinFailed(err) => Some(err),
             RunError::OutputFailed(err) => Some(err),
-            RunError::AgentNotRunnable(_) => None,
+            RunError::ReaderFailed { source, .. } => Some(source),
+            RunError::AgentNotRunnable(_) | RunError::CallbackPanic(_) => None,
         }
     }
+}
+
+/// Identifies which stream an event or error originated from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentEventStream {
+    Stdout,
+    Stderr,
+}
+
+/// Payload carried by a streaming agent event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEventPayload {
+    /// Successfully parsed JSON line
+    JsonLine(serde_json::Value),
+    /// UTF-8 text line that is not valid JSON
+    RawLine(String),
+    /// Non-UTF-8 bytes serialized as an array of integers
+    RawBytes(Vec<u8>),
+}
+
+/// A single event emitted by a streaming agent run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEvent {
+    /// The agent key that produced this event
+    pub agent_key: String,
+    /// Monotonically increasing sequence number across all streams
+    pub seq: u64,
+    /// Which stream this event came from
+    pub stream: AgentEventStream,
+    /// The event payload
+    pub payload: AgentEventPayload,
+}
+
+/// Internal channel message from reader threads to the dispatcher.
+enum ReaderMsg {
+    Chunk {
+        stream: AgentEventStream,
+        /// Raw bytes including any newline character(s)
+        raw: Vec<u8>,
+    },
+    Err {
+        stream: AgentEventStream,
+        source: io::Error,
+    },
 }
 
 /// Returns the list of runnable agent keys.
@@ -296,37 +357,184 @@ fn build_agent_argv(
     argv
 }
 
-/// Runs an agent with the given prompt and options.
-pub fn run_agent(
+/// Event-mode argv builder for codex: emits machine-readable JSON output.
+fn build_codex_argv_events(_prompt: &str, model: Option<&String>, yolo: bool) -> Vec<OsString> {
+    let mut argv = vec![OsString::from("codex"), OsString::from("exec")];
+
+    if let Some(m) = model {
+        argv.push(OsString::from("-m"));
+        argv.push(OsString::from(m.as_str()));
+    }
+
+    if yolo {
+        argv.push(OsString::from("--yolo"));
+    }
+
+    argv.push(OsString::from("--json"));
+    argv.push(OsString::from("--"));
+    argv.push(OsString::from("-"));
+
+    argv
+}
+
+/// Event-mode argv builder for claude: emits stream-json output.
+fn build_claude_argv_events(prompt: &str, model: Option<&String>, stream: bool) -> Vec<OsString> {
+    let mut argv = vec![
+        OsString::from("claude"),
+        OsString::from("-p"),
+        OsString::from(prompt),
+        OsString::from("--dangerously-skip-permissions"),
+    ];
+
+    if let Some(m) = model {
+        argv.push(OsString::from("--model"));
+        argv.push(OsString::from(m.as_str()));
+    }
+
+    argv.push(OsString::from("--output-format"));
+    argv.push(OsString::from(if stream { "stream-json" } else { "json" }));
+
+    argv
+}
+
+/// Event-mode argv builder for gemini: emits JSON output.
+fn build_gemini_argv_events(prompt: &str, model: Option<&String>) -> Vec<OsString> {
+    let mut argv = vec![
+        OsString::from("gemini"),
+        OsString::from("--prompt"),
+        OsString::from(prompt),
+        OsString::from("--json"),
+    ];
+
+    if let Some(m) = model {
+        argv.push(OsString::from("--model"));
+        argv.push(OsString::from(m.as_str()));
+    }
+
+    argv
+}
+
+/// Event-mode argv builder for opencode: emits JSON output.
+fn build_opencode_argv_events(prompt: &str, model: Option<&String>, yolo: bool) -> Vec<OsString> {
+    let mut argv = vec![
+        OsString::from("opencode"),
+        OsString::from("--prompt"),
+        OsString::from(prompt),
+        OsString::from("--json"),
+    ];
+
+    if let Some(m) = model {
+        argv.push(OsString::from("--model"));
+        argv.push(OsString::from(m.as_str()));
+    }
+
+    if yolo {
+        argv.push(OsString::from("--yolo"));
+    }
+
+    argv
+}
+
+/// Event-mode argv builder for agent CLI: emits JSON output.
+fn build_agent_argv_events(
+    prompt: &str,
+    model: Option<&String>,
+    yolo: bool,
+    stream: bool,
+) -> Vec<OsString> {
+    let mut argv = vec![
+        OsString::from("agent"),
+        OsString::from("--prompt"),
+        OsString::from(prompt),
+        OsString::from("--json"),
+    ];
+
+    if let Some(m) = model {
+        argv.push(OsString::from("--model"));
+        argv.push(OsString::from(m.as_str()));
+    }
+
+    if yolo {
+        argv.push(OsString::from("--yolo"));
+    }
+
+    if stream {
+        argv.push(OsString::from("--stream"));
+    }
+
+    argv
+}
+
+/// Shared internal function that spawns a child process with piped stdio.
+///
+/// Returns the spawned `Child` and the argv used (for diagnostics).
+/// `events_mode` selects event-optimized argv builders over the standard ones.
+fn spawn_agent_piped(
     agent_key: &str,
     prompt: &str,
-    options: RunOptions,
-) -> Result<RunResult, RunError> {
+    options: &RunOptions,
+    events_mode: bool,
+) -> Result<(Child, Vec<OsString>), RunError> {
     if !is_runnable(agent_key) {
         return Err(RunError::AgentNotRunnable(agent_key.to_string()));
     }
 
-    let argv = match agent_key {
-        "codex" => build_codex_argv(prompt, options.model.as_ref(), options.yolo, options.stream),
-        "claude" => build_claude_argv(prompt, options.model.as_ref(), options.yolo, options.stream),
-        "gemini" => build_gemini_argv(prompt, options.model.as_ref(), options.yolo, options.stream),
-        "opencode" => {
-            build_opencode_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
+    let argv = if events_mode {
+        match agent_key {
+            "codex" => build_codex_argv_events(prompt, options.model.as_ref(), options.yolo),
+            "claude" => build_claude_argv_events(prompt, options.model.as_ref(), options.stream),
+            "gemini" => build_gemini_argv_events(prompt, options.model.as_ref()),
+            "opencode" => build_opencode_argv_events(prompt, options.model.as_ref(), options.yolo),
+            "agent" => build_agent_argv_events(
+                prompt,
+                options.model.as_ref(),
+                options.yolo,
+                options.stream,
+            ),
+            _ => unreachable!(),
         }
-        "agent" => build_agent_argv(prompt, options.model.as_ref(), options.yolo, options.stream),
-        _ => unreachable!(),
+    } else {
+        match agent_key {
+            "codex" => {
+                build_codex_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
+            }
+            "claude" => {
+                build_claude_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
+            }
+            "gemini" => {
+                build_gemini_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
+            }
+            "opencode" => {
+                build_opencode_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
+            }
+            "agent" => {
+                build_agent_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
+            }
+            _ => unreachable!(),
+        }
     };
 
     let binary = &argv[0];
     let args = &argv[1..];
 
-    let mut child = Command::new(binary)
+    let child = Command::new(binary)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(RunError::SpawnFailed)?;
+
+    Ok((child, argv))
+}
+
+/// Runs an agent with the given prompt and options.
+pub fn run_agent(
+    agent_key: &str,
+    prompt: &str,
+    options: RunOptions,
+) -> Result<RunResult, RunError> {
+    let (mut child, _argv) = spawn_agent_piped(agent_key, prompt, &options, false)?;
 
     if let Some(mut stdin) = child.stdin.take() {
         stdin
@@ -337,6 +545,158 @@ pub fn run_agent(
     let output = child.wait_with_output().map_err(RunError::OutputFailed)?;
 
     Ok(RunResult::new(output.status, output.stdout, output.stderr))
+}
+
+/// Spawns a reader thread that reads lines (delimited by `\n`) from `reader`
+/// and sends raw byte chunks (including the newline) to `tx`.
+/// Non-UTF-8 and partial final lines are sent as-is.
+/// I/O errors are sent as `ReaderMsg::Err` and the thread exits.
+fn spawn_reader_thread<R>(
+    reader: R,
+    stream: AgentEventStream,
+    tx: mpsc::Sender<ReaderMsg>,
+) -> thread::JoinHandle<()>
+where
+    R: io::Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut reader = io::BufReader::new(reader);
+        let mut buf: Vec<u8> = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf) {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    if tx
+                        .send(ReaderMsg::Chunk {
+                            stream: stream.clone(),
+                            raw: buf.clone(),
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(ReaderMsg::Err { stream, source: e });
+                    break;
+                }
+            }
+        }
+    })
+}
+
+/// Parses a raw byte chunk into an `AgentEventPayload`.
+///
+/// Strips a trailing CRLF or LF before attempting UTF-8 and JSON decode.
+/// The raw bytes (including newline) are accumulated separately by the caller.
+fn parse_payload(raw: &[u8]) -> AgentEventPayload {
+    let stripped = raw
+        .strip_suffix(b"\r\n")
+        .or_else(|| raw.strip_suffix(b"\n"))
+        .unwrap_or(raw);
+
+    match std::str::from_utf8(stripped) {
+        Ok(s) => match serde_json::from_str::<serde_json::Value>(s) {
+            Ok(v) => AgentEventPayload::JsonLine(v),
+            Err(_) => AgentEventPayload::RawLine(s.to_string()),
+        },
+        Err(_) => AgentEventPayload::RawBytes(stripped.to_vec()),
+    }
+}
+
+/// Runs an agent with the given prompt and options, delivering events via
+/// `on_event` callback as output lines are produced.
+///
+/// The final `RunResult` accumulates identical bytes to what `run_agent`
+/// would produce. Callback panics are isolated and reported as
+/// `RunError::CallbackPanic`. Reader I/O failures are reported as
+/// `RunError::ReaderFailed`.
+pub fn run_agent_events<F>(
+    agent_key: &str,
+    prompt: &str,
+    options: RunOptions,
+    mut on_event: F,
+) -> Result<RunResult, RunError>
+where
+    F: FnMut(AgentEvent) + Send,
+{
+    let (mut child, _argv) = spawn_agent_piped(agent_key, prompt, &options, true)?;
+
+    // Write prompt and close stdin before reading output.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(RunError::StdinFailed)?;
+    }
+
+    let stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let stderr_pipe = child.stderr.take().expect("stderr was piped");
+
+    let (tx, rx) = mpsc::channel::<ReaderMsg>();
+
+    let stdout_thread = spawn_reader_thread(stdout_pipe, AgentEventStream::Stdout, tx.clone());
+    let stderr_thread = spawn_reader_thread(stderr_pipe, AgentEventStream::Stderr, tx);
+
+    let mut seq: u64 = 0;
+    let mut stdout_bytes: Vec<u8> = Vec::new();
+    let mut stderr_bytes: Vec<u8> = Vec::new();
+    let mut reader_error: Option<RunError> = None;
+    let mut callback_panic: Option<Box<dyn std::any::Any + Send>> = None;
+
+    for msg in rx {
+        match msg {
+            ReaderMsg::Chunk { stream, raw } => {
+                // Accumulate raw bytes verbatim (matches wait_with_output behavior).
+                match stream {
+                    AgentEventStream::Stdout => stdout_bytes.extend_from_slice(&raw),
+                    AgentEventStream::Stderr => stderr_bytes.extend_from_slice(&raw),
+                }
+
+                let payload = parse_payload(&raw);
+                let event = AgentEvent {
+                    agent_key: agent_key.to_string(),
+                    seq,
+                    stream,
+                    payload,
+                };
+                seq += 1;
+
+                // Isolate callback panics; stop calling after first panic.
+                if callback_panic.is_none() {
+                    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                        on_event(event);
+                    }));
+                    if let Err(p) = result {
+                        callback_panic = Some(p);
+                    }
+                }
+            }
+            ReaderMsg::Err { stream, source } => {
+                if reader_error.is_none() {
+                    reader_error = Some(RunError::ReaderFailed { stream, source });
+                }
+            }
+        }
+    }
+
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+
+    let status = child.wait().map_err(RunError::OutputFailed)?;
+
+    if let Some(p) = callback_panic {
+        // Kill/reap child before returning error.
+        let _ = child.kill();
+        return Err(RunError::CallbackPanic(p));
+    }
+
+    if let Some(err) = reader_error {
+        let _ = child.kill();
+        return Err(err);
+    }
+
+    Ok(RunResult::new(status, stdout_bytes, stderr_bytes))
 }
 
 /// Reason why an agent is not available.
@@ -773,5 +1133,302 @@ mod tests {
             format!("{}", AgentAvailabilityReason::TimedOut),
             "timed_out"
         );
+    }
+
+    // --- Streaming API tests ---
+
+    #[test]
+    fn test_run_agent_events_not_runnable() {
+        let result = run_agent_events("unknown", "test", RunOptions::default(), |_| {});
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), RunError::AgentNotRunnable(_)));
+    }
+
+    #[test]
+    fn test_parse_payload_json_line() {
+        let raw = b"{\"key\": \"value\"}\n";
+        let payload = parse_payload(raw);
+        assert!(matches!(payload, AgentEventPayload::JsonLine(_)));
+    }
+
+    #[test]
+    fn test_parse_payload_raw_line() {
+        let raw = b"just some text\n";
+        let payload = parse_payload(raw);
+        if let AgentEventPayload::RawLine(s) = payload {
+            assert_eq!(s, "just some text");
+        } else {
+            panic!("Expected RawLine");
+        }
+    }
+
+    #[test]
+    fn test_parse_payload_crlf_normalized() {
+        let raw = b"just some text\r\n";
+        let payload = parse_payload(raw);
+        if let AgentEventPayload::RawLine(s) = payload {
+            assert_eq!(s, "just some text");
+        } else {
+            panic!("Expected RawLine with CRLF stripped");
+        }
+    }
+
+    #[test]
+    fn test_parse_payload_raw_bytes_non_utf8() {
+        let raw = vec![0xff, 0xfe, 0x00, b'\n'];
+        let payload = parse_payload(&raw);
+        assert!(matches!(payload, AgentEventPayload::RawBytes(_)));
+    }
+
+    #[test]
+    fn test_parse_payload_empty_json_object() {
+        let raw = b"{}\n";
+        let payload = parse_payload(raw);
+        assert!(matches!(payload, AgentEventPayload::JsonLine(_)));
+    }
+
+    #[test]
+    fn test_parse_payload_no_newline() {
+        let raw = b"incomplete line";
+        let payload = parse_payload(raw);
+        if let AgentEventPayload::RawLine(s) = payload {
+            assert_eq!(s, "incomplete line");
+        } else {
+            panic!("Expected RawLine");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_agent_events_with_echo_stub() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Create a stub script that outputs two JSON lines then exits
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("agent");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(
+            f,
+            "#!/bin/sh\necho '{{\"msg\":\"line1\"}}'\necho '{{\"msg\":\"line2\"}}'"
+        )
+        .unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        // Prepend dir to PATH
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let mut events: Vec<AgentEvent> = Vec::new();
+        let result = run_agent_events("agent", "hello", RunOptions::default(), |ev| {
+            events.push(ev)
+        });
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(
+            result.is_ok(),
+            "run_agent_events should succeed: {:?}",
+            result.err()
+        );
+        assert_eq!(events.len(), 2, "Should have received 2 events");
+        assert_eq!(events[0].seq, 0);
+        assert_eq!(events[1].seq, 1);
+        assert!(matches!(events[0].payload, AgentEventPayload::JsonLine(_)));
+        assert!(matches!(events[1].payload, AgentEventPayload::JsonLine(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_agent_events_sequence_numbers_strictly_increasing() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("codex");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(f, "#!/bin/sh\necho 'a'\necho 'b'\necho 'c' >&2\necho 'd'").unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let mut seqs: Vec<u64> = Vec::new();
+        let result = run_agent_events("codex", "hi", RunOptions::default(), |ev| seqs.push(ev.seq));
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(result.is_ok());
+        // Sequence numbers must be strictly increasing
+        for w in seqs.windows(2) {
+            assert!(w[1] > w[0], "seq {} should be > {}", w[1], w[0]);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_agent_events_callback_panic_isolated() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("gemini");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(f, "#!/bin/sh\necho 'line1'\necho 'line2'").unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result = run_agent_events("gemini", "hi", RunOptions::default(), |_ev| {
+            panic!("test panic")
+        });
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(
+            matches!(result, Err(RunError::CallbackPanic(_))),
+            "Expected CallbackPanic, got {:?}",
+            result.map(|_| ())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_agent_events_empty_output() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("opencode");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(f, "#!/bin/sh\nexit 0").unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let mut event_count = 0usize;
+        let result = run_agent_events("opencode", "hi", RunOptions::default(), |_ev| {
+            event_count += 1
+        });
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(result.is_ok());
+        assert_eq!(event_count, 0, "Empty output should produce zero events");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_agent_events_mixed_json_and_raw() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("claude");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(
+            f,
+            "#!/bin/sh\necho '{{\"type\":\"text\"}}'\necho 'plain text'"
+        )
+        .unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let mut payloads: Vec<String> = Vec::new();
+        let result = run_agent_events("claude", "hi", RunOptions::default(), |ev| {
+            let kind = match &ev.payload {
+                AgentEventPayload::JsonLine(_) => "json",
+                AgentEventPayload::RawLine(_) => "raw",
+                AgentEventPayload::RawBytes(_) => "bytes",
+            };
+            payloads.push(kind.to_string());
+        });
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(result.is_ok());
+        assert_eq!(payloads, vec!["json", "raw"]);
+    }
+
+    #[test]
+    fn test_build_codex_argv_events_has_json_flag() {
+        let argv = build_codex_argv_events("test", Some(&"gpt-4".to_string()), true);
+        assert!(argv.contains(&OsString::from("--json")));
+        assert!(argv.contains(&OsString::from("--yolo")));
+        assert!(argv.contains(&OsString::from("-m")));
+    }
+
+    #[test]
+    fn test_build_claude_argv_events_json_format() {
+        let argv = build_claude_argv_events("test", None, false);
+        assert!(argv.contains(&OsString::from("--output-format")));
+        assert!(argv.contains(&OsString::from("json")));
+    }
+
+    #[test]
+    fn test_build_claude_argv_events_stream_json_format() {
+        let argv = build_claude_argv_events("test", None, true);
+        assert!(argv.contains(&OsString::from("stream-json")));
+    }
+
+    #[test]
+    fn test_build_gemini_argv_events_has_json_flag() {
+        let argv = build_gemini_argv_events("test", None);
+        assert!(argv.contains(&OsString::from("--json")));
+    }
+
+    #[test]
+    fn test_build_opencode_argv_events_has_json_flag() {
+        let argv = build_opencode_argv_events("test", None, false);
+        assert!(argv.contains(&OsString::from("--json")));
+    }
+
+    #[test]
+    fn test_build_agent_argv_events_has_json_flag() {
+        let argv = build_agent_argv_events("test", None, false, false);
+        assert!(argv.contains(&OsString::from("--json")));
+    }
+
+    #[test]
+    fn test_run_error_callback_panic_display() {
+        // Cannot easily construct a CallbackPanic without a real panic, so just
+        // test the other new variant.
+        use std::io;
+        let err = RunError::ReaderFailed {
+            stream: AgentEventStream::Stdout,
+            source: io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"),
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("Stdout") || msg.contains("stdout"));
+    }
+
+    #[test]
+    fn test_agent_event_stream_eq() {
+        assert_eq!(AgentEventStream::Stdout, AgentEventStream::Stdout);
+        assert_ne!(AgentEventStream::Stdout, AgentEventStream::Stderr);
     }
 }
