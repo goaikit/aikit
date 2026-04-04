@@ -147,4 +147,7 @@ jobs:
       uses: Swatinem/rust-cache@v2
 
     - name: Run tests
-      run: cargo test --lib --release -- --test-threads=1
+      run: cargo test --workspace --lib --release -- --test-threads=1
+
+    - name: Run integration tests
+      run: cargo test --workspace --test '*' -- --test-threads=1

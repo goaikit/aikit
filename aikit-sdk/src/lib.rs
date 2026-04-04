@@ -418,7 +418,8 @@ pub mod runner;
 
 pub use runner::{
     get_agent_status, get_installed_agents, is_agent_available, is_runnable, run_agent,
-    runnable_agents, AgentAvailabilityReason, AgentStatus, RunError, RunOptions, RunResult,
+    run_agent_events, runnable_agents, AgentAvailabilityReason, AgentEvent, AgentEventPayload,
+    AgentEventStream, AgentStatus, RunError, RunOptions, RunResult,
 };
 
 pub mod fetch;

@@ -1,0 +1,5 @@
+{"event":"start","agent":"agent","prompt_tokens":10}
+{"event":"message","role":"assistant","text":"Working on it..."}
+{"event":"tool","name":"bash","input":{"cmd":"echo hello"}}
+{"event":"tool_result","name":"bash","output":"hello\n"}
+{"event":"end","status":"success"}

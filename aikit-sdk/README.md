@@ -17,6 +17,7 @@ This crate holds the full agent catalog with per-agent capabilities (commands, s
 - **Agent Detection**: Identify which AI coding agents are installed and available
 - **CLI Execution**: Run agents with full parameter support matching coder.sh
 - **Output Capture**: Capture stdout/stderr for programmatic forwarding
+- **Streaming Events**: Real-time event delivery via `run_agent_events` with structured JSON parsing
 
 ## Agents Supported
 
@@ -170,7 +171,55 @@ match result {
 
 - `RunOptions`: optional `model`, `yolo`, `stream`.
 - `RunResult`: `status`, `stdout`, `stderr`; `.exit_code()`, `.success()`.
-- `RunError`: `AgentNotRunnable(key)`, `SpawnFailed`, `StdinFailed`, `OutputFailed`.
+- `RunError`: `AgentNotRunnable(key)`, `SpawnFailed`, `StdinFailed`, `OutputFailed`, `CallbackPanic`, `ReaderFailed`.
+
+### Streaming Events
+
+`run_agent_events` delivers events incrementally as the child process runs, preventing deadlocks from large outputs and enabling real-time progress feedback.
+
+```rust
+use aikit_sdk::{run_agent_events, AgentEvent, AgentEventPayload, AgentEventStream, RunOptions};
+
+let options = RunOptions::default().with_stream(true);
+
+let result = run_agent_events("claude", "Summarize the project", options, |event: AgentEvent| {
+    println!("seq={} stream={:?}", event.seq, event.stream);
+    match &event.payload {
+        AgentEventPayload::JsonLine(v) => println!("  JSON: {}", v),
+        AgentEventPayload::RawLine(s)  => println!("  text: {}", s),
+        AgentEventPayload::RawBytes(b) => println!("  bytes: {} bytes", b.len()),
+    }
+});
+```
+
+#### Per-agent argv matrix
+
+| Agent | Events-mode flags added |
+|-------|------------------------|
+| `codex` | `--json` (already included in standard argv) |
+| `claude` | `--output-format json` (or `stream-json` when `stream=true`) |
+| `gemini` | `--json` |
+| `opencode` | `--json` |
+| `agent` | `--json` |
+
+#### `--stream` vs `--events` (CLI)
+
+- `--stream`: Tunes agent-native partial output flags (e.g. `--stream-partial-output`, `stream-json`). Passed through as `RunOptions::stream` to the argv builder.
+- `--events`: Switches the CLI to call `run_agent_events` and emit one JSON object per line (NDJSON) to stdout. Incremental delivery; process exit code matches child exit when no SDK error occurs.
+
+Both flags can be combined: `aikit run --events --stream` uses events-mode argv (JSON output) AND adds stream-partial flags for supported agents.
+
+#### Error handling
+
+- `RunError::CallbackPanic`: User callback panicked. Subprocess is killed and reaped.
+- `RunError::ReaderFailed { stream, source }`: Reader thread encountered I/O error on the identified stream.
+
+#### Limitations
+
+- No timeout or cancellation support (out of scope for v1).
+- No async/await interface.
+- No Python bindings for the streaming API.
+- Non-JSON agent output formats are emitted as `RawLine`/`RawBytes` without structured parsing.
 
 ### Agent Detection
 

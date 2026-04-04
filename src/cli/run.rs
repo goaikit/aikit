@@ -1,4 +1,4 @@
-use aikit_sdk::run_agent;
+use aikit_sdk::{run_agent, run_agent_events, AgentEvent};
 use aikit_sdk::{RunError, RunOptions};
 use anyhow::Result;
 use clap::Parser;
@@ -26,6 +26,10 @@ pub struct RunArgs {
     /// Enable streaming output
     #[arg(long)]
     pub stream: bool,
+
+    /// Emit standardized NDJSON event stream to stdout (one JSON object per line)
+    #[arg(long)]
+    pub events: bool,
 
     /// Dry-run mode: validate inputs but don't execute agent (for testing)
     #[arg(long, hide = true)]
@@ -60,6 +64,7 @@ pub fn execute(args: RunArgs) -> Result<()> {
         println!("Prompt length: {} chars", prompt.len());
         println!("Yolo mode: {}", args.yolo);
         println!("Stream mode: {}", args.stream);
+        println!("Events mode: {}", args.events);
         println!("Configuration validated successfully (dry-run)");
         return Ok(());
     }
@@ -70,20 +75,41 @@ pub fn execute(args: RunArgs) -> Result<()> {
         stream: args.stream,
     };
 
-    match run_agent(&agent, &prompt, options) {
-        Ok(result) => {
-            io::stdout().write_all(&result.stdout)?;
-            io::stderr().write_all(&result.stderr)?;
-            let exit_code = result.status.code().unwrap_or(1);
-            std::process::exit(exit_code);
+    if args.events {
+        match run_agent_events(&agent, &prompt, options, |event: AgentEvent| {
+            if let Ok(line) = serde_json::to_string(&event) {
+                println!("{}", line);
+            }
+        }) {
+            Ok(result) => {
+                let exit_code = result.status.code().unwrap_or(1);
+                std::process::exit(exit_code);
+            }
+            Err(RunError::AgentNotRunnable(key)) => {
+                eprintln!("{}", RunError::AgentNotRunnable(key));
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
-        Err(RunError::AgentNotRunnable(key)) => {
-            eprintln!("{}", RunError::AgentNotRunnable(key));
-            std::process::exit(1);
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
+    } else {
+        match run_agent(&agent, &prompt, options) {
+            Ok(result) => {
+                io::stdout().write_all(&result.stdout)?;
+                io::stderr().write_all(&result.stderr)?;
+                let exit_code = result.status.code().unwrap_or(1);
+                std::process::exit(exit_code);
+            }
+            Err(RunError::AgentNotRunnable(key)) => {
+                eprintln!("{}", RunError::AgentNotRunnable(key));
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 }

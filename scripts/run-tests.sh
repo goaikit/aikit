@@ -10,7 +10,7 @@
 #   -f, --format FORMAT  Output format: text (default) or json. Report goes to stdout.
 #   -o, --output FILE    Optional: write markdown report to FILE.
 #   -j, --json FILE      Optional: write JSON results to FILE.
-#   -d, --output-dir DIR Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)
+#   -d, --output-dir DIR Directory for raw fmt/clippy/test .txt outputs (default: tmp/test-outputs)
 #   -r, --retries N      Number of retries for flaky tests (default: 3)
 #   -h, --help           Show this help message.
 #
@@ -39,7 +39,7 @@ error_exit() {
     echo "  -f, --format FORMAT   Output format: text (default) or json. Report to stdout." >&2
     echo "  -o, --output FILE     Optional: write markdown report to FILE." >&2
     echo "  -j, --json FILE       Optional: write JSON results to FILE." >&2
-    echo "  -d, --output-dir DIR  Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)" >&2
+    echo "  -d, --output-dir DIR  Directory for raw fmt/clippy/test .txt outputs (default: tmp/test-outputs)" >&2
     echo "  -r, --retries N       Number of retries for flaky tests (default: 3)" >&2
     echo "  -h, --help            Show this help message." >&2
     exit 1
@@ -91,7 +91,7 @@ while [[ $# -gt 0 ]]; do
             echo "  -f, --format FORMAT   Output format: text (default) or json. Report goes to stdout."
             echo "  -o, --output FILE     Optional: write markdown report to FILE."
             echo "  -j, --json FILE       Optional: write JSON results to FILE."
-            echo "  -d, --output-dir DIR  Directory for raw fmt/clippy/test .txt outputs (default: .github/test-outputs)"
+            echo "  -d, --output-dir DIR  Directory for raw fmt/clippy/test .txt outputs (default: tmp/test-outputs)"
             echo "  -r, --retries N       Number of retries for flaky tests (default: 3)"
             echo "  -h, --help            Show this help message."
             echo ""
@@ -130,7 +130,7 @@ cd "$AIKIT_DIR"
 if [[ -n "${TEST_OUTPUT_DIR_ARG:-}" ]]; then
     TEST_OUTPUT_DIR="$TEST_OUTPUT_DIR_ARG"
 else
-    TEST_OUTPUT_DIR=".github/test-outputs"
+    TEST_OUTPUT_DIR="tmp/test-outputs"
 fi
 mkdir -p "$TEST_OUTPUT_DIR"
 echo -e "${YELLOW}Test outputs will be saved to: $TEST_OUTPUT_DIR${NC}" >&2
@@ -160,7 +160,7 @@ echo "$CLIPPY_OUTPUT" > "$TEST_OUTPUT_DIR/clippy-output.txt"
 echo -e "${YELLOW}Running tests with cargo-nextest (retries: $RETRIES, per-test timeout: 60s)...${NC}" >&2
 # Use nextest config from .config/nextest.toml for timeout settings
 # --test-threads=1 to avoid resource contention in integration tests
-TEST_OUTPUT=$(cargo nextest run --all-features --retries "$RETRIES" --fail-fast --test-threads=1 2>&1)
+TEST_OUTPUT=$(cargo nextest run --workspace --all-features --retries "$RETRIES" --fail-fast --test-threads=1 2>&1)
 TEST_EXIT=$?
 echo "$TEST_OUTPUT" > "$TEST_OUTPUT_DIR/test-output.txt"
 
