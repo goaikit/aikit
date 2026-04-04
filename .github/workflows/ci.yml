@@ -181,6 +181,7 @@ jobs:
             chmod +x "$STUB_DIR/$agent"
           done
           PATH="$STUB_DIR:$PATH" AIKIT_DOCKER_TESTS=1 \
-            cargo test --test docker_streaming_agents -- \
+            cargo test --manifest-path aikit-sdk/Cargo.toml \
+              --test docker_streaming_agents -- \
               --include-ignored --test-threads=1
           rm -rf "$STUB_DIR"
