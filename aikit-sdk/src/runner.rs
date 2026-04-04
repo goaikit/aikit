@@ -1137,6 +1137,12 @@ mod tests {
 
     // --- Streaming API tests ---
 
+    /// Global mutex to serialize tests that mutate PATH via std::env::set_var.
+    /// Parallel test threads racing on PATH can cause stub lookup to find the
+    /// real binary instead of the temp-dir stub, producing spurious events.
+    #[cfg(unix)]
+    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_run_agent_events_not_runnable() {
         let result = run_agent_events("unknown", "test", RunOptions::default(), |_| {});
@@ -1201,6 +1207,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_with_echo_stub() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1245,6 +1252,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_sequence_numbers_strictly_increasing() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1276,6 +1284,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_callback_panic_isolated() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1308,6 +1317,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_empty_output() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1338,6 +1348,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_mixed_json_and_raw() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
