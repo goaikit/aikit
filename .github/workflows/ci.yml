@@ -165,4 +165,4 @@ jobs:
       - name: Run streaming integration tests
         run: |
           cargo test --manifest-path aikit-sdk/Cargo.toml \
-            --test docker_streaming_agents -- --test-threads=1
+            --test streaming_agents -- --test-threads=1
