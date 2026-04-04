@@ -149,8 +149,8 @@ jobs:
     - name: Run tests
       run: cargo test --lib --release -- --test-threads=1
 
-  docker-agent-stubs:
-    name: Docker Agent Stubs
+  streaming-tests:
+    name: Streaming Integration Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -162,26 +162,7 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Build Docker stub image
+      - name: Run streaming integration tests
         run: |
-          docker build -t aikit-agent-stubs \
-            aikit-sdk/tests/docker/agents-stubs/
-
-      - name: Verify stub binaries in image
-        run: |
-          for agent in codex claude gemini opencode agent; do
-            docker run --rm aikit-agent-stubs $agent
-          done
-
-      - name: Run SDK tests with Docker stubs via PATH override
-        run: |
-          STUB_DIR=$(mktemp -d)
-          for agent in codex claude gemini opencode agent; do
-            docker cp $(docker create aikit-agent-stubs):"/usr/local/bin/$agent" "$STUB_DIR/$agent"
-            chmod +x "$STUB_DIR/$agent"
-          done
-          PATH="$STUB_DIR:$PATH" AIKIT_DOCKER_TESTS=1 \
-            cargo test --manifest-path aikit-sdk/Cargo.toml \
-              --test docker_streaming_agents -- \
-              --include-ignored --test-threads=1
-          rm -rf "$STUB_DIR"
+          cargo test --manifest-path aikit-sdk/Cargo.toml \
+            --test docker_streaming_agents -- --test-threads=1
