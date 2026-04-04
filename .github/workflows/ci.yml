@@ -147,22 +147,7 @@ jobs:
       uses: Swatinem/rust-cache@v2
 
     - name: Run tests
-      run: cargo test --lib --release -- --test-threads=1
+      run: cargo test --workspace --lib --release -- --test-threads=1
 
-  streaming-tests:
-    name: Streaming Integration Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run streaming integration tests
-        run: |
-          cargo test --manifest-path aikit-sdk/Cargo.toml \
-            --test streaming_agents -- --test-threads=1
+    - name: Run integration tests
+      run: cargo test --workspace --test '*' -- --test-threads=1
