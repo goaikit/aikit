@@ -184,7 +184,17 @@ for line in proc.stdout:
 proc.wait()
 ```
 
-See [aikit run --help] or the [aikit-sdk README](../aikit-sdk/README.md) for complete streaming event documentation and NDJSON format details.
+To match the CLI combination `--events --stream` (NDJSON plus agent-native streaming argv), include `--stream` in the argv (same stdout loop as above):
+
+```python
+proc = subprocess.Popen(
+    ["aikit", "run", "--agent", "claude", "--events", "--stream", "-p", "Summarize the project"],
+    stdout=subprocess.PIPE,
+    text=True,
+)
+```
+
+See `aikit run --help` or the [aikit-sdk README](../aikit-sdk/README.md) for complete streaming event documentation and NDJSON format details.
 
 ## Agent Detection
 

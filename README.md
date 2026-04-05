@@ -169,6 +169,8 @@ aikit run --agent claude --events --stream -p "Refactor this module"
 | `--stream` | | Enable agent-native streaming output flags | `false` |
 | `--events` | | Emit NDJSON event stream to stdout | `false` |
 
+`aikit run` also accepts the root **`--debug`** flag (global on the `aikit` CLI; it appears in `aikit run --help`).
+
 **Environment variables:**
 - `CODING_AGENT`: Default agent (falls back to `opencode`)
 - `CODING_AGENT_MODEL`: Default model (falls back to `zai-coding-plan/glm-4.7`)
