@@ -881,6 +881,8 @@ mod tests {
 
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
+    #[cfg(windows)]
+    use std::os::windows::process::ExitStatusExt;
 
     #[test]
     fn test_runnable_agents_includes_codex_claude_gemini_opencode_agent() {
@@ -1026,7 +1028,12 @@ mod tests {
     fn test_run_result_failure() {
         let stdout = b"".to_vec();
         let stderr = b"error".to_vec();
-        let result = RunResult::new(ExitStatus::from_raw(256), stdout, stderr);
+        // Unix wait status encodes exit code 1 as 256; Windows uses the code directly.
+        #[cfg(unix)]
+        let status = ExitStatus::from_raw(256);
+        #[cfg(windows)]
+        let status = ExitStatus::from_raw(1);
+        let result = RunResult::new(status, stdout, stderr);
 
         assert!(!result.success());
         assert_eq!(result.exit_code(), Some(1));
