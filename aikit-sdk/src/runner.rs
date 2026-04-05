@@ -209,6 +209,13 @@ pub struct AgentEvent {
     pub payload: AgentEventPayload,
 }
 
+impl AgentEvent {
+    /// Serialize this event to a JSON string.
+    pub fn to_json_string(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
 /// Internal channel message from reader threads to the dispatcher.
 enum ReaderMsg {
     Chunk {

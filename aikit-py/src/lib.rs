@@ -315,8 +315,8 @@ fn run_agent_events_py(
         if guard.is_some() {
             return;
         }
-        let _ = Python::try_attach(|py: Python<'_>| {
-            if let Ok(json_str) = serde_json::to_string(&event) {
+        Python::attach(|py: Python<'_>| {
+            if let Ok(json_str) = event.to_json_string() {
                 let result: PyResult<()> = (|| {
                     let json_mod = py.import("json")?;
                     let event_dict = json_mod.call_method1("loads", (json_str,))?;
