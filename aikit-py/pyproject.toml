@@ -22,4 +22,5 @@ classifiers = [
 
 [tool.maturin]
 module-name = "aikit_py"
+features = ["extension-module"]
 
