@@ -60,6 +60,16 @@ fn assert_no_release_failed(msg: &str) {
     );
 }
 
+fn assert_upload_missing_file_err(msg: &str) {
+    assert!(
+        msg.contains("No such file or directory")
+            || msg.contains("cannot find the path")
+            || msg.contains("(os error 2)")
+            || msg.contains("(os error 3)"),
+        "expected not-found I/O message, got: {msg}"
+    );
+}
+
 fn create_test_zip_file(path: &Path) {
     use std::fs::File;
     use std::io::Write;
@@ -172,10 +182,7 @@ async fn test_package_upload_file_not_found_integration() {
         .await;
 
     assert!(result.is_err());
-    insta::assert_snapshot!(
-        "integration_upload_file_not_found",
-        result.unwrap_err().to_string()
-    );
+    assert_upload_missing_file_err(&result.unwrap_err().to_string());
 }
 
 #[tokio::test]
