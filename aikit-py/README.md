@@ -67,9 +67,9 @@ try:
     aikit_py.validate_agent_key("claude")
     print("
 'claude' is a valid agent key.")
-except aikit_py.PyDeployError as e:
+except aikit_py.DeployError as e:
     print(f"
-Error: {e.message}")
+Error: {str(e)}")
 
 # Deploy a command
 with tempfile.TemporaryDirectory() as project_root:
@@ -135,15 +135,15 @@ print('Skill executed!')")
         assert os.path.exists(expected_run_script)
         print(f"Run script exists at: {expected_run_script}")
 
-    except aikit_py.PyDeployError as e:
-        print(f"Failed to deploy skill: {e.message} (Kind: {e.kind})")
+    except aikit_py.DeployError as e:
+        print(f"Failed to deploy skill: {str(e)}")
 
     # Example of trying to deploy a skill for an agent that doesn't support them
     try:
         aikit_py.deploy_skill("qwen", project_root, "unsupported-skill", "# Unsupported", None)
-    except aikit_py.PyDeployError as e:
+    except aikit_py.DeployError as e:
         print(f"
-Expected error when deploying skill to 'qwen': {e.message} (Kind: {e.kind})")
+Expected error when deploying skill to 'qwen': {str(e)}")
 ```
 
 ## Running agents
@@ -163,36 +163,53 @@ if aikit_py.is_runnable_py("claude"):
 
 Raises an exception if the agent is not runnable or the process fails to start.
 
-### Streaming and events
+### Streaming events
 
-**The Python bindings do not support streaming events.** The `run_agent` function buffers all output and returns it after the agent completes. There is no callback-based or incremental delivery API in `aikit-py`.
-
-For real-time event delivery (NDJSON output), use `aikit run --events` as a subprocess:
+Use `run_agent_events_py` to receive real-time events as the agent produces output. A callback function is invoked for each event with a dictionary matching the NDJSON format.
 
 ```python
-import subprocess
-import json
+import aikit_py
 
-proc = subprocess.Popen(
-    ["aikit", "run", "--agent", "claude", "--events", "-p", "Summarize the project"],
-    stdout=subprocess.PIPE,
-    text=True,
+def on_event(event):
+    seq = event["seq"]
+    stream = event["stream"]  # "stdout" or "stderr"
+    payload = event["payload"]
+    if "json_line" in payload:
+        print(f"seq={seq} [{stream}] JSON: {payload['json_line']}")
+    elif "raw_line" in payload:
+        print(f"seq={seq} [{stream}] text: {payload['raw_line']}")
+    else:
+        print(f"seq={seq} [{stream}] bytes: {payload['raw_bytes']}")
+
+result = aikit_py.run_agent_events_py(
+    "claude",
+    "Summarize the project",
+    on_event,
+    model=None,
+    yolo=False,
+    stream=True,
 )
-for line in proc.stdout:
-    event = json.loads(line)
-    print(f"seq={event['seq']} stream={event['stream']}: {event['payload']}")
-proc.wait()
+# result is a dict: status_code (int | None), stdout (bytes), stderr (bytes)
+print(result["stdout"].decode())
 ```
 
-To match the CLI combination `--events --stream` (NDJSON plus agent-native streaming argv), include `--stream` in the argv (same stdout loop as above):
-
+The event dictionary schema:
 ```python
-proc = subprocess.Popen(
-    ["aikit", "run", "--agent", "claude", "--events", "--stream", "-p", "Summarize the project"],
-    stdout=subprocess.PIPE,
-    text=True,
-)
+{
+    "agent_key": str,           # e.g., "claude"
+    "seq": int,                 # monotonic sequence number 0..n-1
+    "stream": str,              # "stdout" or "stderr"
+    "payload": {                # exactly one of:
+        "json_line": dict,      # parsed JSON object
+        "raw_line": str,        # UTF-8 text line (not JSON)
+        "raw_bytes": list[int]  # non-UTF-8 bytes as integer array
+    }
+}
 ```
+
+If the callback raises an exception, the exception propagates to the caller after the agent process completes. Subsequent callback invocations are skipped after the first exception.
+
+The return value has the same structure as `run_agent`: `{"status_code": int | None, "stdout": bytes, "stderr": bytes}`.
 
 See `aikit run --help` or the [aikit-sdk README](../aikit-sdk/README.md) for complete streaming event documentation and NDJSON format details.
 
@@ -275,7 +292,7 @@ The `aikit_py` module exposes functions and classes that mirror the `aikit-sdk` 
 
 -   `all_agents()`: Returns a list of `AgentConfig` objects for all known agents.
 -   `agent(key: str)`: Returns an `AgentConfig` object for the specified agent key, or `None` if not found.
--   `validate_agent_key(key: str)`: Validates if an agent key exists, raises `PyDeployError` if not.
+-   `validate_agent_key(key: str)`: Validates if an agent key exists, raises `aikit_py.DeployError` if not.
 -   `commands_dir(project_root: str, agent_key: str)`: Returns the path to an agent's commands directory.
 -   `skill_dir(project_root: str, agent_key: str, skill_name: str)`: Returns the path to a specific skill directory.
 -   `subagent_path(project_root: str, agent_key: str, name: str)`: Returns the path to a subagent file.
@@ -284,12 +301,13 @@ The `aikit_py` module exposes functions and classes that mirror the `aikit-sdk` 
 -   `deploy_subagent(agent_key: str, project_root: str, name: str, content: str)`: Deploys a subagent file.
 -   `command_filename(agent_key: str, name: str)`: Returns the conventional filename for a command.
 -   `subagent_filename(agent_key: str, name: str)`: Returns the conventional filename for a subagent.
--   `run_agent(agent_key, prompt, model=None, yolo=False, stream=False)`: Runs the agent CLI; returns a dict with `status_code`, `stdout`, `stderr`. Raises on invalid agent or spawn failure. **No streaming events support** — output is buffered until the agent completes. Use `aikit run --events` subprocess for real-time event delivery.
+-   `run_agent(agent_key, prompt, model=None, yolo=False, stream=False)`: Runs the agent CLI; returns a dict with `status_code`, `stdout`, `stderr`. Raises on invalid agent or spawn failure. Output is buffered until the agent completes.
+-   `run_agent_events_py(agent_key, prompt, on_event, model=None, yolo=False, stream=False)`: Runs the agent CLI with streaming event delivery via callback. Returns the same dict structure as `run_agent`. The `on_event` callback receives event dictionaries matching the NDJSON format. Raises `aikit_py.DeployError` on invalid agent or spawn failure; re-raises any exception from the callback.
 -   `runnable_agents_list()`: Returns list of runnable agent keys (`codex`, `claude`, `gemini`, `opencode`, `agent`).
 -   `is_runnable_py(agent_key: str)`: Returns whether the agent can be run via `run_agent`.
 -   `PyRunOptions`: Optional builder for run options (model, yolo, stream); used internally by `run_agent`.
 -   `AgentConfig`: A Python class representing an agent's configuration, with properties like `name`, `commands_dir`, `skills_dir`, `agents_dir`, and `key()`.
--   `PyDeployError`: A custom Python exception class for errors originating from the `aikit-sdk`.
+-   `DeployError`: A Python exception class for errors originating from the `aikit-sdk`. Use `str(e)` to get the error message.
 -   `PyDeployConcept`: A Python enum mirroring `DeployConcept` (Command, Skill, Subagent).
 
 ## License

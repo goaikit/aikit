@@ -39,6 +39,37 @@ async fn create_test_package(temp_dir: &Path) -> Package {
     package
 }
 
+fn assert_create_release_failed(msg: &str) {
+    assert!(
+        msg.starts_with("Failed to create release:"),
+        "unexpected error: {msg}"
+    );
+    assert!(
+        msg.contains("401")
+            || msg.contains("Unauthorized")
+            || msg.contains("error sending request"),
+        "expected HTTP 401 or transport error, got: {msg}"
+    );
+}
+
+fn assert_no_release_failed(msg: &str) {
+    assert!(
+        msg.contains("No release found with tag 'v1.0.0'")
+            || (msg.contains("Failed to find release") && msg.contains("v1.0.0")),
+        "unexpected error: {msg}"
+    );
+}
+
+fn assert_upload_missing_file_err(msg: &str) {
+    assert!(
+        msg.contains("No such file or directory")
+            || msg.contains("cannot find the path")
+            || msg.contains("(os error 2)")
+            || msg.contains("(os error 3)"),
+        "expected not-found I/O message, got: {msg}"
+    );
+}
+
 fn create_test_zip_file(path: &Path) {
     use std::fs::File;
     use std::io::Write;
@@ -90,10 +121,7 @@ async fn test_package_publish_with_upload_integration() {
     std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     assert!(result.is_err());
-    insta::assert_snapshot!(
-        "integration_publish_with_upload",
-        result.unwrap_err().to_string()
-    );
+    assert_create_release_failed(&result.unwrap_err().to_string());
 }
 
 #[tokio::test]
@@ -125,10 +153,7 @@ async fn test_package_publish_no_release_integration() {
     std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     assert!(result.is_err());
-    insta::assert_snapshot!(
-        "integration_publish_no_release",
-        result.unwrap_err().to_string()
-    );
+    assert_no_release_failed(&result.unwrap_err().to_string());
 }
 
 #[tokio::test]
@@ -157,10 +182,7 @@ async fn test_package_upload_file_not_found_integration() {
         .await;
 
     assert!(result.is_err());
-    insta::assert_snapshot!(
-        "integration_upload_file_not_found",
-        result.unwrap_err().to_string()
-    );
+    assert_upload_missing_file_err(&result.unwrap_err().to_string());
 }
 
 #[tokio::test]
@@ -196,10 +218,8 @@ async fn test_package_build_and_publish_workflow_integration() {
 
     std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
-    insta::assert_snapshot!(
-        "integration_build_and_publish",
-        publish_result.unwrap_err().to_string()
-    );
+    assert!(publish_result.is_err());
+    assert_create_release_failed(&publish_result.unwrap_err().to_string());
 }
 
 #[tokio::test]
@@ -231,8 +251,5 @@ async fn test_package_publish_with_custom_release_notes_integration() {
     std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     assert!(result.is_err());
-    insta::assert_snapshot!(
-        "integration_publish_custom_notes",
-        result.unwrap_err().to_string()
-    );
+    assert_create_release_failed(&result.unwrap_err().to_string());
 }

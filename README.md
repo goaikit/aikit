@@ -191,7 +191,7 @@ Run `aikit run --help` for the authoritative option reference.
 **Programmatic use:**
 
 - **Rust:** Add `aikit-sdk` to your `Cargo.toml`, then call `aikit_sdk::run_agent(agent_key, prompt, options)` for buffered output or `aikit_sdk::run_agent_events(agent_key, prompt, options, callback)` for streaming events. Returns `Result<RunResult, RunError>`. See [aikit-sdk README](aikit-sdk/README.md) for full API (catalog, deploy, run, streaming events).
-- **Python:** `pip install aikit-py`, then `aikit_py.run_agent(agent_key, prompt, model=None, yolo=False, stream=False)` returns a dict with `status_code`, `stdout`, `stderr`. **Note:** Python bindings do not support streaming events. For real-time event delivery, use `aikit run --events` as a subprocess. See [aikit-py README](aikit-py/README.md) for catalog, deploy, and run APIs.
+- **Python:** `pip install aikit-py`, then `aikit_py.run_agent(agent_key, prompt, model=None, yolo=False, stream=False)` returns a dict with `status_code`, `stdout`, `stderr`. For real-time streaming events, use `aikit_py.run_agent_events_py(agent_key, prompt, on_event, model=None, yolo=False, stream=False)` with a callback receiving event dicts (same schema as `aikit run --events` NDJSON). See [aikit-py README](aikit-py/README.md) for catalog, deploy, and run APIs.
 
 ## Supported AI assistants
 

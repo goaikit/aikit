@@ -2,6 +2,8 @@ import pytest
 import aikit_py
 import tempfile
 import os
+import sys
+import stat
 
 
 # Fixture for a temporary directory to simulate project_root
@@ -278,3 +280,121 @@ def test_get_agent_status_unavailable_has_reason():
 
 def test_get_agent_status_py_matches_canonical():
     assert aikit_py.get_agent_status() == aikit_py.get_agent_status_py()
+
+
+# ---------------------------------------------------------------------------
+# Streaming events tests
+# ---------------------------------------------------------------------------
+
+def write_stub(directory, name, body):
+    """Write an executable shell script stub."""
+    path = os.path.join(directory, name)
+    with open(path, "w") as f:
+        f.write("#!/bin/sh\n" + body + "\n")
+    os.chmod(path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+    return path
+
+
+def with_stub_path(directory, fn):
+    """Run fn with directory prepended to PATH, restore afterwards."""
+    orig = os.environ.get("PATH", "")
+    os.environ["PATH"] = directory + ":" + orig
+    try:
+        return fn()
+    finally:
+        os.environ["PATH"] = orig
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Shell script stubs not supported on Windows")
+def test_run_agent_events_not_runnable():
+    with pytest.raises(Exception) as excinfo:
+        aikit_py.run_agent_events_py("unknown_agent", "test", lambda e: None)
+    assert "not runnable" in str(excinfo.value)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Shell script stubs not supported on Windows")
+@pytest.mark.parametrize("agent_key,body,expected_count", [
+    (
+        "codex",
+        r"""printf '{"type":"message","role":"system","content":"Codex session started"}\n'
+printf '{"type":"message","role":"assistant","content":"Processing..."}\n'
+printf '{"type":"message","role":"assistant","content":"Done."}\n'""",
+        3,
+    ),
+    (
+        "claude",
+        r"""printf '{"type":"system","subtype":"init","session_id":"stub001"}\n'
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Stub response."}]}}\n'
+printf '{"type":"result","subtype":"success","result":"OK"}\n'""",
+        3,
+    ),
+    (
+        "gemini",
+        r"""printf '{"candidates":[{"content":{"parts":[{"text":"Stub response."}],"role":"model"}}]}\n'
+printf '{"candidates":[{"content":{"parts":[{"text":"Done."}],"role":"model"}}]}\n'""",
+        2,
+    ),
+    (
+        "opencode",
+        r"""printf '{"type":"start","agent":"opencode"}\n'
+printf '{"type":"message","role":"assistant","content":"Stub response."}\n'
+printf '{"type":"end","exit_code":0}\n'""",
+        3,
+    ),
+    (
+        "agent",
+        r"""printf '{"event":"start","agent":"agent"}\n'
+printf '{"event":"message","role":"assistant","text":"Stub response."}\n'
+printf '{"event":"end","status":"success"}\n'""",
+        3,
+    ),
+])
+def test_run_agent_events_all_agents(agent_key, body, expected_count):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        write_stub(tmpdir, agent_key, body)
+        events = []
+
+        def on_event(event):
+            events.append(event)
+
+        result = with_stub_path(tmpdir, lambda: aikit_py.run_agent_events_py(
+            agent_key, "test prompt", on_event
+        ))
+
+        assert result is not None
+        assert "status_code" in result
+        assert "stdout" in result
+        assert "stderr" in result
+        assert len(events) == expected_count
+
+        for i, event in enumerate(events):
+            assert event["agent_key"] == agent_key
+            assert event["seq"] == i
+            assert event["stream"] in ("stdout", "stderr")
+            assert "payload" in event
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Shell script stubs not supported on Windows")
+def test_run_agent_events_callback_raises():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        write_stub(
+            tmpdir,
+            "codex",
+            r"""printf '{"type":"message","content":"line1"}\n'
+printf '{"type":"message","content":"line2"}\n'
+printf '{"type":"message","content":"line3"}\n'""",
+        )
+
+        invocation_count = [0]
+
+        def on_event(event):
+            invocation_count[0] += 1
+            raise ValueError("callback error")
+
+        with pytest.raises(ValueError, match="callback error"):
+            with_stub_path(tmpdir, lambda: aikit_py.run_agent_events_py(
+                "codex", "test prompt", on_event
+            ))
+
+        # Callback should have been invoked exactly once (stops after first exception)
+        assert invocation_count[0] == 1

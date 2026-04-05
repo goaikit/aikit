@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # AIKIT Test Runner Script
-# Runs build, fmt, clippy, and tests (cargo-nextest); captures results and emits report to stdout (text or JSON).
-# Matches CI: full workspace build, fmt, clippy, then tests with retries.
+# Runs build, fmt, clippy, cargo-nextest, lib tests (release), and workspace integration binaries.
+# Matches CI: same flow as test-multiplatform (lib release + cargo test --workspace --test '*').
 #
 # Usage: ./run-tests.sh [OPTIONS]
 #
@@ -83,7 +83,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "AIKIT Test Runner Script"
             echo ""
-            echo "Runs build, fmt, clippy, and tests (cargo-nextest); captures results and emits report to stdout (text or JSON)."
+            echo "Runs build, fmt, clippy, cargo-nextest, lib release tests, and workspace integration binaries (CI test-multiplatform parity)."
             echo ""
             echo "Usage: $0 [OPTIONS]"
             echo ""
@@ -172,6 +172,14 @@ if [ "$LIB_RELEASE_EXIT" -ne 0 ]; then
     echo -e "${RED}Lib release tests failed (same command as CI test-multiplatform on Windows/macOS).${NC}" >&2
 fi
 
+echo -e "${YELLOW}Running cargo test --workspace --test '*' (CI integration binaries, e.g. integration_package_upload)...${NC}" >&2
+INTEGRATION_OUTPUT=$(cargo test --workspace --test '*' -- --test-threads=1 2>&1)
+INTEGRATION_EXIT=$?
+echo "$INTEGRATION_OUTPUT" > "$TEST_OUTPUT_DIR/test-integration-output.txt"
+if [ "$INTEGRATION_EXIT" -ne 0 ]; then
+    echo -e "${RED}Workspace integration tests failed (same as CI \"Run integration tests\" step).${NC}" >&2
+fi
+
 set -e
 
 # Overall pass only if build, fmt, clippy, and tests passed
@@ -181,6 +189,7 @@ EXIT_CODE=0
 [ "$CLIPPY_EXIT" -ne 0 ] && EXIT_CODE=1
 [ "$TEST_EXIT" -ne 0 ] && EXIT_CODE=1
 [ "$LIB_RELEASE_EXIT" -ne 0 ] && EXIT_CODE=1
+[ "$INTEGRATION_EXIT" -ne 0 ] && EXIT_CODE=1
 
 if [ "$EXIT_CODE" -eq 0 ]; then
     echo -e "${GREEN}All checks and tests passed.${NC}" >&2
@@ -190,6 +199,7 @@ else
     [ "$CLIPPY_EXIT" -ne 0 ] && echo -e "${RED}Clippy failed.${NC}" >&2
     [ "$TEST_EXIT" -ne 0 ] && echo -e "${RED}Some tests failed.${NC}" >&2
     [ "$LIB_RELEASE_EXIT" -ne 0 ] && echo -e "${RED}Lib release tests failed.${NC}" >&2
+    [ "$INTEGRATION_EXIT" -ne 0 ] && echo -e "${RED}Workspace integration tests failed.${NC}" >&2
 fi
 echo "" >&2
 
@@ -269,6 +279,7 @@ BUILD_STATUS="$([ "$BUILD_EXIT" -eq 0 ] && echo ok || echo failed)"
 FMT_STATUS="$([ "$FMT_EXIT" -eq 0 ] && echo ok || echo failed)"
 CLIPPY_STATUS="$([ "$CLIPPY_EXIT" -eq 0 ] && echo ok || echo failed)"
 LIB_RELEASE_STATUS="$([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo ok || echo failed)"
+INTEGRATION_STATUS="$([ "$INTEGRATION_EXIT" -eq 0 ] && echo ok || echo failed)"
 if [ "$COMPILATION_FAILED" = true ] || [ "$BUILD_EXIT" -ne 0 ]; then
     JSON_CONTENT=$(cat << EOF
 {
@@ -276,7 +287,7 @@ if [ "$COMPILATION_FAILED" = true ] || [ "$BUILD_EXIT" -ne 0 ]; then
   "timestamp": "$TIMESTAMP",
   "command": "$0",
   "exit_code": $EXIT_CODE,
-  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$LIB_RELEASE_STATUS" },
+  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$LIB_RELEASE_STATUS", "integration": "$INTEGRATION_STATUS" },
   "test_statistics": {
     "total": 0,
     "passed": 0,
@@ -294,7 +305,7 @@ else
   "timestamp": "$TIMESTAMP",
   "command": "$0",
   "exit_code": $EXIT_CODE,
-  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$LIB_RELEASE_STATUS" },
+  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$LIB_RELEASE_STATUS", "integration": "$INTEGRATION_STATUS" },
   "test_statistics": {
     "total": $TOTAL,
     "passed": ${PASSED:-0},
@@ -332,7 +343,7 @@ else
 
         echo "## Overall Status"
         if [ "$EXIT_CODE" -eq 0 ]; then
-            echo "PASSED - build, fmt, clippy, nextest, and lib-release all passed"
+            echo "PASSED - build, fmt, clippy, nextest, lib-release, and workspace integration tests all passed"
         else
             echo "FAILED - One or more checks failed"
         fi
@@ -344,6 +355,7 @@ else
         echo "- clippy: $([ "$CLIPPY_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
         echo "- tests (nextest): $([ "$TEST_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
         echo "- lib release: $([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
+        echo "- integration (cargo test --workspace --test '*'): $([ "$INTEGRATION_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
         echo ""
         if [ "$BUILD_EXIT" -ne 0 ] && [ -n "$BUILD_OUTPUT" ]; then
             echo "### Build failure output"
@@ -367,6 +379,12 @@ else
             echo "### lib release failure output"
             echo ""
             echo "$LIB_RELEASE_OUTPUT"
+            echo ""
+        fi
+        if [ "$INTEGRATION_EXIT" -ne 0 ] && [ -n "$INTEGRATION_OUTPUT" ]; then
+            echo "### workspace integration tests failure output"
+            echo ""
+            echo "$INTEGRATION_OUTPUT"
             echo ""
         fi
 
@@ -455,6 +473,7 @@ echo "  build:       $([ "$BUILD_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED'
 echo "  fmt:         $([ "$FMT_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 echo "  clippy:      $([ "$CLIPPY_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 echo "  lib-release: $([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
+echo "  integration: $([ "$INTEGRATION_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 if [ "$COMPILATION_FAILED" = true ]; then
     echo "  tests:  COMPILATION FAILED - no tests executed" >&2
     if [ -n "$OUTPUT_FILE" ]; then

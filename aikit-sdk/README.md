@@ -218,7 +218,7 @@ Both flags can be combined: `aikit run --events --stream` uses events-mode argv 
 
 - No timeout or cancellation support (out of scope for v1).
 - No async/await interface.
-- No Python bindings for the streaming API.
+- Python bindings support streaming via `run_agent_events_py` in `aikit-py`. See [aikit-py README](../aikit-py/README.md) for details.
 - Non-JSON agent output formats are emitted as `RawLine`/`RawBytes` without structured parsing.
 
 ### Agent Detection

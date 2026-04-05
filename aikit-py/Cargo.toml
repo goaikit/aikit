@@ -1,6 +1,6 @@
 [package]
 name = "aikit-py"
-version = "0.1.49"
+version = "0.1.50"
 edition = "2021"
 license = "Apache-2.0"
 description = "Python bindings for aikit SDK"
@@ -11,8 +11,13 @@ categories = ["command-line-utilities"]
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+# `extension-module` is for wheels (maturin); `cargo test` omits it so libpython is linked (macOS dyld).
+default = []
+extension-module = ["pyo3/extension-module"]
+
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["auto-initialize"] }
 aikit-sdk = { path = "../aikit-sdk" }
 
 [dev-dependencies]
