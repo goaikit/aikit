@@ -1,12 +1,14 @@
 use aikit_sdk::{
     get_agent_status as get_agent_status_impl, get_installed_agents as get_installed_agents_impl,
     is_agent_available as is_agent_available_impl, is_runnable, run_agent as run_agent_impl,
-    runnable_agents, AgentConfig, AgentStatus, DeployConcept, DeployError, RunOptions,
+    run_agent_events, runnable_agents, AgentConfig, AgentStatus, DeployConcept, DeployError,
+    RunOptions,
 };
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 // Removed PyDeployError struct and its #[pyclass]
 
@@ -290,6 +292,58 @@ fn run_agent(
 }
 
 #[pyfunction]
+#[pyo3(signature = (agent_key, prompt, on_event, model=None, yolo=false, stream=false))]
+fn run_agent_events_py(
+    py: Python<'_>,
+    agent_key: &str,
+    prompt: &str,
+    on_event: Py<PyAny>,
+    model: Option<String>,
+    yolo: bool,
+    stream: bool,
+) -> PyResult<Py<PyDict>> {
+    let options = RunOptions {
+        model,
+        yolo,
+        stream,
+    };
+    let callback_error: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
+    let callback_error_ref = callback_error.clone();
+
+    let result = run_agent_events(agent_key, prompt, options, move |event| {
+        let mut guard = callback_error_ref.lock().unwrap();
+        if guard.is_some() {
+            return;
+        }
+        let _ = Python::try_attach(|py: Python<'_>| {
+            if let Ok(json_str) = serde_json::to_string(&event) {
+                let result: PyResult<()> = (|| {
+                    let json_mod = py.import("json")?;
+                    let event_dict = json_mod.call_method1("loads", (json_str,))?;
+                    on_event.call1(py, (event_dict,))?;
+                    Ok(())
+                })();
+                if let Err(e) = result {
+                    *guard = Some(e);
+                }
+            }
+        });
+    });
+
+    if let Some(py_err) = callback_error.lock().unwrap().take() {
+        return Err(py_err);
+    }
+
+    let run_result = result.map_err(|e| PyException::new_err(format!("{}", e)))?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("status_code", run_result.status.code())?;
+    dict.set_item("stdout", run_result.stdout)?;
+    dict.set_item("stderr", run_result.stderr)?;
+    Ok(dict.into())
+}
+
+#[pyfunction]
 fn runnable_agents_list() -> Vec<String> {
     runnable_agents().iter().map(|s| s.to_string()).collect()
 }
@@ -365,6 +419,7 @@ fn aikit_py(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(deploy_skill))?;
     m.add_wrapped(wrap_pyfunction!(deploy_subagent))?;
     m.add_wrapped(wrap_pyfunction!(run_agent))?;
+    m.add_wrapped(wrap_pyfunction!(run_agent_events_py))?;
     m.add_wrapped(wrap_pyfunction!(runnable_agents_list))?;
     m.add_wrapped(wrap_pyfunction!(is_runnable_py))?;
     m.add_wrapped(wrap_pyfunction!(is_agent_available))?;
