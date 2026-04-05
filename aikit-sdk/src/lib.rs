@@ -795,11 +795,20 @@ mod tests {
     #[test]
     fn test_instruction_file_with_override_absolute() {
         let temp_dir = TempDir::new().unwrap();
-        let override_path = Path::new("/absolute/path/to/file.md");
-
-        let path =
-            instruction_file_with_override(temp_dir.path(), None, Some(override_path)).unwrap();
-        assert_eq!(path, PathBuf::from("/absolute/path/to/file.md"));
+        #[cfg(windows)]
+        {
+            let override_path = Path::new(r"C:\absolute\path\to\file.md");
+            let path =
+                instruction_file_with_override(temp_dir.path(), None, Some(override_path)).unwrap();
+            assert_eq!(path, PathBuf::from(r"C:\absolute\path\to\file.md"));
+        }
+        #[cfg(not(windows))]
+        {
+            let override_path = Path::new("/absolute/path/to/file.md");
+            let path =
+                instruction_file_with_override(temp_dir.path(), None, Some(override_path)).unwrap();
+            assert_eq!(path, PathBuf::from("/absolute/path/to/file.md"));
+        }
     }
 
     #[test]

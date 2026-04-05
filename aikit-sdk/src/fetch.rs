@@ -341,6 +341,21 @@ fn normalize_path(path: &Path) -> PathBuf {
     result
 }
 
+/// Zip entry names are POSIX-oriented; Windows Path may not treat `/etc/...` as absolute.
+fn zip_entry_has_absolute_prefix(entry_name: &str) -> bool {
+    if entry_name.is_empty() {
+        return false;
+    }
+    if entry_name.starts_with('/') || entry_name.starts_with('\\') {
+        return true;
+    }
+    let mut it = entry_name.chars();
+    matches!(
+        (it.next(), it.next()),
+        (Some(d), Some(':')) if d.is_ascii_alphabetic()
+    )
+}
+
 /// Extract zip bytes to destination directory
 fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
     use std::io::Cursor;
@@ -375,8 +390,8 @@ fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
         // Normalize the entry name to prevent path traversal (resolves . components)
         let normalized = normalize_path(Path::new(entry_name));
 
-        // Validate that the normalized path is relative (prevents absolute paths like /etc/passwd)
-        if !normalized.is_relative() {
+        // Reject absolute names portably (see `zip_entry_has_absolute_prefix`)
+        if zip_entry_has_absolute_prefix(entry_name) || !normalized.is_relative() {
             return Err(InstallError::FetchFailed(format!(
                 "Absolute path detected in zip entry: {}",
                 entry_name
