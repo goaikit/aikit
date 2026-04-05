@@ -13,6 +13,7 @@ AIKit organizes functionality into logical command groups:
 
 ### Core Commands
 - **`init`** - Initialize new Spec-Driven Development projects
+- **`run`** - Run a coding agent with a prompt (supports streaming events)
 - **`check`** - Validate installed tools and AI agent CLIs
 - **`version`** - Display version information
 
@@ -52,6 +53,7 @@ aikit <command> --help
 | Command | Purpose | Example |
 |---------|---------|---------|
 | `init` | Create new project | `aikit init my-project` |
+| `run` | Run a coding agent | `aikit run --agent claude -p "Task"` |
 | `check` | Validate environment | `aikit check` |
 | `install` | Install package | `aikit install https://github.com/user/repo` |
 | `package init` | Create package | `aikit package init` |
@@ -147,6 +149,77 @@ $ aikit init my-claude-project --ai claude
 ✓ Created development scripts
 ✓ Project ready for Spec-Driven Development
 ```
+
+### run
+
+Run a coding agent with a prompt. The `run` command executes AI coding agents directly from the CLI, supporting buffered output, agent-native streaming, and structured NDJSON event delivery.
+
+**Runnable agents:** `codex`, `claude`, `gemini`, `opencode`, `agent`
+
+```bash
+# Run an agent with an inline prompt
+aikit run --agent claude -p "Refactor this function for clarity"
+
+# Read prompt from stdin
+echo "Add error handling to main.rs" | aikit run --agent opencode
+
+# Use environment variable defaults
+export CODING_AGENT=claude
+export CODING_AGENT_MODEL=claude-3-opus
+echo "Write tests" | aikit run
+
+# Enable agent-native streaming output
+aikit run --agent claude --stream -p "Summarize the project"
+
+# Emit structured NDJSON events to stdout
+aikit run --agent claude --events -p "Summarize the project"
+
+# Combine --events and --stream for streaming-aware JSON output
+aikit run --agent claude --events --stream -p "Refactor this module"
+```
+
+**Options:**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--agent` | `-a` | Agent to run | `CODING_AGENT` env var, then `opencode` |
+| `--model` | `-m` | Model to use | `CODING_AGENT_MODEL` env var, then `zai-coding-plan/glm-4.7` |
+| `--prompt` | `-p` | Prompt to run | Reads from stdin if omitted |
+| `--yolo` | | Auto-confirm, skip checks | `false` |
+| `--stream` | | Enable agent-native streaming output flags | `false` |
+| `--events` | | Emit NDJSON event stream to stdout | `false` |
+
+**Environment variables:**
+- `CODING_AGENT` - Default agent (fallback: `opencode`)
+- `CODING_AGENT_MODEL` - Default model (fallback: `zai-coding-plan/glm-4.7`)
+
+#### `--stream` vs `--events`
+
+These flags are independent and can be combined:
+
+- **`--stream`**: Tunes agent-native partial output flags (e.g. `--stream-partial-output`, `stream-json`). This is passed through as `RunOptions::stream` to the argv builder. The CLI output format is unchanged.
+- **`--events`**: Switches the CLI to call `run_agent_events` and emit one JSON object per line (NDJSON) to stdout. Incremental delivery; process exit code matches child exit when no SDK error occurs.
+- **Combined (`--events --stream`)**: Uses events-mode JSON output AND adds stream-partial flags for supported agents.
+
+#### NDJSON event format
+
+When using `--events`, each line of stdout is a JSON object:
+
+```json
+{"agent_key":"claude","seq":1,"stream":"stdout","payload":{"json_line":{"type":"progress","message":"Starting..."}}}
+{"agent_key":"claude","seq":2,"stream":"stdout","payload":{"raw_line":"Processing file..."}}
+{"agent_key":"claude","seq":3,"stream":"stderr","payload":{"raw_line":"Warning: large context"}}
+```
+
+Fields:
+- `agent_key` - The agent that produced the event
+- `seq` - Monotonically increasing sequence number
+- `stream` - Source stream: `"stdout"` or `"stderr"`
+- `payload` - One of: `{"json_line": <object>}`, `{"raw_line": "<string>"}`, or `{"raw_bytes": "<base64>"}`
+
+See [aikit-sdk README](../aikit-sdk/README.md) for complete streaming API documentation.
+
+Run `aikit run --help` for the authoritative option reference.
 
 ### check
 

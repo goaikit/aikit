@@ -163,6 +163,29 @@ if aikit_py.is_runnable_py("claude"):
 
 Raises an exception if the agent is not runnable or the process fails to start.
 
+### Streaming and events
+
+**The Python bindings do not support streaming events.** The `run_agent` function buffers all output and returns it after the agent completes. There is no callback-based or incremental delivery API in `aikit-py`.
+
+For real-time event delivery (NDJSON output), use `aikit run --events` as a subprocess:
+
+```python
+import subprocess
+import json
+
+proc = subprocess.Popen(
+    ["aikit", "run", "--agent", "claude", "--events", "-p", "Summarize the project"],
+    stdout=subprocess.PIPE,
+    text=True,
+)
+for line in proc.stdout:
+    event = json.loads(line)
+    print(f"seq={event['seq']} stream={event['stream']}: {event['payload']}")
+proc.wait()
+```
+
+See [aikit run --help] or the [aikit-sdk README](../aikit-sdk/README.md) for complete streaming event documentation and NDJSON format details.
+
 ## Agent Detection
 
 ### Check if Agent is Installed
@@ -251,7 +274,7 @@ The `aikit_py` module exposes functions and classes that mirror the `aikit-sdk` 
 -   `deploy_subagent(agent_key: str, project_root: str, name: str, content: str)`: Deploys a subagent file.
 -   `command_filename(agent_key: str, name: str)`: Returns the conventional filename for a command.
 -   `subagent_filename(agent_key: str, name: str)`: Returns the conventional filename for a subagent.
--   `run_agent(agent_key, prompt, model=None, yolo=False, stream=False)`: Runs the agent CLI; returns a dict with `status_code`, `stdout`, `stderr`. Raises on invalid agent or spawn failure.
+-   `run_agent(agent_key, prompt, model=None, yolo=False, stream=False)`: Runs the agent CLI; returns a dict with `status_code`, `stdout`, `stderr`. Raises on invalid agent or spawn failure. **No streaming events support** — output is buffered until the agent completes. Use `aikit run --events` subprocess for real-time event delivery.
 -   `runnable_agents_list()`: Returns list of runnable agent keys (`codex`, `claude`, `gemini`, `opencode`, `agent`).
 -   `is_runnable_py(agent_key: str)`: Returns whether the agent can be run via `run_agent`.
 -   `PyRunOptions`: Optional builder for run options (model, yolo, stream); used internally by `run_agent`.

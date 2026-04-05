@@ -149,20 +149,47 @@ export CODING_AGENT=opencode
 export CODING_AGENT_MODEL=zai-coding-plan/glm-4.7
 echo "Write tests" | aikit run
 
-# Available options
-aikit run --agent claude --model claude-3-opus --yolo --stream -p "Task description"
+# Emit structured NDJSON events to stdout (one JSON object per line)
+aikit run --agent claude --events -p "Summarize the project"
+
+# Combine --events with --stream for streaming-aware JSON output
+aikit run --agent claude --events --stream -p "Refactor this module"
 ```
 
 **Supported agents:** `codex`, `claude`, `gemini`, `opencode`, `agent`
+
+**Options:**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--agent` | `-a` | Agent to run | `CODING_AGENT` env var, then `opencode` |
+| `--model` | `-m` | Model to use | `CODING_AGENT_MODEL` env var, then `zai-coding-plan/glm-4.7` |
+| `--prompt` | `-p` | Prompt to run | Reads from stdin if omitted |
+| `--yolo` | | Auto-confirm, skip checks | `false` |
+| `--stream` | | Enable agent-native streaming output flags | `false` |
+| `--events` | | Emit NDJSON event stream to stdout | `false` |
 
 **Environment variables:**
 - `CODING_AGENT`: Default agent (falls back to `opencode`)
 - `CODING_AGENT_MODEL`: Default model (falls back to `zai-coding-plan/glm-4.7`)
 
+**`--stream` vs `--events`:**
+- `--stream`: Tunes agent-native partial output flags (e.g. `--stream-partial-output`, `stream-json`). Passed through to the agent argv builder.
+- `--events`: Switches the CLI to emit one JSON object per line (NDJSON) to stdout. Process exit code matches the child agent's exit code.
+- Both flags can be combined: `--events --stream` uses events-mode JSON output AND adds stream-partial flags for supported agents.
+
+**NDJSON event format** (when using `--events`):
+```json
+{"agent_key":"claude","seq":1,"stream":"stdout","payload":{"json_line":{"type":"progress","message":"Starting..."}}}
+{"agent_key":"claude","seq":2,"stream":"stdout","payload":{"raw_line":"Processing file..."}}
+```
+
+Run `aikit run --help` for the authoritative option reference.
+
 **Programmatic use:**
 
-- **Rust:** Add `aikit-sdk` to your `Cargo.toml`, then call `aikit_sdk::run_agent(agent_key, prompt, RunOptions { model, yolo, stream })`. Returns `Result<RunResult, RunError>`. See [aikit-sdk README](aikit-sdk/README.md) for full API (catalog, deploy, run).
-- **Python:** `pip install aikit-py`, then `aikit_py.run_agent(agent_key, prompt, model=None, yolo=False, stream=False)` returns a dict with `status_code`, `stdout`, `stderr`. See [aikit-py README](aikit-py/README.md) for catalog, deploy, and run APIs.
+- **Rust:** Add `aikit-sdk` to your `Cargo.toml`, then call `aikit_sdk::run_agent(agent_key, prompt, options)` for buffered output or `aikit_sdk::run_agent_events(agent_key, prompt, options, callback)` for streaming events. Returns `Result<RunResult, RunError>`. See [aikit-sdk README](aikit-sdk/README.md) for full API (catalog, deploy, run, streaming events).
+- **Python:** `pip install aikit-py`, then `aikit_py.run_agent(agent_key, prompt, model=None, yolo=False, stream=False)` returns a dict with `status_code`, `stdout`, `stderr`. **Note:** Python bindings do not support streaming events. For real-time event delivery, use `aikit run --events` as a subprocess. See [aikit-py README](aikit-py/README.md) for catalog, deploy, and run APIs.
 
 ## Supported AI assistants
 
