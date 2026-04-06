@@ -348,7 +348,7 @@ mod tests {
 
         match cli.command.unwrap() {
             aikit::cli::Commands::Run(args) => {
-                assert_eq!(args.agent, Some("opencode".to_string()));
+                assert_eq!(args.agent, "opencode");
                 assert_eq!(args.prompt, Some("hello".to_string()));
                 assert!(args.model.is_none());
                 assert!(!args.yolo);
@@ -377,7 +377,7 @@ mod tests {
 
         match cli.command.unwrap() {
             aikit::cli::Commands::Run(args) => {
-                assert_eq!(args.agent, Some("claude".to_string()));
+                assert_eq!(args.agent, "claude");
                 assert_eq!(args.model, Some("claude-3-opus".to_string()));
                 assert_eq!(args.prompt, Some("task".to_string()));
                 assert!(args.yolo);
@@ -404,6 +404,9 @@ mod tests {
 
         // Missing required version for release
         assert!(Cli::try_parse_from(["aikit", "release"]).is_err());
+
+        // `aikit run` requires --agent
+        assert!(Cli::try_parse_from(["aikit", "run", "-p", "hello"]).is_err());
     }
 
     /// Test that no arguments triggers help (clap exits with help)

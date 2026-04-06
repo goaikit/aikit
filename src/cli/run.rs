@@ -7,12 +7,12 @@ use std::io::{self, Read, Write};
 #[derive(Parser, Debug)]
 #[command(about = "Run a coding agent with a prompt (stdin or -p)")]
 pub struct RunArgs {
-    /// Agent to run (default: CODING_AGENT env var, then opencode)
-    #[arg(long, short = 'a')]
-    pub agent: Option<String>,
+    /// Runnable agent key (e.g. `codex`, `claude`, `gemini`, `opencode`, `agent`)
+    #[arg(long, short = 'a', value_name = "AGENT")]
+    pub agent: String,
 
-    /// Model to use (default: CODING_AGENT_MODEL env var, then zai-coding-plan/glm-4.7)
-    #[arg(long, short = 'm')]
+    /// Model passed to the agent; if omitted, the agent binary applies its own default
+    #[arg(long, short = 'm', value_name = "MODEL")]
     pub model: Option<String>,
 
     /// Prompt to run (if not provided, reads from stdin)
@@ -37,15 +37,8 @@ pub struct RunArgs {
 }
 
 pub fn execute(args: RunArgs) -> Result<()> {
-    let agent = args
-        .agent
-        .or_else(|| std::env::var("CODING_AGENT").ok())
-        .unwrap_or_else(|| "opencode".to_string());
-
-    let model = args
-        .model
-        .or_else(|| std::env::var("CODING_AGENT_MODEL").ok())
-        .unwrap_or_else(|| "zai-coding-plan/glm-4.7".to_string());
+    let agent = args.agent;
+    let model = args.model;
 
     let prompt = match args.prompt {
         Some(p) => p,
@@ -56,11 +49,24 @@ pub fn execute(args: RunArgs) -> Result<()> {
         }
     };
 
+    tracing::debug!(
+        agent = %agent,
+        model = ?model,
+        prompt_chars = prompt.len(),
+        yolo = args.yolo,
+        stream = args.stream,
+        events = args.events,
+        "aikit run dispatch"
+    );
+
     // Dry-run mode: validate inputs but don't execute
     if args.dry_run {
         println!("Dry-run mode enabled");
-        println!("Agent: {}", agent);
-        println!("Model: {}", model);
+        println!("Agent: {}", &agent);
+        println!(
+            "Model: {}",
+            model.as_deref().unwrap_or("(not set; agent default)")
+        );
         println!("Prompt length: {} chars", prompt.len());
         println!("Yolo mode: {}", args.yolo);
         println!("Stream mode: {}", args.stream);
@@ -69,10 +75,12 @@ pub fn execute(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    let options = RunOptions::new()
-        .with_model(model)
+    let mut options = RunOptions::new()
         .with_yolo(args.yolo)
         .with_stream(args.stream);
+    if let Some(ref m) = model {
+        options = options.with_model(m.clone());
+    }
 
     if args.events {
         match run_agent_events(&agent, &prompt, options, |event: AgentEvent| {
@@ -81,7 +89,8 @@ pub fn execute(args: RunArgs) -> Result<()> {
             }
         }) {
             Ok(result) => {
-                let exit_code = result.status.code().unwrap_or(1);
+                let _ = io::stderr().write_all(&result.stderr);
+                let exit_code = result.exit_code().unwrap_or(1);
                 std::process::exit(exit_code);
             }
             Err(RunError::AgentNotRunnable(key)) => {

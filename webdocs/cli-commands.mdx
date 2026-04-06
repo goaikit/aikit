@@ -163,11 +163,6 @@ aikit run --agent claude -p "Refactor this function for clarity"
 # Read prompt from stdin
 echo "Add error handling to main.rs" | aikit run --agent opencode
 
-# Use environment variable defaults
-export CODING_AGENT=claude
-export CODING_AGENT_MODEL=claude-3-opus
-echo "Write tests" | aikit run
-
 # Enable agent-native streaming output
 aikit run --agent claude --stream -p "Summarize the project"
 
@@ -182,17 +177,15 @@ aikit run --agent claude --events --stream -p "Refactor this module"
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--agent` | `-a` | Agent to run | `CODING_AGENT` env var, then `opencode` |
-| `--model` | `-m` | Model to use | `CODING_AGENT_MODEL` env var, then `zai-coding-plan/glm-4.7` |
+| `--agent` | `-a` | Runnable agent key | **Required** |
+| `--model` | `-m` | Model passed to the agent | Omitted unless `-m` is set; agent binary defines behavior |
 | `--prompt` | `-p` | Prompt to run | Reads from stdin if omitted |
 | `--yolo` | | Auto-confirm, skip checks | `false` |
 | `--stream` | | Enable agent-native streaming output flags | `false` |
 | `--events` | | Emit NDJSON event stream to stdout | `false` |
 | `--debug` | | Verbose diagnostic output (global `aikit` flag; shown on `run` help) | `false` |
 
-**Environment variables:**
-- `CODING_AGENT` - Default agent (fallback: `opencode`)
-- `CODING_AGENT_MODEL` - Default model (fallback: `zai-coding-plan/glm-4.7`)
+`-a` / `--agent` is required. `aikit run` does not use `CODING_AGENT` or `CODING_AGENT_MODEL`. Without `-m`, no model is passed through to the agent.
 
 #### `--stream` vs `--events`
 

@@ -9,6 +9,7 @@ keywords = ["ai", "agents", "deploy", "catalog", "capabilities"]
 categories = ["command-line-utilities"]
 
 [dependencies]
+tracing = "0.1"
 glob = "0.3"
 walkdir = "2"
 toml = "0.8"
