@@ -380,18 +380,18 @@ fn build_opencode_argv(
     argv
 }
 
-/// Builds command-line arguments for agent CLI.
-fn build_agent_argv(
+/// Builds command-line arguments for Cursor Agent CLI (headless mode).
+fn build_cursor_agent_argv(
     prompt: &str,
     model: Option<&String>,
     yolo: bool,
     stream: bool,
 ) -> Vec<OsString> {
-    let mut argv = vec![
-        OsString::from("agent"),
-        OsString::from("--prompt"),
-        OsString::from(prompt),
-    ];
+    let mut argv = vec![OsString::from("agent"), OsString::from("--print")];
+
+    if stream {
+        argv.extend_from_slice(&[OsString::from("--output-format"), OsString::from("json")]);
+    }
 
     if let Some(m) = model {
         argv.push(OsString::from("--model"));
@@ -399,13 +399,10 @@ fn build_agent_argv(
     }
 
     if yolo {
-        argv.push(OsString::from("--yolo"));
+        argv.push(OsString::from("--force"));
     }
 
-    if stream {
-        argv.push(OsString::from("--stream"));
-    }
-
+    argv.push(OsString::from(prompt));
     argv
 }
 
@@ -487,8 +484,8 @@ fn build_opencode_argv_events(prompt: &str, model: Option<&String>, yolo: bool) 
     argv
 }
 
-/// Event-mode argv builder for agent CLI: emits JSON output.
-fn build_agent_argv_events(
+/// Event-mode argv builder for Cursor Agent CLI: emits JSON output.
+fn build_cursor_agent_argv_events(
     prompt: &str,
     model: Option<&String>,
     yolo: bool,
@@ -496,10 +493,15 @@ fn build_agent_argv_events(
 ) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("agent"),
-        OsString::from("--prompt"),
-        OsString::from(prompt),
-        OsString::from("--json"),
+        OsString::from("--print"),
+        OsString::from("--output-format"),
     ];
+
+    if stream {
+        argv.push(OsString::from("stream-json"));
+    } else {
+        argv.push(OsString::from("json"));
+    }
 
     if let Some(m) = model {
         argv.push(OsString::from("--model"));
@@ -507,14 +509,17 @@ fn build_agent_argv_events(
     }
 
     if yolo {
-        argv.push(OsString::from("--yolo"));
+        argv.push(OsString::from("--force"));
     }
 
-    if stream {
-        argv.push(OsString::from("--stream"));
-    }
-
+    argv.push(OsString::from(prompt));
     argv
+}
+
+/// Returns whether the agent key expects the prompt written to stdin.
+/// Cursor Agent ("agent") takes the prompt as a positional argument instead.
+fn should_write_stdin(agent_key: &str) -> bool {
+    agent_key != "agent"
 }
 
 /// Shared internal function that spawns a child process with piped stdio.
@@ -537,7 +542,7 @@ fn spawn_agent_piped(
             "claude" => build_claude_argv_events(prompt, options.model.as_ref(), options.stream),
             "gemini" => build_gemini_argv_events(prompt, options.model.as_ref()),
             "opencode" => build_opencode_argv_events(prompt, options.model.as_ref(), options.yolo),
-            "agent" => build_agent_argv_events(
+            "agent" => build_cursor_agent_argv_events(
                 prompt,
                 options.model.as_ref(),
                 options.yolo,
@@ -559,9 +564,12 @@ fn spawn_agent_piped(
             "opencode" => {
                 build_opencode_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
             }
-            "agent" => {
-                build_agent_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
-            }
+            "agent" => build_cursor_agent_argv(
+                prompt,
+                options.model.as_ref(),
+                options.yolo,
+                options.stream,
+            ),
             _ => unreachable!(),
         }
     };
@@ -676,10 +684,14 @@ where
     let (mut child, _argv) = spawn_agent_piped(agent_key, prompt, &options, true)?;
 
     // Write prompt and close stdin before reading output.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .map_err(RunError::StdinFailed)?;
+    // Cursor Agent ("agent") takes the prompt as a positional argument, so
+    // stdin is left unused for that key.
+    if should_write_stdin(agent_key) {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .map_err(RunError::StdinFailed)?;
+        }
     }
 
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
@@ -1094,14 +1106,18 @@ mod tests {
 
     #[test]
     fn test_build_agent_argv_contains_all_options() {
-        let argv = build_agent_argv("test prompt", Some(&"custom-model".to_string()), true, true);
+        let argv =
+            build_cursor_agent_argv("test prompt", Some(&"custom-model".to_string()), true, true);
         assert!(argv.contains(&OsString::from("agent")));
-        assert!(argv.contains(&OsString::from("--prompt")));
-        assert!(argv.contains(&OsString::from("test prompt")));
+        assert!(argv.contains(&OsString::from("--print")));
+        assert!(argv.contains(&OsString::from("--output-format")));
+        assert!(argv.contains(&OsString::from("json")));
         assert!(argv.contains(&OsString::from("--model")));
         assert!(argv.contains(&OsString::from("custom-model")));
-        assert!(argv.contains(&OsString::from("--yolo")));
-        assert!(argv.contains(&OsString::from("--stream")));
+        assert!(argv.contains(&OsString::from("--force")));
+        assert!(argv.contains(&OsString::from("test prompt")));
+        assert!(!argv.contains(&OsString::from("--prompt")));
+        assert!(!argv.contains(&OsString::from("--yolo")));
     }
 
     #[test]
@@ -1544,8 +1560,27 @@ mod tests {
 
     #[test]
     fn test_build_agent_argv_events_has_json_flag() {
-        let argv = build_agent_argv_events("test", None, false, false);
-        assert!(argv.contains(&OsString::from("--json")));
+        let argv = build_cursor_agent_argv_events("test", None, false, false);
+        assert!(argv.contains(&OsString::from("--print")));
+        assert!(argv.contains(&OsString::from("--output-format")));
+        assert!(argv.contains(&OsString::from("json")));
+        assert!(!argv.contains(&OsString::from("--json")));
+    }
+
+    #[test]
+    fn test_build_cursor_agent_argv_events_stream_json() {
+        let argv = build_cursor_agent_argv_events("test", None, false, true);
+        assert!(argv.contains(&OsString::from("stream-json")));
+        assert!(argv.contains(&OsString::from("test")));
+    }
+
+    #[test]
+    fn test_should_write_stdin() {
+        assert!(!should_write_stdin("agent"));
+        assert!(should_write_stdin("codex"));
+        assert!(should_write_stdin("claude"));
+        assert!(should_write_stdin("gemini"));
+        assert!(should_write_stdin("opencode"));
     }
 
     #[test]
