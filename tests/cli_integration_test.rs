@@ -1002,6 +1002,18 @@ description = "Test package with invalid name"
         Ok(())
     }
 
+    /// `aikit run` requires `--agent` (no env-based default)
+    #[test]
+    fn test_aikit_run_requires_agent_flag() -> Result<(), Box<dyn std::error::Error>> {
+        cargo_bin_cmd!("aikit")
+            .args(["run", "-p", "hello"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--agent"));
+
+        Ok(())
+    }
+
     /// Test installing Newton template and verifying .newton/ layout
     #[test]
     fn test_install_newton_template() -> Result<(), Box<dyn std::error::Error>> {

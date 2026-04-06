@@ -59,9 +59,29 @@ pub enum Commands {
     Run(run::RunArgs),
 }
 
+/// Initialize `tracing` when `RUST_LOG` is set or `--debug` is passed (so SDK logs are visible).
+fn init_tracing(cli: &Cli) {
+    let rust_log = std::env::var_os("RUST_LOG").is_some();
+    if !rust_log && !cli.debug {
+        return;
+    }
+    use tracing_subscriber::EnvFilter;
+    let filter = if rust_log {
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
+    } else {
+        EnvFilter::new("aikit_sdk=debug,aikit::cli::run=debug,warn")
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
+
 /// Run the CLI application
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    init_tracing(&cli);
 
     // Initialization banner (binary name and version)
     eprintln!("aikit {}", env!("CARGO_PKG_VERSION"));

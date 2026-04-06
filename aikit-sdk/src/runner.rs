@@ -574,6 +574,23 @@ fn spawn_agent_piped(
         }
     };
 
+    let argv_display: Vec<String> = argv
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+    tracing::debug!(
+        target: "aikit_sdk::runner",
+        agent_key = %agent_key,
+        argv = ?argv_display,
+        cwd = ?options.current_dir.as_ref().map(|p| p.display().to_string()),
+        timeout = ?options.timeout.map(|d| format!("{}s", d.as_secs())),
+        events_mode,
+        yolo = options.yolo,
+        stream = options.stream,
+        write_prompt_to_stdin = should_write_stdin(agent_key),
+        "spawning agent child process"
+    );
+
     let binary = &argv[0];
     let args = &argv[1..];
 
@@ -681,17 +698,31 @@ where
 {
     use std::sync::{Arc, Mutex};
 
+    tracing::debug!(
+        target: "aikit_sdk::runner",
+        agent_key = %agent_key,
+        prompt_len = prompt.len(),
+        timeout = ?options.timeout.map(|d| d.as_secs()),
+        stream = options.stream,
+        yolo = options.yolo,
+        "run_agent_events"
+    );
+
     let (mut child, _argv) = spawn_agent_piped(agent_key, prompt, &options, true)?;
 
     // Write prompt and close stdin before reading output.
     // Cursor Agent ("agent") takes the prompt as a positional argument, so
-    // stdin is left unused for that key.
+    // we do not write stdin; we still must `take()` and drop it so the write
+    // end of the pipe closes. Otherwise the child's stdin stays open and some
+    // agents block reading it when stdout is a pipe (non-TTY).
     if should_write_stdin(agent_key) {
         if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(prompt.as_bytes())
                 .map_err(RunError::StdinFailed)?;
         }
+    } else {
+        drop(child.stdin.take());
     }
 
     let stdout_pipe = child.stdout.take().expect("stdout was piped");

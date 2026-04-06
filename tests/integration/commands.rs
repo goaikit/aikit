@@ -233,7 +233,10 @@ fn test_aikit_run_help() {
     assert!(output_str.contains("--prompt"));
     assert!(output_str.contains("--yolo"));
     assert!(output_str.contains("--stream"));
-    assert!(output_str.contains("CODING_AGENT"));
+    assert!(
+        !output_str.contains("CODING_AGENT"),
+        "run help must not document removed env vars"
+    );
 }
 
 /// Test run command with stdin (using dry-run mode)

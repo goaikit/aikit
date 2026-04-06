@@ -144,11 +144,6 @@ aikit run --agent opencode -p "Help me refactor this code"
 # Read prompt from stdin
 echo "Add error handling" | aikit run --agent claude
 
-# Use environment variables for default agent and model
-export CODING_AGENT=opencode
-export CODING_AGENT_MODEL=zai-coding-plan/glm-4.7
-echo "Write tests" | aikit run
-
 # Emit structured NDJSON events to stdout (one JSON object per line)
 aikit run --agent claude --events -p "Summarize the project"
 
@@ -162,8 +157,8 @@ aikit run --agent claude --events --stream -p "Refactor this module"
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--agent` | `-a` | Agent to run | `CODING_AGENT` env var, then `opencode` |
-| `--model` | `-m` | Model to use | `CODING_AGENT_MODEL` env var, then `zai-coding-plan/glm-4.7` |
+| `--agent` | `-a` | Runnable agent key (`codex`, `claude`, `gemini`, `opencode`, `agent`) | **Required** |
+| `--model` | `-m` | Model passed to the agent | Omitted unless `-m` is set; no CLI default (agent binary decides) |
 | `--prompt` | `-p` | Prompt to run | Reads from stdin if omitted |
 | `--yolo` | | Auto-confirm, skip checks | `false` |
 | `--stream` | | Enable agent-native streaming output flags | `false` |
@@ -171,9 +166,7 @@ aikit run --agent claude --events --stream -p "Refactor this module"
 
 `aikit run` also accepts the root **`--debug`** flag (global on the `aikit` CLI; it appears in `aikit run --help`).
 
-**Environment variables:**
-- `CODING_AGENT`: Default agent (falls back to `opencode`)
-- `CODING_AGENT_MODEL`: Default model (falls back to `zai-coding-plan/glm-4.7`)
+Agent selection is **CLI-only**: `-a` / `--agent` is required. `aikit run` does not read `CODING_AGENT` or `CODING_AGENT_MODEL`. When `-m` is omitted, no model flag is passed to the agent; the spawned agent applies its own defaults or errors if it requires an explicit model.
 
 **`--stream` vs `--events`:**
 - `--stream`: Tunes agent-native partial output flags (e.g. `--stream-partial-output`, `stream-json`). Passed through to the agent argv builder.
