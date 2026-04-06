@@ -245,11 +245,11 @@ impl From<RunOptions> for PyRunOptions {
 
 impl From<PyRunOptions> for RunOptions {
     fn from(options: PyRunOptions) -> Self {
-        RunOptions {
-            model: options.model,
-            yolo: options.yolo,
-            stream: options.stream,
-        }
+        let mut opts = RunOptions::new()
+            .with_yolo(options.yolo)
+            .with_stream(options.stream);
+        opts.model = options.model;
+        opts
     }
 }
 
@@ -275,11 +275,8 @@ fn run_agent(
     yolo: bool,
     stream: bool,
 ) -> PyResult<Py<PyDict>> {
-    let options = RunOptions {
-        model,
-        yolo,
-        stream,
-    };
+    let mut options = RunOptions::new().with_yolo(yolo).with_stream(stream);
+    options.model = model;
 
     let result = run_agent_impl(agent_key, prompt, options)
         .map_err(|e| PyException::new_err(format!("{}", e)))?;
@@ -302,11 +299,8 @@ fn run_agent_events_py(
     yolo: bool,
     stream: bool,
 ) -> PyResult<Py<PyDict>> {
-    let options = RunOptions {
-        model,
-        yolo,
-        stream,
-    };
+    let mut options = RunOptions::new().with_yolo(yolo).with_stream(stream);
+    options.model = model;
     let callback_error: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
     let callback_error_ref = callback_error.clone();
 

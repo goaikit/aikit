@@ -69,11 +69,10 @@ pub fn execute(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
-    let options = RunOptions {
-        model: Some(model),
-        yolo: args.yolo,
-        stream: args.stream,
-    };
+    let options = RunOptions::new()
+        .with_model(model)
+        .with_yolo(args.yolo)
+        .with_stream(args.stream);
 
     if args.events {
         match run_agent_events(&agent, &prompt, options, |event: AgentEvent| {
