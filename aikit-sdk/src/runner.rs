@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::io;
 use std::io::{BufRead, Write};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 use std::{panic, thread};
@@ -64,6 +65,7 @@ impl ChildTimeoutExt for Child {
 
 /// Options for running an agent.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct RunOptions {
     /// Optional model name/identifier
     pub model: Option<String>,
@@ -71,6 +73,18 @@ pub struct RunOptions {
     pub yolo: bool,
     /// Whether to stream output incrementally
     pub stream: bool,
+    /// Maximum wall-clock duration from spawn to child exit or kill.
+    ///
+    /// When set, a watchdog thread monitors the child process and kills it if
+    /// it runs longer than this duration. The kill is process-level (not just
+    /// future cancellation), guaranteeing resource cleanup.
+    pub timeout: Option<std::time::Duration>,
+    /// Working directory for the agent child process only.
+    ///
+    /// When set, only the spawned child process changes directory; the parent
+    /// process working directory is unaffected. This is safe for concurrent
+    /// use and async environments.
+    pub current_dir: Option<std::path::PathBuf>,
 }
 
 impl RunOptions {
@@ -90,6 +104,18 @@ impl RunOptions {
 
     pub fn with_stream(mut self, stream: bool) -> Self {
         self.stream = stream;
+        self
+    }
+
+    /// Set a maximum wall-clock timeout for the agent child process.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Set the working directory for the agent child process.
+    pub fn with_current_dir(mut self, path: std::path::PathBuf) -> Self {
+        self.current_dir = Some(path);
         self
     }
 }
@@ -125,6 +151,7 @@ impl RunResult {
 
 /// Error types for run operations.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum RunError {
     /// Agent key is not runnable
     AgentNotRunnable(String),
@@ -140,6 +167,15 @@ pub enum RunError {
     ReaderFailed {
         stream: AgentEventStream,
         source: io::Error,
+    },
+    /// Agent child was killed because it exceeded the configured timeout
+    TimedOut {
+        /// The timeout duration that was exceeded
+        timeout: Duration,
+        /// Stdout bytes collected before the child was killed (may be partial)
+        stdout: Vec<u8>,
+        /// Stderr bytes collected before the child was killed (may be partial)
+        stderr: Vec<u8>,
     },
 }
 
@@ -160,6 +196,9 @@ impl std::fmt::Display for RunError {
             RunError::ReaderFailed { stream, source } => {
                 write!(f, "Reader failed on {:?} stream: {}", stream, source)
             }
+            RunError::TimedOut { timeout, .. } => {
+                write!(f, "Agent timed out after {:.3}s", timeout.as_secs_f64())
+            }
         }
     }
 }
@@ -171,7 +210,9 @@ impl std::error::Error for RunError {
             RunError::StdinFailed(err) => Some(err),
             RunError::OutputFailed(err) => Some(err),
             RunError::ReaderFailed { source, .. } => Some(source),
-            RunError::AgentNotRunnable(_) | RunError::CallbackPanic(_) => None,
+            RunError::AgentNotRunnable(_)
+            | RunError::CallbackPanic(_)
+            | RunError::TimedOut { .. } => None,
         }
     }
 }
@@ -227,6 +268,10 @@ enum ReaderMsg {
         stream: AgentEventStream,
         source: io::Error,
     },
+    /// Watchdog fired: child was killed due to timeout.
+    /// Kept for API completeness; not sent by the current watchdog implementation.
+    #[allow(dead_code)]
+    Killed,
 }
 
 /// Returns the list of runnable agent keys.
@@ -524,13 +569,17 @@ fn spawn_agent_piped(
     let binary = &argv[0];
     let args = &argv[1..];
 
-    let child = Command::new(binary)
-        .args(args)
+    let mut cmd = Command::new(binary);
+    cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(RunError::SpawnFailed)?;
+        .stderr(Stdio::piped());
+
+    if let Some(ref dir) = options.current_dir {
+        cmd.current_dir(dir);
+    }
+
+    let child = cmd.spawn().map_err(RunError::SpawnFailed)?;
 
     Ok((child, argv))
 }
@@ -541,17 +590,9 @@ pub fn run_agent(
     prompt: &str,
     options: RunOptions,
 ) -> Result<RunResult, RunError> {
-    let (mut child, _argv) = spawn_agent_piped(agent_key, prompt, &options, false)?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .map_err(RunError::StdinFailed)?;
-    }
-
-    let output = child.wait_with_output().map_err(RunError::OutputFailed)?;
-
-    Ok(RunResult::new(output.status, output.stdout, output.stderr))
+    // Delegate to run_agent_events with a no-op callback so that timeout
+    // and current_dir support is handled in one place.
+    run_agent_events(agent_key, prompt, options, |_event| {})
 }
 
 /// Spawns a reader thread that reads lines (delimited by `\n`) from `reader`
@@ -618,7 +659,9 @@ fn parse_payload(raw: &[u8]) -> AgentEventPayload {
 /// The final `RunResult` accumulates identical bytes to what `run_agent`
 /// would produce. Callback panics are isolated and reported as
 /// `RunError::CallbackPanic`. Reader I/O failures are reported as
-/// `RunError::ReaderFailed`.
+/// `RunError::ReaderFailed`. If `options.timeout` is set and the child
+/// exceeds it, the child is killed and `RunError::TimedOut` is returned
+/// with the partial output collected so far.
 pub fn run_agent_events<F>(
     agent_key: &str,
     prompt: &str,
@@ -628,6 +671,8 @@ pub fn run_agent_events<F>(
 where
     F: FnMut(AgentEvent) + Send,
 {
+    use std::sync::{Arc, Mutex};
+
     let (mut child, _argv) = spawn_agent_piped(agent_key, prompt, &options, true)?;
 
     // Write prompt and close stdin before reading output.
@@ -640,10 +685,50 @@ where
     let stdout_pipe = child.stdout.take().expect("stdout was piped");
     let stderr_pipe = child.stderr.take().expect("stderr was piped");
 
+    // Wrap child in Arc<Mutex> so the watchdog thread can call child.kill()
+    // while the main thread retains access for child.wait() after the loop.
+    let child = Arc::new(Mutex::new(child));
+
     let (tx, rx) = mpsc::channel::<ReaderMsg>();
 
     let stdout_thread = spawn_reader_thread(stdout_pipe, AgentEventStream::Stdout, tx.clone());
-    let stderr_thread = spawn_reader_thread(stderr_pipe, AgentEventStream::Stderr, tx);
+    let stderr_thread = spawn_reader_thread(stderr_pipe, AgentEventStream::Stderr, tx.clone());
+
+    // Watchdog: if timeout is configured, spawn a dedicated thread. It blocks
+    // on a cancel channel for the configured duration. On timeout it kills the
+    // child and sets the `killed` flag. The kill causes pipe EOF → reader
+    // threads finish → tx senders drop → rx closes → drain loop exits.
+    //
+    // The watchdog does NOT hold a tx sender. This avoids a deadlock where the
+    // watchdog's tx would keep rx alive on the natural-exit path (blocking the
+    // drain loop until the full timeout elapses).
+    let killed = Arc::new(AtomicBool::new(false));
+    let watchdog_cancel: Option<mpsc::Sender<()>> = if let Some(timeout_duration) = options.timeout
+    {
+        let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
+        let child_watchdog = Arc::clone(&child);
+        let killed_watchdog = Arc::clone(&killed);
+        thread::spawn(move || {
+            match cancel_rx.recv_timeout(timeout_duration) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    // Natural exit signaled or cancel_tx dropped — do nothing.
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Timeout elapsed: mark killed, then kill child.
+                    // The kill closes pipes → reader threads get EOF and exit →
+                    // rx drains → main thread checks `killed` flag after loop.
+                    killed_watchdog.store(true, Ordering::SeqCst);
+                    let _ = child_watchdog.lock().unwrap().kill();
+                }
+            }
+        });
+        Some(cancel_tx)
+    } else {
+        None
+    };
+
+    // Drop our extra tx so rx closes when reader threads finish.
+    drop(tx);
 
     let mut seq: u64 = 0;
     let mut stdout_bytes: Vec<u8> = Vec::new();
@@ -654,7 +739,7 @@ where
     for msg in rx {
         match msg {
             ReaderMsg::Chunk { stream, raw } => {
-                // Accumulate raw bytes verbatim (matches wait_with_output behavior).
+                // Accumulate raw bytes verbatim.
                 match stream {
                     AgentEventStream::Stdout => stdout_bytes.extend_from_slice(&raw),
                     AgentEventStream::Stderr => stderr_bytes.extend_from_slice(&raw),
@@ -684,22 +769,47 @@ where
                     reader_error = Some(RunError::ReaderFailed { stream, source });
                 }
             }
+            ReaderMsg::Killed => {
+                // Sentinel from legacy watchdog designs; not sent in current
+                // implementation but handled defensively.
+            }
         }
     }
 
+    // Signal watchdog on natural exit path (no-op if it already fired).
+    if let Some(cancel_tx) = watchdog_cancel {
+        let _ = cancel_tx.send(());
+    }
+
+    // Join reader threads before wait() to prevent pipe deadlock.
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
 
-    let status = child.wait().map_err(RunError::OutputFailed)?;
+    let timed_out = killed.load(Ordering::SeqCst);
+
+    if timed_out {
+        // child.wait() reaps the zombie even after kill(); ignore status.
+        let _ = child.lock().unwrap().wait();
+        return Err(RunError::TimedOut {
+            timeout: options.timeout.unwrap(),
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        });
+    }
+
+    let status = child
+        .lock()
+        .unwrap()
+        .wait()
+        .map_err(RunError::OutputFailed)?;
 
     if let Some(p) = callback_panic {
-        // Kill/reap child before returning error.
-        let _ = child.kill();
+        let _ = child.lock().unwrap().kill();
         return Err(RunError::CallbackPanic(p));
     }
 
     if let Some(err) = reader_error {
-        let _ = child.kill();
+        let _ = child.lock().unwrap().kill();
         return Err(err);
     }
 
@@ -1455,5 +1565,241 @@ mod tests {
     fn test_agent_event_stream_eq() {
         assert_eq!(AgentEventStream::Stdout, AgentEventStream::Stdout);
         assert_ne!(AgentEventStream::Stdout, AgentEventStream::Stderr);
+    }
+
+    // --- RunOptions new fields ---
+
+    #[test]
+    fn test_run_options_default_has_no_timeout_or_current_dir() {
+        let opts = RunOptions::default();
+        assert!(opts.timeout.is_none());
+        assert!(opts.current_dir.is_none());
+    }
+
+    #[test]
+    fn test_run_options_with_timeout_builder() {
+        let dur = Duration::from_secs(30);
+        let opts = RunOptions::new().with_timeout(dur);
+        assert_eq!(opts.timeout, Some(dur));
+    }
+
+    #[test]
+    fn test_run_options_with_current_dir_builder() {
+        let path = std::path::PathBuf::from("/tmp");
+        let opts = RunOptions::new().with_current_dir(path.clone());
+        assert_eq!(opts.current_dir, Some(path));
+    }
+
+    #[test]
+    fn test_run_error_timed_out_display() {
+        let err = RunError::TimedOut {
+            timeout: Duration::from_secs(5),
+            stdout: b"partial".to_vec(),
+            stderr: vec![],
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("timed out") || msg.contains("timeout") || msg.contains("5"));
+    }
+
+    #[test]
+    fn test_run_error_timed_out_partial_output() {
+        let stdout = b"partial output".to_vec();
+        let stderr = b"err output".to_vec();
+        let err = RunError::TimedOut {
+            timeout: Duration::from_millis(100),
+            stdout: stdout.clone(),
+            stderr: stderr.clone(),
+        };
+        if let RunError::TimedOut {
+            stdout: out,
+            stderr: err_bytes,
+            ..
+        } = err
+        {
+            assert_eq!(out, stdout);
+            assert_eq!(err_bytes, stderr);
+        } else {
+            panic!("Expected TimedOut");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_agent_events_timeout_kills_child() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Create a stub that sleeps for a long time
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("agent");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(
+            f,
+            "#!/bin/sh\necho 'before sleep'\nsleep 60\necho 'after sleep'"
+        )
+        .unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let opts = RunOptions::new().with_timeout(Duration::from_millis(500));
+        let result = run_agent_events("agent", "hi", opts, |_| {});
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(
+            matches!(result, Err(RunError::TimedOut { .. })),
+            "Expected TimedOut, got {:?}",
+            result.map(|_| ())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_agent_events_no_timeout_on_fast_exit() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Stub exits immediately — long timeout should not fire
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("agent");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(f, "#!/bin/sh\necho 'done'\nexit 0").unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let opts = RunOptions::new().with_timeout(Duration::from_secs(60));
+        let result = run_agent_events("agent", "hi", opts, |_| {});
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(
+            result.is_ok(),
+            "Fast exit with long timeout should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_current_dir_applied_to_child() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Stub that prints cwd to stdout
+        let stub_dir = tempfile::tempdir().unwrap();
+        let stub_path = stub_dir.path().join("agent");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(f, "#!/bin/sh\npwd").unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        // Use a known target directory (e.g. /tmp)
+        let target_dir = std::path::PathBuf::from("/tmp");
+        let parent_cwd = std::env::current_dir().unwrap();
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", stub_dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let mut collected_output = Vec::<u8>::new();
+        let opts = RunOptions::new().with_current_dir(target_dir.clone());
+        let result = run_agent_events("agent", "hi", opts, |ev| {
+            if let AgentEventPayload::RawLine(ref line) = ev.payload {
+                collected_output.extend_from_slice(line.as_bytes());
+                collected_output.push(b'\n');
+            }
+        });
+
+        std::env::set_var("PATH", orig_path);
+
+        // Parent cwd must not have changed
+        assert_eq!(
+            std::env::current_dir().unwrap(),
+            parent_cwd,
+            "Parent cwd should be unchanged"
+        );
+
+        assert!(result.is_ok(), "Should succeed: {:?}", result.err());
+
+        let output = String::from_utf8_lossy(&collected_output);
+        // The child's pwd should be under /tmp (may be symlink-resolved)
+        assert!(
+            output.trim().starts_with("/tmp") || output.trim().contains("tmp"),
+            "Child cwd should be /tmp but got: {}",
+            output.trim()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_current_dir_bad_path_returns_spawn_error() {
+        let opts = RunOptions::new().with_current_dir(std::path::PathBuf::from(
+            "/nonexistent/path/that/does/not/exist",
+        ));
+        let result = run_agent_events("agent", "hi", opts, |_| {});
+        assert!(
+            matches!(result, Err(RunError::SpawnFailed(_))),
+            "Non-existent current_dir should return SpawnFailed, got {:?}",
+            result.map(|_| ())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_timeout_partial_output_returned() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Stub that writes some output then sleeps
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("agent");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(f, "#!/bin/sh\necho 'partial line'\nsleep 60").unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let opts = RunOptions::new().with_timeout(Duration::from_millis(600));
+        let result = run_agent_events("agent", "hi", opts, |_| {});
+
+        std::env::set_var("PATH", orig_path);
+
+        match result {
+            Err(RunError::TimedOut { stdout, .. }) => {
+                let stdout_str = String::from_utf8_lossy(&stdout);
+                assert!(
+                    stdout_str.contains("partial line"),
+                    "Partial output should be preserved on timeout, got: {:?}",
+                    stdout_str
+                );
+            }
+            other => panic!(
+                "Expected TimedOut with partial output, got {:?}",
+                other.map(|_| ())
+            ),
+        }
     }
 }

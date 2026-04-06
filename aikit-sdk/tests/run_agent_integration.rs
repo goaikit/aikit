@@ -42,11 +42,10 @@ fn test_run_agent_not_runnable() {
 
 #[test]
 fn test_run_agent_with_options() {
-    let options = RunOptions {
-        model: Some("test-model".to_string()),
-        yolo: true,
-        stream: false,
-    };
+    let options = RunOptions::new()
+        .with_model("test-model")
+        .with_yolo(true)
+        .with_stream(false);
 
     let result = run_agent("unknown", "test", options);
 
