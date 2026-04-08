@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","apiKeySource":"env","cwd":"/home/sysuser/ws001/.newton/scripts","session_id":"6a8f5988-e6bb-4ae9-bf43-5f65d4098600","model":"Sonnet 4","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with one word only: ok."}]},"session_id":"6a8f5988-e6bb-4ae9-bf43-5f65d4098600"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"session_id":"6a8f5988-e6bb-4ae9-bf43-5f65d4098600","timestamp_ms":1775658923464}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]},"session_id":"6a8f5988-e6bb-4ae9-bf43-5f65d4098600"}
+{"type":"result","subtype":"success","duration_ms":20357,"duration_api_ms":20357,"is_error":false,"result":"ok","session_id":"6a8f5988-e6bb-4ae9-bf43-5f65d4098600","request_id":"9277cdf2-a631-48ab-b001-104fff30bf28","usage":{"inputTokens":2,"outputTokens":4,"cacheReadTokens":12228,"cacheWriteTokens":2392}}

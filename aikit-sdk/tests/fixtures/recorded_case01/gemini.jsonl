@@ -1,0 +1,4 @@
+{"type":"init","timestamp":"2026-04-08T14:13:36.772Z","session_id":"bd114857-6c2a-4afd-91ec-89d8c9ba7d70","model":"gemini-2.5-flash"}
+{"type":"message","timestamp":"2026-04-08T14:13:36.774Z","role":"user","content":"Reply with one word only: ok."}
+{"type":"message","timestamp":"2026-04-08T14:13:44.369Z","role":"assistant","content":"ok.","delta":true}
+{"type":"result","timestamp":"2026-04-08T14:13:44.387Z","status":"success","stats":{"total_tokens":7039,"input_tokens":7003,"output_tokens":2,"cached":6637,"input":366,"duration_ms":7615,"tool_calls":0}}
