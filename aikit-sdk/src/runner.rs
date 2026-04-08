@@ -63,8 +63,40 @@ impl ChildTimeoutExt for Child {
     }
 }
 
+/// Normalized token usage from an agent run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    /// Input (prompt) tokens consumed
+    pub input_tokens: u64,
+    /// Output (completion) tokens produced
+    pub output_tokens: u64,
+    /// Total tokens (input + output), if reported by the agent
+    pub total_tokens: Option<u64>,
+    /// Cache read tokens, if reported by the agent
+    pub cache_read_tokens: Option<u64>,
+    /// Cache creation/write tokens, if reported by the agent
+    pub cache_creation_tokens: Option<u64>,
+    /// Reasoning tokens (e.g. chain-of-thought), if reported by the agent
+    pub reasoning_tokens: Option<u64>,
+}
+
+/// Identifies the agent that produced a token usage entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum UsageSource {
+    /// OpenAI Codex (`turn.completed.usage`)
+    Codex,
+    /// Anthropic Claude Code (`result.usage` or `stream_event` message)
+    Claude,
+    /// Google Gemini CLI (`result.stats`)
+    Gemini,
+    /// OpenCode (`step_finish.part.tokens`)
+    OpenCode,
+    /// Cursor Agent (`result.usage` camelCase fields)
+    Cursor,
+}
+
 /// Options for running an agent.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct RunOptions {
     /// Optional model name/identifier
@@ -85,6 +117,23 @@ pub struct RunOptions {
     /// process working directory is unaffected. This is safe for concurrent
     /// use and async environments.
     pub current_dir: Option<std::path::PathBuf>,
+    /// When true (the default), emit `TokenUsageLine` events after each
+    /// `JsonLine` event that contains extractable token usage.  Set to false
+    /// to suppress those events while still populating `RunResult.token_usage`.
+    pub emit_token_usage_events: bool,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            model: None,
+            yolo: false,
+            stream: false,
+            timeout: None,
+            current_dir: None,
+            emit_token_usage_events: true,
+        }
+    }
 }
 
 impl RunOptions {
@@ -118,6 +167,12 @@ impl RunOptions {
         self.current_dir = Some(path);
         self
     }
+
+    /// Control whether `TokenUsageLine` events are emitted.
+    pub fn with_emit_token_usage_events(mut self, emit: bool) -> Self {
+        self.emit_token_usage_events = emit;
+        self
+    }
 }
 
 /// Result of running an agent.
@@ -129,6 +184,8 @@ pub struct RunResult {
     pub stdout: Vec<u8>,
     /// Captured stderr
     pub stderr: Vec<u8>,
+    /// Aggregated token usage extracted from the agent's output, if any.
+    pub token_usage: Option<TokenUsage>,
 }
 
 impl RunResult {
@@ -137,6 +194,7 @@ impl RunResult {
             status,
             stdout,
             stderr,
+            token_usage: None,
         }
     }
 
@@ -235,6 +293,15 @@ pub enum AgentEventPayload {
     RawLine(String),
     /// Non-UTF-8 bytes serialized as an array of integers
     RawBytes(Vec<u8>),
+    /// Normalized token usage extracted from the preceding `JsonLine`.
+    /// Emitted immediately after the corresponding `JsonLine` event when
+    /// `RunOptions::emit_token_usage_events` is `true`.
+    TokenUsageLine {
+        usage: TokenUsage,
+        source: UsageSource,
+        /// Sequence number of the `JsonLine` event this was extracted from.
+        raw_agent_line_seq: u64,
+    },
 }
 
 /// A single event emitted by a streaming agent run.
@@ -446,13 +513,15 @@ fn build_claude_argv_events(prompt: &str, model: Option<&String>, stream: bool) 
     argv
 }
 
-/// Event-mode argv builder for gemini: emits JSON output.
+/// Event-mode argv builder for gemini: emits stream-json output in headless mode.
 fn build_gemini_argv_events(prompt: &str, model: Option<&String>) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("gemini"),
         OsString::from("--prompt"),
         OsString::from(prompt),
-        OsString::from("--json"),
+        OsString::from("--output-format"),
+        OsString::from("stream-json"),
+        OsString::from("--yolo"),
     ];
 
     if let Some(m) = model {
@@ -463,23 +532,19 @@ fn build_gemini_argv_events(prompt: &str, model: Option<&String>) -> Vec<OsStrin
     argv
 }
 
-/// Event-mode argv builder for opencode: emits JSON output.
-fn build_opencode_argv_events(prompt: &str, model: Option<&String>, yolo: bool) -> Vec<OsString> {
-    let mut argv = vec![
-        OsString::from("opencode"),
-        OsString::from("--prompt"),
-        OsString::from(prompt),
-        OsString::from("--json"),
-    ];
+/// Event-mode argv builder for opencode: uses `run` subcommand with `--format json`.
+fn build_opencode_argv_events(prompt: &str, model: Option<&String>, _yolo: bool) -> Vec<OsString> {
+    let mut argv = vec![OsString::from("opencode")];
 
     if let Some(m) = model {
-        argv.push(OsString::from("--model"));
+        argv.push(OsString::from("-m"));
         argv.push(OsString::from(m.as_str()));
     }
 
-    if yolo {
-        argv.push(OsString::from("--yolo"));
-    }
+    argv.push(OsString::from("run"));
+    argv.push(OsString::from(prompt));
+    argv.push(OsString::from("--format"));
+    argv.push(OsString::from("json"));
 
     argv
 }
@@ -517,9 +582,227 @@ fn build_cursor_agent_argv_events(
 }
 
 /// Returns whether the agent key expects the prompt written to stdin.
-/// Cursor Agent ("agent") takes the prompt as a positional argument instead.
+/// Cursor Agent ("agent") and OpenCode ("opencode") take the prompt as a
+/// positional argument instead.
 fn should_write_stdin(agent_key: &str) -> bool {
-    agent_key != "agent"
+    agent_key != "agent" && agent_key != "opencode"
+}
+
+// ---------------------------------------------------------------------------
+// Token usage extraction
+// ---------------------------------------------------------------------------
+
+fn sum_optional<'a>(vals: impl Iterator<Item = &'a Option<u64>>) -> Option<u64> {
+    let collected: Vec<_> = vals.collect();
+    if collected.iter().any(|v| v.is_some()) {
+        Some(collected.iter().map(|v| v.unwrap_or(0)).sum())
+    } else {
+        None
+    }
+}
+
+fn extract_codex_usage(line: &serde_json::Value) -> Option<(TokenUsage, UsageSource)> {
+    if line.get("type")?.as_str()? != "turn.completed" {
+        return None;
+    }
+    let usage = line.get("usage")?;
+    let input_tokens = usage.get("input_tokens")?.as_u64()?;
+    let output_tokens = usage.get("output_tokens")?.as_u64()?;
+    let cache_read_tokens = usage.get("cached_input_tokens").and_then(|v| v.as_u64());
+    Some((
+        TokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens: None,
+            cache_read_tokens,
+            cache_creation_tokens: None,
+            reasoning_tokens: None,
+        },
+        UsageSource::Codex,
+    ))
+}
+
+fn extract_claude_usage(line: &serde_json::Value) -> Option<(TokenUsage, UsageSource)> {
+    let line_type = line.get("type")?.as_str()?;
+
+    let usage = if line_type == "result" {
+        line.get("usage")?
+    } else if line_type == "stream_event" {
+        let event = line.get("event")?;
+        let event_type = event.get("type")?.as_str()?;
+        if event_type == "message_start" {
+            event.get("message")?.get("usage")?
+        } else if event_type == "message_delta" {
+            event.get("usage")?
+        } else {
+            return None;
+        }
+    } else {
+        return None;
+    };
+
+    let input_tokens = usage
+        .get("input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_read_tokens = usage
+        .get("cache_read_input_tokens")
+        .and_then(|v| v.as_u64());
+    let cache_creation_tokens = usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64());
+
+    if input_tokens == 0
+        && output_tokens == 0
+        && cache_read_tokens.is_none()
+        && cache_creation_tokens.is_none()
+    {
+        return None;
+    }
+
+    Some((
+        TokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens: None,
+            cache_read_tokens,
+            cache_creation_tokens,
+            reasoning_tokens: None,
+        },
+        UsageSource::Claude,
+    ))
+}
+
+fn extract_gemini_usage(line: &serde_json::Value) -> Option<(TokenUsage, UsageSource)> {
+    if line.get("type")?.as_str()? != "result" {
+        return None;
+    }
+    let stats = line.get("stats")?;
+    let input_tokens = stats.get("input_tokens")?.as_u64()?;
+    let output_tokens = stats.get("output_tokens")?.as_u64()?;
+    let total_tokens = stats.get("total_tokens").and_then(|v| v.as_u64());
+    let cache_read_tokens = stats.get("cached").and_then(|v| v.as_u64());
+    Some((
+        TokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cache_read_tokens,
+            cache_creation_tokens: None,
+            reasoning_tokens: None,
+        },
+        UsageSource::Gemini,
+    ))
+}
+
+fn extract_opencode_usage(line: &serde_json::Value) -> Option<(TokenUsage, UsageSource)> {
+    if line.get("type")?.as_str()? != "step_finish" {
+        return None;
+    }
+    let tokens = line.get("part")?.get("tokens")?;
+    let input_tokens = tokens.get("input")?.as_u64()?;
+    let output_tokens = tokens.get("output")?.as_u64()?;
+    let total_tokens = tokens.get("total").and_then(|v| v.as_u64());
+    let reasoning_tokens = tokens.get("reasoning").and_then(|v| v.as_u64());
+    let cache_read_tokens = tokens
+        .get("cache")
+        .and_then(|c| c.get("read"))
+        .and_then(|v| v.as_u64());
+    let cache_creation_tokens = tokens
+        .get("cache")
+        .and_then(|c| c.get("write"))
+        .and_then(|v| v.as_u64());
+    Some((
+        TokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            reasoning_tokens,
+        },
+        UsageSource::OpenCode,
+    ))
+}
+
+fn extract_cursor_usage(line: &serde_json::Value) -> Option<(TokenUsage, UsageSource)> {
+    if line.get("type")?.as_str()? != "result" {
+        return None;
+    }
+    let usage = line.get("usage")?;
+    let input_tokens = usage.get("inputTokens")?.as_u64()?;
+    let output_tokens = usage.get("outputTokens")?.as_u64()?;
+    let cache_read_tokens = usage.get("cacheReadTokens").and_then(|v| v.as_u64());
+    let cache_creation_tokens = usage.get("cacheWriteTokens").and_then(|v| v.as_u64());
+    Some((
+        TokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens: None,
+            cache_read_tokens,
+            cache_creation_tokens,
+            reasoning_tokens: None,
+        },
+        UsageSource::Cursor,
+    ))
+}
+
+/// Extract and normalize token usage from a single agent output line.
+///
+/// Returns `None` for lines that do not carry usage data or for unknown agent keys.
+pub fn extract_usage_from_line(
+    line: &serde_json::Value,
+    agent_key: &str,
+) -> Option<(TokenUsage, UsageSource)> {
+    match agent_key {
+        "codex" => extract_codex_usage(line),
+        "claude" => extract_claude_usage(line),
+        "gemini" => extract_gemini_usage(line),
+        "opencode" => extract_opencode_usage(line),
+        "agent" => extract_cursor_usage(line),
+        _ => None,
+    }
+}
+
+/// Aggregate a sequence of token usage entries using the per-agent rule.
+///
+/// - **Codex**: sum all entries (multiple `turn.completed` messages)
+/// - **All others**: take the last entry (final `result` / `step_finish`)
+///
+/// Returns `None` when `usage_entries` is empty.
+pub fn aggregate_token_usage(
+    usage_entries: &[(TokenUsage, UsageSource)],
+    source: UsageSource,
+) -> Option<TokenUsage> {
+    if usage_entries.is_empty() {
+        return None;
+    }
+    match source {
+        UsageSource::Codex => {
+            let input_tokens = usage_entries.iter().map(|(u, _)| u.input_tokens).sum();
+            let output_tokens = usage_entries.iter().map(|(u, _)| u.output_tokens).sum();
+            let total_tokens = sum_optional(usage_entries.iter().map(|(u, _)| &u.total_tokens));
+            let cache_read_tokens =
+                sum_optional(usage_entries.iter().map(|(u, _)| &u.cache_read_tokens));
+            let cache_creation_tokens =
+                sum_optional(usage_entries.iter().map(|(u, _)| &u.cache_creation_tokens));
+            let reasoning_tokens =
+                sum_optional(usage_entries.iter().map(|(u, _)| &u.reasoning_tokens));
+            Some(TokenUsage {
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                reasoning_tokens,
+            })
+        }
+        _ => usage_entries.last().map(|(u, _)| u.clone()),
+    }
 }
 
 /// Shared internal function that spawns a child process with piped stdio.
@@ -778,6 +1061,7 @@ where
     let mut stderr_bytes: Vec<u8> = Vec::new();
     let mut reader_error: Option<RunError> = None;
     let mut callback_panic: Option<Box<dyn std::any::Any + Send>> = None;
+    let mut usage_entries: Vec<(TokenUsage, UsageSource)> = Vec::new();
 
     for msg in rx {
         match msg {
@@ -789,6 +1073,19 @@ where
                 }
 
                 let payload = parse_payload(&raw);
+
+                // Always extract token usage for RunResult.token_usage aggregation.
+                let extracted_usage = if let AgentEventPayload::JsonLine(ref json_val) = payload {
+                    extract_usage_from_line(json_val, agent_key)
+                } else {
+                    None
+                };
+                if let Some(ref up) = extracted_usage {
+                    usage_entries.push(up.clone());
+                }
+
+                let json_line_seq = seq;
+                let event_stream = stream.clone();
                 let event = AgentEvent {
                     agent_key: agent_key.to_string(),
                     seq,
@@ -804,6 +1101,31 @@ where
                     }));
                     if let Err(p) = result {
                         callback_panic = Some(p);
+                    }
+                }
+
+                // Emit TokenUsageLine event immediately after the JsonLine, if enabled.
+                if options.emit_token_usage_events {
+                    if let Some((usage, source)) = extracted_usage {
+                        let token_event = AgentEvent {
+                            agent_key: agent_key.to_string(),
+                            seq,
+                            stream: event_stream,
+                            payload: AgentEventPayload::TokenUsageLine {
+                                usage,
+                                source,
+                                raw_agent_line_seq: json_line_seq,
+                            },
+                        };
+                        seq += 1;
+                        if callback_panic.is_none() {
+                            let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                                on_event(token_event);
+                            }));
+                            if let Err(p) = result {
+                                callback_panic = Some(p);
+                            }
+                        }
                     }
                 }
             }
@@ -856,7 +1178,18 @@ where
         return Err(err);
     }
 
-    Ok(RunResult::new(status, stdout_bytes, stderr_bytes))
+    // Aggregate token usage from all extracted entries.
+    let token_usage = usage_entries
+        .first()
+        .map(|(_, source)| source.clone())
+        .and_then(|source| aggregate_token_usage(&usage_entries, source));
+
+    Ok(RunResult {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+        token_usage,
+    })
 }
 
 /// Reason why an agent is not available.
@@ -1546,6 +1879,7 @@ mod tests {
                 AgentEventPayload::JsonLine(_) => "json",
                 AgentEventPayload::RawLine(_) => "raw",
                 AgentEventPayload::RawBytes(_) => "bytes",
+                AgentEventPayload::TokenUsageLine { .. } => "token_usage",
             };
             payloads.push(kind.to_string());
         });
@@ -1578,15 +1912,36 @@ mod tests {
     }
 
     #[test]
-    fn test_build_gemini_argv_events_has_json_flag() {
+    fn test_build_gemini_argv_events_stream_json_headless() {
         let argv = build_gemini_argv_events("test", None);
-        assert!(argv.contains(&OsString::from("--json")));
+        assert!(argv.contains(&OsString::from("--output-format")));
+        assert!(argv.contains(&OsString::from("stream-json")));
+        assert!(argv.contains(&OsString::from("--yolo")));
+        assert!(!argv.contains(&OsString::from("--json")));
     }
 
     #[test]
-    fn test_build_opencode_argv_events_has_json_flag() {
-        let argv = build_opencode_argv_events("test", None, false);
-        assert!(argv.contains(&OsString::from("--json")));
+    fn test_build_opencode_argv_events_uses_run_subcommand() {
+        let argv = build_opencode_argv_events("test prompt", None, false);
+        assert!(argv.contains(&OsString::from("opencode")));
+        assert!(argv.contains(&OsString::from("run")));
+        assert!(argv.contains(&OsString::from("test prompt")));
+        assert!(argv.contains(&OsString::from("--format")));
+        assert!(argv.contains(&OsString::from("json")));
+        assert!(!argv.contains(&OsString::from("--json")));
+        assert!(!argv.contains(&OsString::from("--prompt")));
+    }
+
+    #[test]
+    fn test_build_opencode_argv_events_with_model() {
+        let model = "zai-coding-plan/glm-4.7".to_string();
+        let argv = build_opencode_argv_events("test", Some(&model), false);
+        assert!(argv.contains(&OsString::from("-m")));
+        assert!(argv.contains(&OsString::from("zai-coding-plan/glm-4.7")));
+        // -m must appear before "run"
+        let m_pos = argv.iter().position(|a| a == "-m").unwrap();
+        let run_pos = argv.iter().position(|a| a == "run").unwrap();
+        assert!(m_pos < run_pos);
     }
 
     #[test]
@@ -1608,10 +1963,10 @@ mod tests {
     #[test]
     fn test_should_write_stdin() {
         assert!(!should_write_stdin("agent"));
+        assert!(!should_write_stdin("opencode"));
         assert!(should_write_stdin("codex"));
         assert!(should_write_stdin("claude"));
         assert!(should_write_stdin("gemini"));
-        assert!(should_write_stdin("opencode"));
     }
 
     #[test]
@@ -1867,5 +2222,296 @@ mod tests {
                 other.map(|_| ())
             ),
         }
+    }
+
+    // --- Token usage extraction tests (using recorded_case01 fixture data) ---
+
+    #[test]
+    fn test_extract_codex_usage_from_turn_completed() {
+        let line: serde_json::Value = serde_json::from_str(
+            r#"{"type":"turn.completed","usage":{"input_tokens":8058,"cached_input_tokens":6912,"output_tokens":15}}"#,
+        )
+        .unwrap();
+        let result = extract_usage_from_line(&line, "codex");
+        assert!(result.is_some());
+        let (usage, source) = result.unwrap();
+        assert_eq!(source, UsageSource::Codex);
+        assert_eq!(usage.input_tokens, 8058);
+        assert_eq!(usage.output_tokens, 15);
+        assert_eq!(usage.cache_read_tokens, Some(6912));
+        assert!(usage.total_tokens.is_none());
+    }
+
+    #[test]
+    fn test_extract_codex_usage_ignores_other_types() {
+        let line: serde_json::Value = serde_json::from_str(r#"{"type":"turn.started"}"#).unwrap();
+        assert!(extract_usage_from_line(&line, "codex").is_none());
+    }
+
+    #[test]
+    fn test_extract_claude_usage_from_result() {
+        let line: serde_json::Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","usage":{"input_tokens":3,"cache_creation_input_tokens":4807,"cache_read_input_tokens":11219,"output_tokens":5}}"#,
+        )
+        .unwrap();
+        let result = extract_usage_from_line(&line, "claude");
+        assert!(result.is_some());
+        let (usage, source) = result.unwrap();
+        assert_eq!(source, UsageSource::Claude);
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_read_tokens, Some(11219));
+        assert_eq!(usage.cache_creation_tokens, Some(4807));
+    }
+
+    #[test]
+    fn test_extract_claude_usage_from_stream_event_message_start() {
+        let line: serde_json::Value = serde_json::from_str(
+            r#"{"type":"stream_event","event":{"type":"message_start","message":{"usage":{"input_tokens":3,"cache_creation_input_tokens":4807,"cache_read_input_tokens":11219,"output_tokens":1}}}}"#,
+        )
+        .unwrap();
+        let result = extract_usage_from_line(&line, "claude");
+        assert!(result.is_some());
+        let (usage, source) = result.unwrap();
+        assert_eq!(source, UsageSource::Claude);
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.cache_creation_tokens, Some(4807));
+    }
+
+    #[test]
+    fn test_extract_gemini_usage_from_result_stats() {
+        let line: serde_json::Value = serde_json::from_str(
+            r#"{"type":"result","status":"success","stats":{"total_tokens":7039,"input_tokens":7003,"output_tokens":2,"cached":6637,"input":366,"duration_ms":7615,"tool_calls":0}}"#,
+        )
+        .unwrap();
+        let result = extract_usage_from_line(&line, "gemini");
+        assert!(result.is_some());
+        let (usage, source) = result.unwrap();
+        assert_eq!(source, UsageSource::Gemini);
+        assert_eq!(usage.input_tokens, 7003);
+        assert_eq!(usage.output_tokens, 2);
+        assert_eq!(usage.total_tokens, Some(7039));
+        assert_eq!(usage.cache_read_tokens, Some(6637));
+    }
+
+    #[test]
+    fn test_extract_gemini_usage_ignores_non_result() {
+        let line: serde_json::Value =
+            serde_json::from_str(r#"{"type":"message","role":"user","content":"ok"}"#).unwrap();
+        assert!(extract_usage_from_line(&line, "gemini").is_none());
+    }
+
+    #[test]
+    fn test_extract_opencode_usage_from_step_finish() {
+        let line: serde_json::Value = serde_json::from_str(
+            r#"{"type":"step_finish","timestamp":1775657635524,"part":{"id":"prt_1","reason":"stop","type":"step-finish","tokens":{"total":11287,"input":11162,"output":42,"reasoning":39,"cache":{"write":0,"read":83}},"cost":0}}"#,
+        )
+        .unwrap();
+        let result = extract_usage_from_line(&line, "opencode");
+        assert!(result.is_some());
+        let (usage, source) = result.unwrap();
+        assert_eq!(source, UsageSource::OpenCode);
+        assert_eq!(usage.input_tokens, 11162);
+        assert_eq!(usage.output_tokens, 42);
+        assert_eq!(usage.total_tokens, Some(11287));
+        assert_eq!(usage.reasoning_tokens, Some(39));
+        assert_eq!(usage.cache_read_tokens, Some(83));
+        assert_eq!(usage.cache_creation_tokens, Some(0));
+    }
+
+    #[test]
+    fn test_extract_cursor_usage_from_result_camelcase() {
+        let line: serde_json::Value = serde_json::from_str(
+            r#"{"type":"result","subtype":"success","usage":{"inputTokens":2,"outputTokens":4,"cacheReadTokens":12228,"cacheWriteTokens":2392}}"#,
+        )
+        .unwrap();
+        let result = extract_usage_from_line(&line, "agent");
+        assert!(result.is_some());
+        let (usage, source) = result.unwrap();
+        assert_eq!(source, UsageSource::Cursor);
+        assert_eq!(usage.input_tokens, 2);
+        assert_eq!(usage.output_tokens, 4);
+        assert_eq!(usage.cache_read_tokens, Some(12228));
+        assert_eq!(usage.cache_creation_tokens, Some(2392));
+    }
+
+    #[test]
+    fn test_extract_usage_unknown_agent_returns_none() {
+        let line: serde_json::Value =
+            serde_json::from_str(r#"{"type":"result","usage":{"input_tokens":1}}"#).unwrap();
+        assert!(extract_usage_from_line(&line, "copilot").is_none());
+        assert!(extract_usage_from_line(&line, "unknown").is_none());
+    }
+
+    #[test]
+    fn test_aggregate_codex_sums_all_entries() {
+        let entries = vec![
+            (
+                TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 10,
+                    total_tokens: None,
+                    cache_read_tokens: Some(50),
+                    cache_creation_tokens: None,
+                    reasoning_tokens: None,
+                },
+                UsageSource::Codex,
+            ),
+            (
+                TokenUsage {
+                    input_tokens: 200,
+                    output_tokens: 20,
+                    total_tokens: None,
+                    cache_read_tokens: Some(75),
+                    cache_creation_tokens: None,
+                    reasoning_tokens: None,
+                },
+                UsageSource::Codex,
+            ),
+        ];
+        let result = aggregate_token_usage(&entries, UsageSource::Codex).unwrap();
+        assert_eq!(result.input_tokens, 300);
+        assert_eq!(result.output_tokens, 30);
+        assert_eq!(result.cache_read_tokens, Some(125));
+    }
+
+    #[test]
+    fn test_aggregate_claude_takes_last() {
+        let entries = vec![
+            (
+                TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 1,
+                    total_tokens: None,
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    reasoning_tokens: None,
+                },
+                UsageSource::Claude,
+            ),
+            (
+                TokenUsage {
+                    input_tokens: 99,
+                    output_tokens: 7,
+                    total_tokens: None,
+                    cache_read_tokens: Some(500),
+                    cache_creation_tokens: None,
+                    reasoning_tokens: None,
+                },
+                UsageSource::Claude,
+            ),
+        ];
+        let result = aggregate_token_usage(&entries, UsageSource::Claude).unwrap();
+        assert_eq!(result.input_tokens, 99);
+        assert_eq!(result.output_tokens, 7);
+        assert_eq!(result.cache_read_tokens, Some(500));
+    }
+
+    #[test]
+    fn test_aggregate_empty_returns_none() {
+        assert!(aggregate_token_usage(&[], UsageSource::Codex).is_none());
+        assert!(aggregate_token_usage(&[], UsageSource::Claude).is_none());
+    }
+
+    #[test]
+    fn test_run_options_default_emit_token_usage_events_true() {
+        let opts = RunOptions::default();
+        assert!(opts.emit_token_usage_events);
+    }
+
+    #[test]
+    fn test_run_options_with_emit_token_usage_events() {
+        let opts = RunOptions::new().with_emit_token_usage_events(false);
+        assert!(!opts.emit_token_usage_events);
+    }
+
+    #[test]
+    fn test_recorded_case01_codex_fixture() {
+        let fixture = include_str!("../tests/fixtures/recorded_case01/codex.jsonl");
+        let mut found = false;
+        for line in fixture.lines().filter(|l| !l.is_empty()) {
+            let val: serde_json::Value = serde_json::from_str(line).unwrap();
+            if let Some((usage, source)) = extract_usage_from_line(&val, "codex") {
+                assert_eq!(source, UsageSource::Codex);
+                assert!(usage.input_tokens > 0);
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "Should find at least one token usage line in codex fixture"
+        );
+    }
+
+    #[test]
+    fn test_recorded_case01_claude_fixture() {
+        let fixture = include_str!("../tests/fixtures/recorded_case01/claude.jsonl");
+        let mut found = false;
+        for line in fixture.lines().filter(|l| !l.is_empty()) {
+            let val: serde_json::Value = serde_json::from_str(line).unwrap();
+            if let Some((usage, source)) = extract_usage_from_line(&val, "claude") {
+                assert_eq!(source, UsageSource::Claude);
+                assert!(usage.input_tokens > 0 || usage.cache_read_tokens.is_some());
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "Should find at least one token usage line in claude fixture"
+        );
+    }
+
+    #[test]
+    fn test_recorded_case01_gemini_fixture() {
+        let fixture = include_str!("../tests/fixtures/recorded_case01/gemini.jsonl");
+        let mut found = false;
+        for line in fixture.lines().filter(|l| !l.is_empty()) {
+            let val: serde_json::Value = serde_json::from_str(line).unwrap();
+            if let Some((usage, source)) = extract_usage_from_line(&val, "gemini") {
+                assert_eq!(source, UsageSource::Gemini);
+                assert!(usage.input_tokens > 0);
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "Should find at least one token usage line in gemini fixture"
+        );
+    }
+
+    #[test]
+    fn test_recorded_case01_opencode_fixture() {
+        let fixture = include_str!("../tests/fixtures/recorded_case01/opencode.jsonl");
+        let mut found = false;
+        for line in fixture.lines().filter(|l| !l.is_empty()) {
+            let val: serde_json::Value = serde_json::from_str(line).unwrap();
+            if let Some((usage, source)) = extract_usage_from_line(&val, "opencode") {
+                assert_eq!(source, UsageSource::OpenCode);
+                assert!(usage.input_tokens > 0);
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "Should find at least one token usage line in opencode fixture"
+        );
+    }
+
+    #[test]
+    fn test_recorded_case01_cursor_fixture() {
+        let fixture = include_str!("../tests/fixtures/recorded_case01/cursor-agent.jsonl");
+        let mut found = false;
+        for line in fixture.lines().filter(|l| !l.is_empty()) {
+            let val: serde_json::Value = serde_json::from_str(line).unwrap();
+            if let Some((usage, source)) = extract_usage_from_line(&val, "agent") {
+                assert_eq!(source, UsageSource::Cursor);
+                assert!(usage.input_tokens > 0);
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "Should find at least one token usage line in cursor fixture"
+        );
     }
 }
