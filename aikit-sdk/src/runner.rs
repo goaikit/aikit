@@ -877,7 +877,13 @@ fn spawn_agent_piped(
     let binary = &argv[0];
     let args = &argv[1..];
 
-    let mut cmd = Command::new(binary);
+    let resolved_program = crate::command_resolve::resolve_command(&binary.to_string_lossy());
+    tracing::debug!(
+        target: "aikit_sdk::runner",
+        resolved_program = ?resolved_program,
+        "resolved executable path"
+    );
+    let mut cmd = Command::new(resolved_program);
     cmd.args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1262,7 +1268,8 @@ fn get_binary_candidates(agent_key: &str) -> &'static [&'static str] {
 /// Ok(false) if binary exists but --version fails,
 /// Err if binary not found or timeout occurs.
 fn probe_binary_with_timeout(binary: &str) -> Result<bool, AgentAvailabilityReason> {
-    let mut cmd = Command::new(binary);
+    let resolved_binary = crate::command_resolve::resolve_command(binary);
+    let mut cmd = Command::new(resolved_binary);
     cmd.arg("--version");
     cmd.stdout(Stdio::null());
     cmd.stderr(Stdio::null());

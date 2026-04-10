@@ -311,6 +311,35 @@ The crate returns `Result` types with `aikit_sdk::DeployError` for:
 - Attempting to deploy to an agent that doesn't support the concept
 - Filesystem operations failing
 
+## Windows Configuration
+
+### AIKIT_CURSOR_AGENT Environment Variable
+
+On Windows, Cursor ships its agent as `agent.cmd` rather than `agent.exe`. AIKIT automatically resolves this via PATH + PATHEXT scanning, but you can override the path explicitly:
+
+```bash
+# Point to a custom Cursor agent installation
+set AIKIT_CURSOR_AGENT=C:\path\to\custom\agent.cmd
+```
+
+When `AIKIT_CURSOR_AGENT` is set and points to an existing file, it takes precedence over PATH resolution for the `agent` command. If the path is invalid, AIKIT falls back to standard PATH+PATHEXT resolution.
+
+This variable only affects the `agent` command (Cursor agent). Other agent binaries use standard PATH resolution.
+
+### Manual Windows Agent Tests
+
+Integration tests for real Windows agent CLIs are available but skipped by default (they require actual agent installations):
+
+```bash
+# Run all manual Windows agent tests (requires agents installed)
+cargo test --test manual_windows_agents -- --ignored
+
+# Run a specific manual test
+cargo test --test manual_windows_agents test_cursor_agent_spawn -- --ignored
+```
+
+These tests verify that `agent.cmd` is correctly discovered and spawnable on Windows. They are excluded from CI and must be run manually in environments where the agents are installed.
+
 ## Dependencies
 
 Only `std` is required. No external dependencies.
