@@ -423,7 +423,7 @@ pub use runner::{
     RunError, RunOptions, RunResult, TokenUsage, UsageSource,
 };
 
-pub mod command_resolve;
+pub(crate) mod command_resolve;
 pub mod fetch;
 pub mod install;
 pub mod manifest;
