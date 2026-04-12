@@ -1,6 +1,8 @@
 //! GitHub integration for package distribution
 //!
 //! This module handles GitHub API interactions for package discovery,
+
+#![allow(dead_code)]
 //! downloading, and publishing.
 
 use reqwest::Client;

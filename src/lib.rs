@@ -4,8 +4,6 @@
 //! map templates into many coding-assistant layouts, init/scaffold, publish, and registry.
 //! Runnable agents and event streaming live in the `aikit-sdk` crate.
 
-#![allow(dead_code)]
-
 pub mod cli;
 pub mod core;
 pub mod error;
@@ -15,7 +13,6 @@ pub mod github;
 pub mod models;
 pub mod tui;
 
-pub use core::registry::RegistryManager;
 pub use error::AikError;
 /// Re-export commonly used types
 pub use models::{

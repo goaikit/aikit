@@ -1,6 +1,8 @@
 //! Error types for the AIKIT CLI
 //!
 //! This module defines comprehensive error types using thiserror
+
+#![allow(dead_code)]
 //! for better error handling throughout the application.
 
 use thiserror::Error;

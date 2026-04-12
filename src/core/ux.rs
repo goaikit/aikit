@@ -1,6 +1,8 @@
 //! User experience utilities for the AIKIT CLI
 //!
 //! This module provides utilities for progress indicators, interactive prompts,
+
+#![allow(dead_code)]
 //! and other UX improvements.
 
 use crate::error::AikError;

@@ -2,6 +2,8 @@
 //!
 //! This module contains file system utilities with cross-platform support.
 
+#![allow(dead_code)]
+
 pub mod merge;
 pub mod permissions;
 

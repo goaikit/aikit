@@ -132,17 +132,3 @@ pub fn run() -> Result<()> {
 
     Ok(())
 }
-
-/// Check if debug mode is enabled
-#[allow(dead_code)]
-pub fn is_debug() -> bool {
-    std::env::var("AIKIT_DEBUG").is_ok()
-}
-
-/// Print debug message if debug mode is enabled
-#[allow(dead_code)]
-pub fn debug_print(msg: &str) {
-    if is_debug() {
-        eprintln!("[DEBUG] {}", msg);
-    }
-}

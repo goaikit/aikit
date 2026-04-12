@@ -19,6 +19,7 @@ pub struct PackageArgs {
 }
 
 /// Execute the package command
+#[allow(dead_code)]
 pub async fn execute(args: PackageArgs) -> Result<()> {
     // Parse filters from environment variables
     let agents = PackageConfig::parse_agents_env();

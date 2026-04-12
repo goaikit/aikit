@@ -2,6 +2,8 @@
 //!
 //! This module handles generation of template zip archives for releases.
 
+#![allow(dead_code)]
+
 use crate::core::agent::{get_agent_configs, AgentConfig, OutputFormat, ScriptVariant};
 use anyhow::{Context, Result};
 use std::collections::HashMap;

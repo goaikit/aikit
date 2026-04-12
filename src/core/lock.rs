@@ -3,6 +3,8 @@
 //! This module handles package lock files for tracking installed package
 //! versions and ensuring reproducible installations.
 
+#![allow(dead_code)]
+
 use crate::models::package::InstalledPackage;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

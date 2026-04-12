@@ -1,6 +1,8 @@
 //! File merging logic
 //!
 //! This module handles file merging operations, including deep JSON merge
+
+#![allow(dead_code)]
 //! for .vscode/settings.json files.
 
 use anyhow::Result;

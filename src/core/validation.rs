@@ -1,6 +1,8 @@
 //! Input validation utilities for the AIKIT CLI
 //!
 //! This module provides comprehensive validation functions for user inputs,
+
+#![allow(dead_code)]
 //! path sanitization, and data validation to prevent security issues and
 //! improve user experience.
 

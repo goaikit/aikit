@@ -848,6 +848,7 @@ fn deploy_skills_for_agent(
 ///
 /// This function is deprecated in favor of using aikit_sdk::copy_artifacts directly.
 /// It is kept for backward compatibility but delegates to the SDK.
+#[allow(dead_code)]
 #[deprecated(note = "Use aikit_sdk::copy_artifacts directly")]
 fn copy_artifacts_to_project(
     package: &crate::models::package::Package,

@@ -1,6 +1,8 @@
 //! GitHub API rate limit detection and error formatting
 //!
 //! This module handles rate limit information parsing from GitHub API headers
+
+#![allow(dead_code)]
 //! and formats error messages matching the Python version exactly.
 
 use chrono::{DateTime, Utc};

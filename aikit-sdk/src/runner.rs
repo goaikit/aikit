@@ -335,10 +335,6 @@ enum ReaderMsg {
         stream: AgentEventStream,
         source: io::Error,
     },
-    /// Watchdog fired: child was killed due to timeout.
-    /// Kept for API completeness; not sent by the current watchdog implementation.
-    #[allow(dead_code)]
-    Killed,
 }
 
 /// Returns the list of runnable agent keys.
@@ -1139,10 +1135,6 @@ where
                 if reader_error.is_none() {
                     reader_error = Some(RunError::ReaderFailed { stream, source });
                 }
-            }
-            ReaderMsg::Killed => {
-                // Sentinel from legacy watchdog designs; not sent in current
-                // implementation but handled defensively.
             }
         }
     }

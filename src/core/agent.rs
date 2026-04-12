@@ -3,6 +3,8 @@
 //! This module contains types and functions for managing AI agent configurations,
 //! including agent selection, validation, and tool checking.
 
+#![allow(dead_code)]
+
 /// Script variant (bash or PowerShell)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScriptVariant {
@@ -19,15 +21,6 @@ impl ScriptVariant {
             Self::Ps
         } else {
             Self::Sh
-        }
-    }
-
-    /// Get the file extension for this script variant
-    #[allow(dead_code)]
-    pub fn extension(&self) -> &'static str {
-        match self {
-            Self::Sh => "sh",
-            Self::Ps => "ps1",
         }
     }
 }
@@ -261,49 +254,7 @@ pub fn validate_agent_key(key: &str) -> Result<(), String> {
     validate_agent_key(key).map_err(|e| e.to_string())
 }
 
-/// Get all agent keys
-#[allow(dead_code)]
-pub fn get_all_agent_keys() -> Vec<String> {
-    get_agent_configs().iter().map(|a| a.key.clone()).collect()
-}
-
-/// Agent selection enum
-///
-/// Represents user's agent selection (interactive or CLI argument).
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub enum AgentSelection {
-    /// Agent key selected
-    Selected(String),
-    /// Trigger interactive selection
-    Interactive,
-    /// Use default (copilot)
-    Default,
-}
-
-impl AgentSelection {
-    /// Resolve to a concrete agent key
-    pub fn resolve(&self) -> String {
-        match self {
-            Self::Selected(key) => key.clone(),
-            Self::Default => "copilot".to_string(),
-            Self::Interactive => {
-                // This will be handled by TUI in a later phase
-                "copilot".to_string()
-            }
-        }
-    }
-}
-
 impl AgentConfig {
-    /// Check if agent supports package installation
-    #[allow(dead_code)]
-    pub fn supports_packages(&self) -> bool {
-        // All agents in the current configuration support packages
-        // In the future, this could be a configuration field
-        true
-    }
-
     /// Get the namespace prefix for package commands
     #[allow(dead_code)]
     pub fn get_namespace_prefix(&self, package_name: &str) -> String {
@@ -371,17 +322,6 @@ impl AgentConfig {
         }
 
         result
-    }
-
-    /// Get the full path for a package command file
-    #[allow(dead_code)]
-    pub fn get_package_command_path(
-        &self,
-        package_name: &str,
-        command_name: &str,
-    ) -> std::path::PathBuf {
-        std::path::PathBuf::from(&self.output_dir)
-            .join(format!("{}-{}.md", package_name, command_name))
     }
 }
 

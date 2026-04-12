@@ -1,5 +1,7 @@
 //! Template processing and extraction utilities
 
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

@@ -1,5 +1,7 @@
 //! Output formatting utilities
 
+#![allow(dead_code)]
+
 /// Tree item for displaying hierarchical data
 pub struct TreeItem {
     pub label: String,
