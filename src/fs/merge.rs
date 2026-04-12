@@ -2,7 +2,6 @@
 //!
 //! This module handles file merging operations, including deep JSON merge
 
-#![allow(dead_code)]
 //! for .vscode/settings.json files.
 
 use anyhow::Result;
@@ -11,6 +10,7 @@ use std::path::Path;
 
 /// Result of a file merge operation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum MergeResult {
     /// File was created (didn't exist)
     Created,

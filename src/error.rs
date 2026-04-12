@@ -2,7 +2,6 @@
 //!
 //! This module defines comprehensive error types using thiserror
 
-#![allow(dead_code)]
 //! for better error handling throughout the application.
 
 use thiserror::Error;
@@ -10,6 +9,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum AikError {
     #[error("Configuration error: {0}")]
+    #[allow(dead_code)]
     Config(String),
 
     #[error("Invalid source: {0}")]

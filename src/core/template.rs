@@ -1,7 +1,5 @@
 //! Template processing and extraction utilities
 
-#![allow(dead_code)]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +34,7 @@ pub fn extract_and_flatten_zip(
 }
 
 /// Copy directory recursively (moved from fs module to avoid conflicts)
+#[allow(dead_code)]
 pub fn copy_directory(from: &Path, to: &Path) -> Result<(), Box<dyn std::error::Error>> {
     for entry in walkdir::WalkDir::new(from)
         .into_iter()

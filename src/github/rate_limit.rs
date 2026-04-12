@@ -2,7 +2,6 @@
 //!
 //! This module handles rate limit information parsing from GitHub API headers
 
-#![allow(dead_code)]
 //! and formats error messages matching the Python version exactly.
 
 use chrono::{DateTime, Utc};
@@ -17,6 +16,7 @@ pub struct GitHubRateLimitInfo {
     /// Remaining requests
     pub remaining: u32,
     /// Reset time as Unix timestamp
+    #[allow(dead_code)]
     pub reset_epoch: i64,
     /// Reset time as DateTime
     pub reset_time: DateTime<Utc>,

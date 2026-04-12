@@ -3,8 +3,6 @@
 //! This module contains types and functions for managing AI agent configurations,
 //! including agent selection, validation, and tool checking.
 
-#![allow(dead_code)]
-
 /// Script variant (bash or PowerShell)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScriptVariant {
@@ -27,6 +25,7 @@ impl ScriptVariant {
 
 /// Output format for command files
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum OutputFormat {
     /// Markdown format (.md)
     Markdown,

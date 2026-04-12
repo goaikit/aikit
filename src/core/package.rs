@@ -2,8 +2,6 @@
 //!
 //! This module handles generation of template zip archives for releases.
 
-#![allow(dead_code)]
-
 use crate::core::agent::{get_agent_configs, AgentConfig, OutputFormat, ScriptVariant};
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -114,6 +112,7 @@ pub struct CommandTemplate {
     /// Template filename (e.g., "specify.md")
     pub name: String,
     /// Description from YAML frontmatter
+    #[allow(dead_code)]
     pub description: String,
     /// Script commands per variant
     pub script_commands: HashMap<ScriptVariant, String>,

@@ -3,6 +3,7 @@
 //! This module defines the data structures for AIKIT's template package system.
 
 #![allow(dead_code)]
+
 //! Packages are defined by aikit.toml files and can contain any kind of reusable
 //! content (prompts, templates, scripts, configurations) for AI agents.
 

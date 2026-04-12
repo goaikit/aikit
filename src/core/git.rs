@@ -2,7 +2,6 @@
 //!
 //! This module handles GitHub API interactions for package discovery,
 
-#![allow(dead_code)]
 //! downloading, and publishing.
 
 use reqwest::Client;
@@ -261,6 +260,7 @@ pub struct ReleaseInfo {
 
 impl ReleaseInfo {
     /// Create a new ReleaseInfo with automatic prerelease detection from tag name
+    #[allow(dead_code)]
     pub fn new(tag_name: String, name: String, body: String, draft: bool) -> Self {
         let prerelease =
             tag_name.contains("alpha") || tag_name.contains("beta") || tag_name.contains("rc");
