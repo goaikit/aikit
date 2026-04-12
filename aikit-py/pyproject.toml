@@ -7,7 +7,7 @@ name = "aikit-py"
 version = "0.1.50"
 requires-python = ">=3.9"
 license = "Apache-2.0"
-description = "Python bindings for aikit SDK"
+description = "Python gateway to aikit-sdk: catalog, deploy, detection, run_agent, run_agent_events_py"
 readme = "README.md"
 authors = [
     { name = "goaikit", email = "info@goaikit.dev" }

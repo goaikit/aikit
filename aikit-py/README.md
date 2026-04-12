@@ -1,6 +1,6 @@
-# aikit-py: Python Bindings for aikit SDK
+# aikit-py
 
-Python bindings for the `aikit-sdk` providing agent catalog and deployment functionalities from Python. This library allows you to programmatically interact with aikit agents, list available agents, and deploy commands, skills, and subagents to your project.
+Python bindings for **[aikit-sdk](../aikit-sdk/README.md)**: the same **programmatic gateway** from Python. Use it to query the **agent catalog**, **resolve paths**, **deploy** commands/skills/subagents, **check** which runnable agent CLIs are installed, and **run** agents with either **buffered** output (`run_agent`) or **per-event callbacks** (`run_agent_events_py`) matching the NDJSON shape of `aikit run --events` (including `token_usage_line` when the agent emits parseable usage).
 
 ## Requirements
 
@@ -178,6 +178,8 @@ def on_event(event):
         print(f"seq={seq} [{stream}] JSON: {payload['json_line']}")
     elif "raw_line" in payload:
         print(f"seq={seq} [{stream}] text: {payload['raw_line']}")
+    elif "token_usage_line" in payload:
+        print(f"seq={seq} [{stream}] usage: {payload['token_usage_line']}")
     else:
         print(f"seq={seq} [{stream}] bytes: {payload['raw_bytes']}")
 
@@ -202,7 +204,12 @@ The event dictionary schema:
     "payload": {                # exactly one of:
         "json_line": dict,      # parsed JSON object
         "raw_line": str,        # UTF-8 text line (not JSON)
-        "raw_bytes": list[int]  # non-UTF-8 bytes as integer array
+        "raw_bytes": list[int], # non-UTF-8 bytes as integer array
+        "token_usage_line": {   # normalized usage after a json_line (when emitted)
+            "usage": dict,      # input_tokens, output_tokens, optional totals/cache/reasoning
+            "source": str,      # e.g. "Claude" (matches Rust UsageSource)
+            "raw_agent_line_seq": int,
+        },
     }
 }
 ```

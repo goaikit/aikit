@@ -1,10 +1,10 @@
-# AI Agent Deploy Service
+# aikit-sdk
 
-A Rust library crate that provides agent catalog management and deployment capabilities for AI assistant configurations.
+Rust library: **programmatic gateway** to coding-agent CLIs and their on-disk conventions. One catalog and set of APIs for **resolving paths** (commands, skills, subagents, instruction files), **deploying** template content, **probing** which agent binaries are installed, and **running** agents with captured output or a structured **event stream** (including optional **token usage** lines). The **`aikit`** CLI uses this crate for `aikit run` and related behavior.
 
 ## Overview
 
-This crate holds the full agent catalog with per-agent capabilities (commands, skills, subagents) and provides deploy APIs that write files to the correct locations, throwing clear errors when an agent does not support a given concept.
+The crate holds the full **agent catalog** (18 assistants) with per-agent capability flags, implements deterministic **path** and **instruction-file** resolution, and provides **deploy** APIs that write files to the correct locations with clear errors when a concept is unsupported. **Runnable** agent keys match the CLI: `codex`, `claude`, `gemini`, `opencode`, `agent` (the last is the Cursor agent CLI).
 
 ## Features
 
@@ -15,7 +15,7 @@ This crate holds the full agent catalog with per-agent capabilities (commands, s
 - **Error Handling**: Clear error types when concepts are unsupported
 - **Filename Conventions**: Proper filename formats per agent type
 - **Agent Detection**: Identify which AI coding agents are installed and available
-- **CLI Execution**: Run agents with full parameter support matching coder.sh
+- **CLI execution**: Spawn runnable agent CLIs with argv aligned to the `aikit run` contract
 - **Output Capture**: Capture stdout/stderr for programmatic forwarding
 - **Streaming Events**: Real-time event delivery via `run_agent_events` with structured JSON parsing
 

@@ -1,8 +1,8 @@
-//! AIKIT - Universal Package Manager for AI Agent Extensions
+//! AIKIT: multi-agent template package manager and CLI.
 //!
-//! This library provides the core functionality for AIKIT's universal package system,
-//! enabling the creation, distribution, and installation of reusable content
-//! (prompts, templates, scripts, configurations) across different AI agents.
+//! Core logic for `aikit.toml` template packages: install from GitHub or local paths,
+//! map templates into many coding-assistant layouts, init/scaffold, publish, and registry.
+//! Runnable agents and event streaming live in the `aikit-sdk` crate.
 
 #![allow(dead_code)]
 

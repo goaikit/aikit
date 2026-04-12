@@ -1,6 +1,8 @@
-# AIKIT - Universal Package Manager for AI Agent Extensions
+# AIKIT
 
-AIKIT is a universal package manager for AI agent extensions. Create, share, and discover reusable AI commands and templates across 17+ AI assistants including Claude, Cursor, GitHub Copilot, and Gemini.
+**Multi-agent template package manager and CLI.** Install and publish `aikit.toml` template packages from **GitHub or a local directory**, map them into many coding-assistant layouts, scaffold projects with **`aikit init`**, and run supported agent CLIs with **`aikit run`**. Use **`aikit check`** to see which tools and agents are available.
+
+**Programmatic gateway:** [aikit-sdk](aikit-sdk/README.md) (Rust) and [aikit-py](aikit-py/README.md) (Python) expose the same agent catalog, path rules, deploy APIs, availability checks, and run/event APIs for your own tools and automation.
 
 ## Installation
 
@@ -173,22 +175,32 @@ Agent selection is **CLI-only**: `-a` / `--agent` is required. `aikit run` does 
 - `--events`: Switches the CLI to emit one JSON object per line (NDJSON) to stdout. Process exit code matches the child agent's exit code.
 - Both flags can be combined: `--events --stream` uses events-mode JSON output AND adds stream-partial flags for supported agents.
 
-**NDJSON event format** (when using `--events`):
+**NDJSON event format** (when using `--events`): each line is one JSON object with `agent_key`, `seq`, `stream` (`stdout` | `stderr`), and `payload`. The payload is one of:
+
+- **`json_line`**: parsed JSON object from the agent
+- **`raw_line`**: UTF-8 text line that is not JSON
+- **`raw_bytes`**: non-UTF-8 data as a byte array in JSON
+- **`token_usage_line`**: normalized token counts extracted from a preceding `json_line` (fields: `usage`, `source`, `raw_agent_line_seq`)
+
+Example lines:
+
 ```json
 {"agent_key":"claude","seq":1,"stream":"stdout","payload":{"json_line":{"type":"progress","message":"Starting..."}}}
-{"agent_key":"claude","seq":2,"stream":"stdout","payload":{"raw_line":"Processing file..."}}
+{"agent_key":"claude","seq":2,"stream":"stdout","payload":{"token_usage_line":{"usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"cache_read_tokens":null,"cache_creation_tokens":null,"reasoning_tokens":null},"source":"Claude","raw_agent_line_seq":1}}}
 ```
+
+On **Windows**, the Cursor agent is often `agent.cmd`. If spawn fails, set **`AIKIT_CURSOR_AGENT`** to the full path (see [aikit-sdk README: Windows Configuration](aikit-sdk/README.md#windows-configuration)).
 
 Run `aikit run --help` for the authoritative option reference.
 
-**Programmatic use:**
+**Programmatic use (gateway libraries):**
 
-- **Rust:** Add `aikit-sdk` to your `Cargo.toml`, then call `aikit_sdk::run_agent(agent_key, prompt, options)` for buffered output or `aikit_sdk::run_agent_events(agent_key, prompt, options, callback)` for streaming events. Returns `Result<RunResult, RunError>`. See [aikit-sdk README](aikit-sdk/README.md) for full API (catalog, deploy, run, streaming events).
-- **Python:** `pip install aikit-py`, then `aikit_py.run_agent(agent_key, prompt, model=None, yolo=False, stream=False)` returns a dict with `status_code`, `stdout`, `stderr`. For real-time streaming events, use `aikit_py.run_agent_events_py(agent_key, prompt, on_event, model=None, yolo=False, stream=False)` with a callback receiving event dicts (same schema as `aikit run --events` NDJSON). See [aikit-py README](aikit-py/README.md) for catalog, deploy, and run APIs.
+- **Rust ([aikit-sdk](aikit-sdk/README.md)):** Add `aikit-sdk` to `Cargo.toml`. Use catalog/path/deploy APIs, `run_agent` for buffered stdout/stderr, or `run_agent_events` for the same event stream shape as `aikit run --events` (including optional `token_usage_line` events). Returns `Result<RunResult, RunError>`.
+- **Python ([aikit-py](aikit-py/README.md)):** `pip install aikit-py`. Same surface area from Python: catalog, deploy, `run_agent`, and `run_agent_events_py(..., on_event, ...)` for per-event callbacks (schema matches CLI NDJSON).
 
 ## Supported AI assistants
 
-AIKIT supports 17+ AI assistants:
+The catalog covers **18** coding assistants (install/template mapping). Runnable via **`aikit run`** are only: `codex`, `claude`, `gemini`, `opencode`, `agent`.
 
 **CLI-based:** Claude, Gemini, Qwen, OpenCode, Codex, Auggie, CodeBuddy, Qoder, Q, Amp, Shai
 

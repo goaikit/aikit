@@ -9,7 +9,7 @@ pub fn build_cli() -> Command {
     Command::new("aikit")
         .version(env!("CARGO_PKG_VERSION"))
         .author("AIKIT Team")
-        .about("Universal package manager for AI agent extensions")
+        .about("AIKit - Universal template package manager for AI agents")
         .subcommand_required(true)
         .arg_required_else_help(true)
         .subcommand(

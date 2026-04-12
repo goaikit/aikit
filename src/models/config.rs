@@ -1,6 +1,6 @@
 //! Configuration Data Structures
 //!
-//! This module defines configuration structures for AIKIT's universal package system,
+//! This module defines configuration structures for AIKIT's template package system,
 //! including global settings, agent configurations, and user preferences.
 
 use crate::models::registry::RegistryConfig;

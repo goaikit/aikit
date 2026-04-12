@@ -1,13 +1,13 @@
 ---
 title: "AIKit Documentation"
-description: "Complete guide to AIKit - Universal Package Manager for AI Agent Extensions"
+description: "AIKit: multi-agent template package manager, CLI, and Rust/Python gateway (aikit-sdk, aikit-py)"
 ---
 
 # AIKit Documentation
 
-Welcome to the comprehensive documentation for **AIKit**, the universal package manager for AI agent extensions. This guide covers everything you need to get started with AIKit, from installation to advanced package development and AI agent integration.
+**AIKit** is a **multi-agent template package manager and CLI**: install and publish `aikit.toml` packages from GitHub or a local directory, scaffold projects, and run supported coding-agent CLIs. **aikit-sdk** (Rust) and **aikit-py** (Python) provide the same **programmatic gateway** (catalog, paths, deploy, detection, run/events). This site covers installation, commands, packages, and agents.
 
-## 🚀 Getting Started
+## Getting Started
 
 <Card
   title="Quick Start"
@@ -18,7 +18,7 @@ Welcome to the comprehensive documentation for **AIKit**, the universal package 
   Install AIKit and create your first AI-powered project in minutes.
 </Card>
 
-## 📚 Core Documentation
+## Core Documentation
 
 <Columns cols={3}>
   <Card
@@ -40,11 +40,11 @@ Welcome to the comprehensive documentation for **AIKit**, the universal package 
     icon="robot"
     href="/agents"
   >
-    Comprehensive guide to all 17+ supported AI assistants, with setup instructions and integration details.
+    Guide to supported AI assistants (18 in the catalog), setup, and integration details.
   </Card>
 </Columns>
 
-## 📦 Package Ecosystem
+## Packages and examples
 
 <Columns cols={2}>
   <Card
@@ -52,7 +52,7 @@ Welcome to the comprehensive documentation for **AIKit**, the universal package 
     icon="box"
     href="/packages"
   >
-    Create, build, publish, and manage AIKit packages. Learn about the package ecosystem and community contributions.
+    Create, build, publish, and manage AIKit template packages (GitHub releases and local paths).
   </Card>
   <Card
     title="Usage Examples"
@@ -63,7 +63,7 @@ Welcome to the comprehensive documentation for **AIKit**, the universal package 
   </Card>
 </Columns>
 
-## 🛠️ Advanced Features
+## Advanced
 
 <Columns cols={2}>
   <Card
@@ -82,43 +82,38 @@ Welcome to the comprehensive documentation for **AIKit**, the universal package 
   </Card>
 </Columns>
 
-## 🎯 What is AIKit?
+## What is AIKit?
 
-AIKit is a **universal package manager** for AI agent extensions that enables developers to:
+AIKit helps you:
 
-- **Create reusable AI commands** and templates across different AI assistants
-- **Share AI tools** through a decentralized package ecosystem
-- **Integrate seamlessly** with 17+ AI coding assistants (Claude, Cursor, Copilot, Gemini, and more)
-- **Streamline workflows** with standardized project initialization and package management
-- **Foster community collaboration** through open-source AI tool sharing
+- **Ship template packages** (`aikit.toml`) that install into many coding-assistant layouts
+- **Install packages** from **GitHub (owner/repo)** or a **local directory**
+- **Scaffold projects** with `aikit init` and **run** supported agent CLIs with `aikit run`
+- **Automate** the same behavior via **aikit-sdk** / **aikit-py** (catalog, deploy, detection, run, event stream)
 
-### Key Features
+### Key features
 
-- 🔧 **Universal Compatibility** - Works with all major AI coding assistants
-- 📦 **Package Ecosystem** - Share and discover AI tools created by the community
-- ⚡ **Fast Setup** - Get started with AI-powered development in minutes
-- 🛠️ **Extensible Architecture** - Easy to add support for new AI agents and tools
-- 🎨 **Standardized Workflows** - Consistent experience across different AI platforms
+- **Multi-agent layouts** - One package definition, many target agents (18 in the catalog)
+- **CLI + libraries** - `aikit` for day-to-day use; Rust/Python bindings for tools and CI
+- **Runnable agents** - `aikit run` supports `codex`, `claude`, `gemini`, `opencode`, `agent`
+- **GitHub-oriented publish flow** - `aikit package publish` / `aikit release` for releases and assets
 
-### Quick Example
+### Quick example
 
 ```bash
-# Install AIKit
+# Install AIKit (or use release binaries / Homebrew / Scoop; see main README)
 cargo install aikit
 
-# Create your first AI-powered project
+# Scaffold a project for an assistant
 aikit init my-ai-project --ai claude
 
-# Install community packages
-# Browse packages at https://github.com/search?q=aikit&type=repositories
+# Install a package from GitHub (owner/repo)
 aikit install owner/code-review-tools
 
-# Start developing with AI assistance
 cd my-ai-project
-# Your AI agent now has access to code review tools!
 ```
 
-## 📖 Documentation Overview
+## Documentation overview
 
 This documentation is organized to support your AIKit journey:
 

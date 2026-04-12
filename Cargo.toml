@@ -6,7 +6,7 @@ name = "aikit"
 version = "0.1.77"
 edition = "2021"
 authors = ["@aroff"]
-description = "AIKIT - Rust Spec Kit CLI Complete Reimplementation"
+description = "Multi-agent template package manager and CLI for aikit.toml packages; aikit-sdk provides the Rust gateway for catalog, deploy, and agent run APIs."
 license = "Apache-2.0"
 
 [dependencies]
