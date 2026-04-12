@@ -3,6 +3,8 @@
 //! This module defines configuration structures for AIKIT's template package system,
 //! including global settings, agent configurations, and user preferences.
 
+#![allow(dead_code)]
+
 use crate::models::registry::RegistryConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

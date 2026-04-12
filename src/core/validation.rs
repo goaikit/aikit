@@ -1,6 +1,7 @@
 //! Input validation utilities for the AIKIT CLI
 //!
 //! This module provides comprehensive validation functions for user inputs,
+
 //! path sanitization, and data validation to prevent security issues and
 //! improve user experience.
 
@@ -60,6 +61,7 @@ pub fn validate_version_format(version: &str) -> Result<(), AikError> {
 }
 
 /// Sanitize and validate file path to prevent directory traversal
+#[allow(dead_code)]
 pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
     let path_buf = PathBuf::from(path);
 
@@ -108,6 +110,7 @@ pub fn sanitize_path(path: &str) -> Result<PathBuf, AikError> {
 }
 
 /// Validate GitHub URL format
+#[allow(dead_code)]
 pub fn validate_github_url(url: &str) -> Result<(), AikError> {
     let github_regex = Regex::new(r"^https?://github\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_.-]+$")
         .map_err(|_| AikError::Generic("Invalid regex".to_string()))?;
@@ -122,6 +125,7 @@ pub fn validate_github_url(url: &str) -> Result<(), AikError> {
 }
 
 /// Validate local path for package installation
+#[allow(dead_code)]
 pub fn validate_local_path(path: &Path) -> Result<(), AikError> {
     // Check if path exists
     if !path.exists() {

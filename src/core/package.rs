@@ -112,6 +112,7 @@ pub struct CommandTemplate {
     /// Template filename (e.g., "specify.md")
     pub name: String,
     /// Description from YAML frontmatter
+    #[allow(dead_code)]
     pub description: String,
     /// Script commands per variant
     pub script_commands: HashMap<ScriptVariant, String>,

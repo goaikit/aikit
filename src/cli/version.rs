@@ -17,6 +17,7 @@ pub struct VersionArgs {
 }
 
 /// Execute the version command
+#[allow(dead_code)]
 pub async fn execute(args: VersionArgs) -> Result<()> {
     // Get CLI version
     let cli_version = env!("CARGO_PKG_VERSION");
@@ -49,6 +50,7 @@ pub async fn execute(args: VersionArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn get_template_version(github_token: Option<String>) -> Result<String> {
     let token = GitHubClient::resolve_token(github_token);
     let client = GitHubClient::new(token)?;
@@ -63,6 +65,7 @@ async fn get_template_version(github_token: Option<String>) -> Result<String> {
     Ok(tag_name.to_string())
 }
 
+#[allow(dead_code)]
 fn get_rust_version() -> String {
     // Try to get from rustc, fallback to "unknown"
     std::process::Command::new("rustc")

@@ -3,6 +3,8 @@
 //! This module defines data structures for managing package registries,
 //! including local installation registries and remote package discovery.
 
+#![allow(dead_code)]
+
 use crate::models::package::{InstalledPackage, PackageRegistryEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

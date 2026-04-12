@@ -3,6 +3,7 @@
 /// Tree item for displaying hierarchical data
 pub struct TreeItem {
     pub label: String,
+    #[allow(dead_code)]
     pub children: Vec<TreeItem>,
 }
 

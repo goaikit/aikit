@@ -1,6 +1,7 @@
 //! User experience utilities for the AIKIT CLI
 //!
 //! This module provides utilities for progress indicators, interactive prompts,
+
 //! and other UX improvements.
 
 use crate::error::AikError;
@@ -8,6 +9,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use std::fmt::Display;
 
 /// Create a progress bar for long operations
+#[allow(dead_code)]
 pub fn create_progress_bar(total: u64, message: &str) -> ProgressBar {
     let pb = ProgressBar::new(total);
     pb.set_style(
@@ -48,6 +50,7 @@ pub fn confirm_action(prompt: &str) -> Result<bool, AikError> {
 }
 
 /// Select from a list of options
+#[allow(dead_code)]
 pub fn select_from_list<T: Display>(items: &[T], prompt: &str) -> Result<usize, AikError> {
     if !atty::is(atty::Stream::Stdout) {
         return Err(AikError::Generic(
