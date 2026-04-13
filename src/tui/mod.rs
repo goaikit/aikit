@@ -2,3 +2,4 @@
 
 pub mod agent_select;
 pub mod output;
+pub mod progress_render;

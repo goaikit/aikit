@@ -1,0 +1,6 @@
+---
+source: aikit-sdk/tests/run_progress_test.rs
+assertion_line: 69
+expression: lines
+---
+[]

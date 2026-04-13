@@ -1,0 +1,8 @@
+---
+source: aikit-sdk/tests/run_progress_test.rs
+assertion_line: 193
+expression: lines
+---
+[
+    "[assistant] {\"message\":{\"content\":[{\"text\":\"Hello\",\"type\":\"text\"}],\"role\":\"assistant\"},\"type",
+]

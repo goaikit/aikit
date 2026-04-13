@@ -1,0 +1,8 @@
+---
+source: aikit-sdk/tests/run_progress_test.rs
+assertion_line: 57
+expression: lines
+---
+[
+    "assistant> Hello from the agent",
+]

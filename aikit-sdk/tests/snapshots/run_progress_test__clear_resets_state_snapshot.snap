@@ -1,0 +1,9 @@
+---
+source: aikit-sdk/tests/run_progress_test.rs
+assertion_line: 282
+expression: "(lines, footer)"
+---
+(
+    [],
+    None,
+)
