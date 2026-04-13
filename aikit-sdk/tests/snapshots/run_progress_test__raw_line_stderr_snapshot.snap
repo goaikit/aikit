@@ -1,0 +1,8 @@
+---
+source: aikit-sdk/tests/run_progress_test.rs
+assertion_line: 221
+expression: lines
+---
+[
+    "err> error output line",
+]

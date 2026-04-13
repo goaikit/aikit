@@ -1,0 +1,8 @@
+---
+source: aikit-sdk/tests/run_progress_test.rs
+assertion_line: 142
+expression: footer
+---
+Some(
+    "[tokens] opencode  in=1000 out=250 total=1250",
+)

@@ -423,6 +423,9 @@ pub use runner::{
     RunError, RunOptions, RunResult, TokenUsage, UsageSource,
 };
 
+pub mod run_progress;
+pub use run_progress::{ProgressViewConfig, RunProgress};
+
 pub(crate) mod command_resolve;
 pub mod fetch;
 pub mod install;
