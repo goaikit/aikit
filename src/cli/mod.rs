@@ -83,8 +83,8 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(&cli);
 
-    // Initialization banner (binary name and version)
-    eprintln!("aikit {}", env!("CARGO_PKG_VERSION"));
+    // Initialization banner (binary name only)
+    eprintln!("aikit");
 
     // Set debug mode if enabled
     if cli.debug {
