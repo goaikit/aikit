@@ -41,6 +41,7 @@ pub struct RunProgress {
     config: ProgressViewConfig,
     rows: VecDeque<String>,
     latest_token_usage: Option<(TokenUsage, UsageSource)>,
+    last_assistant_text: Option<String>,
 }
 
 impl RunProgress {
@@ -50,6 +51,7 @@ impl RunProgress {
             config,
             rows: VecDeque::new(),
             latest_token_usage: None,
+            last_assistant_text: None,
         }
     }
 
@@ -60,7 +62,8 @@ impl RunProgress {
                 self.latest_token_usage = Some((usage.clone(), source.clone()));
             }
             AgentEventPayload::JsonLine(val) => {
-                let line = self.classify_json(agent_key, val);
+                let val = val.clone();
+                let line = self.classify_json(agent_key, &val);
                 if let Some(l) = line {
                     self.add_row(l);
                 }
@@ -103,12 +106,18 @@ impl RunProgress {
             UsageSource::OpenCode => "opencode",
             UsageSource::Cursor => "cursor",
         };
-        let total = usage
-            .total_tokens
-            .unwrap_or(usage.input_tokens + usage.output_tokens);
+        let computed_total = usage.input_tokens + usage.output_tokens;
+        let agent_total_suffix = match usage.total_tokens {
+            Some(t) if t != computed_total => format!(" agent_total={}", t),
+            _ => String::new(),
+        };
         Some(format!(
-            "[tokens] {}  in={} out={} total={}",
-            source_label, usage.input_tokens, usage.output_tokens, total
+            "[tokens] {}  in={} out={} total={}{}",
+            source_label,
+            usage.input_tokens,
+            usage.output_tokens,
+            computed_total,
+            agent_total_suffix
         ))
     }
 
@@ -116,6 +125,7 @@ impl RunProgress {
     pub fn clear(&mut self) {
         self.rows.clear();
         self.latest_token_usage = None;
+        self.last_assistant_text = None;
     }
 
     // -------------------------------------------------------------------------
@@ -135,7 +145,7 @@ impl RunProgress {
     /// Classify a JSON event value into a formatted display string.
     ///
     /// Returns `None` for events that should be suppressed (e.g. `step_start`).
-    fn classify_json(&self, agent_key: &str, val: &serde_json::Value) -> Option<String> {
+    fn classify_json(&mut self, agent_key: &str, val: &serde_json::Value) -> Option<String> {
         if agent_key == "opencode" {
             self.classify_opencode(val)
         } else {
@@ -144,7 +154,7 @@ impl RunProgress {
     }
 
     /// OpenCode-specific event classification.
-    fn classify_opencode(&self, val: &serde_json::Value) -> Option<String> {
+    fn classify_opencode(&mut self, val: &serde_json::Value) -> Option<String> {
         let event_type = val.get("type")?.as_str()?;
 
         match event_type {
@@ -157,18 +167,30 @@ impl RunProgress {
                     .and_then(|p| p.get("text"))
                     .and_then(|t| t.as_str())
                     .unwrap_or("");
-                let truncated = truncate(text, self.config.max_text_width);
-                if truncated.is_empty() {
-                    None
-                } else {
-                    Some(format!("assistant> {}", truncated))
+                // Normalize: replace newlines with spaces, then trim whitespace
+                let normalized = text.replace('\n', " ").replace('\r', "");
+                let normalized = normalized.trim();
+                if normalized.is_empty() {
+                    return None;
                 }
+                // Deduplicate consecutive identical assistant rows
+                if Some(normalized) == self.last_assistant_text.as_deref() {
+                    return None;
+                }
+                let truncated = truncate(normalized, self.config.max_text_width);
+                let row = format!("assistant> {}", truncated);
+                self.last_assistant_text = Some(normalized.to_string());
+                Some(row)
             }
 
             "tool_use" => {
                 // {"type":"tool_use","part":{"tool":"bash","input":{"command":"..."},"output":"...","exit":0}}
                 let part = val.get("part")?;
                 let tool_name = part.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
+                // Suppress intermediate tool events with unresolved tool name
+                if tool_name == "invalid" {
+                    return None;
+                }
                 let command = part
                     .get("input")
                     .and_then(|i| i.get("command"))
@@ -200,8 +222,8 @@ impl RunProgress {
                     .and_then(|p| p.get("reason"))
                     .and_then(|r| r.as_str())
                     .unwrap_or("done");
-                // Suppress trivial "stop" reason, show anything else
-                if reason == "stop" || reason == "done" {
+                // Suppress normal intermediate step reasons
+                if matches!(reason, "stop" | "done" | "tool-calls") {
                     None
                 } else {
                     Some(format!("step_finish: {}", reason))
@@ -401,5 +423,115 @@ mod tests {
         progress.clear();
         assert_eq!(progress.formatted_lines().count(), 0);
         assert!(progress.token_footer().is_none());
+    }
+
+    #[test]
+    fn test_tool_invalid_suppressed() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let (key, event) = make_json_event(
+            "opencode",
+            r#"{"type":"tool_use","part":{"tool":"invalid","input":{},"output":""}}"#,
+        );
+        progress.push(&key, &event);
+        assert_eq!(progress.formatted_lines().count(), 0);
+    }
+
+    #[test]
+    fn test_text_deduplication() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let json = r#"{"type":"text","part":{"text":"hello world"}}"#;
+        let (key, event1) = make_json_event("opencode", json);
+        let (_, event2) = make_json_event("opencode", json);
+        progress.push(&key, &event1);
+        progress.push(&key, &event2);
+        let lines: Vec<_> = progress.formatted_lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "assistant> hello world");
+    }
+
+    #[test]
+    fn test_text_leading_newline_normalized() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let (key, event) =
+            make_json_event("opencode", r#"{"type":"text","part":{"text":"\nHello"}}"#);
+        progress.push(&key, &event);
+        let lines: Vec<_> = progress.formatted_lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "assistant> Hello");
+        assert!(!lines[0].contains('\n'));
+    }
+
+    #[test]
+    fn test_text_whitespace_only_suppressed() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let (key, event) = make_json_event("opencode", r#"{"type":"text","part":{"text":"   "}}"#);
+        progress.push(&key, &event);
+        assert_eq!(progress.formatted_lines().count(), 0);
+    }
+
+    #[test]
+    fn test_text_dedup_reset_after_clear() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let json = r#"{"type":"text","part":{"text":"hello"}}"#;
+        let (key, event1) = make_json_event("opencode", json);
+        progress.push(&key, &event1);
+        assert_eq!(progress.formatted_lines().count(), 1);
+        progress.clear();
+        let (_, event2) = make_json_event("opencode", json);
+        progress.push(&key, &event2);
+        let lines: Vec<_> = progress.formatted_lines().collect();
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn test_token_footer_agent_total_differs() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let event = AgentEvent {
+            agent_key: "opencode".to_string(),
+            seq: 1,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::TokenUsageLine {
+                usage: TokenUsage {
+                    input_tokens: 270,
+                    output_tokens: 359,
+                    total_tokens: Some(22058),
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    reasoning_tokens: None,
+                },
+                source: UsageSource::OpenCode,
+                raw_agent_line_seq: 0,
+            },
+        };
+        progress.push("opencode", &event);
+        let footer = progress.token_footer().unwrap();
+        assert!(footer.contains("total=629"), "footer: {}", footer);
+        assert!(footer.contains("agent_total=22058"), "footer: {}", footer);
+    }
+
+    #[test]
+    fn test_token_footer_agent_total_same() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let event = AgentEvent {
+            agent_key: "opencode".to_string(),
+            seq: 1,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::TokenUsageLine {
+                usage: TokenUsage {
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    total_tokens: Some(150),
+                    cache_read_tokens: None,
+                    cache_creation_tokens: None,
+                    reasoning_tokens: None,
+                },
+                source: UsageSource::OpenCode,
+                raw_agent_line_seq: 0,
+            },
+        };
+        progress.push("opencode", &event);
+        let footer = progress.token_footer().unwrap();
+        assert!(footer.contains("total=150"), "footer: {}", footer);
+        assert!(!footer.contains("agent_total="), "footer: {}", footer);
     }
 }
