@@ -130,6 +130,22 @@ fn test_opencode_step_finish_error_shown_snapshot() {
 }
 
 // -------------------------------------------------------------------------
+// tool(invalid) suppression snapshot
+// -------------------------------------------------------------------------
+
+#[test]
+fn test_opencode_tool_use_invalid_suppressed_snapshot() {
+    let mut progress = RunProgress::new(ProgressViewConfig::default());
+    let event = json_event(
+        "opencode",
+        r#"{"type":"tool_use","part":{"tool":"invalid","input":{},"output":""}}"#,
+    );
+    progress.push("opencode", &event);
+    let lines: Vec<_> = progress.formatted_lines().collect();
+    insta::assert_debug_snapshot!(lines);
+}
+
+// -------------------------------------------------------------------------
 // Token usage footer snapshots
 // -------------------------------------------------------------------------
 
