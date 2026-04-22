@@ -9,7 +9,7 @@ use crate::tui::progress_render::ProgressRenderer;
 #[derive(Parser, Debug)]
 #[command(about = "Run a coding agent with a prompt (stdin or -p)")]
 pub struct RunArgs {
-    /// Runnable agent key (e.g. `codex`, `claude`, `gemini`, `opencode`, `agent`)
+    /// Runnable agent key (e.g. `codex`, `claude`, `gemini`, `opencode`, `agent`, `auto`)
     #[arg(long, short = 'a', value_name = "AGENT")]
     pub agent: String,
 
@@ -43,8 +43,8 @@ pub struct RunArgs {
 }
 
 pub fn execute(args: RunArgs) -> Result<()> {
-    let agent = args.agent;
-    let model = args.model;
+    let mut agent = args.agent;
+    let mut model = args.model;
 
     let prompt = match args.prompt {
         Some(p) => p,
@@ -54,6 +54,24 @@ pub fn execute(args: RunArgs) -> Result<()> {
             buffer
         }
     };
+
+    if agent == "auto" {
+        let tier_str = model.as_deref().unwrap_or("");
+        let tier =
+            crate::core::fallback::parse_tier(tier_str).map_err(|e| anyhow::anyhow!("{}", e))?;
+        let fallback_cfg =
+            crate::core::fallback::load_fallback_config().map_err(|e| anyhow::anyhow!("{}", e))?;
+        let pair = crate::core::fallback::resolve_auto(&tier, &fallback_cfg)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        tracing::debug!(
+            resolved_agent = %pair.agent,
+            resolved_model = %pair.model,
+            tier = %tier.as_str(),
+            "auto-agent resolved"
+        );
+        agent = pair.agent;
+        model = Some(pair.model);
+    }
 
     tracing::debug!(
         agent = %agent,
