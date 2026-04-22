@@ -420,7 +420,7 @@ pub use runner::{
     aggregate_token_usage, extract_usage_from_line, get_agent_status, get_installed_agents,
     is_agent_available, is_runnable, run_agent, run_agent_events, runnable_agents,
     AgentAvailabilityReason, AgentEvent, AgentEventPayload, AgentEventStream, AgentStatus,
-    RunError, RunOptions, RunResult, TokenUsage, UsageSource,
+    QuotaCategory, QuotaExceededInfo, RunError, RunOptions, RunResult, TokenUsage, UsageSource,
 };
 
 pub mod run_progress;

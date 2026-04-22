@@ -169,6 +169,357 @@ printf '{"event":"end","status":"success"}\n'"#,
             .iter()
             .all(|ev| matches!(ev.payload, AgentEventPayload::JsonLine(_))));
     }
+
+    #[test]
+    fn test_stub_claude_quota_exceeded_stderr() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "claude",
+            r#"printf '{"type":"system","subtype":"init"}\n'
+printf 'Claude usage limit reached. Your limit will reset at 5 PM hour.\n' >&2
+printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("claude", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty(), "Should detect quota exceeded");
+        if let AgentEventPayload::QuotaExceeded { info, .. } = &quota_events[0].payload {
+            assert_eq!(info.agent_key, "claude");
+            assert_eq!(info.category, aikit_sdk::QuotaCategory::Hourly);
+        } else {
+            panic!("Expected QuotaExceeded payload");
+        }
+        let rr = result.unwrap();
+        assert!(rr.quota_exceeded.is_some());
+    }
+
+    #[test]
+    fn test_stub_claude_quota_failed_to_load_usage() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "claude",
+            r#"printf 'Error: Failed to load usage data: {"error":{"type":"rate_limit_error","message":"Rate limited. Please try again later."}}\n' >&2
+printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("claude", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+        if let AgentEventPayload::QuotaExceeded { info, .. } = &quota_events[0].payload {
+            assert_eq!(info.agent_key, "claude");
+        }
+    }
+
+    #[test]
+    fn test_stub_claude_quota_api_error_plain() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "claude",
+            r#"printf 'API Error: Rate limit reached\n' >&2
+printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("claude", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+    }
+
+    #[test]
+    fn test_stub_claude_quota_http_429_line() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "claude",
+            r#"printf 'HTTP 429: rate_limit_error: This request would exceed your rate limit.\n' >&2
+printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("claude", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+    }
+
+    #[test]
+    fn test_stub_codex_quota_exceeded_json() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "codex",
+            r#"printf '{"type":"error","code":"rate_limit_exceeded","message":"You have exceeded your request rate limit"}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("codex", "test", RunOptions::default(), |ev| events.push(ev))
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+        if let AgentEventPayload::QuotaExceeded { info, .. } = &quota_events[0].payload {
+            assert_eq!(info.agent_key, "codex");
+        }
+    }
+
+    #[test]
+    fn test_stub_codex_quota_exceeded_rawline() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "codex",
+            r#"printf 'stream disconnected before completion: Rate limit reached for organization org-abc on tokens per min (TPM): Limit 250000, Used 250000\n' >&2"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("codex", "test", RunOptions::default(), |ev| events.push(ev))
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+    }
+
+    #[test]
+    fn test_stub_gemini_quota_exceeded_json() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "gemini",
+            r#"printf '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded"}}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("gemini", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+        if let AgentEventPayload::QuotaExceeded { info, .. } = &quota_events[0].payload {
+            assert_eq!(info.agent_key, "gemini");
+            assert_eq!(info.category, aikit_sdk::QuotaCategory::Unknown);
+        }
+    }
+
+    #[test]
+    fn test_stub_gemini_quota_exceeded_rawline() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "gemini",
+            r#"printf "prompt 1: ERROR {'code': 429, 'message': 'Rate limit exceeded. Try again later.'}\n""#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("gemini", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+    }
+
+    #[test]
+    fn test_stub_opencode_quota_exceeded_json() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "opencode",
+            r#"printf '{"type":"error","message":"weekly quota exceeded"}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("opencode", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+        if let AgentEventPayload::QuotaExceeded { info, .. } = &quota_events[0].payload {
+            assert_eq!(info.agent_key, "opencode");
+            assert_eq!(info.category, aikit_sdk::QuotaCategory::Weekly);
+        }
+    }
+
+    #[test]
+    fn test_stub_opencode_insufficient_quota_json() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "opencode",
+            r#"printf '{"type":"error","error":{"type":"insufficient_quota","code":"insufficient_quota","message":"You exceeded your current quota.","param":null}}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("opencode", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+    }
+
+    #[test]
+    fn test_stub_agent_quota_exceeded_json() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "agent",
+            r#"printf '{"type":"error","message":"Rate limit exceeded for hourly requests"}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("agent", "test", RunOptions::default(), |ev| events.push(ev))
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+        if let AgentEventPayload::QuotaExceeded { info, .. } = &quota_events[0].payload {
+            assert_eq!(info.agent_key, "agent");
+            assert_eq!(info.category, aikit_sdk::QuotaCategory::Hourly);
+        }
+    }
+
+    #[test]
+    fn test_stub_agent_structured_log_quota() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "agent",
+            r#"printf 'structured-log.info {"message":"agent_cli.turn.outcome","metadata":{"outcome":"error","grpc_code":"resource_exhausted","error_text":"Usage limit for slow pool"}}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("agent", "test", RunOptions::default(), |ev| events.push(ev))
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(!quota_events.is_empty());
+    }
+
+    #[test]
+    fn test_stub_no_quota_events_on_success() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "claude",
+            r#"printf '{"type":"system","subtype":"init","session_id":"stub001"}\n'
+printf '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Stub response."}]}}\n'
+printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("claude", "test prompt", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
+        });
+
+        assert!(result.is_ok());
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(quota_events.is_empty(), "No quota events on success");
+        assert!(result.unwrap().quota_exceeded.is_none());
+    }
 }
 
 // ---------------------------------------------------------------------------

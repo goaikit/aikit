@@ -85,6 +85,10 @@ impl RunProgress {
                 let truncated = truncate(&text, self.config.max_text_width);
                 self.add_row(format!("{} {}", prefix, truncated));
             }
+            AgentEventPayload::QuotaExceeded { info, .. } => {
+                let truncated = truncate(&info.raw_message, self.config.max_text_width);
+                self.add_row(format!("[quota] {}", truncated));
+            }
         }
     }
 
