@@ -95,6 +95,24 @@ pub enum UsageSource {
     Cursor,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuotaCategory {
+    Hourly,
+    Daily,
+    Weekly,
+    Requests,
+    Tokens,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuotaExceededInfo {
+    pub agent_key: String,
+    pub category: QuotaCategory,
+    pub raw_message: String,
+}
+
 /// Options for running an agent.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -186,6 +204,8 @@ pub struct RunResult {
     pub stderr: Vec<u8>,
     /// Aggregated token usage extracted from the agent's output, if any.
     pub token_usage: Option<TokenUsage>,
+    /// Structured quota-exceeded signal, if detected during the run.
+    pub quota_exceeded: Option<QuotaExceededInfo>,
 }
 
 impl RunResult {
@@ -195,6 +215,7 @@ impl RunResult {
             stdout,
             stderr,
             token_usage: None,
+            quota_exceeded: None,
         }
     }
 
@@ -235,6 +256,8 @@ pub enum RunError {
         /// Stderr bytes collected before the child was killed (may be partial)
         stderr: Vec<u8>,
     },
+    /// Agent terminated due to a quota or rate-limit signal
+    QuotaExceeded(QuotaExceededInfo),
 }
 
 impl std::fmt::Display for RunError {
@@ -257,6 +280,13 @@ impl std::fmt::Display for RunError {
             RunError::TimedOut { timeout, .. } => {
                 write!(f, "Agent timed out after {:.3}s", timeout.as_secs_f64())
             }
+            RunError::QuotaExceeded(info) => {
+                write!(
+                    f,
+                    "Agent '{}' stopped: quota exceeded ({:?}): {}",
+                    info.agent_key, info.category, info.raw_message
+                )
+            }
         }
     }
 }
@@ -270,7 +300,8 @@ impl std::error::Error for RunError {
             RunError::ReaderFailed { source, .. } => Some(source),
             RunError::AgentNotRunnable(_)
             | RunError::CallbackPanic(_)
-            | RunError::TimedOut { .. } => None,
+            | RunError::TimedOut { .. }
+            | RunError::QuotaExceeded(_) => None,
         }
     }
 }
@@ -286,6 +317,7 @@ pub enum AgentEventStream {
 /// Payload carried by a streaming agent event.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum AgentEventPayload {
     /// Successfully parsed JSON line
     JsonLine(serde_json::Value),
@@ -300,6 +332,12 @@ pub enum AgentEventPayload {
         usage: TokenUsage,
         source: UsageSource,
         /// Sequence number of the `JsonLine` event this was extracted from.
+        raw_agent_line_seq: u64,
+    },
+    /// Quota or rate-limit exceeded signal detected from agent output.
+    QuotaExceeded {
+        info: QuotaExceededInfo,
+        /// Sequence number of the JsonLine or RawLine that triggered detection.
         raw_agent_line_seq: u64,
     },
 }
@@ -764,6 +802,525 @@ pub fn extract_usage_from_line(
     }
 }
 
+fn infer_quota_category(msg: &str) -> QuotaCategory {
+    let lower = msg.to_lowercase();
+    if lower.contains("hour") {
+        QuotaCategory::Hourly
+    } else if lower.contains("month") || lower.contains("monthly") {
+        QuotaCategory::Unknown
+    } else if lower.contains("per day")
+        || lower.contains("daily")
+        || lower.contains(" day ")
+        || lower.ends_with(" day")
+        || lower.starts_with("day ")
+        || lower.contains("day,")
+    {
+        QuotaCategory::Daily
+    } else if lower.contains("week") {
+        QuotaCategory::Weekly
+    } else if lower.contains("long context") || lower.contains("token") {
+        QuotaCategory::Tokens
+    } else if lower.contains("request") {
+        QuotaCategory::Requests
+    } else {
+        QuotaCategory::Unknown
+    }
+}
+
+fn truncate_message(msg: &str, max_len: usize) -> String {
+    if msg.len() <= max_len {
+        msg.to_string()
+    } else {
+        let mut end = max_len;
+        while !msg.is_char_boundary(end) && end > 0 {
+            end -= 1;
+        }
+        msg[..end].to_string()
+    }
+}
+
+pub fn extract_quota_signal(
+    agent_key: &str,
+    payload: &AgentEventPayload,
+) -> Option<QuotaExceededInfo> {
+    match agent_key {
+        "claude" => extract_claude_quota_signal(payload),
+        "codex" => extract_codex_quota_signal(payload),
+        "gemini" => extract_gemini_quota_signal(payload),
+        "opencode" => extract_opencode_quota_signal(payload),
+        "agent" => extract_agent_quota_signal(payload),
+        _ => None,
+    }
+}
+
+fn extract_claude_quota_signal(payload: &AgentEventPayload) -> Option<QuotaExceededInfo> {
+    let agent_key = "claude";
+    match payload {
+        AgentEventPayload::RawLine(text) => {
+            let lower = text.to_lowercase();
+
+            // §4.5.1 item 1: "Failed to load usage data" with embedded rate_limit_error JSON
+            if let Some(idx) = text.find("Failed to load usage data") {
+                if let Some(brace_start) = text[idx..].find('{') {
+                    let json_fragment = &text[idx + brace_start..];
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_fragment) {
+                        if let Some(error_msg) = extract_nested_rate_limit_error(&val) {
+                            return Some(QuotaExceededInfo {
+                                agent_key: agent_key.to_string(),
+                                category: infer_quota_category(&error_msg),
+                                raw_message: truncate_message(&error_msg, 500),
+                            });
+                        }
+                    }
+                }
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+
+            // §4.5.1 item 2: "429" with rate_limit_error JSON
+            if text.contains("429") {
+                if let Some(brace_start) = text.find('{') {
+                    let json_fragment = &text[brace_start..];
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_fragment) {
+                        if let Some(error_msg) = extract_nested_rate_limit_error(&val) {
+                            return Some(QuotaExceededInfo {
+                                agent_key: agent_key.to_string(),
+                                category: infer_quota_category(&error_msg),
+                                raw_message: truncate_message(&error_msg, 500),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // §4.5.1 item 3: plain text "API Error:" + rate limit wording
+            if lower.contains("api error:")
+                && (lower.contains("rate limit reached")
+                    || lower.contains("rate limited")
+                    || (lower.contains("request rejected") && lower.contains("429")))
+            {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+
+            // §4.5.1 item 4: "You've hit your limit" / "hit your limit" + "reset"
+            if (lower.contains("you've hit your limit")
+                || lower.contains("you've hit your usage limit"))
+                || (lower.contains("hit your limit") && lower.contains("reset"))
+            {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+
+            // §4.5.1 item 5: "HTTP 429" or "429" + "rate_limit_error"
+            if lower.contains("http 429")
+                || (text.contains("429") && lower.contains("rate_limit_error"))
+            {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+
+            // §4.5.1 item 6: "Error: 429" prefix + JSON
+            if text.starts_with("Error: 429") {
+                if let Some(brace_start) = text.find('{') {
+                    let json_fragment = &text[brace_start..];
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_fragment) {
+                        if let Some(error_msg) = extract_nested_rate_limit_error(&val) {
+                            return Some(QuotaExceededInfo {
+                                agent_key: agent_key.to_string(),
+                                category: infer_quota_category(&error_msg),
+                                raw_message: truncate_message(&error_msg, 500),
+                            });
+                        }
+                    }
+                }
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+
+            // Legacy: "usage limit" or "rate limit" substrings
+            if lower.contains("usage limit") || lower.contains("rate limit") {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+
+            None
+        }
+        AgentEventPayload::JsonLine(val) => {
+            // §4.5.1 item 7: type == "error" with nested error.type == "rate_limit_error"
+            if val.get("type").and_then(|v| v.as_str()) == Some("error") {
+                if let Some(error_msg) = extract_nested_rate_limit_error(val) {
+                    return Some(QuotaExceededInfo {
+                        agent_key: agent_key.to_string(),
+                        category: infer_quota_category(&error_msg),
+                        raw_message: truncate_message(&error_msg, 500),
+                    });
+                }
+            }
+
+            // type == "result" with error + usage/limit message
+            if val.get("type").and_then(|v| v.as_str()) == Some("result") {
+                let is_error = val.get("subtype").and_then(|v| v.as_str()) == Some("error")
+                    || val.get("is_error").and_then(|v| v.as_bool()) == Some(true);
+                if is_error {
+                    if let Some(msg) = val.get("message").and_then(|v| v.as_str()) {
+                        let msg_lower = msg.to_lowercase();
+                        if msg_lower.contains("usage") || msg_lower.contains("limit") {
+                            return Some(QuotaExceededInfo {
+                                agent_key: agent_key.to_string(),
+                                category: infer_quota_category(msg),
+                                raw_message: truncate_message(msg, 500),
+                            });
+                        }
+                    }
+                    if let Some(result_str) = val.get("result").and_then(|v| v.as_str()) {
+                        let r_lower = result_str.to_lowercase();
+                        if r_lower.contains("usage") || r_lower.contains("limit") {
+                            return Some(QuotaExceededInfo {
+                                agent_key: agent_key.to_string(),
+                                category: infer_quota_category(result_str),
+                                raw_message: truncate_message(result_str, 500),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Log-array shape: [0].error may be a string to re-parse
+            if val.is_array() {
+                if let Some(first) = val.get(0) {
+                    if let Some(error_val) = first.get("error") {
+                        if error_val.is_string() {
+                            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(
+                                error_val.as_str().unwrap_or(""),
+                            ) {
+                                if let Some(error_msg) = extract_nested_rate_limit_error(&parsed) {
+                                    return Some(QuotaExceededInfo {
+                                        agent_key: agent_key.to_string(),
+                                        category: infer_quota_category(&error_msg),
+                                        raw_message: truncate_message(&error_msg, 500),
+                                    });
+                                }
+                            }
+                        } else if let Some(error_msg) = extract_nested_rate_limit_error(error_val) {
+                            return Some(QuotaExceededInfo {
+                                agent_key: agent_key.to_string(),
+                                category: infer_quota_category(&error_msg),
+                                raw_message: truncate_message(&error_msg, 500),
+                            });
+                        }
+                    }
+                }
+            }
+
+            None
+        }
+        _ => None,
+    }
+}
+
+fn extract_nested_rate_limit_error(val: &serde_json::Value) -> Option<String> {
+    let error_obj = val.get("error")?;
+    if error_obj.get("type").and_then(|v| v.as_str()) == Some("rate_limit_error") {
+        return error_obj
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+    if error_obj.get("code").and_then(|v| v.as_str()) == Some("rate_limit_error") {
+        return error_obj
+            .get("message")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+    }
+    None
+}
+
+fn extract_codex_quota_signal(payload: &AgentEventPayload) -> Option<QuotaExceededInfo> {
+    let agent_key = "codex";
+    match payload {
+        AgentEventPayload::JsonLine(val) => {
+            if val.get("type").and_then(|v| v.as_str()) == Some("error") {
+                let code_matches =
+                    val.get("code").and_then(|v| v.as_str()) == Some("rate_limit_exceeded");
+                let msg = val.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let msg_matches = msg.to_lowercase().contains("rate limit");
+                if code_matches || msg_matches {
+                    let raw = if msg.is_empty() {
+                        truncate_message(&val.to_string(), 500)
+                    } else {
+                        truncate_message(msg, 500)
+                    };
+                    return Some(QuotaExceededInfo {
+                        agent_key: agent_key.to_string(),
+                        category: infer_quota_category(msg),
+                        raw_message: raw,
+                    });
+                }
+            }
+            None
+        }
+        AgentEventPayload::RawLine(text) => {
+            let lower = text.to_lowercase();
+            if lower.contains("rate limit reached")
+                || lower.contains("tokens per min")
+                || lower.contains("429 too many requests")
+                || lower.contains("rate_limit_exceeded")
+            {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn extract_gemini_quota_signal(payload: &AgentEventPayload) -> Option<QuotaExceededInfo> {
+    let agent_key = "gemini";
+    match payload {
+        AgentEventPayload::JsonLine(val) => {
+            if let Some(error_obj) = find_gemini_error_object(val) {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(&error_obj),
+                    raw_message: truncate_message(&error_obj, 500),
+                });
+            }
+            None
+        }
+        AgentEventPayload::RawLine(text) => {
+            let lower = text.to_lowercase();
+            if lower.contains("resource_exhausted") {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+            if lower.contains("rate limit exceeded") {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+            if text.contains("429")
+                && (lower.contains("quota exceeded") || lower.contains("rate limit"))
+            {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+            // Python-like: "ERROR {'code': 429, ...}"
+            if lower.contains("error")
+                && text.contains("429")
+                && (lower.contains("rate limit") || lower.contains("'code'"))
+            {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn find_gemini_error_object(val: &serde_json::Value) -> Option<String> {
+    let error = if val.is_array() {
+        val.get(0)?.get("error")
+    } else {
+        val.get("error")
+    };
+
+    let error = error?;
+
+    let code_429 = error.get("code").and_then(|v| v.as_u64()) == Some(429);
+    let status_exhausted =
+        error.get("status").and_then(|v| v.as_str()) == Some("RESOURCE_EXHAUSTED");
+
+    if !code_429 && !status_exhausted {
+        return None;
+    }
+
+    let msg = error.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    Some(if msg.is_empty() {
+        error.to_string()
+    } else {
+        msg.to_string()
+    })
+}
+
+fn extract_opencode_quota_signal(payload: &AgentEventPayload) -> Option<QuotaExceededInfo> {
+    let agent_key = "opencode";
+    match payload {
+        AgentEventPayload::JsonLine(val) => {
+            if val.get("type").and_then(|v| v.as_str()) == Some("error") {
+                // Check nested error.type == "insufficient_quota" or error.code == "insufficient_quota"
+                if let Some(error) = val.get("error") {
+                    if error.get("type").and_then(|v| v.as_str()) == Some("insufficient_quota")
+                        || error.get("code").and_then(|v| v.as_str()) == Some("insufficient_quota")
+                    {
+                        let msg = error.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                        return Some(QuotaExceededInfo {
+                            agent_key: agent_key.to_string(),
+                            category: infer_quota_category(msg),
+                            raw_message: if msg.is_empty() {
+                                truncate_message(&val.to_string(), 500)
+                            } else {
+                                truncate_message(msg, 500)
+                            },
+                        });
+                    }
+                }
+                // Fallback: message contains quota/rate-limit keywords
+                let msg = val.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let msg_lower = msg.to_lowercase();
+                if msg_lower.contains("quota")
+                    || msg_lower.contains("rate limit")
+                    || msg_lower.contains("insufficient_quota")
+                    || msg_lower.contains("429")
+                {
+                    return Some(QuotaExceededInfo {
+                        agent_key: agent_key.to_string(),
+                        category: infer_quota_category(msg),
+                        raw_message: if msg.is_empty() {
+                            truncate_message(&val.to_string(), 500)
+                        } else {
+                            truncate_message(msg, 500)
+                        },
+                    });
+                }
+            }
+            None
+        }
+        AgentEventPayload::RawLine(text) => {
+            let lower = text.to_lowercase();
+            if lower.contains("rate-limited")
+                || lower.contains("daily token quota exceeded")
+                || (lower.contains("too many requests") && lower.contains("quota exceeded"))
+                || lower.contains("insufficient_quota")
+            {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn extract_agent_quota_signal(payload: &AgentEventPayload) -> Option<QuotaExceededInfo> {
+    let agent_key = "agent";
+    match payload {
+        AgentEventPayload::JsonLine(val) => {
+            if val.get("type").and_then(|v| v.as_str()) == Some("error") {
+                let msg = val.get("message").and_then(|v| v.as_str()).unwrap_or("");
+                let msg_lower = msg.to_lowercase();
+                if msg_lower.contains("rate limit")
+                    || msg_lower.contains("quota exceeded")
+                    || msg_lower.contains("usage limit")
+                {
+                    return Some(QuotaExceededInfo {
+                        agent_key: agent_key.to_string(),
+                        category: infer_quota_category(msg),
+                        raw_message: if msg.is_empty() {
+                            truncate_message(&val.to_string(), 500)
+                        } else {
+                            truncate_message(msg, 500)
+                        },
+                    });
+                }
+            }
+            None
+        }
+        AgentEventPayload::RawLine(text) => {
+            // structured-log.info JSON
+            if text.contains("structured-log.info") {
+                if let Some(brace_start) = text.find('{') {
+                    let json_fragment = &text[brace_start..];
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_fragment) {
+                        if let Some(metadata) = val.get("metadata") {
+                            let outcome = metadata.get("outcome").and_then(|v| v.as_str());
+                            if outcome == Some("error") {
+                                let grpc_code = metadata
+                                    .get("grpc_code")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_lowercase();
+                                let error_text = metadata
+                                    .get("error_text")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_lowercase();
+                                if grpc_code.contains("resource_exhausted")
+                                    || error_text.contains("usage limit")
+                                    || (error_text.contains("limit")
+                                        && (error_text.contains("slow pool")
+                                            || error_text.contains("opus")))
+                                    || grpc_code.contains("resource_exhausted")
+                                {
+                                    let raw_msg = metadata
+                                        .get("error_text")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(json_fragment);
+                                    return Some(QuotaExceededInfo {
+                                        agent_key: agent_key.to_string(),
+                                        category: infer_quota_category(raw_msg),
+                                        raw_message: truncate_message(raw_msg, 500),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Plain text: "You've hit your usage limit"
+            let lower = text.to_lowercase();
+            if lower.contains("you've hit your usage limit") || lower.contains("usage limit for") {
+                return Some(QuotaExceededInfo {
+                    agent_key: agent_key.to_string(),
+                    category: infer_quota_category(text),
+                    raw_message: truncate_message(text, 500),
+                });
+            }
+
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Aggregate a sequence of token usage entries using the per-agent rule.
 ///
 /// - **Codex**: sum all entries (multiple `turn.completed` messages)
@@ -900,9 +1457,11 @@ pub fn run_agent(
     prompt: &str,
     options: RunOptions,
 ) -> Result<RunResult, RunError> {
-    // Delegate to run_agent_events with a no-op callback so that timeout
-    // and current_dir support is handled in one place.
-    run_agent_events(agent_key, prompt, options, |_event| {})
+    let result = run_agent_events(agent_key, prompt, options, |_event| {})?;
+    if let Some(info) = result.quota_exceeded {
+        return Err(RunError::QuotaExceeded(info));
+    }
+    Ok(result)
 }
 
 /// Spawns a reader thread that reads lines (delimited by `\n`) from `reader`
@@ -1064,6 +1623,7 @@ where
     let mut reader_error: Option<RunError> = None;
     let mut callback_panic: Option<Box<dyn std::any::Any + Send>> = None;
     let mut usage_entries: Vec<(TokenUsage, UsageSource)> = Vec::new();
+    let mut quota_exceeded: Option<QuotaExceededInfo> = None;
 
     for msg in rx {
         match msg {
@@ -1088,6 +1648,7 @@ where
 
                 let json_line_seq = seq;
                 let event_stream = stream.clone();
+                let quota_signal = extract_quota_signal(agent_key, &payload);
                 let event = AgentEvent {
                     agent_key: agent_key.to_string(),
                     seq,
@@ -1112,7 +1673,7 @@ where
                         let token_event = AgentEvent {
                             agent_key: agent_key.to_string(),
                             seq,
-                            stream: event_stream,
+                            stream: event_stream.clone(),
                             payload: AgentEventPayload::TokenUsageLine {
                                 usage,
                                 source,
@@ -1127,6 +1688,30 @@ where
                             if let Err(p) = result {
                                 callback_panic = Some(p);
                             }
+                        }
+                    }
+                }
+
+                if let Some(info) = quota_signal {
+                    if quota_exceeded.is_none() {
+                        quota_exceeded = Some(info.clone());
+                    }
+                    let quota_event = AgentEvent {
+                        agent_key: agent_key.to_string(),
+                        seq,
+                        stream: event_stream,
+                        payload: AgentEventPayload::QuotaExceeded {
+                            info,
+                            raw_agent_line_seq: json_line_seq,
+                        },
+                    };
+                    seq += 1;
+                    if callback_panic.is_none() {
+                        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                            on_event(quota_event);
+                        }));
+                        if let Err(p) = result {
+                            callback_panic = Some(p);
                         }
                     }
                 }
@@ -1187,6 +1772,7 @@ where
         stdout: stdout_bytes,
         stderr: stderr_bytes,
         token_usage,
+        quota_exceeded,
     })
 }
 
@@ -1879,6 +2465,7 @@ mod tests {
                 AgentEventPayload::RawLine(_) => "raw",
                 AgentEventPayload::RawBytes(_) => "bytes",
                 AgentEventPayload::TokenUsageLine { .. } => "token_usage",
+                AgentEventPayload::QuotaExceeded { .. } => "quota_exceeded",
             };
             payloads.push(kind.to_string());
         });
@@ -2512,5 +3099,324 @@ mod tests {
             found,
             "Should find at least one token usage line in cursor fixture"
         );
+    }
+
+    // --- Quota detection unit tests ---
+
+    #[test]
+    fn test_quota_category_serde_roundtrip() {
+        let cats = vec![
+            QuotaCategory::Hourly,
+            QuotaCategory::Daily,
+            QuotaCategory::Weekly,
+            QuotaCategory::Requests,
+            QuotaCategory::Tokens,
+            QuotaCategory::Unknown,
+        ];
+        for cat in &cats {
+            let json = serde_json::to_string(cat).unwrap();
+            let back: QuotaCategory = serde_json::from_str(&json).unwrap();
+            assert_eq!(*cat, back);
+        }
+    }
+
+    #[test]
+    fn test_quota_exceeded_info_serde_roundtrip() {
+        let info = QuotaExceededInfo {
+            agent_key: "claude".to_string(),
+            category: QuotaCategory::Hourly,
+            raw_message: "usage limit".to_string(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: QuotaExceededInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(info, back);
+    }
+
+    #[test]
+    fn test_run_result_new_has_quota_exceeded_none() {
+        use std::os::unix::process::ExitStatusExt;
+        let status = std::process::ExitStatus::from_raw(0);
+        let result = RunResult::new(status, vec![], vec![]);
+        assert!(result.quota_exceeded.is_none());
+    }
+
+    #[test]
+    fn test_run_error_quota_exceeded_display() {
+        let info = QuotaExceededInfo {
+            agent_key: "claude".to_string(),
+            category: QuotaCategory::Hourly,
+            raw_message: "limit reached".to_string(),
+        };
+        let err = RunError::QuotaExceeded(info);
+        let msg = format!("{}", err);
+        assert!(msg.contains("claude"));
+        assert!(msg.contains("quota exceeded"));
+        assert!(msg.contains("limit reached"));
+    }
+
+    #[test]
+    fn test_infer_quota_category_hourly() {
+        assert_eq!(
+            infer_quota_category("hourly limit reached"),
+            QuotaCategory::Hourly
+        );
+        assert_eq!(
+            infer_quota_category("reset in 1 hour"),
+            QuotaCategory::Hourly
+        );
+    }
+
+    #[test]
+    fn test_infer_quota_category_weekly() {
+        assert_eq!(
+            infer_quota_category("weekly quota exceeded"),
+            QuotaCategory::Weekly
+        );
+        assert_eq!(
+            infer_quota_category("resets next week"),
+            QuotaCategory::Weekly
+        );
+    }
+
+    #[test]
+    fn test_infer_quota_category_long_context_tokens() {
+        assert_eq!(
+            infer_quota_category("Extra usage is required for long context requests"),
+            QuotaCategory::Tokens
+        );
+    }
+
+    #[test]
+    fn test_infer_quota_category_unknown() {
+        assert_eq!(
+            infer_quota_category("something went wrong"),
+            QuotaCategory::Unknown
+        );
+        assert_eq!(
+            infer_quota_category("monthly billing cycle"),
+            QuotaCategory::Unknown
+        );
+    }
+
+    #[test]
+    fn test_extract_quota_signal_claude_rawline_usage_limit() {
+        let payload = AgentEventPayload::RawLine(
+            "Claude usage limit reached. Your limit will reset at 5 PM.".to_string(),
+        );
+        let info = extract_quota_signal("claude", &payload).unwrap();
+        assert_eq!(info.agent_key, "claude");
+        assert_eq!(info.category, QuotaCategory::Unknown);
+    }
+
+    #[test]
+    fn test_extract_quota_signal_claude_rawline_rate_limit_hourly() {
+        let payload = AgentEventPayload::RawLine("Rate limit hit for hourly usage".to_string());
+        let info = extract_quota_signal("claude", &payload).unwrap();
+        assert_eq!(info.agent_key, "claude");
+        assert_eq!(info.category, QuotaCategory::Hourly);
+    }
+
+    #[test]
+    fn test_extract_quota_signal_claude_failed_to_load_usage_data() {
+        let payload = AgentEventPayload::RawLine(
+            r#"Error: Failed to load usage data: {"error":{"type":"rate_limit_error","message":"Rate limited. Please try again later."}}"#.to_string(),
+        );
+        let info = extract_quota_signal("claude", &payload).unwrap();
+        assert_eq!(info.agent_key, "claude");
+        assert!(info.raw_message.contains("Rate limited"));
+    }
+
+    #[test]
+    fn test_extract_quota_signal_claude_api_error_rate_limit_reached() {
+        let payload = AgentEventPayload::RawLine("API Error: Rate limit reached".to_string());
+        let info = extract_quota_signal("claude", &payload).unwrap();
+        assert_eq!(info.agent_key, "claude");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_claude_api_error_429() {
+        let payload = AgentEventPayload::RawLine(
+            "API Error: Request rejected (429) · Rate limited".to_string(),
+        );
+        let info = extract_quota_signal("claude", &payload).unwrap();
+        assert_eq!(info.agent_key, "claude");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_claude_hit_your_limit() {
+        let payload = AgentEventPayload::RawLine(
+            "⎿ You've hit your limit · resets 10am (Asia/Manila)".to_string(),
+        );
+        let info = extract_quota_signal("claude", &payload).unwrap();
+        assert_eq!(info.agent_key, "claude");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_claude_http_429_rate_limit_error() {
+        let payload = AgentEventPayload::RawLine(
+            "HTTP 429: rate_limit_error: This request would exceed your account's rate limit."
+                .to_string(),
+        );
+        let info = extract_quota_signal("claude", &payload).unwrap();
+        assert_eq!(info.agent_key, "claude");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_claude_error_429_json() {
+        let payload = AgentEventPayload::RawLine(
+            r#"Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Extra usage is required for long context requests."},"request_id":"req_abc123"}"#.to_string(),
+        );
+        let info = extract_quota_signal("claude", &payload).unwrap();
+        assert_eq!(info.agent_key, "claude");
+        assert_eq!(info.category, QuotaCategory::Tokens);
+    }
+
+    #[test]
+    fn test_extract_quota_signal_claude_json_type_error_rate_limit() {
+        let payload = AgentEventPayload::JsonLine(serde_json::from_str(
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited. Please try again later."}}"#,
+        ).unwrap());
+        let info = extract_quota_signal("claude", &payload).unwrap();
+        assert_eq!(info.agent_key, "claude");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_claude_json_result_error_usage() {
+        let payload = AgentEventPayload::JsonLine(
+            serde_json::from_str(
+                r#"{"type":"result","subtype":"error","message":"usage limit reached"}"#,
+            )
+            .unwrap(),
+        );
+        let info = extract_quota_signal("claude", &payload).unwrap();
+        assert_eq!(info.agent_key, "claude");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_codex_rate_limit_code() {
+        let payload = AgentEventPayload::JsonLine(serde_json::from_str(
+            r#"{"type":"error","code":"rate_limit_exceeded","message":"You have exceeded your request rate limit"}"#,
+        ).unwrap());
+        let info = extract_quota_signal("codex", &payload).unwrap();
+        assert_eq!(info.agent_key, "codex");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_codex_rawline_tpm() {
+        let payload = AgentEventPayload::RawLine(
+            "stream disconnected before completion: Rate limit reached for organization org-abc on tokens per min (TPM): Limit 250000, Used 250000".to_string(),
+        );
+        let info = extract_quota_signal("codex", &payload).unwrap();
+        assert_eq!(info.agent_key, "codex");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_codex_rawline_429() {
+        let payload = AgentEventPayload::RawLine(
+            "error: http 429 Too Many Requests: rate_limit_exceeded".to_string(),
+        );
+        let info = extract_quota_signal("codex", &payload).unwrap();
+        assert_eq!(info.agent_key, "codex");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_gemini_resource_exhausted() {
+        let payload = AgentEventPayload::JsonLine(serde_json::from_str(
+            r#"{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Quota exceeded"}}"#,
+        ).unwrap());
+        let info = extract_quota_signal("gemini", &payload).unwrap();
+        assert_eq!(info.agent_key, "gemini");
+        assert_eq!(info.category, QuotaCategory::Unknown);
+    }
+
+    #[test]
+    fn test_extract_quota_signal_gemini_rawline_error_429() {
+        let payload = AgentEventPayload::RawLine(
+            "prompt 1: ERROR {'code': 429, 'message': 'Rate limit exceeded. Try again later.'}"
+                .to_string(),
+        );
+        let info = extract_quota_signal("gemini", &payload).unwrap();
+        assert_eq!(info.agent_key, "gemini");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_opencode_quota_message() {
+        let payload = AgentEventPayload::JsonLine(
+            serde_json::from_str(r#"{"type":"error","message":"weekly quota exceeded"}"#).unwrap(),
+        );
+        let info = extract_quota_signal("opencode", &payload).unwrap();
+        assert_eq!(info.agent_key, "opencode");
+        assert_eq!(info.category, QuotaCategory::Weekly);
+    }
+
+    #[test]
+    fn test_extract_quota_signal_opencode_insufficient_quota_json() {
+        let payload = AgentEventPayload::JsonLine(serde_json::from_str(
+            r#"{"type":"error","sequence_number":2,"error":{"type":"insufficient_quota","code":"insufficient_quota","message":"You exceeded your current quota.","param":null}}"#,
+        ).unwrap());
+        let info = extract_quota_signal("opencode", &payload).unwrap();
+        assert_eq!(info.agent_key, "opencode");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_opencode_rawline_daily_token() {
+        let payload = AgentEventPayload::RawLine("Your daily token quota exceeded".to_string());
+        let info = extract_quota_signal("opencode", &payload).unwrap();
+        assert_eq!(info.agent_key, "opencode");
+        assert_eq!(info.category, QuotaCategory::Daily);
+    }
+
+    #[test]
+    fn test_extract_quota_signal_opencode_rawline_rate_limited() {
+        let payload = AgentEventPayload::RawLine("You are rate-limited".to_string());
+        let info = extract_quota_signal("opencode", &payload).unwrap();
+        assert_eq!(info.agent_key, "opencode");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_agent_rate_limit() {
+        let payload = AgentEventPayload::JsonLine(
+            serde_json::from_str(
+                r#"{"type":"error","message":"Rate limit exceeded for hourly requests"}"#,
+            )
+            .unwrap(),
+        );
+        let info = extract_quota_signal("agent", &payload).unwrap();
+        assert_eq!(info.agent_key, "agent");
+        assert_eq!(info.category, QuotaCategory::Hourly);
+    }
+
+    #[test]
+    fn test_extract_quota_signal_agent_structured_log_resource_exhausted() {
+        let payload = AgentEventPayload::RawLine(
+            r#"structured-log.info {"message":"agent_cli.turn.outcome","metadata":{"outcome":"error","grpc_code":"resource_exhausted","error_text":"Usage limit for slow pool"}}"#.to_string(),
+        );
+        let info = extract_quota_signal("agent", &payload).unwrap();
+        assert_eq!(info.agent_key, "agent");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_agent_rawline_usage_limit() {
+        let payload = AgentEventPayload::RawLine(
+            "b: You've hit your usage limit for Opus. Switch to Auto.".to_string(),
+        );
+        let info = extract_quota_signal("agent", &payload).unwrap();
+        assert_eq!(info.agent_key, "agent");
+    }
+
+    #[test]
+    fn test_extract_quota_signal_no_match_returns_none() {
+        let payload = AgentEventPayload::RawLine("Normal output line".to_string());
+        assert!(extract_quota_signal("claude", &payload).is_none());
+        assert!(extract_quota_signal("codex", &payload).is_none());
+        assert!(extract_quota_signal("gemini", &payload).is_none());
+        assert!(extract_quota_signal("opencode", &payload).is_none());
+        assert!(extract_quota_signal("agent", &payload).is_none());
+    }
+
+    #[test]
+    fn test_extract_quota_signal_unknown_agent_returns_none() {
+        let payload = AgentEventPayload::RawLine("Rate limit reached".to_string());
+        assert!(extract_quota_signal("copilot", &payload).is_none());
     }
 }
