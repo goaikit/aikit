@@ -8,7 +8,9 @@
 // PATH separators and binary resolution; fixture tests below still run on all targets.
 #[cfg(unix)]
 mod unix_stubs {
-    use aikit_sdk::{run_agent_events, AgentEventPayload, AgentEventStream, RunOptions};
+    use aikit_sdk::{
+        run_agent, run_agent_events, AgentEventPayload, AgentEventStream, RunError, RunOptions,
+    };
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
@@ -519,6 +521,30 @@ printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
             .collect();
         assert!(quota_events.is_empty(), "No quota events on success");
         assert!(result.unwrap().quota_exceeded.is_none());
+    }
+
+    #[test]
+    fn test_run_agent_returns_quota_exceeded_error() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "claude",
+            r#"printf 'Claude usage limit reached. Your limit will reset at 5 PM hour.\n' >&2
+printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
+        );
+
+        let result = with_stub_path(dir.path(), || {
+            run_agent("claude", "test", RunOptions::default())
+        });
+
+        match result {
+            Err(RunError::QuotaExceeded(info)) => {
+                assert_eq!(info.agent_key, "claude");
+                assert_eq!(info.category, aikit_sdk::QuotaCategory::Hourly);
+            }
+            other => panic!("expected quota-exceeded error, got {other:?}"),
+        }
     }
 }
 

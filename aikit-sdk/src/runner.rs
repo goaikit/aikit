@@ -806,6 +806,8 @@ fn infer_quota_category(msg: &str) -> QuotaCategory {
     let lower = msg.to_lowercase();
     if lower.contains("hour") {
         QuotaCategory::Hourly
+    } else if lower.contains("month") || lower.contains("monthly") {
+        QuotaCategory::Unknown
     } else if lower.contains("per day")
         || lower.contains("daily")
         || lower.contains(" day ")
