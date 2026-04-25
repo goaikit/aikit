@@ -8,7 +8,7 @@ use tokio_stream::StreamExt;
 use crate::core::llm_http::{
     build_chat_request, build_client, build_json_envelope, extract_content_from_chunk,
     extract_usage_from_chunk, format_usage_stderr, parse_sse_line, resolve_api_key, resolve_prompt,
-    send_chat, ChatRequest, JsonUsage, LlmError, SseChunk, StreamEvent,
+    send_chat, send_chat_stream, ChatRequest, JsonUsage, LlmError, SseChunk, StreamEvent,
 };
 
 #[derive(Parser, Debug)]
@@ -219,54 +219,25 @@ async fn execute_stream(
     quiet: bool,
     usage_mode: Option<&str>,
 ) -> Result<()> {
-    let url = format!("{}/chat/completions", args.url.trim_end_matches('/'));
-
-    let response = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Content-Type", "application/json")
-        .json(chat_req)
-        .send()
+    let response = send_chat_stream(client, &args.url, chat_req, api_key, args.timeout)
         .await
         .map_err(|e| {
-            let (code, msg) = if e.is_timeout() {
-                ("E_LLM_TIMEOUT", e.to_string())
-            } else {
-                ("E_LLM_REQUEST_FAILED", e.to_string())
+            let code = match &e {
+                LlmError::Timeout { .. } => "E_LLM_TIMEOUT",
+                LlmError::RequestFailed { .. } => "E_LLM_REQUEST_FAILED",
+                LlmError::ResponseError { .. } => "E_LLM_RESPONSE_ERROR",
+                _ => "E_LLM_UNKNOWN",
             };
             if is_json {
-                let event = StreamEvent::error(1, code.to_string(), msg.clone());
+                let event = StreamEvent::error(1, code.to_string(), e.to_string());
                 let _ = writeln!(
                     std::io::stdout(),
                     "{}",
                     serde_json::to_string(&event).unwrap()
                 );
             }
-            anyhow::anyhow!("{}", msg)
+            anyhow::anyhow!("{}", e)
         })?;
-
-    let status = response.status();
-    if !status.is_success() {
-        let body_text = response.text().await.unwrap_or_default();
-        let err = LlmError::ResponseError {
-            status: status.as_u16(),
-            url: url.clone(),
-            body: body_text.clone(),
-        };
-        if is_json {
-            let event = StreamEvent::error(
-                1,
-                "E_LLM_RESPONSE_ERROR".to_string(),
-                format!("HTTP {} from {}: {}", status.as_u16(), url, body_text),
-            );
-            let _ = writeln!(
-                std::io::stdout(),
-                "{}",
-                serde_json::to_string(&event).unwrap()
-            );
-        }
-        return Err(anyhow::anyhow!("{}", err));
-    }
 
     let mut stream = response.bytes_stream();
     let mut seq: u64 = 1;
@@ -379,8 +350,6 @@ async fn execute_stream(
                                 let _ = write!(std::io::stdout(), "{}", c);
                                 let _ = std::io::stdout().flush();
                             }
-                        } else if let Some(ref c) = content {
-                            full_content.push_str(c);
                         }
                         seq += 1;
                     }

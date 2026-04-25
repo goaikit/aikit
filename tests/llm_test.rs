@@ -43,6 +43,15 @@ fn mock_stream_chunks() -> String {
     chunks.iter().map(|c| format!("{}\n\n", c)).collect()
 }
 
+fn mock_malformed_stream_chunks() -> String {
+    let chunks = [
+        r#"data: {"id":"chatcmpl-1","model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}"#,
+        r#"data: {this is not valid json}"#,
+        "data: [DONE]",
+    ];
+    chunks.iter().map(|c| format!("{}\n\n", c)).collect()
+}
+
 #[test]
 fn test_llm_non_streaming_text_mode() {
     let mut server = mockito::Server::new();
@@ -571,4 +580,157 @@ fn test_llm_streaming_json_schema_version() {
 fn test_llm_backward_compat_existing_commands() {
     aikit().args(["check"]).assert().success();
     aikit().args(["--version"]).assert().success();
+}
+
+#[test]
+fn test_llm_stdin_prompt() {
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(serde_json::to_string(&mock_openai_response()).unwrap())
+        .create();
+
+    let url = server.url();
+
+    aikit()
+        .env("OPENAI_API_KEY", "test-key-123")
+        .args(["llm", "-m", "gpt-4o", "--prompt-file", "-", "-u", &url])
+        .write_stdin("hello from stdin")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Hello! How can I help you?"));
+
+    mock.assert();
+}
+
+#[test]
+fn test_llm_stream_protocol_error() {
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(mock_malformed_stream_chunks())
+        .create();
+
+    let url = server.url();
+
+    aikit()
+        .env("OPENAI_API_KEY", "test-key-123")
+        .args(["llm", "-m", "gpt-4o", "-p", "hello", "-u", &url, "--stream"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E_LLM_STREAM_PROTOCOL"));
+
+    mock.assert();
+}
+
+#[test]
+fn test_llm_stream_json_quiet_error_on_stdout() {
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "text/event-stream")
+        .with_body(mock_malformed_stream_chunks())
+        .create();
+
+    let url = server.url();
+
+    let result = aikit()
+        .env("OPENAI_API_KEY", "test-key-123")
+        .args([
+            "llm", "-m", "gpt-4o", "-p", "hello", "-u", &url, "--stream", "--format", "json",
+            "--quiet",
+        ])
+        .assert()
+        .failure();
+
+    let output = String::from_utf8(result.get_output().stdout.clone()).unwrap();
+    let lines: Vec<&str> = output.trim().lines().filter(|l| !l.is_empty()).collect();
+
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(first["type"], "delta");
+
+    let has_error = lines.iter().any(|l| {
+        serde_json::from_str::<serde_json::Value>(l)
+            .map(|v| v["type"] == "error" && v["code"] == "E_LLM_STREAM_PROTOCOL")
+            .unwrap_or(false)
+    });
+    assert!(
+        has_error,
+        "JSON error event must appear on stdout even with --quiet"
+    );
+
+    mock.assert();
+}
+
+#[test]
+fn test_llm_timeout() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        if let Ok((_stream, _)) = listener.accept() {
+            std::thread::sleep(std::time::Duration::from_secs(30));
+        }
+    });
+
+    aikit()
+        .env("OPENAI_API_KEY", "test-key-123")
+        .args([
+            "llm",
+            "-m",
+            "gpt-4o",
+            "-p",
+            "hello",
+            "-u",
+            &format!("http://127.0.0.1:{}/v1", port),
+            "--timeout",
+            "1",
+            "--connect-timeout",
+            "5",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E_LLM_TIMEOUT"));
+}
+
+#[test]
+fn test_llm_output_write_error() {
+    let mut server = mockito::Server::new();
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(serde_json::to_string(&mock_openai_response()).unwrap())
+        .create();
+
+    let url = server.url();
+
+    let dir = tempfile::tempdir().unwrap();
+    let blocking_file = dir.path().join("blocking");
+    std::fs::write(&blocking_file, "content").unwrap();
+    let impossible_path = blocking_file.join("sub").join("output.txt");
+
+    aikit()
+        .env("OPENAI_API_KEY", "test-key-123")
+        .args([
+            "llm",
+            "-m",
+            "gpt-4o",
+            "-p",
+            "hello",
+            "-u",
+            &url,
+            "--out",
+            impossible_path.to_str().unwrap(),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("E_LLM_OUTPUT_WRITE"));
+
+    mock.assert();
 }

@@ -331,6 +331,46 @@ pub async fn send_chat(
         })
 }
 
+pub async fn send_chat_stream(
+    client: &reqwest::Client,
+    base_url: &str,
+    req: &ChatRequest,
+    key: &str,
+    timeout_secs: u64,
+) -> Result<reqwest::Response, LlmError> {
+    let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
+    let response = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", key))
+        .header("Content-Type", "application/json")
+        .json(req)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                LlmError::Timeout {
+                    seconds: timeout_secs,
+                }
+            } else {
+                LlmError::RequestFailed {
+                    message: e.to_string(),
+                }
+            }
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        return Err(LlmError::ResponseError {
+            status: status.as_u16(),
+            url,
+            body,
+        });
+    }
+
+    Ok(response)
+}
+
 #[derive(Deserialize, Debug)]
 pub struct SseChunk {
     pub choices: Option<Vec<Choice>>,
