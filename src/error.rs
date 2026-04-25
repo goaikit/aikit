@@ -47,6 +47,9 @@ pub enum AikError {
 
     #[error("Generic error: {0}")]
     Generic(String),
+
+    #[error("{0}")]
+    Llm(#[from] crate::core::llm_http::LlmError),
 }
 
 impl From<Box<dyn std::error::Error>> for AikError {
