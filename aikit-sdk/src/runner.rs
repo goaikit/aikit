@@ -139,6 +139,9 @@ pub struct RunOptions {
     /// `JsonLine` event that contains extractable token usage.  Set to false
     /// to suppress those events while still populating `RunResult.token_usage`.
     pub emit_token_usage_events: bool,
+    /// When true, emit `RawTransportLine` events alongside `StreamMessage`
+    /// events for debugging. Off by default.
+    pub emit_raw_transport: bool,
 }
 
 impl Default for RunOptions {
@@ -150,6 +153,7 @@ impl Default for RunOptions {
             timeout: None,
             current_dir: None,
             emit_token_usage_events: true,
+            emit_raw_transport: false,
         }
     }
 }
@@ -189,6 +193,12 @@ impl RunOptions {
     /// Control whether `TokenUsageLine` events are emitted.
     pub fn with_emit_token_usage_events(mut self, emit: bool) -> Self {
         self.emit_token_usage_events = emit;
+        self
+    }
+
+    /// Control whether `RawTransportLine` events are emitted.
+    pub fn with_emit_raw_transport(mut self, emit: bool) -> Self {
+        self.emit_raw_transport = emit;
         self
     }
 }
@@ -307,11 +317,47 @@ impl std::error::Error for RunError {
 }
 
 /// Identifies which stream an event or error originated from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentEventStream {
     Stdout,
     Stderr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessagePhase {
+    Delta,
+    Final,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageRole {
+    Assistant,
+    Tool,
+    System,
+    User,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageKind {
+    Message,
+    Reasoning,
+    ToolOutput,
+    Status,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StreamMessage {
+    pub text: String,
+    pub phase: MessagePhase,
+    pub role: MessageRole,
+    pub kind: MessageKind,
+    pub source: AgentEventStream,
+    pub raw_line_seq: u64,
+    pub turn_id: Option<String>,
 }
 
 /// Payload carried by a streaming agent event.
@@ -319,12 +365,14 @@ pub enum AgentEventStream {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AgentEventPayload {
-    /// Successfully parsed JSON line
+    /// Successfully parsed JSON line (internal; not emitted to callbacks by default).
     JsonLine(serde_json::Value),
     /// UTF-8 text line that is not valid JSON
     RawLine(String),
     /// Non-UTF-8 bytes serialized as an array of integers
     RawBytes(Vec<u8>),
+    /// Canonical text output from an agent, engine-agnostic.
+    StreamMessage(StreamMessage),
     /// Normalized token usage extracted from the preceding `JsonLine`.
     /// Emitted immediately after the corresponding `JsonLine` event when
     /// `RunOptions::emit_token_usage_events` is `true`.
@@ -339,6 +387,12 @@ pub enum AgentEventPayload {
         info: QuotaExceededInfo,
         /// Sequence number of the JsonLine or RawLine that triggered detection.
         raw_agent_line_seq: u64,
+    },
+    /// Opt-in raw transport line for debugging (behind `RunOptions::emit_raw_transport`).
+    RawTransportLine {
+        raw: String,
+        stream: AgentEventStream,
+        seq: u64,
     },
 }
 
@@ -1321,6 +1375,348 @@ fn extract_agent_quota_signal(payload: &AgentEventPayload) -> Option<QuotaExceed
     }
 }
 
+pub fn normalize_json_line(
+    agent_key: &str,
+    stream: AgentEventStream,
+    value: &serde_json::Value,
+    raw_line_seq: u64,
+) -> Vec<StreamMessage> {
+    let known = ["codex", "claude", "gemini", "opencode", "agent"];
+    if !known.contains(&agent_key) {
+        tracing::warn!(
+            target: "aikit_sdk::runner::normalize",
+            agent_key = %agent_key,
+            "E_NORMALIZE_UNKNOWN_AGENT: unknown agent key"
+        );
+        return Vec::new();
+    }
+
+    let messages = match agent_key {
+        "codex" => normalize_codex(value, stream, raw_line_seq),
+        "claude" => normalize_claude(value, stream, raw_line_seq),
+        "gemini" => normalize_gemini(value, stream, raw_line_seq),
+        "opencode" => normalize_opencode(value, stream, raw_line_seq),
+        "agent" => normalize_agent(value, stream, raw_line_seq),
+        _ => Vec::new(),
+    };
+
+    let filtered: Vec<StreamMessage> = messages
+        .into_iter()
+        .filter(|m| {
+            if m.text.trim().is_empty() {
+                tracing::debug!(
+                    target: "aikit_sdk::runner::normalize",
+                    "E_NORMALIZE_EMPTY_TEXT: matched rule but text is empty"
+                );
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    tracing::debug!(
+        target: "aikit_sdk::runner::normalize",
+        agent_key = %agent_key,
+        count = filtered.len(),
+        unmapped = filtered.is_empty() && !value.as_object().map_or(true, |o| o.is_empty()),
+        "normalized json line"
+    );
+
+    filtered
+}
+
+fn normalize_codex(
+    value: &serde_json::Value,
+    stream: AgentEventStream,
+    raw_line_seq: u64,
+) -> Vec<StreamMessage> {
+    let mut results = Vec::new();
+    let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    if line_type == "message" {
+        let role_str = value.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
+            let role = match role_str {
+                "assistant" => MessageRole::Assistant,
+                "system" => MessageRole::System,
+                "user" => MessageRole::User,
+                _ => MessageRole::Assistant,
+            };
+            let kind = if role_str == "system" {
+                MessageKind::Status
+            } else {
+                MessageKind::Message
+            };
+            results.push(StreamMessage {
+                text: content.to_string(),
+                phase: MessagePhase::Final,
+                role,
+                kind,
+                source: stream,
+                raw_line_seq,
+                turn_id: None,
+            });
+        }
+    }
+
+    if line_type == "action" {
+        if let Some(cmd) = value.get("command").and_then(|v| v.as_str()) {
+            results.push(StreamMessage {
+                text: cmd.to_string(),
+                phase: MessagePhase::Final,
+                role: MessageRole::Tool,
+                kind: MessageKind::Message,
+                source: stream,
+                raw_line_seq,
+                turn_id: None,
+            });
+        }
+    }
+
+    if line_type == "output" {
+        if let Some(stdout) = value.get("stdout").and_then(|v| v.as_str()) {
+            results.push(StreamMessage {
+                text: stdout.to_string(),
+                phase: MessagePhase::Final,
+                role: MessageRole::Tool,
+                kind: MessageKind::ToolOutput,
+                source: stream,
+                raw_line_seq,
+                turn_id: None,
+            });
+        }
+    }
+
+    if let Some(item) = value.get("item") {
+        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+            results.push(StreamMessage {
+                text: text.to_string(),
+                phase: MessagePhase::Final,
+                role: MessageRole::Assistant,
+                kind: MessageKind::Message,
+                source: stream,
+                raw_line_seq,
+                turn_id: None,
+            });
+        }
+    }
+
+    results
+}
+
+fn normalize_claude(
+    value: &serde_json::Value,
+    stream: AgentEventStream,
+    raw_line_seq: u64,
+) -> Vec<StreamMessage> {
+    let mut results = Vec::new();
+    let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    if line_type == "assistant" {
+        if let Some(content) = value.get("message").and_then(|m| m.get("content")) {
+            if let Some(arr) = content.as_array() {
+                for item in arr {
+                    if item.get("type").and_then(|v| v.as_str()) == Some("text") {
+                        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+                            results.push(StreamMessage {
+                                text: text.to_string(),
+                                phase: MessagePhase::Delta,
+                                role: MessageRole::Assistant,
+                                kind: MessageKind::Message,
+                                source: stream,
+                                raw_line_seq,
+                                turn_id: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if line_type == "result" {
+        if let Some(result_text) = value.get("result").and_then(|v| v.as_str()) {
+            let turn_id = value
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            results.push(StreamMessage {
+                text: result_text.to_string(),
+                phase: MessagePhase::Final,
+                role: MessageRole::Assistant,
+                kind: MessageKind::Message,
+                source: stream,
+                raw_line_seq,
+                turn_id,
+            });
+        }
+    }
+
+    results
+}
+
+fn normalize_gemini(
+    value: &serde_json::Value,
+    stream: AgentEventStream,
+    raw_line_seq: u64,
+) -> Vec<StreamMessage> {
+    let mut results = Vec::new();
+
+    if let Some(candidates) = value.get("candidates").and_then(|v| v.as_array()) {
+        for candidate in candidates {
+            if let Some(parts) = candidate
+                .get("content")
+                .and_then(|c| c.get("parts"))
+                .and_then(|p| p.as_array())
+            {
+                for part in parts {
+                    if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                        results.push(StreamMessage {
+                            text: text.to_string(),
+                            phase: MessagePhase::Delta,
+                            role: MessageRole::Assistant,
+                            kind: MessageKind::Message,
+                            source: stream,
+                            raw_line_seq,
+                            turn_id: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if value.get("type").and_then(|v| v.as_str()) == Some("result") {
+        if let Some(result_text) = value.get("result").and_then(|v| v.as_str()) {
+            results.push(StreamMessage {
+                text: result_text.to_string(),
+                phase: MessagePhase::Final,
+                role: MessageRole::Assistant,
+                kind: MessageKind::Message,
+                source: stream,
+                raw_line_seq,
+                turn_id: None,
+            });
+        }
+    }
+
+    results
+}
+
+fn normalize_opencode(
+    value: &serde_json::Value,
+    stream: AgentEventStream,
+    raw_line_seq: u64,
+) -> Vec<StreamMessage> {
+    let mut results = Vec::new();
+    let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    if event_type == "text" {
+        if let Some(text) = value
+            .get("part")
+            .and_then(|p| p.get("text"))
+            .and_then(|t| t.as_str())
+        {
+            results.push(StreamMessage {
+                text: text.to_string(),
+                phase: MessagePhase::Delta,
+                role: MessageRole::Assistant,
+                kind: MessageKind::Message,
+                source: stream,
+                raw_line_seq,
+                turn_id: None,
+            });
+        }
+    }
+
+    if event_type == "tool_use" {
+        if let Some(output) = value
+            .get("part")
+            .and_then(|p| p.get("output"))
+            .and_then(|o| o.as_str())
+        {
+            results.push(StreamMessage {
+                text: output.to_string(),
+                phase: MessagePhase::Final,
+                role: MessageRole::Tool,
+                kind: MessageKind::ToolOutput,
+                source: stream,
+                raw_line_seq,
+                turn_id: None,
+            });
+        }
+    }
+
+    if event_type == "message" {
+        let role_str = value.get("role").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
+            let role = if role_str == "assistant" {
+                MessageRole::Assistant
+            } else if role_str == "system" {
+                MessageRole::System
+            } else {
+                MessageRole::Assistant
+            };
+            results.push(StreamMessage {
+                text: content.to_string(),
+                phase: MessagePhase::Delta,
+                role,
+                kind: MessageKind::Message,
+                source: stream,
+                raw_line_seq,
+                turn_id: None,
+            });
+        }
+    }
+
+    results
+}
+
+fn normalize_agent(
+    value: &serde_json::Value,
+    stream: AgentEventStream,
+    raw_line_seq: u64,
+) -> Vec<StreamMessage> {
+    let mut results = Vec::new();
+
+    let event_key = value
+        .get("event")
+        .and_then(|v| v.as_str())
+        .or_else(|| value.get("type").and_then(|v| v.as_str()))
+        .unwrap_or("");
+
+    if event_key == "message" {
+        if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
+            results.push(StreamMessage {
+                text: text.to_string(),
+                phase: MessagePhase::Delta,
+                role: MessageRole::Assistant,
+                kind: MessageKind::Message,
+                source: stream,
+                raw_line_seq,
+                turn_id: None,
+            });
+        }
+    }
+
+    if event_key == "result" {
+        if let Some(result_text) = value.get("result").and_then(|v| v.as_str()) {
+            results.push(StreamMessage {
+                text: result_text.to_string(),
+                phase: MessagePhase::Final,
+                role: MessageRole::Assistant,
+                kind: MessageKind::Message,
+                source: stream,
+                raw_line_seq,
+                turn_id: None,
+            });
+        }
+    }
+
+    results
+}
+
 /// Aggregate a sequence of token usage entries using the per-agent rule.
 ///
 /// - **Codex**: sum all entries (multiple `turn.completed` messages)
@@ -1486,7 +1882,7 @@ where
                 Ok(_) => {
                     if tx
                         .send(ReaderMsg::Chunk {
-                            stream: stream.clone(),
+                            stream,
                             raw: buf.clone(),
                         })
                         .is_err()
@@ -1624,6 +2020,11 @@ where
     let mut callback_panic: Option<Box<dyn std::any::Any + Send>> = None;
     let mut usage_entries: Vec<(TokenUsage, UsageSource)> = Vec::new();
     let mut quota_exceeded: Option<QuotaExceededInfo> = None;
+    let mut json_lines_seen: u64 = 0;
+    let mut stream_messages_emitted: u64 = 0;
+    let mut json_lines_unmapped: u64 = 0;
+
+    let emit_raw = options.emit_raw_transport;
 
     for msg in rx {
         match msg {
@@ -1636,82 +2037,159 @@ where
 
                 let payload = parse_payload(&raw);
 
-                // Always extract token usage for RunResult.token_usage aggregation.
-                let extracted_usage = if let AgentEventPayload::JsonLine(ref json_val) = payload {
-                    extract_usage_from_line(json_val, agent_key)
-                } else {
-                    None
-                };
-                if let Some(ref up) = extracted_usage {
-                    usage_entries.push(up.clone());
-                }
+                match payload {
+                    AgentEventPayload::JsonLine(ref json_val) => {
+                        json_lines_seen += 1;
 
-                let json_line_seq = seq;
-                let event_stream = stream.clone();
-                let quota_signal = extract_quota_signal(agent_key, &payload);
-                let event = AgentEvent {
-                    agent_key: agent_key.to_string(),
-                    seq,
-                    stream,
-                    payload,
-                };
-                seq += 1;
+                        let extracted_usage = extract_usage_from_line(json_val, agent_key);
+                        if let Some(ref up) = extracted_usage {
+                            usage_entries.push(up.clone());
+                        }
 
-                // Isolate callback panics; stop calling after first panic.
-                if callback_panic.is_none() {
-                    let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                        on_event(event);
-                    }));
-                    if let Err(p) = result {
-                        callback_panic = Some(p);
+                        let json_line_seq = seq;
+                        let quota_signal = extract_quota_signal(agent_key, &payload);
+
+                        if emit_raw {
+                            let stripped = raw
+                                .strip_suffix(b"\r\n")
+                                .or_else(|| raw.strip_suffix(b"\n"))
+                                .unwrap_or(&raw);
+                            let raw_str = String::from_utf8_lossy(stripped).to_string();
+                            let raw_event = AgentEvent {
+                                agent_key: agent_key.to_string(),
+                                seq,
+                                stream,
+                                payload: AgentEventPayload::RawTransportLine {
+                                    raw: raw_str,
+                                    stream,
+                                    seq: json_line_seq,
+                                },
+                            };
+                            seq += 1;
+                            if callback_panic.is_none() {
+                                let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                                    on_event(raw_event);
+                                }));
+                                if let Err(p) = result {
+                                    callback_panic = Some(p);
+                                }
+                            }
+                        }
+
+                        let messages =
+                            normalize_json_line(agent_key, stream, json_val, json_line_seq);
+                        if messages.is_empty() {
+                            json_lines_unmapped += 1;
+                        }
+                        for msg_instance in messages {
+                            stream_messages_emitted += 1;
+                            let sm_event = AgentEvent {
+                                agent_key: agent_key.to_string(),
+                                seq,
+                                stream,
+                                payload: AgentEventPayload::StreamMessage(msg_instance),
+                            };
+                            seq += 1;
+                            if callback_panic.is_none() {
+                                let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                                    on_event(sm_event);
+                                }));
+                                if let Err(p) = result {
+                                    callback_panic = Some(p);
+                                }
+                            }
+                        }
+
+                        if options.emit_token_usage_events {
+                            if let Some((usage, source)) = extracted_usage {
+                                let token_event = AgentEvent {
+                                    agent_key: agent_key.to_string(),
+                                    seq,
+                                    stream,
+                                    payload: AgentEventPayload::TokenUsageLine {
+                                        usage,
+                                        source,
+                                        raw_agent_line_seq: json_line_seq,
+                                    },
+                                };
+                                seq += 1;
+                                if callback_panic.is_none() {
+                                    let result =
+                                        panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                                            on_event(token_event);
+                                        }));
+                                    if let Err(p) = result {
+                                        callback_panic = Some(p);
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(info) = quota_signal {
+                            if quota_exceeded.is_none() {
+                                quota_exceeded = Some(info.clone());
+                            }
+                            let quota_event = AgentEvent {
+                                agent_key: agent_key.to_string(),
+                                seq,
+                                stream,
+                                payload: AgentEventPayload::QuotaExceeded {
+                                    info,
+                                    raw_agent_line_seq: json_line_seq,
+                                },
+                            };
+                            seq += 1;
+                            if callback_panic.is_none() {
+                                let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                                    on_event(quota_event);
+                                }));
+                                if let Err(p) = result {
+                                    callback_panic = Some(p);
+                                }
+                            }
+                        }
                     }
-                }
-
-                // Emit TokenUsageLine event immediately after the JsonLine, if enabled.
-                if options.emit_token_usage_events {
-                    if let Some((usage, source)) = extracted_usage {
-                        let token_event = AgentEvent {
+                    _ => {
+                        let quota_signal = extract_quota_signal(agent_key, &payload);
+                        let event = AgentEvent {
                             agent_key: agent_key.to_string(),
                             seq,
-                            stream: event_stream.clone(),
-                            payload: AgentEventPayload::TokenUsageLine {
-                                usage,
-                                source,
-                                raw_agent_line_seq: json_line_seq,
-                            },
+                            stream,
+                            payload,
                         };
                         seq += 1;
+
                         if callback_panic.is_none() {
                             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                                on_event(token_event);
+                                on_event(event);
                             }));
                             if let Err(p) = result {
                                 callback_panic = Some(p);
                             }
                         }
-                    }
-                }
 
-                if let Some(info) = quota_signal {
-                    if quota_exceeded.is_none() {
-                        quota_exceeded = Some(info.clone());
-                    }
-                    let quota_event = AgentEvent {
-                        agent_key: agent_key.to_string(),
-                        seq,
-                        stream: event_stream,
-                        payload: AgentEventPayload::QuotaExceeded {
-                            info,
-                            raw_agent_line_seq: json_line_seq,
-                        },
-                    };
-                    seq += 1;
-                    if callback_panic.is_none() {
-                        let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                            on_event(quota_event);
-                        }));
-                        if let Err(p) = result {
-                            callback_panic = Some(p);
+                        if let Some(info) = quota_signal {
+                            if quota_exceeded.is_none() {
+                                quota_exceeded = Some(info.clone());
+                            }
+                            let quota_event = AgentEvent {
+                                agent_key: agent_key.to_string(),
+                                seq,
+                                stream,
+                                payload: AgentEventPayload::QuotaExceeded {
+                                    info,
+                                    raw_agent_line_seq: seq,
+                                },
+                            };
+                            seq += 1;
+                            if callback_panic.is_none() {
+                                let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                                    on_event(quota_event);
+                                }));
+                                if let Err(p) = result {
+                                    callback_panic = Some(p);
+                                }
+                            }
                         }
                     }
                 }
@@ -1723,6 +2201,14 @@ where
             }
         }
     }
+
+    tracing::info!(
+        target: "aikit_sdk::runner::normalize",
+        json_lines_seen,
+        stream_messages_emitted,
+        json_lines_unmapped,
+        "run_agent_events completed"
+    );
 
     // Signal watchdog on natural exit path (no-op if it already fired).
     if let Some(cancel_tx) = watchdog_cancel {
@@ -2331,11 +2817,11 @@ mod tests {
             "run_agent_events should succeed: {:?}",
             result.err()
         );
-        assert_eq!(events.len(), 2, "Should have received 2 events");
-        assert_eq!(events[0].seq, 0);
-        assert_eq!(events[1].seq, 1);
-        assert!(matches!(events[0].payload, AgentEventPayload::JsonLine(_)));
-        assert!(matches!(events[1].payload, AgentEventPayload::JsonLine(_)));
+        assert_eq!(
+            events.len(),
+            0,
+            "Unmapped JSON lines should produce no callback events"
+        );
     }
 
     #[cfg(unix)]
@@ -2464,8 +2950,10 @@ mod tests {
                 AgentEventPayload::JsonLine(_) => "json",
                 AgentEventPayload::RawLine(_) => "raw",
                 AgentEventPayload::RawBytes(_) => "bytes",
+                AgentEventPayload::StreamMessage(_) => "stream_message",
                 AgentEventPayload::TokenUsageLine { .. } => "token_usage",
                 AgentEventPayload::QuotaExceeded { .. } => "quota_exceeded",
+                AgentEventPayload::RawTransportLine { .. } => "raw_transport",
             };
             payloads.push(kind.to_string());
         });
@@ -2473,7 +2961,7 @@ mod tests {
         std::env::set_var("PATH", orig_path);
 
         assert!(result.is_ok());
-        assert_eq!(payloads, vec!["json", "raw"]);
+        assert_eq!(payloads, vec!["raw"]);
     }
 
     #[test]

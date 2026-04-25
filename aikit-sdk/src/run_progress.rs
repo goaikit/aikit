@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 
-use crate::{AgentEvent, AgentEventPayload, TokenUsage, UsageSource};
+use crate::{AgentEvent, AgentEventPayload, MessageKind, MessageRole, TokenUsage, UsageSource};
 
 /// Configuration for progress display behaviour.
 #[derive(Debug, Clone)]
@@ -56,18 +56,46 @@ impl RunProgress {
     }
 
     /// Process an agent event and update internal state.
-    pub fn push(&mut self, agent_key: &str, event: &AgentEvent) {
+    pub fn push(&mut self, _agent_key: &str, event: &AgentEvent) {
         match &event.payload {
             AgentEventPayload::TokenUsageLine { usage, source, .. } => {
                 self.latest_token_usage = Some((usage.clone(), source.clone()));
             }
-            AgentEventPayload::JsonLine(val) => {
-                let val = val.clone();
-                let line = self.classify_json(agent_key, &val);
-                if let Some(l) = line {
-                    self.add_row(l);
+            AgentEventPayload::StreamMessage(sm) => {
+                let text = sm.text.replace('\n', " ").replace('\r', "");
+                let text = text.trim();
+                if text.is_empty() {
+                    return;
+                }
+                let truncated = truncate(text, self.config.max_text_width);
+                match sm.role {
+                    MessageRole::Assistant => {
+                        if Some(text) == self.last_assistant_text.as_deref() {
+                            return;
+                        }
+                        self.add_row(format!("assistant> {}", truncated));
+                        self.last_assistant_text = Some(text.to_string());
+                    }
+                    MessageRole::Tool => match sm.kind {
+                        MessageKind::ToolOutput => {
+                            let out_truncated = truncate(text, self.config.max_tool_output_chars);
+                            if !out_truncated.is_empty() {
+                                self.add_row(format!("tool> {}", out_truncated));
+                            }
+                        }
+                        _ => {
+                            self.add_row(format!("tool> {}", truncated));
+                        }
+                    },
+                    MessageRole::System => {
+                        self.add_row(format!("system> {}", truncated));
+                    }
+                    MessageRole::User => {
+                        self.add_row(format!("user> {}", truncated));
+                    }
                 }
             }
+            AgentEventPayload::JsonLine(_) => {}
             AgentEventPayload::RawLine(text) => {
                 let prefix = match event.stream {
                     crate::AgentEventStream::Stdout => "out>",
@@ -89,6 +117,7 @@ impl RunProgress {
                 let truncated = truncate(&info.raw_message, self.config.max_text_width);
                 self.add_row(format!("[quota] {}", truncated));
             }
+            AgentEventPayload::RawTransportLine { .. } => {}
         }
     }
 
@@ -145,118 +174,6 @@ impl RunProgress {
         }
         self.rows.push_back(row);
     }
-
-    /// Classify a JSON event value into a formatted display string.
-    ///
-    /// Returns `None` for events that should be suppressed (e.g. `step_start`).
-    fn classify_json(&mut self, agent_key: &str, val: &serde_json::Value) -> Option<String> {
-        if agent_key == "opencode" {
-            self.classify_opencode(val)
-        } else {
-            Self::classify_fallback(val, self.config.max_text_width)
-        }
-    }
-
-    /// OpenCode-specific event classification.
-    fn classify_opencode(&mut self, val: &serde_json::Value) -> Option<String> {
-        let event_type = val.get("type")?.as_str()?;
-
-        match event_type {
-            "step_start" => None, // suppress by default
-
-            "text" => {
-                // {"type":"text","part":{"text":"..."}}
-                let text = val
-                    .get("part")
-                    .and_then(|p| p.get("text"))
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
-                // Normalize: replace newlines with spaces, then trim whitespace
-                let normalized = text.replace('\n', " ").replace('\r', "");
-                let normalized = normalized.trim();
-                if normalized.is_empty() {
-                    return None;
-                }
-                // Deduplicate consecutive identical assistant rows
-                if Some(normalized) == self.last_assistant_text.as_deref() {
-                    return None;
-                }
-                let truncated = truncate(normalized, self.config.max_text_width);
-                let row = format!("assistant> {}", truncated);
-                self.last_assistant_text = Some(normalized.to_string());
-                Some(row)
-            }
-
-            "tool_use" => {
-                // {"type":"tool_use","part":{"tool":"bash","input":{"command":"..."},"output":"...","exit":0}}
-                let part = val.get("part")?;
-                let tool_name = part.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
-                // Suppress intermediate tool events with unresolved tool name
-                if tool_name == "invalid" {
-                    return None;
-                }
-                let command = part
-                    .get("input")
-                    .and_then(|i| i.get("command"))
-                    .and_then(|c| c.as_str())
-                    .or_else(|| part.get("input").and_then(|i| i.as_str()))
-                    .unwrap_or("");
-                let exit_code = part.get("exit").and_then(|e| e.as_i64());
-                let output = part.get("output").and_then(|o| o.as_str()).unwrap_or("");
-
-                let cmd_truncated = truncate(command, self.config.max_text_width);
-                let out_truncated = truncate(output, self.config.max_tool_output_chars);
-
-                let exit_str = match exit_code {
-                    Some(0) => " [ok]".to_string(),
-                    Some(n) => format!(" [exit={}]", n),
-                    None => String::new(),
-                };
-
-                let mut line = format!("tool({})> {}{}", tool_name, cmd_truncated, exit_str);
-                if !out_truncated.is_empty() {
-                    line.push_str(&format!(" | {}", out_truncated));
-                }
-                Some(line)
-            }
-
-            "step_finish" => {
-                let reason = val
-                    .get("part")
-                    .and_then(|p| p.get("reason"))
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("done");
-                // Suppress normal intermediate step reasons
-                if matches!(reason, "stop" | "done" | "tool-calls") {
-                    None
-                } else {
-                    Some(format!("step_finish: {}", reason))
-                }
-            }
-
-            other => Self::classify_fallback_with_type(other, val, self.config.max_text_width),
-        }
-    }
-
-    /// Compact fallback for non-OpenCode agents.
-    fn classify_fallback(val: &serde_json::Value, max_width: usize) -> Option<String> {
-        if let Some(t) = val.get("type").and_then(|v| v.as_str()) {
-            Some(Self::classify_fallback_with_type(t, val, max_width)?)
-        } else {
-            let raw = val.to_string();
-            Some(truncate(&raw, max_width).to_string())
-        }
-    }
-
-    fn classify_fallback_with_type(
-        event_type: &str,
-        val: &serde_json::Value,
-        max_width: usize,
-    ) -> Option<String> {
-        let raw = val.to_string();
-        let truncated = truncate(&raw, max_width);
-        Some(format!("[{}] {}", event_type, truncated))
-    }
 }
 
 /// Truncate a string to at most `max_chars` characters, appending `…` if truncated.
@@ -279,26 +196,31 @@ fn truncate(s: &str, max_chars: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AgentEventPayload, AgentEventStream};
+    use crate::{AgentEventPayload, AgentEventStream, StreamMessage};
 
-    fn make_json_event(agent_key: &str, json: &str) -> (String, AgentEvent) {
-        let val: serde_json::Value = serde_json::from_str(json).unwrap();
+    fn make_stream_event(text: &str, role: MessageRole, kind: MessageKind) -> (String, AgentEvent) {
         let event = AgentEvent {
-            agent_key: agent_key.to_string(),
+            agent_key: "opencode".to_string(),
             seq: 0,
             stream: AgentEventStream::Stdout,
-            payload: AgentEventPayload::JsonLine(val),
+            payload: AgentEventPayload::StreamMessage(StreamMessage {
+                text: text.to_string(),
+                phase: crate::MessagePhase::Delta,
+                role,
+                kind,
+                source: AgentEventStream::Stdout,
+                raw_line_seq: 0,
+                turn_id: None,
+            }),
         };
-        (agent_key.to_string(), event)
+        ("opencode".to_string(), event)
     }
 
     #[test]
     fn test_opencode_text_event() {
         let mut progress = RunProgress::new(ProgressViewConfig::default());
-        let (key, event) = make_json_event(
-            "opencode",
-            r#"{"type":"text","part":{"text":"hello world"}}"#,
-        );
+        let (key, event) =
+            make_stream_event("hello world", MessageRole::Assistant, MessageKind::Message);
         progress.push(&key, &event);
         let lines: Vec<_> = progress.formatted_lines().collect();
         assert_eq!(lines, vec!["assistant> hello world"]);
@@ -307,24 +229,30 @@ mod tests {
     #[test]
     fn test_opencode_step_start_suppressed() {
         let mut progress = RunProgress::new(ProgressViewConfig::default());
-        let (key, event) = make_json_event("opencode", r#"{"type":"step_start","timestamp":123}"#);
-        progress.push(&key, &event);
+        let val: serde_json::Value =
+            serde_json::from_str(r#"{"type":"step_start","timestamp":123}"#).unwrap();
+        let event = AgentEvent {
+            agent_key: "opencode".to_string(),
+            seq: 0,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::JsonLine(val),
+        };
+        progress.push("opencode", &event);
         assert_eq!(progress.formatted_lines().count(), 0);
     }
 
     #[test]
     fn test_opencode_tool_use_event() {
         let mut progress = RunProgress::new(ProgressViewConfig::default());
-        let (key, event) = make_json_event(
-            "opencode",
-            r#"{"type":"tool_use","part":{"tool":"bash","input":{"command":"ls -la"},"exit":0,"output":"total 8\ndrwxr-xr-x"}}"#,
+        let (key, event) = make_stream_event(
+            "total 8\ndrwxr-xr-x",
+            MessageRole::Tool,
+            MessageKind::ToolOutput,
         );
         progress.push(&key, &event);
         let lines: Vec<_> = progress.formatted_lines().collect();
         assert_eq!(lines.len(), 1);
-        assert!(lines[0].contains("bash"));
-        assert!(lines[0].contains("ls -la"));
-        assert!(lines[0].contains("[ok]"));
+        assert!(lines[0].contains("tool>"));
     }
 
     #[test]
@@ -335,9 +263,10 @@ mod tests {
         };
         let mut progress = RunProgress::new(config);
         for i in 0..5 {
-            let (key, event) = make_json_event(
-                "opencode",
-                &format!(r#"{{"type":"text","part":{{"text":"msg {i}"}}}}"#),
+            let (key, event) = make_stream_event(
+                &format!("msg {i}"),
+                MessageRole::Assistant,
+                MessageKind::Message,
             );
             progress.push(&key, &event);
         }
@@ -420,8 +349,7 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut progress = RunProgress::new(ProgressViewConfig::default());
-        let (key, event) =
-            make_json_event("opencode", r#"{"type":"text","part":{"text":"hello"}}"#);
+        let (key, event) = make_stream_event("hello", MessageRole::Assistant, MessageKind::Message);
         progress.push(&key, &event);
         assert_eq!(progress.formatted_lines().count(), 1);
         progress.clear();
@@ -430,22 +358,12 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_invalid_suppressed() {
-        let mut progress = RunProgress::new(ProgressViewConfig::default());
-        let (key, event) = make_json_event(
-            "opencode",
-            r#"{"type":"tool_use","part":{"tool":"invalid","input":{},"output":""}}"#,
-        );
-        progress.push(&key, &event);
-        assert_eq!(progress.formatted_lines().count(), 0);
-    }
-
-    #[test]
     fn test_text_deduplication() {
         let mut progress = RunProgress::new(ProgressViewConfig::default());
-        let json = r#"{"type":"text","part":{"text":"hello world"}}"#;
-        let (key, event1) = make_json_event("opencode", json);
-        let (_, event2) = make_json_event("opencode", json);
+        let (key, event1) =
+            make_stream_event("hello world", MessageRole::Assistant, MessageKind::Message);
+        let (_, event2) =
+            make_stream_event("hello world", MessageRole::Assistant, MessageKind::Message);
         progress.push(&key, &event1);
         progress.push(&key, &event2);
         let lines: Vec<_> = progress.formatted_lines().collect();
@@ -457,7 +375,7 @@ mod tests {
     fn test_text_leading_newline_normalized() {
         let mut progress = RunProgress::new(ProgressViewConfig::default());
         let (key, event) =
-            make_json_event("opencode", r#"{"type":"text","part":{"text":"\nHello"}}"#);
+            make_stream_event("\nHello", MessageRole::Assistant, MessageKind::Message);
         progress.push(&key, &event);
         let lines: Vec<_> = progress.formatted_lines().collect();
         assert_eq!(lines.len(), 1);
@@ -468,7 +386,7 @@ mod tests {
     #[test]
     fn test_text_whitespace_only_suppressed() {
         let mut progress = RunProgress::new(ProgressViewConfig::default());
-        let (key, event) = make_json_event("opencode", r#"{"type":"text","part":{"text":"   "}}"#);
+        let (key, event) = make_stream_event("   ", MessageRole::Assistant, MessageKind::Message);
         progress.push(&key, &event);
         assert_eq!(progress.formatted_lines().count(), 0);
     }
@@ -476,12 +394,12 @@ mod tests {
     #[test]
     fn test_text_dedup_reset_after_clear() {
         let mut progress = RunProgress::new(ProgressViewConfig::default());
-        let json = r#"{"type":"text","part":{"text":"hello"}}"#;
-        let (key, event1) = make_json_event("opencode", json);
+        let (key, event1) =
+            make_stream_event("hello", MessageRole::Assistant, MessageKind::Message);
         progress.push(&key, &event1);
         assert_eq!(progress.formatted_lines().count(), 1);
         progress.clear();
-        let (_, event2) = make_json_event("opencode", json);
+        let (_, event2) = make_stream_event("hello", MessageRole::Assistant, MessageKind::Message);
         progress.push(&key, &event2);
         let lines: Vec<_> = progress.formatted_lines().collect();
         assert_eq!(lines.len(), 1);
@@ -537,5 +455,24 @@ mod tests {
         let footer = progress.token_footer().unwrap();
         assert!(footer.contains("total=150"), "footer: {}", footer);
         assert!(!footer.contains("agent_total="), "footer: {}", footer);
+    }
+
+    #[test]
+    fn test_system_role_display() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let (key, event) =
+            make_stream_event("session started", MessageRole::System, MessageKind::Status);
+        progress.push(&key, &event);
+        let lines: Vec<_> = progress.formatted_lines().collect();
+        assert_eq!(lines, vec!["system> session started"]);
+    }
+
+    #[test]
+    fn test_tool_role_display() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let (key, event) = make_stream_event("ls -la", MessageRole::Tool, MessageKind::Message);
+        progress.push(&key, &event);
+        let lines: Vec<_> = progress.formatted_lines().collect();
+        assert_eq!(lines, vec!["tool> ls -la"]);
     }
 }

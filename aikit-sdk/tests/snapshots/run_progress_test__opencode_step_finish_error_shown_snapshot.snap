@@ -1,8 +1,7 @@
 ---
 source: aikit-sdk/tests/run_progress_test.rs
-assertion_line: 129
 expression: lines
 ---
 [
-    "step_finish: error",
+    "system> error",
 ]

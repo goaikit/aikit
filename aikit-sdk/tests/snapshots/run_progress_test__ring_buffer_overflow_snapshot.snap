@@ -1,6 +1,5 @@
 ---
 source: aikit-sdk/tests/run_progress_test.rs
-assertion_line: 177
 expression: lines
 ---
 [
