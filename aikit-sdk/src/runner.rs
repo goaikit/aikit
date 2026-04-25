@@ -2150,6 +2150,7 @@ where
                         }
                     }
                     _ => {
+                        let source_seq = seq;
                         let quota_signal = extract_quota_signal(agent_key, &payload);
                         let event = AgentEvent {
                             agent_key: agent_key.to_string(),
@@ -2178,7 +2179,7 @@ where
                                 stream,
                                 payload: AgentEventPayload::QuotaExceeded {
                                     info,
-                                    raw_agent_line_seq: seq,
+                                    raw_agent_line_seq: source_seq,
                                 },
                             };
                             seq += 1;
