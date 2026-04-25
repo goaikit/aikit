@@ -421,4 +421,152 @@ mod tests {
         // This should fail because no command is provided and arg_required_else_help is true
         assert!(Cli::try_parse_from(["aikit"]).is_err());
     }
+
+    /// Test llm command basic parsing
+    #[test]
+    fn test_llm_basic_parsing() {
+        let cli = Cli::try_parse_from(["aikit", "llm", "-m", "gpt-4o", "-p", "hello"]).unwrap();
+
+        match cli.command.unwrap() {
+            aikit::cli::Commands::Llm(args) => {
+                assert_eq!(args.model, "gpt-4o");
+                assert_eq!(args.prompt, Some("hello".to_string()));
+                assert!(args.prompt_file.is_none());
+                assert!(!args.stream);
+                assert_eq!(args.format, "text");
+            }
+            _ => panic!("Expected Commands::Llm"),
+        }
+    }
+
+    /// Test llm command prompt group conflict
+    #[test]
+    fn test_llm_prompt_group_conflict() {
+        let result = Cli::try_parse_from([
+            "aikit",
+            "llm",
+            "-m",
+            "gpt-4o",
+            "-p",
+            "a",
+            "--prompt-file",
+            "b.txt",
+        ]);
+        assert!(result.is_err());
+    }
+
+    /// Test llm command prompt missing (no --prompt or --prompt-file)
+    #[test]
+    fn test_llm_prompt_missing() {
+        let result = Cli::try_parse_from(["aikit", "llm", "-m", "gpt-4o"]);
+        assert!(result.is_err());
+    }
+
+    /// Test llm stream flag
+    #[test]
+    fn test_llm_stream_flag() {
+        let cli =
+            Cli::try_parse_from(["aikit", "llm", "-m", "gpt-4o", "-p", "hi", "--stream"]).unwrap();
+
+        match cli.command.unwrap() {
+            aikit::cli::Commands::Llm(args) => {
+                assert!(args.stream);
+            }
+            _ => panic!("Expected Commands::Llm"),
+        }
+    }
+
+    /// Test llm format flag
+    #[test]
+    fn test_llm_format_flag() {
+        let cli = Cli::try_parse_from([
+            "aikit", "llm", "-m", "gpt-4o", "-p", "hi", "--format", "json",
+        ])
+        .unwrap();
+
+        match cli.command.unwrap() {
+            aikit::cli::Commands::Llm(args) => {
+                assert_eq!(args.format, "json");
+            }
+            _ => panic!("Expected Commands::Llm"),
+        }
+    }
+
+    /// Test llm with all flags
+    #[test]
+    fn test_llm_all_flags() {
+        let cli = Cli::try_parse_from([
+            "aikit",
+            "llm",
+            "-m",
+            "gpt-4o",
+            "-u",
+            "http://localhost:11434/v1",
+            "-p",
+            "hello",
+            "--system",
+            "You are helpful",
+            "--stream",
+            "--format",
+            "json",
+            "--max-tokens",
+            "100",
+            "--temperature",
+            "0.7",
+            "--top-p",
+            "0.9",
+            "--api-key-env",
+            "MY_KEY",
+            "--timeout",
+            "30",
+            "--connect-timeout",
+            "5",
+            "--usage",
+            "stderr",
+            "--quiet",
+        ])
+        .unwrap();
+
+        match cli.command.unwrap() {
+            aikit::cli::Commands::Llm(args) => {
+                assert_eq!(args.model, "gpt-4o");
+                assert_eq!(args.url, "http://localhost:11434/v1");
+                assert_eq!(args.prompt, Some("hello".to_string()));
+                assert_eq!(args.system, Some("You are helpful".to_string()));
+                assert!(args.stream);
+                assert_eq!(args.format, "json");
+                assert_eq!(args.max_tokens, Some(100));
+                assert_eq!(args.temperature, Some(0.7));
+                assert_eq!(args.top_p, Some(0.9));
+                assert_eq!(args.api_key_env, Some("MY_KEY".to_string()));
+                assert_eq!(args.timeout, 30);
+                assert_eq!(args.connect_timeout, 5);
+                assert_eq!(args.usage, Some("stderr".to_string()));
+                assert!(args.quiet);
+            }
+            _ => panic!("Expected Commands::Llm"),
+        }
+    }
+
+    /// Test llm with prompt-file flag
+    #[test]
+    fn test_llm_prompt_file() {
+        let cli = Cli::try_parse_from([
+            "aikit",
+            "llm",
+            "-m",
+            "gpt-4o",
+            "--prompt-file",
+            "./prompt.txt",
+        ])
+        .unwrap();
+
+        match cli.command.unwrap() {
+            aikit::cli::Commands::Llm(args) => {
+                assert_eq!(args.prompt_file, Some("./prompt.txt".to_string()));
+                assert!(args.prompt.is_none());
+            }
+            _ => panic!("Expected Commands::Llm"),
+        }
+    }
 }

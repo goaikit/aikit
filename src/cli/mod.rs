@@ -4,6 +4,7 @@
 
 mod check;
 mod init;
+mod llm;
 mod release;
 mod run;
 mod template_package; // Old template zip archive builder (used by release command)
@@ -57,6 +58,8 @@ pub enum Commands {
     Release(release::ReleaseArgs),
     /// Run a coding agent with a prompt (stdin or -p)
     Run(run::RunArgs),
+    /// Invoke an LLM via OpenAI-compatible API
+    Llm(llm::LlmArgs),
 }
 
 /// Initialize `tracing` when `RUST_LOG` is set or `--debug` is passed (so SDK logs are visible).
@@ -123,6 +126,7 @@ pub fn run() -> Result<()> {
         },
         Some(Commands::Release(args)) => rt.block_on(release::execute(args))?,
         Some(Commands::Run(args)) => run::execute(args)?,
+        Some(Commands::Llm(args)) => rt.block_on(llm::execute(args))?,
         // This should never be reached due to arg_required_else_help = true
         None => unreachable!("arg_required_else_help should prevent None commands"),
     }
