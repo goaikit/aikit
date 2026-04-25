@@ -3134,7 +3134,6 @@ mod tests {
 
     #[test]
     fn test_run_result_new_has_quota_exceeded_none() {
-        use std::os::unix::process::ExitStatusExt;
         let status = std::process::ExitStatus::from_raw(0);
         let result = RunResult::new(status, vec![], vec![]);
         assert!(result.quota_exceeded.is_none());
