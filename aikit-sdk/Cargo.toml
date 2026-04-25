@@ -1,6 +1,6 @@
 [package]
 name = "aikit-sdk"
-version = "0.1.50"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Rust gateway: agent catalog, paths, deploy, detection, and run/event APIs for coding-agent CLIs"

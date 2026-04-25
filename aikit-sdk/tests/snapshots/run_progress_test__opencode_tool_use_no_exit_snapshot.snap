@@ -1,8 +1,7 @@
 ---
 source: aikit-sdk/tests/run_progress_test.rs
-assertion_line: 105
 expression: lines
 ---
 [
-    "tool(read)>  | myhost",
+    "tool> myhost",
 ]

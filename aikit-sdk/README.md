@@ -17,7 +17,7 @@ The crate holds the full **agent catalog** (18 assistants) with per-agent capabi
 - **Agent Detection**: Identify which AI coding agents are installed and available
 - **CLI execution**: Spawn runnable agent CLIs with argv aligned to the `aikit run` contract
 - **Output Capture**: Capture stdout/stderr for programmatic forwarding
-- **Streaming Events**: Real-time event delivery via `run_agent_events` with structured JSON parsing
+- **Streaming Events**: Real-time event delivery via `run_agent_events` with canonical `StreamMessage` normalization across all agent engines
 
 ## Agents Supported
 
@@ -185,11 +185,96 @@ let options = RunOptions::default().with_stream(true);
 let result = run_agent_events("claude", "Summarize the project", options, |event: AgentEvent| {
     println!("seq={} stream={:?}", event.seq, event.stream);
     match &event.payload {
-        AgentEventPayload::JsonLine(v) => println!("  JSON: {}", v),
+        AgentEventPayload::StreamMessage(sm) => println!("  [{}] {}", sm.role.as_ref(), sm.text),
         AgentEventPayload::RawLine(s)  => println!("  text: {}", s),
         AgentEventPayload::RawBytes(b) => println!("  bytes: {} bytes", b.len()),
     }
 });
+```
+
+### Canonical Event Stream
+
+By default, `run_agent_events` normalises per-engine JSON output into engine-agnostic `StreamMessage` events. Callbacks receive `AgentEventPayload::StreamMessage` instead of raw `AgentEventPayload::JsonLine`, so consumers no longer need per-engine JSON-path extraction logic.
+
+#### `StreamMessage` struct
+
+```rust
+pub struct StreamMessage {
+    pub text: String,           // Extracted assistant/tool text
+    pub phase: MessagePhase,    // Delta (partial) or Final (complete)
+    pub role: MessageRole,      // Assistant, Tool, System, User
+    pub kind: MessageKind,      // Message, Reasoning, ToolOutput, Status
+    pub source: AgentEventStream, // Stdout or Stderr
+    pub raw_line_seq: u64,      // Seq of the source JsonLine
+    pub turn_id: Option<String>, // Session/turn ID if provided by engine
+}
+```
+
+#### Supporting enums
+
+```rust
+pub enum MessagePhase { Delta, Final }
+pub enum MessageRole { Assistant, Tool, System, User }
+pub enum MessageKind { Message, Reasoning, ToolOutput, Status }
+```
+
+#### Per-engine normalization
+
+| Agent      | JSON shape                                             | Extracted path                    | Phase  | Role       | Kind       |
+|------------|--------------------------------------------------------|-----------------------------------|--------|------------|------------|
+| `codex`    | `{"type":"message","role":"assistant","content":"..."}` | `$.content`                       | Final  | Assistant  | Message    |
+| `codex`    | `{"type":"message","role":"system","content":"..."}`   | `$.content`                       | Final  | System     | Status     |
+| `codex`    | `{"type":"action","action":"shell","command":"..."}`   | `$.command`                       | Final  | Tool       | Message    |
+| `codex`    | `{"type":"output","stdout":"..."}`                     | `$.stdout`                        | Final  | Tool       | ToolOutput |
+| `codex`    | `{"type":"...","item":{"text":"..."}}`                 | `$.item.text`                     | Final  | Assistant  | Message    |
+| `claude`   | `{"type":"assistant","message":{"content":[...]}}`     | `$.message.content[*].text`       | Delta  | Assistant  | Message    |
+| `claude`   | `{"type":"result","result":"..."}`                     | `$.result`                        | Final  | Assistant  | Message    |
+| `gemini`   | `{"candidates":[{"content":{"parts":[{"text":"..."}]}}]}` | `$.candidates[*].content.parts[*].text` | Delta | Assistant | Message |
+| `gemini`   | `{"type":"result","result":"..."}`                     | `$.result`                        | Final  | Assistant  | Message    |
+| `opencode` | `{"type":"text","part":{"text":"..."}}`                | `$.part.text`                     | Delta  | Assistant  | Message    |
+| `opencode` | `{"type":"tool_use","part":{"output":"..."}}`          | `$.part.output`                   | Final  | Tool       | ToolOutput |
+| `opencode` | `{"type":"message","role":"assistant","content":"..."}` | `$.content`                      | Delta  | Assistant  | Message    |
+| `agent`    | `{"event":"message","role":"assistant","text":"..."}`  | `$.text`                          | Delta  | Assistant  | Message    |
+| `agent`    | `{"type":"result","result":"..."}`                     | `$.result`                        | Final  | Assistant  | Message    |
+
+#### `RawTransportLine` opt-in
+
+For debugging, enable `RunOptions::emit_raw_transport` to receive `AgentEventPayload::RawTransportLine` events alongside `StreamMessage`:
+
+```rust
+let options = RunOptions::default().with_emit_raw_transport(true);
+```
+
+#### Migration guide
+
+**Before** (pre-0.2.0): callbacks received `JsonLine(serde_json::Value)` and consumers extracted text with per-engine logic:
+
+```rust
+// OLD: match on JsonLine and extract per engine
+match &event.payload {
+    AgentEventPayload::JsonLine(v) => {
+        let text = if agent_key == "codex" {
+            v.get("content").and_then(|v| v.as_str()).unwrap_or("")
+        } else if agent_key == "claude" {
+            v.get("message").and_then(|m| m.get("content"))
+                .and_then(|c| c.get(0)).and_then(|i| i.get("text"))
+                .and_then(|v| v.as_str()).unwrap_or("")
+        } else { "" };
+    }
+    _ => {}
+}
+```
+
+**After** (0.2.0+): callbacks receive `StreamMessage` with engine-agnostic text:
+
+```rust
+// NEW: match on StreamMessage — no engine-specific logic needed
+match &event.payload {
+    AgentEventPayload::StreamMessage(sm) => {
+        println!("[{}] {}", sm.role.as_ref(), sm.text);
+    }
+    _ => {}
+}
 ```
 
 #### Per-agent argv matrix
@@ -219,7 +304,7 @@ Both flags can be combined: `aikit run --events --stream` uses events-mode argv 
 - No timeout or cancellation support (out of scope for v1).
 - No async/await interface.
 - Python bindings support streaming via `run_agent_events_py` in `aikit-py`. See [aikit-py README](../aikit-py/README.md) for details.
-- Non-JSON agent output formats are emitted as `RawLine`/`RawBytes` without structured parsing.
+- Non-JSON agent output formats are emitted as `RawLine`/`RawBytes` without structured parsing. JSON lines that do not match any engine rule produce no `StreamMessage` (unmapped count is logged).
 
 ### Agent Detection
 

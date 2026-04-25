@@ -1,10 +1,9 @@
 ---
 source: aikit-sdk/tests/run_progress_test.rs
-assertion_line: 260
 expression: lines
 ---
 [
     "assistant> Starting analysis",
-    "tool(bash)> pwd [ok] | /home/user",
+    "tool> /home/user",
     "assistant> Done.",
 ]

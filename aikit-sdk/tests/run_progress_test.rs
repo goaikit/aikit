@@ -1,23 +1,32 @@
 //! Snapshot tests for `RunProgress` event classification.
 //!
 //! Uses synthetic `AgentEvent` fixtures and `insta` for snapshot assertions.
+//! After the canonical event stream change, tests send `StreamMessage` events
+//! instead of raw `JsonLine` events.
 
 use aikit_sdk::{
-    AgentEvent, AgentEventPayload, AgentEventStream, ProgressViewConfig, RunProgress, TokenUsage,
-    UsageSource,
+    AgentEvent, AgentEventPayload, AgentEventStream, MessageKind, MessagePhase, MessageRole,
+    ProgressViewConfig, RunProgress, StreamMessage, TokenUsage, UsageSource,
 };
 
 // -------------------------------------------------------------------------
 // Helper constructors
 // -------------------------------------------------------------------------
 
-fn json_event(agent_key: &str, json: &str) -> AgentEvent {
-    let val: serde_json::Value = serde_json::from_str(json).unwrap();
+fn stream_event(text: &str, role: MessageRole, kind: MessageKind) -> AgentEvent {
     AgentEvent {
-        agent_key: agent_key.to_string(),
+        agent_key: "opencode".to_string(),
         seq: 0,
         stream: AgentEventStream::Stdout,
-        payload: AgentEventPayload::JsonLine(val),
+        payload: AgentEventPayload::StreamMessage(StreamMessage {
+            text: text.to_string(),
+            phase: MessagePhase::Delta,
+            role,
+            kind,
+            source: AgentEventStream::Stdout,
+            raw_line_seq: 0,
+            turn_id: None,
+        }),
     }
 }
 
@@ -42,15 +51,16 @@ fn token_event(agent_key: &str, input: u64, output: u64, total: u64) -> AgentEve
 }
 
 // -------------------------------------------------------------------------
-// OpenCode event classification snapshots
+// Assistant text classification snapshots
 // -------------------------------------------------------------------------
 
 #[test]
 fn test_opencode_text_event_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
-    let event = json_event(
-        "opencode",
-        r#"{"type":"text","part":{"text":"Hello from the agent"}}"#,
+    let event = stream_event(
+        "Hello from the agent",
+        MessageRole::Assistant,
+        MessageKind::Message,
     );
     progress.push("opencode", &event);
     let lines: Vec<_> = progress.formatted_lines().collect();
@@ -60,10 +70,14 @@ fn test_opencode_text_event_snapshot() {
 #[test]
 fn test_opencode_step_start_suppressed_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
-    let event = json_event(
-        "opencode",
-        r#"{"type":"step_start","timestamp":1234567890,"part":{"type":"step-start"}}"#,
-    );
+    let val: serde_json::Value =
+        serde_json::from_str(r#"{"type":"step_start","timestamp":1234567890}"#).unwrap();
+    let event = AgentEvent {
+        agent_key: "opencode".to_string(),
+        seq: 0,
+        stream: AgentEventStream::Stdout,
+        payload: AgentEventPayload::JsonLine(val),
+    };
     progress.push("opencode", &event);
     let lines: Vec<_> = progress.formatted_lines().collect();
     insta::assert_debug_snapshot!(lines);
@@ -72,9 +86,10 @@ fn test_opencode_step_start_suppressed_snapshot() {
 #[test]
 fn test_opencode_tool_use_success_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
-    let event = json_event(
-        "opencode",
-        r#"{"type":"tool_use","part":{"tool":"bash","input":{"command":"ls -la /tmp"},"exit":0,"output":"total 8\ndrwxr-xr-x 2 user user 4096 Jan 1 00:00 ."}}"#,
+    let event = stream_event(
+        "total 8\ndrwxr-xr-x 2 user user 4096 Jan 1 00:00 .",
+        MessageRole::Tool,
+        MessageKind::ToolOutput,
     );
     progress.push("opencode", &event);
     let lines: Vec<_> = progress.formatted_lines().collect();
@@ -84,9 +99,10 @@ fn test_opencode_tool_use_success_snapshot() {
 #[test]
 fn test_opencode_tool_use_failure_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
-    let event = json_event(
-        "opencode",
-        r#"{"type":"tool_use","part":{"tool":"bash","input":{"command":"cat /nonexistent"},"exit":1,"output":"cat: /nonexistent: No such file or directory"}}"#,
+    let event = stream_event(
+        "cat: /nonexistent: No such file or directory",
+        MessageRole::Tool,
+        MessageKind::ToolOutput,
     );
     progress.push("opencode", &event);
     let lines: Vec<_> = progress.formatted_lines().collect();
@@ -96,10 +112,7 @@ fn test_opencode_tool_use_failure_snapshot() {
 #[test]
 fn test_opencode_tool_use_no_exit_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
-    let event = json_event(
-        "opencode",
-        r#"{"type":"tool_use","part":{"tool":"read","input":{"path":"/etc/hostname"},"output":"myhost"}}"#,
-    );
+    let event = stream_event("myhost", MessageRole::Tool, MessageKind::ToolOutput);
     progress.push("opencode", &event);
     let lines: Vec<_> = progress.formatted_lines().collect();
     insta::assert_debug_snapshot!(lines);
@@ -108,10 +121,14 @@ fn test_opencode_tool_use_no_exit_snapshot() {
 #[test]
 fn test_opencode_step_finish_stop_suppressed_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
-    let event = json_event(
-        "opencode",
-        r#"{"type":"step_finish","part":{"reason":"stop"}}"#,
-    );
+    let val: serde_json::Value =
+        serde_json::from_str(r#"{"type":"step_finish","part":{"reason":"stop"}}"#).unwrap();
+    let event = AgentEvent {
+        agent_key: "opencode".to_string(),
+        seq: 0,
+        stream: AgentEventStream::Stdout,
+        payload: AgentEventPayload::JsonLine(val),
+    };
     progress.push("opencode", &event);
     let lines: Vec<_> = progress.formatted_lines().collect();
     insta::assert_debug_snapshot!(lines);
@@ -120,26 +137,29 @@ fn test_opencode_step_finish_stop_suppressed_snapshot() {
 #[test]
 fn test_opencode_step_finish_error_shown_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
-    let event = json_event(
-        "opencode",
-        r#"{"type":"step_finish","part":{"reason":"error","messageID":"msg1"}}"#,
-    );
+    let event = stream_event("error", MessageRole::System, MessageKind::Status);
     progress.push("opencode", &event);
     let lines: Vec<_> = progress.formatted_lines().collect();
     insta::assert_debug_snapshot!(lines);
 }
 
 // -------------------------------------------------------------------------
-// tool(invalid) suppression snapshot
+// tool(invalid) suppression snapshot — now handled by normalizer
 // -------------------------------------------------------------------------
 
 #[test]
 fn test_opencode_tool_use_invalid_suppressed_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
-    let event = json_event(
-        "opencode",
+    let val: serde_json::Value = serde_json::from_str(
         r#"{"type":"tool_use","part":{"tool":"invalid","input":{},"output":""}}"#,
-    );
+    )
+    .unwrap();
+    let event = AgentEvent {
+        agent_key: "opencode".to_string(),
+        seq: 0,
+        stream: AgentEventStream::Stdout,
+        payload: AgentEventPayload::JsonLine(val),
+    };
     progress.push("opencode", &event);
     let lines: Vec<_> = progress.formatted_lines().collect();
     insta::assert_debug_snapshot!(lines);
@@ -183,9 +203,10 @@ fn test_ring_buffer_overflow_snapshot() {
     };
     let mut progress = RunProgress::new(config);
     for i in 0..6u32 {
-        let event = json_event(
-            "opencode",
-            &format!(r#"{{"type":"text","part":{{"text":"message number {i}"}}}}"#),
+        let event = stream_event(
+            &format!("message number {i}"),
+            MessageRole::Assistant,
+            MessageKind::Message,
         );
         progress.push("opencode", &event);
     }
@@ -200,10 +221,7 @@ fn test_ring_buffer_overflow_snapshot() {
 #[test]
 fn test_non_opencode_agent_fallback_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
-    let event = json_event(
-        "claude",
-        r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello"}]}}"#,
-    );
+    let event = stream_event("Hello", MessageRole::Assistant, MessageKind::Message);
     progress.push("claude", &event);
     let lines: Vec<_> = progress.formatted_lines().collect();
     insta::assert_debug_snapshot!(lines);
@@ -246,20 +264,13 @@ fn test_multiple_events_sequence_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
 
     let events = vec![
-        json_event("opencode", r#"{"type":"step_start","timestamp":1234}"#),
-        json_event(
-            "opencode",
-            r#"{"type":"text","part":{"text":"Starting analysis"}}"#,
+        stream_event(
+            "Starting analysis",
+            MessageRole::Assistant,
+            MessageKind::Message,
         ),
-        json_event(
-            "opencode",
-            r#"{"type":"tool_use","part":{"tool":"bash","input":{"command":"pwd"},"exit":0,"output":"/home/user"}}"#,
-        ),
-        json_event("opencode", r#"{"type":"text","part":{"text":"Done."}}"#),
-        json_event(
-            "opencode",
-            r#"{"type":"step_finish","part":{"reason":"stop"}}"#,
-        ),
+        stream_event("/home/user", MessageRole::Tool, MessageKind::ToolOutput),
+        stream_event("Done.", MessageRole::Assistant, MessageKind::Message),
     ];
 
     for event in &events {
@@ -277,10 +288,7 @@ fn test_multiple_events_sequence_snapshot() {
 #[test]
 fn test_clear_resets_state_snapshot() {
     let mut progress = RunProgress::new(ProgressViewConfig::default());
-    let event = json_event(
-        "opencode",
-        r#"{"type":"text","part":{"text":"before clear"}}"#,
-    );
+    let event = stream_event("before clear", MessageRole::Assistant, MessageKind::Message);
     progress.push("opencode", &event);
     let token_ev = token_event("opencode", 100, 50, 150);
     progress.push("opencode", &token_ev);

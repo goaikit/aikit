@@ -58,12 +58,18 @@ printf '{"type":"message","role":"assistant","content":"Done."}\n'"#,
         });
 
         assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
-        assert_eq!(events.len(), 3);
+        let stream_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::StreamMessage(_)))
+            .collect();
+        assert_eq!(stream_events.len(), 3, "Expected 3 StreamMessage events");
         for (i, ev) in events.iter().enumerate() {
             assert_eq!(ev.seq, i as u64);
             assert_eq!(ev.stream, AgentEventStream::Stdout);
-            assert!(matches!(ev.payload, AgentEventPayload::JsonLine(_)));
         }
+        assert!(!events
+            .iter()
+            .any(|ev| matches!(ev.payload, AgentEventPayload::JsonLine(_))));
     }
 
     #[test]
@@ -89,10 +95,17 @@ printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
         });
 
         assert!(result.is_ok());
-        assert_eq!(events.len(), 3);
-        assert!(events
+        let stream_events: Vec<_> = events
             .iter()
-            .all(|ev| matches!(ev.payload, AgentEventPayload::JsonLine(_))));
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::StreamMessage(_)))
+            .collect();
+        assert!(
+            !stream_events.is_empty(),
+            "Expected at least 1 StreamMessage event from claude fixture"
+        );
+        assert!(!events
+            .iter()
+            .any(|ev| matches!(ev.payload, AgentEventPayload::JsonLine(_))));
     }
 
     #[test]
@@ -114,10 +127,14 @@ printf '{"candidates":[{"content":{"parts":[{"text":"Done."}],"role":"model"}}]}
         });
 
         assert!(result.is_ok());
-        assert_eq!(events.len(), 2);
-        assert!(events
+        let stream_events: Vec<_> = events
             .iter()
-            .all(|ev| matches!(ev.payload, AgentEventPayload::JsonLine(_))));
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::StreamMessage(_)))
+            .collect();
+        assert_eq!(stream_events.len(), 2, "Expected 2 StreamMessage events");
+        assert!(!events
+            .iter()
+            .any(|ev| matches!(ev.payload, AgentEventPayload::JsonLine(_))));
     }
 
     #[test]
@@ -140,10 +157,17 @@ printf '{"type":"end","exit_code":0}\n'"#,
         });
 
         assert!(result.is_ok());
-        assert_eq!(events.len(), 3);
-        assert!(events
+        let stream_events: Vec<_> = events
             .iter()
-            .all(|ev| matches!(ev.payload, AgentEventPayload::JsonLine(_))));
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::StreamMessage(_)))
+            .collect();
+        assert!(
+            !stream_events.is_empty(),
+            "Expected at least 1 StreamMessage event"
+        );
+        assert!(!events
+            .iter()
+            .any(|ev| matches!(ev.payload, AgentEventPayload::JsonLine(_))));
     }
 
     #[test]
@@ -166,10 +190,17 @@ printf '{"event":"end","status":"success"}\n'"#,
         });
 
         assert!(result.is_ok());
-        assert_eq!(events.len(), 3);
-        assert!(events
+        let stream_events: Vec<_> = events
             .iter()
-            .all(|ev| matches!(ev.payload, AgentEventPayload::JsonLine(_))));
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::StreamMessage(_)))
+            .collect();
+        assert!(
+            !stream_events.is_empty(),
+            "Expected at least 1 StreamMessage event"
+        );
+        assert!(!events
+            .iter()
+            .any(|ev| matches!(ev.payload, AgentEventPayload::JsonLine(_))));
     }
 
     #[test]
@@ -595,4 +626,171 @@ fn test_fixture_agent_all_lines_valid_json() {
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
         assert!(parsed.is_ok(), "Line is not valid JSON: {}", line);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fixture-based StreamMessage normalization tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_fixture_codex_produces_stream_messages() {
+    let fixture = include_str!("fixtures/streaming/codex.jsonl");
+    use aikit_sdk::{normalize_json_line, AgentEventStream, MessagePhase, MessageRole};
+    let mut assistant_count = 0;
+    for (i, line) in fixture.lines().filter(|l| !l.is_empty()).enumerate() {
+        let val: serde_json::Value = serde_json::from_str(line).unwrap();
+        let messages = normalize_json_line("codex", AgentEventStream::Stdout, &val, i as u64);
+        for sm in &messages {
+            if sm.role == MessageRole::Assistant {
+                assistant_count += 1;
+            }
+        }
+    }
+    assert!(
+        assistant_count >= 1,
+        "Expected at least 1 assistant StreamMessage from codex fixture"
+    );
+
+    let line = r#"{"type":"message","role":"assistant","content":"Processing your request..."}"#;
+    let val: serde_json::Value = serde_json::from_str(line).unwrap();
+    let messages = normalize_json_line("codex", AgentEventStream::Stdout, &val, 0);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text, "Processing your request...");
+    assert_eq!(messages[0].phase, MessagePhase::Final);
+    assert_eq!(messages[0].role, MessageRole::Assistant);
+}
+
+#[test]
+fn test_fixture_codex_nested_item_text() {
+    use aikit_sdk::{normalize_json_line, AgentEventStream, MessageRole};
+    let line = r#"{"type":"item","item":{"text":"<status>COMPLETED</status>"}}"#;
+    let val: serde_json::Value = serde_json::from_str(line).unwrap();
+    let messages = normalize_json_line("codex", AgentEventStream::Stdout, &val, 0);
+    assert_eq!(messages.len(), 1);
+    assert!(messages[0].text.contains("<status>COMPLETED</status>"));
+    assert_eq!(messages[0].role, MessageRole::Assistant);
+}
+
+#[test]
+fn test_fixture_claude_produces_stream_messages() {
+    let fixture = include_str!("fixtures/streaming/claude.jsonl");
+    use aikit_sdk::{normalize_json_line, AgentEventStream, MessagePhase, MessageRole};
+    let mut found = false;
+    for (i, line) in fixture.lines().filter(|l| !l.is_empty()).enumerate() {
+        let val: serde_json::Value = serde_json::from_str(line).unwrap();
+        let messages = normalize_json_line("claude", AgentEventStream::Stdout, &val, i as u64);
+        if !messages.is_empty() && messages[0].role == MessageRole::Assistant {
+            found = true;
+        }
+    }
+    assert!(
+        found,
+        "Expected at least 1 StreamMessage from claude fixture"
+    );
+
+    let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"I'll help with that."}]}}"#;
+    let val: serde_json::Value = serde_json::from_str(line).unwrap();
+    let messages = normalize_json_line("claude", AgentEventStream::Stdout, &val, 0);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text, "I'll help with that.");
+    assert_eq!(messages[0].phase, MessagePhase::Delta);
+}
+
+#[test]
+fn test_fixture_gemini_produces_stream_messages() {
+    let fixture = include_str!("fixtures/streaming/gemini.jsonl");
+    use aikit_sdk::{normalize_json_line, AgentEventStream, MessageRole};
+    let mut count = 0;
+    for (i, line) in fixture.lines().filter(|l| !l.is_empty()).enumerate() {
+        let val: serde_json::Value = serde_json::from_str(line).unwrap();
+        let messages = normalize_json_line("gemini", AgentEventStream::Stdout, &val, i as u64);
+        count += messages.len();
+    }
+    assert!(
+        count >= 1,
+        "Expected at least 1 StreamMessage from gemini fixture"
+    );
+
+    let line = r#"{"candidates":[{"content":{"parts":[{"text":"Starting..."}],"role":"model"}}]}"#;
+    let val: serde_json::Value = serde_json::from_str(line).unwrap();
+    let messages = normalize_json_line("gemini", AgentEventStream::Stdout, &val, 0);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text, "Starting...");
+    assert_eq!(messages[0].role, MessageRole::Assistant);
+}
+
+#[test]
+fn test_fixture_opencode_produces_stream_messages() {
+    let fixture = include_str!("fixtures/streaming/opencode.jsonl");
+    use aikit_sdk::{normalize_json_line, AgentEventStream, MessageRole};
+    let mut count = 0;
+    for (i, line) in fixture.lines().filter(|l| !l.is_empty()).enumerate() {
+        let val: serde_json::Value = serde_json::from_str(line).unwrap();
+        let messages = normalize_json_line("opencode", AgentEventStream::Stdout, &val, i as u64);
+        count += messages.len();
+    }
+    assert!(
+        count >= 1,
+        "Expected at least 1 StreamMessage from opencode fixture"
+    );
+
+    let line = r#"{"type":"text","part":{"text":"hello world"}}"#;
+    let val: serde_json::Value = serde_json::from_str(line).unwrap();
+    let messages = normalize_json_line("opencode", AgentEventStream::Stdout, &val, 0);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text, "hello world");
+    assert_eq!(messages[0].role, MessageRole::Assistant);
+}
+
+#[test]
+fn test_fixture_agent_produces_stream_messages() {
+    let fixture = include_str!("fixtures/streaming/agent.jsonl");
+    use aikit_sdk::{normalize_json_line, AgentEventStream, MessageRole};
+    let mut found = false;
+    for (i, line) in fixture.lines().filter(|l| !l.is_empty()).enumerate() {
+        let val: serde_json::Value = serde_json::from_str(line).unwrap();
+        let messages = normalize_json_line("agent", AgentEventStream::Stdout, &val, i as u64);
+        if !messages.is_empty() {
+            found = true;
+        }
+    }
+    assert!(
+        found,
+        "Expected at least 1 StreamMessage from agent fixture"
+    );
+
+    let line = r#"{"event":"message","role":"assistant","text":"Working on it..."}"#;
+    let val: serde_json::Value = serde_json::from_str(line).unwrap();
+    let messages = normalize_json_line("agent", AgentEventStream::Stdout, &val, 0);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].text, "Working on it...");
+    assert_eq!(messages[0].role, MessageRole::Assistant);
+}
+
+#[test]
+fn test_normalize_unknown_agent_returns_empty() {
+    use aikit_sdk::{normalize_json_line, AgentEventStream};
+    let val: serde_json::Value = serde_json::from_str(r#"{"type":"message"}"#).unwrap();
+    let messages = normalize_json_line("unknown", AgentEventStream::Stdout, &val, 0);
+    assert!(messages.is_empty());
+}
+
+#[test]
+fn test_normalize_empty_text_no_message() {
+    use aikit_sdk::{normalize_json_line, AgentEventStream};
+    let val: serde_json::Value =
+        serde_json::from_str(r#"{"type":"message","role":"assistant","content":"   "}"#).unwrap();
+    let messages = normalize_json_line("codex", AgentEventStream::Stdout, &val, 0);
+    assert!(messages.is_empty());
+}
+
+#[test]
+fn test_normalize_claude_result_is_final() {
+    use aikit_sdk::{normalize_json_line, AgentEventStream, MessagePhase};
+    let line = r#"{"type":"result","subtype":"success","result":"Done","session_id":"sess001"}"#;
+    let val: serde_json::Value = serde_json::from_str(line).unwrap();
+    let messages = normalize_json_line("claude", AgentEventStream::Stdout, &val, 0);
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].phase, MessagePhase::Final);
+    assert_eq!(messages[0].turn_id, Some("sess001".to_string()));
 }
