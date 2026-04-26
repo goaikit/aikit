@@ -113,6 +113,7 @@ aikit list
 | `aikit package init <name>` | Create a new package with aikit.toml |
 | `aikit package build` | Build distributable package (output: dist/ or .genreleases/) |
 | `aikit package publish <owner/repo>` | Publish package to GitHub (release and assets) |
+| `aikit llm` | Invoke an LLM via OpenAI-compatible API (supports streaming and JSON output) |
 | `aikit release <version>` | Create GitHub release from .genreleases/ (e.g. v1.0.0) |
 
 ## Creating and publishing packages
@@ -160,18 +161,19 @@ aikit run --agent claude --events -p "Summarize the project"
 aikit run --agent claude --events --stream -p "Refactor this module"
 ```
 
-**Supported agents:** `codex`, `claude`, `gemini`, `opencode`, `agent`
+**Supported agents:** `codex`, `claude`, `gemini`, `opencode`, `agent`, `auto`
 
 **Options:**
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--agent` | `-a` | Runnable agent key (`codex`, `claude`, `gemini`, `opencode`, `agent`) | **Required** |
+| `--agent` | `-a` | Runnable agent key (`codex`, `claude`, `gemini`, `opencode`, `agent`, `auto`) | **Required** |
 | `--model` | `-m` | Model passed to the agent | Omitted unless `-m` is set; no CLI default (agent binary decides) |
 | `--prompt` | `-p` | Prompt to run | Reads from stdin if omitted |
 | `--yolo` | | Auto-confirm, skip checks | `false` |
 | `--stream` | | Enable agent-native streaming output flags | `false` |
 | `--events` | | Emit NDJSON event stream to stdout | `false` |
+| `--progress` | | Display live human-readable progress on stderr (conflicts with `--events`) | `false` |
 
 `aikit run` also accepts the root **`--debug`** flag (global on the `aikit` CLI; it appears in `aikit run --help`).
 
@@ -207,7 +209,7 @@ Run `aikit run --help` for the authoritative option reference.
 
 ## Supported AI assistants
 
-The catalog covers **18** coding assistants (install/template mapping). Runnable via **`aikit run`** are only: `codex`, `claude`, `gemini`, `opencode`, `agent`.
+The catalog covers **18** coding assistants (install/template mapping). Runnable via **`aikit run`** are only: `codex`, `claude`, `gemini`, `opencode`, `agent`, `auto` (routing mode that resolves to a concrete agent).
 
 **CLI-based:** Claude, Gemini, Qwen, OpenCode, Codex, Auggie, CodeBuddy, Qoder, Q, Amp, Shai
 
