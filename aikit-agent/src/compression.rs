@@ -41,20 +41,22 @@ fn compress(packet: &mut ContextPacket, _target_tokens: u64) -> Result<u64, Agen
         return Ok(0);
     }
 
-    // Find the indices of turns to preserve:
-    // - Always preserve the last user turn
-    // - Always preserve the last tool result turn
     let last_user_idx = conversation.iter().rposition(|t| t.role == TurnRole::User);
     let last_tool_idx = conversation.iter().rposition(|t| t.role == TurnRole::Tool);
 
-    let preserve_from = std::cmp::min(
-        last_user_idx.unwrap_or(conversation.len()),
-        last_tool_idx.unwrap_or(conversation.len()),
-    );
+    let preserve_tool_boundary = last_tool_idx.and_then(|tool_idx| {
+        conversation[..tool_idx]
+            .iter()
+            .rposition(|t| t.role == TurnRole::Assistant && t.tool_calls.is_some())
+    });
 
-    // Summarize all turns before preserve_from
+    let preserve_from = [last_user_idx, preserve_tool_boundary]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(conversation.len());
+
     if preserve_from == 0 {
-        // Nothing to summarize
         return Ok(0);
     }
 
@@ -63,7 +65,6 @@ fn compress(packet: &mut ContextPacket, _target_tokens: u64) -> Result<u64, Agen
 
     let summary = build_summary(&turns_to_summarize);
 
-    // Insert summary as first turn
     let summary_turn = crate::context::Turn::assistant(summary);
     conversation.insert(0, summary_turn);
 
@@ -220,5 +221,96 @@ mod tests {
         packet.add_turn(Turn::user("Short question"));
         let result = maybe_compress(&mut packet).unwrap();
         assert!(result.is_none(), "no compression needed");
+    }
+
+    #[test]
+    fn test_compression_preserves_tool_call_boundary() {
+        let budget = TokenBudget {
+            total_budget: 50,
+            reserve_for_tools: 5,
+            reserve_for_output: 5,
+        };
+        let mut packet = ContextPacket::new("System instructions.".to_string(), budget);
+
+        for i in 0..5 {
+            packet.add_turn(Turn::user(format!("User question {}", i)));
+            packet.add_turn(Turn::assistant(format!("Answer {}", i)));
+        }
+
+        packet.add_turn(Turn::user("Read the file"));
+        packet.add_turn(Turn::assistant_with_tool_calls(
+            "",
+            vec![crate::context::ContextToolCall {
+                id: "call_1".to_string(),
+                name: "read_file".to_string(),
+                arguments: r#"{"path": "test.txt"}"#.to_string(),
+            }],
+        ));
+        packet.add_turn(Turn::tool_result(vec![crate::context::ContextToolResult {
+            call_id: "call_1".to_string(),
+            output: "file contents".to_string(),
+            is_error: false,
+        }]));
+
+        let _ = maybe_compress(&mut packet).unwrap();
+
+        for (i, turn) in packet.conversation.iter().enumerate() {
+            if turn.role == TurnRole::Tool {
+                assert!(
+                    i > 0,
+                    "Tool turn must not be the first turn in conversation"
+                );
+                let prev = &packet.conversation[i - 1];
+                assert!(
+                    prev.role == TurnRole::Assistant && prev.tool_calls.is_some(),
+                    "Tool turn must be immediately preceded by Assistant with tool_calls, but got {:?}",
+                    prev.role
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_compression_never_orphans_tool_turn() {
+        let budget = TokenBudget {
+            total_budget: 50,
+            reserve_for_tools: 5,
+            reserve_for_output: 5,
+        };
+        let mut packet = ContextPacket::new("System instructions.".to_string(), budget);
+
+        for i in 0..5 {
+            packet.add_turn(Turn::user(format!("User question {}", i)));
+            packet.add_turn(Turn::assistant(format!("Answer {}", i)));
+        }
+
+        packet.add_turn(Turn::user("Read a file please"));
+        packet.add_turn(Turn::assistant_with_tool_calls(
+            "I will read the file",
+            vec![crate::context::ContextToolCall {
+                id: "call_99".to_string(),
+                name: "read_file".to_string(),
+                arguments: r#"{"path": "data.txt"}"#.to_string(),
+            }],
+        ));
+        packet.add_turn(Turn::tool_result(vec![crate::context::ContextToolResult {
+            call_id: "call_99".to_string(),
+            output: "data contents".to_string(),
+            is_error: false,
+        }]));
+
+        let _ = maybe_compress(&mut packet).unwrap();
+
+        for (i, turn) in packet.conversation.iter().enumerate() {
+            if turn.role == TurnRole::Tool {
+                assert!(i > 0, "Tool turn at index {} has no predecessor", i);
+                let prev = &packet.conversation[i - 1];
+                assert_eq!(prev.role, TurnRole::Assistant);
+                assert!(
+                    prev.tool_calls.is_some(),
+                    "Predecessor of Tool turn must have tool_calls"
+                );
+            }
+        }
     }
 }

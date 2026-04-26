@@ -219,7 +219,9 @@ fn build_llm_request(
     if !context.system_instructions.is_empty() {
         messages.push(LlmMessage {
             role: "system".to_string(),
-            content: context.system_instructions.clone(),
+            content: Some(context.system_instructions.clone()),
+            tool_calls: None,
+            tool_call_id: None,
         });
     }
 
@@ -228,13 +230,35 @@ fn build_llm_request(
             crate::context::TurnRole::User => {
                 messages.push(LlmMessage {
                     role: "user".to_string(),
-                    content: turn.content.clone(),
+                    content: Some(turn.content.clone()),
+                    tool_calls: None,
+                    tool_call_id: None,
                 });
             }
             crate::context::TurnRole::Assistant => {
+                let tool_calls = turn.tool_calls.as_ref().map(|calls| {
+                    calls
+                        .iter()
+                        .map(|tc| crate::llm::types::MessageToolCall {
+                            id: tc.id.clone(),
+                            call_type: "function".to_string(),
+                            function: crate::llm::types::MessageToolCallFunction {
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                            },
+                        })
+                        .collect::<Vec<_>>()
+                });
+                let content = if turn.content.is_empty() && tool_calls.is_some() {
+                    None
+                } else {
+                    Some(turn.content.clone())
+                };
                 messages.push(LlmMessage {
                     role: "assistant".to_string(),
-                    content: turn.content.clone(),
+                    content,
+                    tool_calls,
+                    tool_call_id: None,
                 });
             }
             crate::context::TurnRole::Tool => {
@@ -242,7 +266,9 @@ fn build_llm_request(
                     for result in results {
                         messages.push(LlmMessage {
                             role: "tool".to_string(),
-                            content: result.output.clone(),
+                            content: Some(result.output.clone()),
+                            tool_calls: None,
+                            tool_call_id: Some(result.call_id.clone()),
                         });
                     }
                 }
@@ -606,5 +632,152 @@ mod tests {
             AgentError::MaxIterations { max } => assert_eq!(max, 1),
             e => panic!("expected MaxIterations, got {:?}", e),
         }
+    }
+
+    #[test]
+    fn test_two_iteration_tool_use_non_streaming() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp, false);
+
+        let gw = MockGateway::new(vec![
+            MockResponse::tool_call("c1", "read_file", r#"{"path": "test.txt"}"#),
+            MockResponse::text("Done reading file"),
+        ]);
+
+        let events = run(config, "Read test.txt", Box::new(gw)).unwrap();
+
+        let has_tool_use = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentInternalEvent::ToolUse { tool_name, .. }
+                if tool_name == "read_file"
+            )
+        });
+        assert!(has_tool_use, "should have ToolUse event");
+
+        let has_final = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentInternalEvent::TextFinal { content, .. }
+                if content == "Done reading file"
+            )
+        });
+        assert!(has_final, "should have final text response");
+    }
+
+    #[test]
+    fn test_two_iteration_tool_use_streaming() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp, true);
+
+        let gw = MockGateway::new(vec![
+            MockResponse::tool_call("c2", "read_file", r#"{"path": "test.txt"}"#),
+            MockResponse::text("Done reading file"),
+        ]);
+
+        let events = run(config, "Read test.txt", Box::new(gw)).unwrap();
+
+        let has_tool_use = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentInternalEvent::ToolUse { tool_name, .. }
+                if tool_name == "read_file"
+            )
+        });
+        assert!(has_tool_use, "should have ToolUse event");
+
+        let has_final = events.iter().any(|e| {
+            matches!(
+                e,
+                AgentInternalEvent::TextFinal { content, .. }
+                if content == "Done reading file"
+            )
+        });
+        assert!(has_final, "should have final text response");
+    }
+
+    #[test]
+    fn test_build_llm_request_includes_tool_calls() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp, false);
+
+        let budget = crate::context::TokenBudget {
+            total_budget: 12000,
+            reserve_for_tools: 1000,
+            reserve_for_output: 2000,
+        };
+        let mut context = crate::context::ContextPacket::new("System prompt".to_string(), budget);
+        context.add_turn(crate::context::Turn::user("Read the file"));
+        context.add_turn(crate::context::Turn::assistant_with_tool_calls(
+            "",
+            vec![crate::context::ContextToolCall {
+                id: "call_abc".to_string(),
+                name: "read_file".to_string(),
+                arguments: r#"{"path": "AGENTS.md"}"#.to_string(),
+            }],
+        ));
+        context.add_turn(crate::context::Turn::tool_result(vec![
+            crate::context::ContextToolResult {
+                call_id: "call_abc".to_string(),
+                output: "file contents here".to_string(),
+                is_error: false,
+            },
+        ]));
+
+        let req = build_llm_request(&config, &context, vec![]);
+
+        let assistant_msg = req
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant" && m.tool_calls.is_some())
+            .expect("should have assistant message with tool_calls");
+
+        assert!(assistant_msg.tool_calls.is_some());
+        let calls = assistant_msg.tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_abc");
+        assert_eq!(calls[0].function.name, "read_file");
+        assert!(assistant_msg.tool_call_id.is_none());
+    }
+
+    #[test]
+    fn test_build_llm_request_includes_tool_call_id() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp, false);
+
+        let budget = crate::context::TokenBudget {
+            total_budget: 12000,
+            reserve_for_tools: 1000,
+            reserve_for_output: 2000,
+        };
+        let mut context = crate::context::ContextPacket::new("System prompt".to_string(), budget);
+        context.add_turn(crate::context::Turn::user("Read the file"));
+        context.add_turn(crate::context::Turn::assistant_with_tool_calls(
+            "",
+            vec![crate::context::ContextToolCall {
+                id: "call_abc".to_string(),
+                name: "read_file".to_string(),
+                arguments: r#"{"path": "AGENTS.md"}"#.to_string(),
+            }],
+        ));
+        context.add_turn(crate::context::Turn::tool_result(vec![
+            crate::context::ContextToolResult {
+                call_id: "call_abc".to_string(),
+                output: "file contents here".to_string(),
+                is_error: false,
+            },
+        ]));
+
+        let req = build_llm_request(&config, &context, vec![]);
+
+        let tool_msg = req
+            .messages
+            .iter()
+            .find(|m| m.role == "tool" && m.tool_call_id.is_some())
+            .expect("should have tool message with tool_call_id");
+
+        assert_eq!(tool_msg.tool_call_id.as_deref(), Some("call_abc"));
+        assert_eq!(tool_msg.content.as_deref(), Some("file contents here"));
+        assert!(tool_msg.tool_calls.is_none());
     }
 }

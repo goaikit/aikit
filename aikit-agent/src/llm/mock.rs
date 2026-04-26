@@ -1,5 +1,7 @@
 use crate::llm::gateway::LlmGateway;
-use crate::llm::types::{LlmError, LlmRequest, LlmResponse, LlmStreamEvent, LlmStreamHandle};
+use crate::llm::types::{
+    LlmError, LlmRequest, LlmResponse, LlmStreamEvent, LlmStreamHandle, ToolCall,
+};
 
 /// A mock LLM gateway for testing.
 ///
@@ -17,6 +19,7 @@ pub struct MockResponse {
     pub finish_reason: String,
     pub stream_events: Vec<LlmStreamEvent>,
     pub error: Option<LlmError>,
+    pub tool_calls: Vec<ToolCall>,
 }
 
 impl MockResponse {
@@ -36,6 +39,7 @@ impl MockResponse {
             content: Some(content),
             finish_reason: "stop".to_string(),
             error: None,
+            tool_calls: vec![],
         }
     }
 
@@ -46,6 +50,41 @@ impl MockResponse {
             finish_reason: "error".to_string(),
             stream_events: vec![],
             error: Some(err),
+            tool_calls: vec![],
+        }
+    }
+
+    pub fn tool_call(
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        args: impl Into<String>,
+    ) -> Self {
+        let id = call_id.into();
+        let fn_name = name.into();
+        let arguments = args.into();
+        Self {
+            content: None,
+            finish_reason: "tool_calls".to_string(),
+            stream_events: vec![
+                LlmStreamEvent::ToolCallDelta {
+                    id: id.clone(),
+                    function_name: fn_name.clone(),
+                    arguments_delta: arguments.clone(),
+                },
+                LlmStreamEvent::Completed {
+                    finish_reason: "tool_calls".to_string(),
+                    usage: None,
+                },
+            ],
+            error: None,
+            tool_calls: vec![ToolCall {
+                id,
+                call_type: Some("function".to_string()),
+                function: crate::llm::types::ToolCallFunction {
+                    name: fn_name,
+                    arguments,
+                },
+            }],
         }
     }
 }
@@ -93,7 +132,7 @@ impl LlmGateway for MockGateway {
         }
         Ok(crate::llm::types::LlmResponse {
             content: resp.content,
-            tool_calls: vec![],
+            tool_calls: resp.tool_calls,
             finish_reason: Some(resp.finish_reason),
             usage: None,
         })
