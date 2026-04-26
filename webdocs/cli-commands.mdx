@@ -14,6 +14,7 @@ AIKit organizes functionality into logical command groups:
 ### Core Commands
 - **`init`** - Initialize new Spec-Driven Development projects
 - **`run`** - Run a coding agent with a prompt (supports streaming events)
+- **`llm`** - Invoke an LLM via OpenAI-compatible API (supports streaming and JSON output)
 - **`check`** - Validate installed tools and AI agent CLIs
 - **`version`** - Display version information
 
@@ -54,6 +55,7 @@ aikit <command> --help
 |---------|---------|---------|
 | `init` | Create new project | `aikit init my-project` |
 | `run` | Run a coding agent | `aikit run --agent claude -p "Task"` |
+| `llm` | Invoke an LLM | `aikit llm -m gpt-4o -p "Hello"` |
 | `check` | Validate environment | `aikit check` |
 | `install` | Install package | `aikit install https://github.com/user/repo` |
 | `package init` | Create package | `aikit package init` |
@@ -154,7 +156,7 @@ $ aikit init my-claude-project --ai claude
 
 Run a coding agent with a prompt. The `run` command executes AI coding agents directly from the CLI, supporting buffered output, agent-native streaming, and structured NDJSON event delivery.
 
-**Runnable agents:** `codex`, `claude`, `gemini`, `opencode`, `agent`
+**Runnable agents:** `codex`, `claude`, `gemini`, `opencode`, `agent`, `auto`
 
 ```bash
 # Run an agent with an inline prompt
@@ -183,6 +185,7 @@ aikit run --agent claude --events --stream -p "Refactor this module"
 | `--yolo` | | Auto-confirm, skip checks | `false` |
 | `--stream` | | Enable agent-native streaming output flags | `false` |
 | `--events` | | Emit NDJSON event stream to stdout | `false` |
+| `--progress` | | Display live human-readable progress on stderr (conflicts with `--events`) | `false` |
 | `--debug` | | Verbose diagnostic output (global `aikit` flag; shown on `run` help) | `false` |
 
 `-a` / `--agent` is required. `aikit run` does not use `CODING_AGENT` or `CODING_AGENT_MODEL`. Without `-m`, no model is passed through to the agent.
@@ -214,6 +217,76 @@ Fields:
 See [aikit-sdk README](../aikit-sdk/README.md) for complete streaming API documentation.
 
 Run `aikit run --help` for the authoritative option reference.
+
+### llm
+
+Invoke an LLM via an OpenAI-compatible API. Supports both streaming and non-streaming requests, JSON output format, and usage tracking.
+
+```bash
+# Simple prompt (uses OPENAI_API_KEY env var by default)
+aikit llm -m gpt-4o -p "Explain Rust ownership in one paragraph"
+
+# Read prompt from a file
+aikit llm -m gpt-4o --prompt-file prompt.txt
+
+# Stream output token by token
+aikit llm -m gpt-4o -p "Write a haiku about coding" --stream
+
+# JSON output format
+aikit llm -m gpt-4o -p "What is 2+2?" --format json
+
+# Write output to a file
+aikit llm -m gpt-4o -p "Summarize this" -o summary.txt
+
+# Use a custom API endpoint
+aikit llm -m my-model -u https://my-llm.example.com/v1 -p "Hello"
+
+# Suppress non-essential output
+aikit llm -m gpt-4o -p "Quick answer" --quiet
+
+# Set custom timeouts
+aikit llm -m gpt-4o -p "Long task" --timeout 300 --connect-timeout 30
+```
+
+**Options:**
+
+| Flag | Short | Description | Default |
+|------|-------|-------------|---------|
+| `--model` | `-m` | Model to use | **Required** |
+| `--url` | `-u` | OpenAI-compatible API base URL | `https://api.openai.com/v1` |
+| `--prompt` | `-p` | Prompt text | One of `--prompt` or `--prompt-file` required |
+| `--prompt-file` | | Read prompt from file | One of `--prompt` or `--prompt-file` required |
+| `--system` | | System prompt | Omitted |
+| `--stream` | | Enable streaming output | `false` |
+| `--out` | `-o` | Write output to file | Omitted |
+| `--format` | | Output format: `text` or `json` | `text` |
+| `--max-tokens` | | Maximum tokens in response | Omitted |
+| `--temperature` | | Sampling temperature | Omitted |
+| `--top-p` | | Top-p sampling | Omitted |
+| `--api-key-env` | | Environment variable holding API key | `OPENAI_API_KEY` |
+| `--timeout` | | Request timeout in seconds | `120` |
+| `--connect-timeout` | | Connection timeout in seconds | `10` |
+| `--usage` | | Usage output mode: `stderr`, `json`, `none` | `stderr` (text) / `json` (json) |
+| `--quiet` | | Suppress non-essential output | `false` |
+
+`--model` is required. Exactly one of `--prompt` or `--prompt-file` must be provided.
+
+**`--format` modes:**
+- `text` (default): Prints the LLM response as plain text.
+- `json`: Prints a JSON envelope wrapping the full response object (including metadata).
+
+**`--usage` modes:**
+- `stderr` (default for text format): Prints token usage to stderr after the response.
+- `json` (default for json format): Appends a JSON usage object to stdout after the response.
+- `none`: Suppresses usage output entirely.
+
+**`--stream` behavior:**
+When `--stream` is enabled, the command connects to the SSE streaming endpoint and prints tokens incrementally. In `--format json` mode, each chunk is emitted as a JSON delta event. A final `[DONE]` event signals stream completion.
+
+**API key resolution:**
+The command reads the API key from the environment variable specified by `--api-key-env` (default: `OPENAI_API_KEY`). If the variable is not set, the command exits with an authentication error.
+
+Run `aikit llm --help` for the authoritative option reference.
 
 ### check
 
