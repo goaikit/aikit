@@ -4,6 +4,13 @@
 
 **Programmatic gateway:** [aikit-sdk](aikit-sdk/README.md) (Rust) and [aikit-py](aikit-py/README.md) (Python) expose the same agent catalog, path rules, deploy APIs, availability checks, and run/event APIs for your own tools and automation.
 
+## Workspace crates
+
+- `aikit` (root crate): CLI for package lifecycle, install/init flows, release, run/llm commands
+- [`aikit-sdk`](aikit-sdk/README.md): Rust library for catalog/deploy and run/event APIs
+- [`aikit-py`](aikit-py/README.md): Python package exposing the same gateway behaviors
+- [`aikit-agent`](aikit-agent/README.md): in-process agent runtime used by `aikit run -a aikit`
+
 ## Installation
 
 ### Linux (GNU)
@@ -213,3 +220,7 @@ Run `aikit check` to see which are installed on your system (git and VS Code are
 Apache License 2.0 - See [LICENSE](LICENSE)
 
 Need help? [Open an issue](https://github.com/goaikit/aikit/issues)
+
+Contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md)  
+Architecture: [architecture.md](architecture.md)  
+Testing details: [TESTING.md](TESTING.md)

@@ -1,433 +1,111 @@
 # aikit-sdk
 
-Rust library: **programmatic gateway** to coding-agent CLIs and their on-disk conventions. One catalog and set of APIs for **resolving paths** (commands, skills, subagents, instruction files), **deploying** template content, **probing** which agent binaries are installed, and **running** agents with captured output or a structured **event stream** (including optional **token usage** lines). The **`aikit`** CLI uses this crate for `aikit run` and related behavior.
+`aikit-sdk` is the Rust gateway used by the `aikit` CLI and available for direct integration.
+It provides deterministic APIs for:
 
-## Overview
+- agent catalog and capability lookup
+- path and instruction-file resolution
+- file deployment (commands, skills, subagents)
+- package/template install helpers
+- runnable-agent detection
+- buffered and streaming agent execution
 
-The crate holds the full **agent catalog** (18 assistants) with per-agent capability flags, implements deterministic **path** and **instruction-file** resolution, and provides **deploy** APIs that write files to the correct locations with clear errors when a concept is unsupported. **Runnable** agent keys match the CLI: `codex`, `claude`, `gemini`, `opencode`, `agent` (the last is the Cursor agent CLI).
+## Install
 
-## Features
+```toml
+[dependencies]
+aikit-sdk = "0.2.0"
+```
 
-- **Complete Agent Catalog**: All 18 supported agents including their capabilities
-- **Path Resolution**: Resolves target paths per agent and concept
-- **Instruction File Resolution**: Resolve project-level instruction files (CLAUDE.md, GEMINI.md, AGENTS.md) with deterministic precedence
-- **File Deployment**: Creates directories and writes files for commands, skills, and subagents
-- **Error Handling**: Clear error types when concepts are unsupported
-- **Filename Conventions**: Proper filename formats per agent type
-- **Agent Detection**: Identify which AI coding agents are installed and available
-- **CLI execution**: Spawn runnable agent CLIs with argv aligned to the `aikit run` contract
-- **Output Capture**: Capture stdout/stderr for programmatic forwarding
-- **Streaming Events**: Real-time event delivery via `run_agent_events` with canonical `StreamMessage` normalization across all agent engines
+Or from this workspace:
 
-## Agents Supported
+```toml
+[dependencies]
+aikit-sdk = { path = "../aikit-sdk" }
+```
 
-| Agent Key    | Name               | Commands | Skills | Subagents |
-| ------------ | ------------------ | -------- | ------ | --------- |
-| claude       | Claude Code        | ✓        | ✓      | ✓         |
-| gemini       | Google Gemini      | ✓        | ✓      | ✓         |
-| copilot      | GitHub Copilot     | ✓        | ✗      | ✓         |
-| cursor-agent | Cursor             | ✓        | ✓      | ✓         |
-| qwen         | Qwen Code          | ✓        | ✗      | ✗         |
-| opencode     | opencode           | ✓        | ✗      | ✗         |
-| codex        | Codex CLI          | ✓        | ✓      | ✗         |
-| windsurf     | Windsurf           | ✓        | ✓      | ✗         |
-| kilocode     | Kilo Code          | ✓        | ✓      | ✗         |
-| auggie       | Auggie CLI         | ✓        | ✓      | ✓         |
-| roo          | Roo Code           | ✓        | ✓      | ✗         |
-| codebuddy    | CodeBuddy CLI      | ✓        | ✗      | ✗         |
-| qoder        | Qoder CLI          | ✓        | ✗      | ✓         |
-| amp          | Amp                | ✓        | ✗      | ✗         |
-| shai         | SHAI               | ✓        | ✗      | ✗         |
-| q            | Amazon Q Developer | ✓        | ✗      | ✗         |
-| bob          | IBM Bob            | ✓        | ✗      | ✗         |
-
-## Public API
-
-### Catalog
+## Quick start
 
 ```rust
-use aikit_sdk::*;
+use aikit_sdk::{all_agents, validate_agent_key, commands_dir};
+use std::path::Path;
 
-// Get all agents
-let agents = all_agents();
-
-// Get a specific agent
-let claude = agent("claude");
-
-// Validate an agent key
+let _agents = all_agents();
 validate_agent_key("claude")?;
+let cmd_dir = commands_dir(Path::new("."), "claude")?;
+println!("{}", cmd_dir.display());
+# Ok::<(), aikit_sdk::DeployError>(())
 ```
 
-### Path Resolution
+## Deploy content
 
 ```rust
-// Command directory (all agents support this)
-let commands_dir = commands_dir(project_root, "claude")?;
+use aikit_sdk::{deploy_command, deploy_skill, deploy_subagent};
+use std::path::Path;
 
-// Skill directory (only if agent supports skills)
-let skill_dir = skill_dir(project_root, "claude", "my-skill")?;
-
-// Subagent path (only if agent supports subagents)
-let subagent_path = subagent_path(project_root, "claude", "my-agent")?;
+let root = Path::new(".");
+deploy_command("claude", root, "lint", "# command body")?;
+deploy_skill("cursor-agent", root, "my-skill", "# SKILL.md", None)?;
+deploy_subagent("claude", root, "reviewer", "# subagent")?;
+# Ok::<(), aikit_sdk::DeployError>(())
 ```
 
-### Instruction File Resolution
+## Instruction files
 
-Instruction files are project-root files used for agent guidance (e.g., `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`).
+For agent guidance files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`):
 
-```rust
-// Direct lookup: Get the primary instruction file for an agent
-let claude_md = instruction_file(project_root, "claude")?;
-// Returns Some(project_root/CLAUDE.md) for claude
+- `instruction_file(...)`
+- `resolve_instruction_file(...)`
+- `instruction_file_with_override(...)`
+- `instruction_file_agents()`
 
-// Check if an agent supports instruction files
-if agent_has_instruction_file("claude") {
-    println!("Claude supports instruction files");
-}
+These helpers provide deterministic paths and fallback behavior per agent.
 
-// Get all agents that support instruction files
-let agents = instruction_file_agents();
+## Run agents
 
-// Auto-resolve: Find the best instruction file with fallback logic
-let resolved = resolve_instruction_file(project_root, None)?;
-// Scans for AGENTS.md, CLAUDE.md, GEMINI.md in order
-
-// With specific agent
-let resolved = resolve_instruction_file(project_root, Some("claude"))?;
-// Returns CLAUDE.md if exists, else AGENTS.md, else CLAUDE.md path for creation
-
-// With override path (takes precedence)
-let override_path = Path::new("custom/instructions.md");
-let resolved = instruction_file_with_override(project_root, Some("claude"), Some(override_path))?;
-```
-
-**Instruction File Support Table:**
-
-| Agent Key | Name | Primary Instruction File | Fallback |
-|-----------|------|-------------------------|----------|
-| claude | Claude Code | CLAUDE.md | AGENTS.md |
-| gemini | Google Gemini | GEMINI.md | AGENTS.md |
-| cursor-agent | Cursor | AGENTS.md | - |
-| codex | Codex CLI | AGENTS.md | - |
-| newton | Newton | AGENTS.md | - |
-| qwen | Qwen Code | AGENTS.md | - |
-| opencode | opencode | AGENTS.md | - |
-| windsurf | Windsurf | AGENTS.md | - |
-| kilocode | Kilo Code | AGENTS.md | - |
-| auggie | Auggie CLI | AGENTS.md | - |
-| roo | Roo Code | AGENTS.md | - |
-| codebuddy | CodeBuddy CLI | AGENTS.md | - |
-| qoder | Qoder CLI | AGENTS.md | - |
-| amp | Amp | AGENTS.md | - |
-| shai | SHAI | AGENTS.md | - |
-| q | Amazon Q Developer | AGENTS.md | - |
-| bob | IBM Bob | AGENTS.md | - |
-| copilot | GitHub Copilot | Not supported | - |
-
-
-### Deployment
+Runnable keys: `codex`, `claude`, `gemini`, `opencode`, `agent`.
 
 ```rust
-// Deploy a command
-let path = deploy_command("claude", project_root, "my-command", "# Content")?;
+use aikit_sdk::{run_agent, RunOptions};
 
-// Deploy a skill with optional scripts
-let path = deploy_skill(
-    "cursor-agent",
-    project_root,
-    "my-skill",
-    "# Skill content",
-    Some(&[("script.sh", b"#!/bin/sh")])
+let result = run_agent(
+    "claude",
+    "Summarize the architecture",
+    RunOptions::default().with_stream(false),
 )?;
 
-// Deploy a subagent
-let path = deploy_subagent("claude", project_root, "my-agent", "# Agent content")?;
+println!("exit={:?}", result.exit_code());
+# Ok::<(), aikit_sdk::RunError>(())
 ```
 
-### Running agents
+For incremental output, use `run_agent_events(...)`. Event payloads include normalized stream messages and raw transport lines where applicable.
 
-Only some agents have a runnable CLI; use `runnable_agents()` or `is_runnable(key)` before calling `run_agent`.
+## Agent availability
 
-Runnable agent keys: `codex`, `claude`, `gemini`, `opencode`, `agent`.
+- `is_agent_available(key)`
+- `get_installed_agents()`
+- `get_agent_status()`
+- `is_runnable(key)` and `runnable_agents()`
 
-```rust
-use aikit_sdk::{run_agent, RunOptions, RunResult};
+## Test
 
-let options = RunOptions::default()
-    .with_model("claude-3-opus")
-    .with_yolo(true)
-    .with_stream(false);
-
-let result: Result<RunResult, _> = run_agent("claude", "Refactor this function", options);
-match result {
-    Ok(r) => {
-        println!("stdout: {}", String::from_utf8_lossy(&r.stdout));
-        println!("stderr: {}", String::from_utf8_lossy(&r.stderr));
-        std::process::exit(r.exit_code().unwrap_or(1));
-    }
-    Err(e) => eprintln!("{}", e),
-}
-```
-
-- `RunOptions`: optional `model`, `yolo`, `stream`.
-- `RunResult`: `status`, `stdout`, `stderr`; `.exit_code()`, `.success()`.
-- `RunError`: `AgentNotRunnable(key)`, `SpawnFailed`, `StdinFailed`, `OutputFailed`, `CallbackPanic`, `ReaderFailed`.
-
-### Streaming Events
-
-`run_agent_events` delivers events incrementally as the child process runs, preventing deadlocks from large outputs and enabling real-time progress feedback.
-
-```rust
-use aikit_sdk::{run_agent_events, AgentEvent, AgentEventPayload, AgentEventStream, RunOptions};
-
-let options = RunOptions::default().with_stream(true);
-
-let result = run_agent_events("claude", "Summarize the project", options, |event: AgentEvent| {
-    println!("seq={} stream={:?}", event.seq, event.stream);
-    match &event.payload {
-        AgentEventPayload::StreamMessage(sm) => println!("  [{}] {}", sm.role.as_ref(), sm.text),
-        AgentEventPayload::RawLine(s)  => println!("  text: {}", s),
-        AgentEventPayload::RawBytes(b) => println!("  bytes: {} bytes", b.len()),
-    }
-});
-```
-
-### Canonical Event Stream
-
-By default, `run_agent_events` normalises per-engine JSON output into engine-agnostic `StreamMessage` events. Callbacks receive `AgentEventPayload::StreamMessage` instead of raw `AgentEventPayload::JsonLine`, so consumers no longer need per-engine JSON-path extraction logic.
-
-#### `StreamMessage` struct
-
-```rust
-pub struct StreamMessage {
-    pub text: String,           // Extracted assistant/tool text
-    pub phase: MessagePhase,    // Delta (partial) or Final (complete)
-    pub role: MessageRole,      // Assistant, Tool, System, User
-    pub kind: MessageKind,      // Message, Reasoning, ToolOutput, Status
-    pub source: AgentEventStream, // Stdout or Stderr
-    pub raw_line_seq: u64,      // Seq of the source JsonLine
-    pub turn_id: Option<String>, // Session/turn ID if provided by engine
-}
-```
-
-#### Supporting enums
-
-```rust
-pub enum MessagePhase { Delta, Final }
-pub enum MessageRole { Assistant, Tool, System, User }
-pub enum MessageKind { Message, Reasoning, ToolOutput, Status }
-```
-
-#### Per-engine normalization
-
-| Agent      | JSON shape                                             | Extracted path                    | Phase  | Role       | Kind       |
-|------------|--------------------------------------------------------|-----------------------------------|--------|------------|------------|
-| `codex`    | `{"type":"message","role":"assistant","content":"..."}` | `$.content`                       | Final  | Assistant  | Message    |
-| `codex`    | `{"type":"message","role":"system","content":"..."}`   | `$.content`                       | Final  | System     | Status     |
-| `codex`    | `{"type":"action","action":"shell","command":"..."}`   | `$.command`                       | Final  | Tool       | Message    |
-| `codex`    | `{"type":"output","stdout":"..."}`                     | `$.stdout`                        | Final  | Tool       | ToolOutput |
-| `codex`    | `{"type":"...","item":{"text":"..."}}`                 | `$.item.text`                     | Final  | Assistant  | Message    |
-| `claude`   | `{"type":"assistant","message":{"content":[...]}}`     | `$.message.content[*].text`       | Delta  | Assistant  | Message    |
-| `claude`   | `{"type":"result","result":"..."}`                     | `$.result`                        | Final  | Assistant  | Message    |
-| `gemini`   | `{"candidates":[{"content":{"parts":[{"text":"..."}]}}]}` | `$.candidates[*].content.parts[*].text` | Delta | Assistant | Message |
-| `gemini`   | `{"type":"result","result":"..."}`                     | `$.result`                        | Final  | Assistant  | Message    |
-| `opencode` | `{"type":"text","part":{"text":"..."}}`                | `$.part.text`                     | Delta  | Assistant  | Message    |
-| `opencode` | `{"type":"tool_use","part":{"output":"..."}}`          | `$.part.output`                   | Final  | Tool       | ToolOutput |
-| `opencode` | `{"type":"message","role":"assistant","content":"..."}` | `$.content`                      | Delta  | Assistant  | Message    |
-| `agent`    | `{"event":"message","role":"assistant","text":"..."}`  | `$.text`                          | Delta  | Assistant  | Message    |
-| `agent`    | `{"type":"result","result":"..."}`                     | `$.result`                        | Final  | Assistant  | Message    |
-
-#### `RawTransportLine` opt-in
-
-For debugging, enable `RunOptions::emit_raw_transport` to receive `AgentEventPayload::RawTransportLine` events alongside `StreamMessage`:
-
-```rust
-let options = RunOptions::default().with_emit_raw_transport(true);
-```
-
-#### Migration guide
-
-**Before** (pre-0.2.0): callbacks received `JsonLine(serde_json::Value)` and consumers extracted text with per-engine logic:
-
-```rust
-// OLD: match on JsonLine and extract per engine
-match &event.payload {
-    AgentEventPayload::JsonLine(v) => {
-        let text = if agent_key == "codex" {
-            v.get("content").and_then(|v| v.as_str()).unwrap_or("")
-        } else if agent_key == "claude" {
-            v.get("message").and_then(|m| m.get("content"))
-                .and_then(|c| c.get(0)).and_then(|i| i.get("text"))
-                .and_then(|v| v.as_str()).unwrap_or("")
-        } else { "" };
-    }
-    _ => {}
-}
-```
-
-**After** (0.2.0+): callbacks receive `StreamMessage` with engine-agnostic text:
-
-```rust
-// NEW: match on StreamMessage — no engine-specific logic needed
-match &event.payload {
-    AgentEventPayload::StreamMessage(sm) => {
-        println!("[{}] {}", sm.role.as_ref(), sm.text);
-    }
-    _ => {}
-}
-```
-
-#### Per-agent argv matrix
-
-| Agent | Events-mode flags added |
-|-------|------------------------|
-| `codex` | `--json` (already included in standard argv) |
-| `claude` | `--output-format json` (or `stream-json` when `stream=true`) |
-| `gemini` | `--json` |
-| `opencode` | `--json` |
-| `agent` | `--json` |
-
-#### `--stream` vs `--events` (CLI)
-
-- `--stream`: Tunes agent-native partial output flags (e.g. `--stream-partial-output`, `stream-json`). Passed through as `RunOptions::stream` to the argv builder.
-- `--events`: Switches the CLI to call `run_agent_events` and emit one JSON object per line (NDJSON) to stdout. Incremental delivery; process exit code matches child exit when no SDK error occurs.
-
-Both flags can be combined: `aikit run --events --stream` uses events-mode argv (JSON output) AND adds stream-partial flags for supported agents.
-
-#### Error handling
-
-- `RunError::CallbackPanic`: User callback panicked. Subprocess is killed and reaped.
-- `RunError::ReaderFailed { stream, source }`: Reader thread encountered I/O error on the identified stream.
-
-#### Limitations
-
-- No timeout or cancellation support (out of scope for v1).
-- No async/await interface.
-- Python bindings support streaming via `run_agent_events_py` in `aikit-py`. See [aikit-py README](../aikit-py/README.md) for details.
-- Non-JSON agent output formats are emitted as `RawLine`/`RawBytes` without structured parsing. JSON lines that do not match any engine rule produce no `StreamMessage` (unmapped count is logged).
-
-### Agent Detection
-
-Check if agent CLI tools are installed and available on the system.
-
-```rust
-use aikit_sdk::*;
-
-// Check if a specific agent is available
-if is_agent_available("claude") {
-    println!("Claude is installed and ready to run");
-} else {
-    println!("Claude is not available");
-}
-
-// Get all installed runnable agents (sorted alphabetically)
-let installed = get_installed_agents();
-println!("Installed agents: {:?}", installed);
-// Output: ["agent", "claude", "codex", "gemini", "opencode"]
-
-// Get detailed status for all runnable agents
-let status = get_agent_status();
-for (agent_key, agent_status) in status {
-    println!("{}: {}",
-        agent_key,
-        if agent_status.available { "Available" } else { "Not available" }
-    );
-    if let Some(reason) = agent_status.reason {
-        println!("  Reason: {}", reason);
-    }
-}
-```
-
-**Functions**:
-
-- `is_agent_available(agent_key: &str) -> bool` - Check if agent binary is in PATH and responds to `--version`
-- `get_installed_agents() -> Vec<String>` - List all runnable agents that are installed (sorted alphabetically)
-- `get_agent_status() -> BTreeMap<String, AgentStatus>` - Get detailed availability info for all runnable agents (deterministic ordering)
-
-**AgentAvailabilityReason**:
-
-```rust
-pub enum AgentAvailabilityReason {
-    NotRunnable,        // Agent is not in runnable_agents list
-    BinaryNotFound,     // Binary not found in PATH
-    VersionCheckFailed, // Binary found but --version failed
-    TimedOut,          // Probe timed out
-}
-```
-
-**AgentStatus**:
-
-```rust
-pub struct AgentStatus {
-    pub available: bool,
-    pub reason: Option<AgentAvailabilityReason>,
-}
-```
-
-**Detection behavior**:
-
-- Detection is bounded by a 1500ms timeout per binary probe
-- The `opencode` agent checks multiple binary candidates: `opencode` and `opencode-desktop`
-- `get_agent_status()` returns a BTreeMap for deterministic ordering
-- `get_installed_agents()` returns a sorted list of available agents
-
-## Error Types
-
-```rust
-pub enum DeployError {
-    AgentNotFound(String),
-    UnsupportedConcept { agent_key: String, concept: DeployConcept },
-    Io(std::io::Error),
-}
-
-pub enum DeployConcept {
-    Command,
-    Skill,
-    Subagent,
-    InstructionFile,
-}
-```
-
-## Error Handling
-
-The crate returns `Result` types with `aikit_sdk::DeployError` for:
-
-- Agent key not found in catalog
-- Attempting to deploy to an agent that doesn't support the concept
-- Filesystem operations failing
-
-## Windows Configuration
-
-### AIKIT_CURSOR_AGENT Environment Variable
-
-On Windows, Cursor ships its agent as `agent.cmd` rather than `agent.exe`. AIKIT automatically resolves this via PATH + PATHEXT scanning, but you can override the path explicitly:
+From workspace root:
 
 ```bash
-# Point to a custom Cursor agent installation
-set AIKIT_CURSOR_AGENT=C:\path\to\custom\agent.cmd
+cargo test -p aikit-sdk
 ```
 
-When `AIKIT_CURSOR_AGENT` is set and points to an existing file, it takes precedence over PATH resolution for the `agent` command. If the path is invalid, AIKIT falls back to standard PATH+PATHEXT resolution.
-
-This variable only affects the `agent` command (Cursor agent). Other agent binaries use standard PATH resolution.
-
-### Manual Windows Agent Tests
-
-Integration tests for real Windows agent CLIs are available but skipped by default (they require actual agent installations):
+Some tests are marked ignored (for manual Windows/real-agent scenarios):
 
 ```bash
-# Run all manual Windows agent tests (requires agents installed)
-cargo test --test manual_windows_agents -- --ignored
-
-# Run a specific manual test
-cargo test --test manual_windows_agents test_cursor_agent_spawn -- --ignored
+cargo test -p aikit-sdk -- --ignored
 ```
 
-These tests verify that `agent.cmd` is correctly discovered and spawnable on Windows. They are excluded from CI and must be run manually in environments where the agents are installed.
+## Related docs
 
-## Dependencies
-
-Only `std` is required. No external dependencies.
+- Workspace overview: `../README.md`
+- Python bindings: `../aikit-py/README.md`
+- Contributor guide: `CONTRIBUTING.md`
 
 ## License
 

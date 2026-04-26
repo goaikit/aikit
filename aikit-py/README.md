@@ -1,5 +1,136 @@
 # aikit-py
 
+`aikit-py` is the Python binding for `aikit-sdk`.
+It exposes the same core capabilities from Python:
+
+- agent catalog lookup
+- deterministic path resolution
+- command/skill/subagent deployment
+- runnable-agent availability checks
+- agent execution (`run_agent`)
+- streaming callbacks (`run_agent_events_py`)
+
+## Requirements
+
+- Python `>=3.9`
+- Rust toolchain (needed for local build from source)
+
+## Install
+
+```bash
+pip install aikit-py
+```
+
+For local development from this workspace:
+
+```bash
+cd aikit-py
+python -m venv .venv
+source .venv/bin/activate
+pip install -U pip maturin
+maturin develop
+```
+
+## Quick start
+
+```python
+import aikit_py
+from tempfile import TemporaryDirectory
+
+# Catalog
+print([a.key() for a in aikit_py.all_agents()])
+aikit_py.validate_agent_key("claude")
+
+with TemporaryDirectory() as root:
+    # Deploy a command for Claude
+    path = aikit_py.deploy_command(
+        "claude",
+        root,
+        "hello",
+        "# hello command\nprint('hello')\n",
+    )
+    print(path)
+```
+
+## Run an agent
+
+Runnable keys: `codex`, `claude`, `gemini`, `opencode`, `agent`.
+
+```python
+import aikit_py
+
+if aikit_py.is_runnable_py("claude"):
+    result = aikit_py.run_agent(
+        "claude",
+        "Summarize this repository",
+        model=None,
+        yolo=False,
+        stream=False,
+    )
+    print(result["stdout"].decode("utf-8", errors="replace"))
+```
+
+## Streaming events
+
+Use `run_agent_events_py` for incremental callback delivery while the child process is running.
+
+```python
+import aikit_py
+
+def on_event(event: dict) -> None:
+    seq = event["seq"]
+    stream = event["stream"]
+    payload = event["payload"]
+    print(seq, stream, payload.keys())
+
+result = aikit_py.run_agent_events_py(
+    "claude",
+    "List important modules",
+    on_event,
+    model=None,
+    yolo=False,
+    stream=True,
+)
+print(result["status_code"])
+```
+
+Event payload contains exactly one of:
+
+- `json_line`
+- `raw_line`
+- `raw_bytes`
+- `token_usage_line`
+
+## Main API surface
+
+- `all_agents()`, `agent(key)`, `validate_agent_key(key)`
+- `commands_dir(...)`, `skill_dir(...)`, `subagent_path(...)`
+- `deploy_command(...)`, `deploy_skill(...)`, `deploy_subagent(...)`
+- `run_agent(...)`, `run_agent_events_py(...)`
+- `runnable_agents_list()`, `is_runnable_py(key)`
+- `is_agent_available(key)`, `get_installed_agents()`, `get_agent_status()`
+
+## Test
+
+From workspace root:
+
+```bash
+cargo test -p aikit-py
+```
+
+Python integration test file is `aikit-py/tests/test_aikit_py.py`.
+
+## Related docs
+
+- Workspace overview: `../README.md`
+- Rust gateway: `../aikit-sdk/README.md`
+- Contributor guide: `CONTRIBUTING.md`
+
+## License
+
+Apache-2.0
+# aikit-py
+
 Python bindings for **[aikit-sdk](../aikit-sdk/README.md)**: the same **programmatic gateway** from Python. Use it to query the **agent catalog**, **resolve paths**, **deploy** commands/skills/subagents, **check** which runnable agent CLIs are installed, and **run** agents with either **buffered** output (`run_agent`) or **per-event callbacks** (`run_agent_events_py`) matching the NDJSON shape of `aikit run --events` (including `token_usage_line` when the agent emits parseable usage).
 
 ## Requirements
