@@ -289,9 +289,12 @@ mod tests {
 
         let ctx = ToolContext::new(tmp.path().to_path_buf(), vec![tmp.path().to_path_buf()]);
 
-        // Use /tmp as workdir - outside the allowed root
+        let outside = TempDir::new().unwrap();
+
+        // Use a real temporary directory outside the allowed root. This keeps
+        // the test portable across Unix and Windows, where "/tmp" may not exist.
         let input = serde_json::json!({
-            "workdir": "/tmp",
+            "workdir": outside.path().to_str().unwrap(),
             "prompt": "do evil"
         });
         let result = tool.execute(input, &ctx).unwrap();
