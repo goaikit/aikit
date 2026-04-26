@@ -1,0 +1,26 @@
+[package]
+name = "aikit-agent"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Built-in AI agent for aikit with LLM gateway, context management, tools, skills, and sub-agent spawning"
+repository = "https://github.com/goaikit/aikit"
+keywords = ["ai", "agents", "llm", "openai", "tools"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+tokio = { version = "1", features = ["full"] }
+thiserror = "2.0"
+tracing = "0.1"
+
+[dev-dependencies]
+mockito = "1.2"
+tempfile = "3.10"
+tokio = { version = "1", features = ["full"] }
+
+[features]
+default = []
+fastskill = []

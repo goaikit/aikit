@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "aikit-py"
-version = "0.1.50"
+version = "0.2.0"
 requires-python = ">=3.9"
 license = "Apache-2.0"
 description = "Python gateway to aikit-sdk: catalog, deploy, detection, run_agent, run_agent_events_py"
@@ -23,4 +23,3 @@ classifiers = [
 [tool.maturin]
 module-name = "aikit_py"
 features = ["extension-module"]
-

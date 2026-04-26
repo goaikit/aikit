@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "aikit-sdk", "aikit-py"]
+members = [".", "aikit-sdk", "aikit-py", "aikit-agent"]
 
 [package]
 name = "aikit"

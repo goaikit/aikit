@@ -93,6 +93,8 @@ pub enum UsageSource {
     OpenCode,
     /// Cursor Agent (`result.usage` camelCase fields)
     Cursor,
+    /// Built-in aikit agent
+    Aikit,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -276,7 +278,7 @@ impl std::fmt::Display for RunError {
             RunError::AgentNotRunnable(key) => {
                 write!(
                     f,
-                    "Agent '{}' is not runnable. Supported: codex, claude, gemini, opencode, agent",
+                    "Agent '{}' is not runnable. Supported: codex, claude, gemini, opencode, agent, aikit",
                     key
                 )
             }
@@ -394,6 +396,52 @@ pub enum AgentEventPayload {
         stream: AgentEventStream,
         seq: u64,
     },
+    /// Built-in aikit agent text delta.
+    AikitTextDelta {
+        content: String,
+        turn_id: Option<String>,
+    },
+    /// Built-in aikit agent final text.
+    AikitTextFinal {
+        content: String,
+        turn_id: Option<String>,
+    },
+    /// Built-in aikit agent tool use.
+    AikitToolUse {
+        tool_name: String,
+        tool_input: serde_json::Value,
+        call_id: String,
+    },
+    /// Built-in aikit agent tool result.
+    AikitToolResult {
+        call_id: String,
+        output: String,
+        is_error: bool,
+    },
+    /// Built-in aikit agent sub-agent spawn.
+    AikitSubagentSpawn {
+        subagent_id: String,
+        workdir: String,
+    },
+    /// Built-in aikit agent sub-agent result.
+    AikitSubagentResult {
+        subagent_id: String,
+        status: String,
+        changed_files: Vec<String>,
+        key_findings: String,
+        final_message: String,
+    },
+    /// Built-in aikit agent context compression.
+    AikitContextCompressed {
+        original_tokens: u64,
+        compressed_tokens: u64,
+        turns_summarized: u64,
+    },
+    /// Built-in aikit agent step finish.
+    AikitStepFinish {
+        iteration: u32,
+        finish_reason: String,
+    },
 }
 
 /// A single event emitted by a streaming agent run.
@@ -431,7 +479,7 @@ enum ReaderMsg {
 
 /// Returns the list of runnable agent keys.
 pub fn runnable_agents() -> &'static [&'static str] {
-    &["codex", "claude", "gemini", "opencode", "agent"]
+    &["codex", "claude", "gemini", "opencode", "agent", "aikit"]
 }
 
 /// Checks if an agent key is runnable.
@@ -1948,6 +1996,10 @@ where
         "run_agent_events"
     );
 
+    if agent_key == "aikit" {
+        return crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, on_event);
+    }
+
     let (mut child, _argv) = spawn_agent_piped(agent_key, prompt, &options, true)?;
 
     // Write prompt and close stdin before reading output.
@@ -2364,6 +2416,9 @@ pub fn is_agent_available(agent_key: &str) -> bool {
     if !is_runnable(agent_key) {
         return false;
     }
+    if agent_key == "aikit" {
+        return true;
+    }
 
     let candidates = get_binary_candidates(agent_key);
     for binary in candidates {
@@ -2396,6 +2451,11 @@ pub fn get_agent_status() -> BTreeMap<String, AgentStatus> {
     let mut status = BTreeMap::new();
 
     for &agent_key in runnable_agents() {
+        if agent_key == "aikit" {
+            status.insert(agent_key.to_string(), AgentStatus::available());
+            continue;
+        }
+
         if !is_runnable(agent_key) {
             status.insert(
                 agent_key.to_string(),
@@ -2450,7 +2510,8 @@ mod tests {
         assert!(agents.contains(&"gemini"));
         assert!(agents.contains(&"opencode"));
         assert!(agents.contains(&"agent"));
-        assert_eq!(agents.len(), 5);
+        assert!(agents.contains(&"aikit"));
+        assert_eq!(agents.len(), 6);
     }
 
     #[test]
@@ -2955,6 +3016,14 @@ mod tests {
                 AgentEventPayload::TokenUsageLine { .. } => "token_usage",
                 AgentEventPayload::QuotaExceeded { .. } => "quota_exceeded",
                 AgentEventPayload::RawTransportLine { .. } => "raw_transport",
+                AgentEventPayload::AikitTextDelta { .. } => "aikit_text_delta",
+                AgentEventPayload::AikitTextFinal { .. } => "aikit_text_final",
+                AgentEventPayload::AikitToolUse { .. } => "aikit_tool_use",
+                AgentEventPayload::AikitToolResult { .. } => "aikit_tool_result",
+                AgentEventPayload::AikitSubagentSpawn { .. } => "aikit_subagent_spawn",
+                AgentEventPayload::AikitSubagentResult { .. } => "aikit_subagent_result",
+                AgentEventPayload::AikitContextCompressed { .. } => "aikit_context_compressed",
+                AgentEventPayload::AikitStepFinish { .. } => "aikit_step_finish",
             };
             payloads.push(kind.to_string());
         });

@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # AIKIT Test Runner Script
-# Runs build, fmt, clippy, cargo-nextest, lib tests (release), and workspace integration binaries.
+# Runs version sync, build, fmt, clippy, cargo-nextest, lib tests (release), and workspace integration binaries.
 # Matches CI: same flow as test-multiplatform (lib release + cargo test --workspace --test '*').
 #
 # Usage: ./run-tests.sh [OPTIONS]
@@ -136,8 +136,36 @@ mkdir -p "$TEST_OUTPUT_DIR"
 echo -e "${YELLOW}Test outputs will be saved to: $TEST_OUTPUT_DIR${NC}" >&2
 echo "" >&2
 
-# Run build, fmt, clippy, and tests; capture output and exit codes (do not exit on first failure)
+# Run version sync, build, fmt, clippy, and tests; capture output and exit codes (do not exit on first failure)
 set +e
+
+echo -e "${YELLOW}Running version sync check (CI parity)...${NC}" >&2
+VERSION_SYNC_OUTPUT=$(
+    SDK_VERSION=$(grep "^version" aikit-sdk/Cargo.toml | head -n 1 | awk -F '"' '{print $2}')
+    PY_CARGO_VERSION=$(grep "^version" aikit-py/Cargo.toml | head -n 1 | awk -F '"' '{print $2}')
+    PY_PYPROJECT_VERSION=$(grep "version =" aikit-py/pyproject.toml | head -n 1 | awk -F '"' '{print $2}')
+
+    echo "SDK Version: $SDK_VERSION"
+    echo "aikit-py Cargo Version: $PY_CARGO_VERSION"
+    echo "aikit-py pyproject Version: $PY_PYPROJECT_VERSION"
+
+    if [ "$SDK_VERSION" != "$PY_CARGO_VERSION" ]; then
+        echo "Error: aikit-sdk/Cargo.toml version ($SDK_VERSION) does not match aikit-py/Cargo.toml version ($PY_CARGO_VERSION)"
+        exit 1
+    fi
+
+    if [ "$SDK_VERSION" != "$PY_PYPROJECT_VERSION" ]; then
+        echo "Error: aikit-sdk/Cargo.toml version ($SDK_VERSION) does not match aikit-py/pyproject.toml version ($PY_PYPROJECT_VERSION)"
+        exit 1
+    fi
+
+    echo "All versions are in sync."
+)
+VERSION_SYNC_EXIT=$?
+echo "$VERSION_SYNC_OUTPUT" > "$TEST_OUTPUT_DIR/version-sync-output.txt"
+if [ "$VERSION_SYNC_EXIT" -ne 0 ]; then
+    echo -e "${RED}Version sync check failed (same as CI Version Sync Check job).${NC}" >&2
+fi
 
 echo -e "${YELLOW}Running cargo build --workspace --all-targets --all-features...${NC}" >&2
 BUILD_OUTPUT=$(cargo build --workspace --all-targets --all-features 2>&1)
@@ -184,6 +212,7 @@ set -e
 
 # Overall pass only if build, fmt, clippy, and tests passed
 EXIT_CODE=0
+[ "$VERSION_SYNC_EXIT" -ne 0 ] && EXIT_CODE=1
 [ "$BUILD_EXIT" -ne 0 ] && EXIT_CODE=1
 [ "$FMT_EXIT" -ne 0 ] && EXIT_CODE=1
 [ "$CLIPPY_EXIT" -ne 0 ] && EXIT_CODE=1
@@ -194,6 +223,7 @@ EXIT_CODE=0
 if [ "$EXIT_CODE" -eq 0 ]; then
     echo -e "${GREEN}All checks and tests passed.${NC}" >&2
 else
+    [ "$VERSION_SYNC_EXIT" -ne 0 ] && echo -e "${RED}Version sync check failed.${NC}" >&2
     [ "$BUILD_EXIT" -ne 0 ] && echo -e "${RED}Workspace build failed.${NC}" >&2
     [ "$FMT_EXIT" -ne 0 ] && echo -e "${RED}Format check failed.${NC}" >&2
     [ "$CLIPPY_EXIT" -ne 0 ] && echo -e "${RED}Clippy failed.${NC}" >&2
@@ -275,6 +305,7 @@ if [ "${FAILED:-0}" -gt 0 ]; then
 fi
 
 # Build JSON content (for stdout and/or file)
+VERSION_SYNC_STATUS="$([ "$VERSION_SYNC_EXIT" -eq 0 ] && echo ok || echo failed)"
 BUILD_STATUS="$([ "$BUILD_EXIT" -eq 0 ] && echo ok || echo failed)"
 FMT_STATUS="$([ "$FMT_EXIT" -eq 0 ] && echo ok || echo failed)"
 CLIPPY_STATUS="$([ "$CLIPPY_EXIT" -eq 0 ] && echo ok || echo failed)"
@@ -287,7 +318,7 @@ if [ "$COMPILATION_FAILED" = true ] || [ "$BUILD_EXIT" -ne 0 ]; then
   "timestamp": "$TIMESTAMP",
   "command": "$0",
   "exit_code": $EXIT_CODE,
-  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$LIB_RELEASE_STATUS", "integration": "$INTEGRATION_STATUS" },
+  "checks": { "version_sync": "$VERSION_SYNC_STATUS", "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$LIB_RELEASE_STATUS", "integration": "$INTEGRATION_STATUS" },
   "test_statistics": {
     "total": 0,
     "passed": 0,
@@ -305,7 +336,7 @@ else
   "timestamp": "$TIMESTAMP",
   "command": "$0",
   "exit_code": $EXIT_CODE,
-  "checks": { "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$LIB_RELEASE_STATUS", "integration": "$INTEGRATION_STATUS" },
+  "checks": { "version_sync": "$VERSION_SYNC_STATUS", "build": "$BUILD_STATUS", "fmt": "$FMT_STATUS", "clippy": "$CLIPPY_STATUS", "lib_release": "$LIB_RELEASE_STATUS", "integration": "$INTEGRATION_STATUS" },
   "test_statistics": {
     "total": $TOTAL,
     "passed": ${PASSED:-0},
@@ -343,13 +374,14 @@ else
 
         echo "## Overall Status"
         if [ "$EXIT_CODE" -eq 0 ]; then
-            echo "PASSED - build, fmt, clippy, nextest, lib-release, and workspace integration tests all passed"
+            echo "PASSED - version sync, build, fmt, clippy, nextest, lib-release, and workspace integration tests all passed"
         else
             echo "FAILED - One or more checks failed"
         fi
         echo ""
 
         echo "## Checks"
+        echo "- version sync: $([ "$VERSION_SYNC_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
         echo "- build: $([ "$BUILD_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
         echo "- fmt: $([ "$FMT_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
         echo "- clippy: $([ "$CLIPPY_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
@@ -357,6 +389,12 @@ else
         echo "- lib release: $([ "$LIB_RELEASE_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
         echo "- integration (cargo test --workspace --test '*'): $([ "$INTEGRATION_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')"
         echo ""
+        if [ "$VERSION_SYNC_EXIT" -ne 0 ] && [ -n "$VERSION_SYNC_OUTPUT" ]; then
+            echo "### version sync failure output"
+            echo ""
+            echo "$VERSION_SYNC_OUTPUT"
+            echo ""
+        fi
         if [ "$BUILD_EXIT" -ne 0 ] && [ -n "$BUILD_OUTPUT" ]; then
             echo "### Build failure output"
             echo ""
@@ -469,6 +507,7 @@ fi
 echo "" >&2
 
 echo "Summary:" >&2
+echo "  version:     $([ "$VERSION_SYNC_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 echo "  build:       $([ "$BUILD_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 echo "  fmt:         $([ "$FMT_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
 echo "  clippy:      $([ "$CLIPPY_EXIT" -eq 0 ] && echo 'PASSED' || echo 'FAILED')" >&2
