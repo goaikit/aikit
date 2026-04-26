@@ -414,8 +414,10 @@ pub fn deploy_subagent(
     Ok(subagent_path)
 }
 
+pub mod aikit_agent_adapter;
 pub mod runner;
 
+pub use aikit_agent_adapter::run_aikit_agent;
 pub use runner::{
     aggregate_token_usage, extract_usage_from_line, get_agent_status, get_installed_agents,
     is_agent_available, is_runnable, normalize_json_line, run_agent, run_agent_events,

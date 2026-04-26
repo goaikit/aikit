@@ -117,6 +117,57 @@ impl RunProgress {
                 let truncated = truncate(&info.raw_message, self.config.max_text_width);
                 self.add_row(format!("[quota] {}", truncated));
             }
+            AgentEventPayload::AikitTextDelta { content, .. }
+            | AgentEventPayload::AikitTextFinal { content, .. } => {
+                let text = content.replace('\n', " ").replace('\r', "");
+                let text = text.trim();
+                if !text.is_empty() {
+                    self.add_row(format!(
+                        "assistant> {}",
+                        truncate(text, self.config.max_text_width)
+                    ));
+                    self.last_assistant_text = Some(text.to_string());
+                }
+            }
+            AgentEventPayload::AikitToolUse { tool_name, .. } => {
+                self.add_row(format!("tool> {}", tool_name));
+            }
+            AgentEventPayload::AikitToolResult {
+                output, is_error, ..
+            } => {
+                let prefix = if *is_error { "tool error>" } else { "tool>" };
+                self.add_row(format!(
+                    "{} {}",
+                    prefix,
+                    truncate(output, self.config.max_tool_output_chars)
+                ));
+            }
+            AgentEventPayload::AikitSubagentSpawn { subagent_id, .. } => {
+                self.add_row(format!("subagent> spawned {}", subagent_id));
+            }
+            AgentEventPayload::AikitSubagentResult {
+                subagent_id,
+                status,
+                ..
+            } => {
+                self.add_row(format!("subagent> {} {}", subagent_id, status));
+            }
+            AgentEventPayload::AikitContextCompressed {
+                original_tokens,
+                compressed_tokens,
+                ..
+            } => {
+                self.add_row(format!(
+                    "context> compressed {} -> {} tokens",
+                    original_tokens, compressed_tokens
+                ));
+            }
+            AgentEventPayload::AikitStepFinish {
+                iteration,
+                finish_reason,
+            } => {
+                self.add_row(format!("step> {} {}", iteration, finish_reason));
+            }
             AgentEventPayload::RawTransportLine { .. } => {}
         }
     }
@@ -138,6 +189,7 @@ impl RunProgress {
             UsageSource::Gemini => "gemini",
             UsageSource::OpenCode => "opencode",
             UsageSource::Cursor => "cursor",
+            UsageSource::Aikit => "aikit",
         };
         let computed_total = usage.input_tokens + usage.output_tokens;
         let agent_total_suffix = match usage.total_tokens {
