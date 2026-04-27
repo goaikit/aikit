@@ -19,7 +19,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio-stream = "0.1"
 
 # ZIP archive handling
-zip = "0.6.6"
+zip = "8.6.0"
 
 # JSON serialization
 serde = { version = "1.0", features = ["derive"] }
