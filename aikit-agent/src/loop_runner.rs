@@ -63,6 +63,9 @@ pub(crate) fn run_inner(
     };
     let mut context = ContextPacket::new(system_instructions, budget);
     context.skills_summary = skills.iter().map(|s| s.metadata.clone()).collect();
+    events.push(AgentInternalEvent::SkillsDiscovered {
+        skills_summary: context.skills_summary.clone(),
+    });
     context.add_turn(Turn::user(prompt));
 
     // 4. Build available tools
@@ -509,9 +512,6 @@ mod tests {
     };
     use tempfile::TempDir;
 
-    #[cfg(feature = "fastskill")]
-    use crate::skills::FastskillSkillBackend;
-
     fn make_config(tmp: &TempDir, stream: bool) -> AgentConfig {
         AgentConfig {
             model: "test-model".to_string(),
@@ -846,26 +846,37 @@ mod tests {
         let mut config = make_config(&tmp, false);
         config.skills_dirs = vec![skills_root.clone()];
 
-        // Verify FastskillSkillBackend discovers both skills (these populate skills_summary in run_inner)
-        let backend = FastskillSkillBackend::new(&config).unwrap();
-        let discovered = backend.discover(&config.skills_dirs);
-        assert_eq!(discovered.len(), 2, "should discover 2 skills");
-        let names: Vec<&str> = discovered
-            .iter()
-            .map(|s| s.metadata.name.as_str())
-            .collect();
-        assert!(names.contains(&"skill-a"), "should contain skill-a");
-        assert!(names.contains(&"skill-b"), "should contain skill-b");
-
         // run_inner uses FastskillSkillBackend when fastskill feature is enabled
         let gw = MockGateway::new(vec![MockResponse::text("done")]);
         let events = run_inner(config, "test", Arc::new(gw)).unwrap();
+
         let has_error = events
             .iter()
             .any(|e| matches!(e, AgentInternalEvent::Error { .. }));
         assert!(
             !has_error,
             "run_inner should complete without errors when skills are present"
+        );
+
+        // Locate the SkillsDiscovered event and verify skills_summary contains both skills
+        let skills_event = events.iter().find_map(|e| {
+            if let AgentInternalEvent::SkillsDiscovered { skills_summary } = e {
+                Some(skills_summary)
+            } else {
+                None
+            }
+        });
+        let skills_summary = skills_event.expect("run_inner must emit a SkillsDiscovered event");
+        let names: Vec<&str> = skills_summary.iter().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"skill-a"),
+            "ContextPacket.skills_summary must include 'skill-a', got: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"skill-b"),
+            "ContextPacket.skills_summary must include 'skill-b', got: {:?}",
+            names
         );
     }
 

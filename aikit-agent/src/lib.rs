@@ -48,6 +48,12 @@ pub enum AgentInternalEvent {
         compressed_tokens: u64,
         turns_summarized: u64,
     },
+    /// Emitted once per run after skill discovery, carrying the full skills_summary
+    /// that was written into ContextPacket. Tests can find this event to verify
+    /// that the correct SkillMetadata entries were discovered and populated.
+    SkillsDiscovered {
+        skills_summary: Vec<crate::skills::SkillMetadata>,
+    },
     StepFinish {
         iteration: u32,
         finish_reason: String,
