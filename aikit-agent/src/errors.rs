@@ -35,4 +35,12 @@ pub enum AgentError {
 
     #[error("E_AIKIT_AGENTS_MD_READ: failed to read AGENTS.md: {reason}")]
     AgentsMdRead { reason: String },
+
+    #[cfg(feature = "fastskill")]
+    #[error("E_AIKIT_FASTSKILL_INIT: failed to initialize fastskill resolver: {reason}")]
+    FastskillInit { reason: String },
+
+    #[cfg(feature = "fastskill")]
+    #[error("E_AIKIT_FASTSKILL_RESOLVE: fastskill resolver error for skill '{name}': {reason}")]
+    FastskillResolve { name: String, reason: String },
 }

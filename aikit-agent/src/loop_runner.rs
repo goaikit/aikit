@@ -6,12 +6,18 @@ use crate::context::{ContextPacket, ContextToolCall, ContextToolResult, TokenBud
 use crate::errors::AgentError;
 use crate::llm::gateway::LlmGateway;
 use crate::llm::types::{LlmMessage, LlmRequest, LlmStreamEvent, LlmUsage, ToolCall};
-use crate::skills::discover_skills;
+use crate::skills::SkillProvider;
+
+#[cfg(not(feature = "fastskill"))]
+use crate::skills::FilesystemSkillProvider;
 use crate::subagents::SpawnSubagentTool;
 use crate::tools::{
     GitTool, ReadFileTool, ReadSkillTool, RunBashTool, Tool, ToolContext, WriteFileTool,
 };
 use crate::AgentInternalEvent;
+
+#[cfg(feature = "fastskill")]
+use crate::skills::FastskillSkillBackend;
 
 type LlmCallResult = (String, Vec<ToolCall>, Option<String>, Option<LlmUsage>);
 
@@ -34,8 +40,20 @@ pub(crate) fn run_inner(
     // 1. Load AGENTS.md if present
     let system_instructions = build_system_instructions(&config)?;
 
-    // 2. Discover skills
-    let skills = discover_skills(&config.skills_dirs);
+    // 2. Discover skills using the appropriate backend
+    #[cfg(feature = "fastskill")]
+    let (skills, provider): (Vec<_>, Arc<dyn SkillProvider>) = {
+        let backend = Arc::new(FastskillSkillBackend::new(&config)?);
+        let discovered = backend.discover(&config.skills_dirs);
+        (discovered, backend)
+    };
+
+    #[cfg(not(feature = "fastskill"))]
+    let (skills, provider): (Vec<_>, Arc<dyn SkillProvider>) = {
+        let p = Arc::new(FilesystemSkillProvider);
+        let discovered = p.discover(&config.skills_dirs);
+        (discovered, p)
+    };
 
     // 3. Build initial context packet
     let budget = TokenBudget {
@@ -48,7 +66,12 @@ pub(crate) fn run_inner(
     context.add_turn(Turn::user(prompt));
 
     // 4. Build available tools
-    let tools = build_tools(&config, Arc::clone(&gateway), &skills);
+    let tools = build_tools(
+        &config,
+        Arc::clone(&gateway),
+        &skills,
+        Arc::clone(&provider),
+    );
 
     // 5. Main agent loop
     for iteration in 0..config.max_iterations {
@@ -187,6 +210,7 @@ fn build_tools(
     config: &AgentConfig,
     gateway: Arc<dyn LlmGateway>,
     skills: &[crate::skills::DiscoveredSkill],
+    provider: Arc<dyn SkillProvider>,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ReadFileTool),
@@ -195,6 +219,7 @@ fn build_tools(
         Box::new(GitTool),
         Box::new(ReadSkillTool {
             skills: skills.to_vec(),
+            provider,
         }),
     ];
 
@@ -483,6 +508,9 @@ mod tests {
         LlmError, LlmResponse, LlmStreamEvent, LlmStreamHandle, ToolCall, ToolCallFunction,
     };
     use tempfile::TempDir;
+
+    #[cfg(feature = "fastskill")]
+    use crate::skills::FastskillSkillBackend;
 
     fn make_config(tmp: &TempDir, stream: bool) -> AgentConfig {
         AgentConfig {
@@ -779,5 +807,84 @@ mod tests {
         assert_eq!(tool_msg.tool_call_id.as_deref(), Some("call_abc"));
         assert_eq!(tool_msg.content.as_deref(), Some("file contents here"));
         assert!(tool_msg.tool_calls.is_none());
+    }
+
+    #[test]
+    fn test_build_system_instructions_includes_md_content() {
+        let tmp = TempDir::new().unwrap();
+        let md_path = tmp.path().join("AGENTS.md");
+        std::fs::write(&md_path, "Custom system instructions for testing").unwrap();
+        let mut config = make_config(&tmp, false);
+        config.agents_md_path = Some(md_path);
+        let instructions = build_system_instructions(&config).unwrap();
+        assert!(
+            instructions.contains("Custom system instructions for testing"),
+            "build_system_instructions should include md file content"
+        );
+    }
+
+    #[cfg(feature = "fastskill")]
+    fn create_skill_in_dir(root: &std::path::Path, dir_name: &str, name: &str, description: &str) {
+        let skill_dir = root.join(dir_name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let content = format!(
+            "---\nname: {}\ndescription: {}\n---\n\n# Skill Content\n\nFull skill body here.",
+            name, description
+        );
+        std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+    }
+
+    #[cfg(feature = "fastskill")]
+    #[test]
+    fn test_resolver_backed_discovery_populates_skills_summary() {
+        let tmp = TempDir::new().unwrap();
+        let skills_root = tmp.path().join("skills");
+        std::fs::create_dir_all(&skills_root).unwrap();
+        create_skill_in_dir(&skills_root, "skill-a", "skill-a", "First skill");
+        create_skill_in_dir(&skills_root, "skill-b", "skill-b", "Second skill");
+
+        let mut config = make_config(&tmp, false);
+        config.skills_dirs = vec![skills_root.clone()];
+
+        // Verify FastskillSkillBackend discovers both skills (these populate skills_summary in run_inner)
+        let backend = FastskillSkillBackend::new(&config).unwrap();
+        let discovered = backend.discover(&config.skills_dirs);
+        assert_eq!(discovered.len(), 2, "should discover 2 skills");
+        let names: Vec<&str> = discovered
+            .iter()
+            .map(|s| s.metadata.name.as_str())
+            .collect();
+        assert!(names.contains(&"skill-a"), "should contain skill-a");
+        assert!(names.contains(&"skill-b"), "should contain skill-b");
+
+        // run_inner uses FastskillSkillBackend when fastskill feature is enabled
+        let gw = MockGateway::new(vec![MockResponse::text("done")]);
+        let events = run_inner(config, "test", Arc::new(gw)).unwrap();
+        let has_error = events
+            .iter()
+            .any(|e| matches!(e, AgentInternalEvent::Error { .. }));
+        assert!(
+            !has_error,
+            "run_inner should complete without errors when skills are present"
+        );
+    }
+
+    #[cfg(feature = "fastskill")]
+    #[test]
+    fn test_resolver_no_match_yields_empty_summary() {
+        let tmp = TempDir::new().unwrap();
+        // No skills in skills_dirs (empty) — FastskillSkillBackend::discover returns vec![]
+        let config = make_config(&tmp, false);
+
+        let gw = MockGateway::new(vec![MockResponse::text("done")]);
+        let events = run_inner(config, "test", Arc::new(gw)).unwrap();
+
+        let has_error = events
+            .iter()
+            .any(|e| matches!(e, AgentInternalEvent::Error { .. }));
+        assert!(
+            !has_error,
+            "run_inner should complete without errors when no skills are found"
+        );
     }
 }

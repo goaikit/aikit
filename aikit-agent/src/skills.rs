@@ -28,6 +28,8 @@ impl DiscoveredSkill {
 
 pub trait SkillProvider: Send + Sync {
     fn discover(&self, roots: &[PathBuf]) -> Vec<DiscoveredSkill>;
+    /// Load skill content by name. When multiple entries share the same name,
+    /// the first entry in slice order is selected (first-match policy).
     fn load(&self, skill_name: &str, skills: &[DiscoveredSkill]) -> Result<String, AgentError>;
 }
 
@@ -132,6 +134,61 @@ fn extract_frontmatter_fields(content: &str, path: &Path) -> Result<(String, Str
     Ok((name, description))
 }
 
+/// Fastskill-backed skill provider compiled only when the `fastskill` feature is enabled.
+///
+/// When `fastskill-core` is integrated, this backend will call the resolver API.
+/// Until then, it delegates to filesystem scanning, providing the correct structural
+/// contract (first-match policy, empty-roots invariant, AgentError mapping).
+#[cfg(feature = "fastskill")]
+#[derive(Debug)]
+pub struct FastskillSkillBackend {
+    /// Placeholder for the fastskill-core resolver handle once integrated.
+    #[allow(dead_code)]
+    roots: Vec<PathBuf>,
+}
+
+#[cfg(feature = "fastskill")]
+impl FastskillSkillBackend {
+    /// Construct from AgentConfig. Returns `AgentError::FastskillInit` on failure.
+    pub fn new(config: &crate::config::AgentConfig) -> Result<Self, AgentError> {
+        Ok(Self {
+            roots: config.skills_dirs.clone(),
+        })
+    }
+
+    /// Test helper: always returns `AgentError::FastskillInit` to verify error propagation.
+    #[cfg(test)]
+    pub(crate) fn new_failing(_config: &crate::config::AgentConfig) -> Result<Self, AgentError> {
+        Err(AgentError::FastskillInit {
+            reason: "forced failure for testing".to_string(),
+        })
+    }
+}
+
+#[cfg(feature = "fastskill")]
+impl SkillProvider for FastskillSkillBackend {
+    fn discover(&self, roots: &[PathBuf]) -> Vec<DiscoveredSkill> {
+        if roots.is_empty() {
+            return Vec::new();
+        }
+        // Delegate to filesystem scanning until fastskill-core resolver is integrated.
+        // Order from the resolver API is preserved without sorting.
+        FilesystemSkillProvider.discover(roots)
+    }
+
+    fn load(&self, skill_name: &str, skills: &[DiscoveredSkill]) -> Result<String, AgentError> {
+        // First-match policy: same as FilesystemSkillProvider::load
+        let skill = skills
+            .iter()
+            .find(|s| s.metadata.name == skill_name)
+            .ok_or_else(|| AgentError::SkillParseError {
+                name: skill_name.to_string(),
+                reason: "skill not found".to_string(),
+            })?;
+        skill.load_content()
+    }
+}
+
 /// Discover skills from the given root directories.
 pub fn discover_skills(roots: &[PathBuf]) -> Vec<DiscoveredSkill> {
     let provider = FilesystemSkillProvider;
@@ -225,5 +282,121 @@ mod tests {
         let names: Vec<_> = skills.iter().map(|s| s.metadata.name.as_str()).collect();
         assert!(names.contains(&"skill-a"));
         assert!(names.contains(&"skill-b"));
+    }
+
+    #[cfg(feature = "fastskill")]
+    fn make_fastskill_config(tmp: &TempDir) -> crate::config::AgentConfig {
+        crate::config::AgentConfig {
+            model: "test-model".to_string(),
+            base_url: "http://localhost".to_string(),
+            api_key: "test-key".to_string(),
+            stream: false,
+            max_iterations: 1,
+            max_subagent_depth: 0,
+            context_budget_tokens: 1000,
+            workdir: tmp.path().to_path_buf(),
+            allowed_roots: vec![],
+            skills_dirs: vec![],
+            agents_md_path: None,
+            timeout_secs: 10,
+            connect_timeout_secs: 5,
+        }
+    }
+
+    #[cfg(feature = "fastskill")]
+    #[test]
+    fn test_duplicate_skill_name_uses_first_match() {
+        let tmp = TempDir::new().unwrap();
+
+        // Create two roots each containing a skill named "dup-skill"
+        let root1 = tmp.path().join("root1");
+        let root2 = tmp.path().join("root2");
+
+        let dir1 = root1.join("dup-skill");
+        fs::create_dir_all(&dir1).unwrap();
+        fs::write(
+            dir1.join("SKILL.md"),
+            "---\nname: dup-skill\ndescription: First version\n---\n\nFirst content",
+        )
+        .unwrap();
+
+        let dir2 = root2.join("dup-skill");
+        fs::create_dir_all(&dir2).unwrap();
+        fs::write(
+            dir2.join("SKILL.md"),
+            "---\nname: dup-skill\ndescription: Second version\n---\n\nSecond content",
+        )
+        .unwrap();
+
+        let config = make_fastskill_config(&tmp);
+        let backend = FastskillSkillBackend::new(&config).unwrap();
+        // Discover from root1 first so it appears first in the slice
+        let skills = backend.discover(&[root1, root2]);
+
+        assert_eq!(
+            skills.len(),
+            2,
+            "both duplicate skills should be discovered"
+        );
+
+        // First-match policy: root1's skill is first in slice, so its content is returned
+        let loaded = backend.load("dup-skill", &skills).unwrap();
+        assert!(
+            loaded.contains("First content"),
+            "first-match policy: should return first entry in slice order"
+        );
+    }
+
+    #[cfg(feature = "fastskill")]
+    #[test]
+    fn test_fastskill_init_failure_emits_init_error() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_fastskill_config(&tmp);
+        let result = FastskillSkillBackend::new_failing(&config);
+        assert!(
+            matches!(result, Err(crate::errors::AgentError::FastskillInit { .. })),
+            "new_failing should return FastskillInit error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("E_AIKIT_FASTSKILL_INIT"),
+            "error message should include E_AIKIT_FASTSKILL_INIT code"
+        );
+    }
+
+    #[cfg(feature = "fastskill")]
+    #[test]
+    fn test_fastskill_resolve_error_on_load_failure() {
+        struct MockResolvingProvider;
+        impl SkillProvider for MockResolvingProvider {
+            fn discover(&self, _: &[PathBuf]) -> Vec<DiscoveredSkill> {
+                vec![]
+            }
+            fn load(
+                &self,
+                name: &str,
+                _: &[DiscoveredSkill],
+            ) -> Result<String, crate::errors::AgentError> {
+                Err(crate::errors::AgentError::FastskillResolve {
+                    name: name.to_string(),
+                    reason: "simulated resolver failure".to_string(),
+                })
+            }
+        }
+
+        let provider = MockResolvingProvider;
+        let result = provider.load("some-skill", &[]);
+        assert!(
+            matches!(
+                result,
+                Err(crate::errors::AgentError::FastskillResolve { .. })
+            ),
+            "provider should return FastskillResolve error"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.to_string().contains("E_AIKIT_FASTSKILL_RESOLVE"),
+            "error message should include E_AIKIT_FASTSKILL_RESOLVE code"
+        );
     }
 }

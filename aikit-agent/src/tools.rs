@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::llm::types::{FunctionDefinition, ToolDefinition};
-use crate::skills::DiscoveredSkill;
+use crate::skills::{DiscoveredSkill, SkillProvider};
 
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
@@ -363,6 +364,7 @@ impl Tool for GitTool {
 
 pub struct ReadSkillTool {
     pub skills: Vec<DiscoveredSkill>,
+    pub provider: Arc<dyn SkillProvider>,
 }
 
 impl Tool for ReadSkillTool {
@@ -392,13 +394,9 @@ impl Tool for ReadSkillTool {
             .as_str()
             .ok_or_else(|| ToolError::Exec("missing 'skill_name' parameter".to_string()))?;
 
-        let skill = self.skills.iter().find(|s| s.metadata.name == skill_name);
-        match skill {
-            Some(s) => match s.load_content() {
-                Ok(content) => Ok(ToolOutput::ok(content)),
-                Err(e) => Ok(ToolOutput::err(format!("failed to load skill: {}", e))),
-            },
-            None => Ok(ToolOutput::err(format!("skill '{}' not found", skill_name))),
+        match self.provider.load(skill_name, &self.skills) {
+            Ok(content) => Ok(ToolOutput::ok(content)),
+            Err(e) => Ok(ToolOutput::err(format!("failed to load skill: {}", e))),
         }
     }
 }
@@ -406,7 +404,11 @@ impl Tool for ReadSkillTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::AgentError;
+    use crate::skills::SkillProvider;
     use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn make_ctx(tmp: &TempDir) -> ToolContext {
@@ -500,5 +502,59 @@ mod tests {
         let result = tool.execute(input, &ctx).unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("hello"));
+    }
+
+    struct MockProvider {
+        content: Option<String>,
+    }
+
+    impl SkillProvider for MockProvider {
+        fn discover(&self, _roots: &[PathBuf]) -> Vec<DiscoveredSkill> {
+            vec![]
+        }
+        fn load(
+            &self,
+            skill_name: &str,
+            _skills: &[DiscoveredSkill],
+        ) -> Result<String, AgentError> {
+            match &self.content {
+                Some(s) => Ok(s.clone()),
+                None => Err(AgentError::SkillParseError {
+                    name: skill_name.to_string(),
+                    reason: "skill not found (mock)".to_string(),
+                }),
+            }
+        }
+    }
+
+    #[test]
+    fn test_read_skill_delegates_to_provider() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx(&tmp);
+        let provider = Arc::new(MockProvider {
+            content: Some("mock skill content".to_string()),
+        });
+        let tool = ReadSkillTool {
+            skills: vec![],
+            provider,
+        };
+        let input = serde_json::json!({"skill_name": "my-skill"});
+        let result = tool.execute(input, &ctx).unwrap();
+        assert!(!result.is_error, "should succeed");
+        assert_eq!(result.content, "mock skill content");
+    }
+
+    #[test]
+    fn test_read_skill_provider_not_found_returns_error_output() {
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx(&tmp);
+        let provider = Arc::new(MockProvider { content: None });
+        let tool = ReadSkillTool {
+            skills: vec![],
+            provider,
+        };
+        let input = serde_json::json!({"skill_name": "unknown-skill"});
+        let result = tool.execute(input, &ctx).unwrap();
+        assert!(result.is_error, "should be an error when skill not found");
     }
 }
