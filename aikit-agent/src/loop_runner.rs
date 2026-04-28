@@ -828,8 +828,8 @@ mod tests {
         let skill_dir = root.join(dir_name);
         std::fs::create_dir_all(&skill_dir).unwrap();
         let content = format!(
-            "---\nname: {}\ndescription: {}\n---\n\n# Skill Content\n\nFull skill body here.",
-            name, description
+            "---\nname: {}\ndescription: {}\n---\n\n# Skill Content\n\nFull skill body here for {}.",
+            name, description, name
         );
         std::fs::write(skill_dir.join("SKILL.md"), content).unwrap();
     }
@@ -878,6 +878,33 @@ mod tests {
             "ContextPacket.skills_summary must include 'skill-b', got: {:?}",
             names
         );
+
+        let gw = MockGateway::new(vec![
+            MockResponse::tool_call("read_skill_1", "read_skill", r#"{"skill_name":"skill-a"}"#),
+            MockResponse::text("done"),
+        ]);
+        let mut config = make_config(&tmp, false);
+        config.skills_dirs = vec![skills_root];
+        let events = run_inner(config, "read skill-a", Arc::new(gw)).unwrap();
+        let skill_result = events.iter().find_map(|event| {
+            if let AgentInternalEvent::ToolResult {
+                call_id,
+                output,
+                is_error,
+            } = event
+            {
+                (call_id == "read_skill_1").then_some((output, *is_error))
+            } else {
+                None
+            }
+        });
+        let (output, is_error) = skill_result.expect("read_skill tool result should be emitted");
+        assert!(!is_error, "read_skill should load fastskill-backed content");
+        assert!(
+            output.contains("Full skill body here for skill-a."),
+            "read_skill should return full resolved content, got: {}",
+            output
+        );
     }
 
     #[cfg(feature = "fastskill")]
@@ -896,6 +923,20 @@ mod tests {
         assert!(
             !has_error,
             "run_inner should complete without errors when no skills are found"
+        );
+        let skills_summary = events
+            .iter()
+            .find_map(|e| {
+                if let AgentInternalEvent::SkillsDiscovered { skills_summary } = e {
+                    Some(skills_summary)
+                } else {
+                    None
+                }
+            })
+            .expect("run_inner must emit SkillsDiscovered");
+        assert!(
+            skills_summary.is_empty(),
+            "empty skills_dirs should produce an empty summary"
         );
     }
 }

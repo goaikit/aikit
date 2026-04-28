@@ -136,32 +136,83 @@ fn extract_frontmatter_fields(content: &str, path: &Path) -> Result<(String, Str
 
 /// Fastskill-backed skill provider compiled only when the `fastskill` feature is enabled.
 ///
-/// When `fastskill-core` is integrated, this backend will call the resolver API.
-/// Until then, it delegates to filesystem scanning, providing the correct structural
-/// contract (first-match policy, empty-roots invariant, AgentError mapping).
+/// The backend initializes a fastskill-core service per discovery root, lets the
+/// service index local skills, and maps the indexed definitions into the agent's
+/// existing skill metadata shape.
 #[cfg(feature = "fastskill")]
 #[derive(Debug)]
 pub struct FastskillSkillBackend {
-    /// Placeholder for the fastskill-core resolver handle once integrated.
-    #[allow(dead_code)]
-    roots: Vec<PathBuf>,
+    runtime: tokio::runtime::Runtime,
 }
 
 #[cfg(feature = "fastskill")]
 impl FastskillSkillBackend {
     /// Construct from AgentConfig. Returns `AgentError::FastskillInit` on failure.
     pub fn new(config: &crate::config::AgentConfig) -> Result<Self, AgentError> {
-        Ok(Self {
-            roots: config.skills_dirs.clone(),
-        })
+        for root in &config.skills_dirs {
+            if root.exists() && !root.is_dir() {
+                return Err(AgentError::FastskillInit {
+                    reason: format!("skill root is not a directory: {}", root.display()),
+                });
+            }
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| AgentError::FastskillInit {
+                reason: e.to_string(),
+            })?;
+
+        Ok(Self { runtime })
     }
 
-    /// Test helper: always returns `AgentError::FastskillInit` to verify error propagation.
-    #[cfg(test)]
-    pub(crate) fn new_failing(_config: &crate::config::AgentConfig) -> Result<Self, AgentError> {
-        Err(AgentError::FastskillInit {
-            reason: "forced failure for testing".to_string(),
-        })
+    async fn discover_root(root: PathBuf) -> Result<Vec<DiscoveredSkill>, AgentError> {
+        use fastskill_core::{FastSkillService, ServiceConfig};
+
+        let config = ServiceConfig {
+            skill_storage_path: root,
+            embedding: None,
+            ..Default::default()
+        };
+        let mut service =
+            FastSkillService::new(config)
+                .await
+                .map_err(|e| AgentError::FastskillResolve {
+                    name: "*".to_string(),
+                    reason: e.to_string(),
+                })?;
+        service
+            .initialize()
+            .await
+            .map_err(|e| AgentError::FastskillResolve {
+                name: "*".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        let definitions = service
+            .skill_manager()
+            .list_skills(None)
+            .await
+            .map_err(|e| AgentError::FastskillResolve {
+                name: "*".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        Ok(definitions
+            .into_iter()
+            .map(|skill| {
+                let content_path = skill.skill_file.clone();
+                DiscoveredSkill {
+                    metadata: SkillMetadata {
+                        name: skill.name,
+                        description: skill.description,
+                        path: content_path.clone(),
+                    },
+                    content_path,
+                }
+            })
+            .collect())
     }
 }
 
@@ -171,9 +222,14 @@ impl SkillProvider for FastskillSkillBackend {
         if roots.is_empty() {
             return Vec::new();
         }
-        // Delegate to filesystem scanning until fastskill-core resolver is integrated.
-        // Order from the resolver API is preserved without sorting.
-        FilesystemSkillProvider.discover(roots)
+        let mut discovered = Vec::new();
+        for root in roots {
+            match self.runtime.block_on(Self::discover_root(root.clone())) {
+                Ok(mut skills) => discovered.append(&mut skills),
+                Err(e) => tracing::warn!("fastskill resolver skipped {}: {}", root.display(), e),
+            }
+        }
+        discovered
     }
 
     fn load(&self, skill_name: &str, skills: &[DiscoveredSkill]) -> Result<String, AgentError> {
@@ -185,7 +241,10 @@ impl SkillProvider for FastskillSkillBackend {
                 name: skill_name.to_string(),
                 reason: "skill not found".to_string(),
             })?;
-        skill.load_content()
+        std::fs::read_to_string(&skill.content_path).map_err(|e| AgentError::FastskillResolve {
+            name: skill_name.to_string(),
+            reason: format!("failed to read resolved skill content: {}", e),
+        })
     }
 }
 
@@ -351,11 +410,14 @@ mod tests {
     #[test]
     fn test_fastskill_init_failure_emits_init_error() {
         let tmp = TempDir::new().unwrap();
-        let config = make_fastskill_config(&tmp);
-        let result = FastskillSkillBackend::new_failing(&config);
+        let skill_root_file = tmp.path().join("not-a-directory");
+        fs::write(&skill_root_file, "not a directory").unwrap();
+        let mut config = make_fastskill_config(&tmp);
+        config.skills_dirs = vec![skill_root_file];
+        let result = FastskillSkillBackend::new(&config);
         assert!(
             matches!(result, Err(crate::errors::AgentError::FastskillInit { .. })),
-            "new_failing should return FastskillInit error"
+            "invalid skill root should return FastskillInit error"
         );
         let err = result.unwrap_err();
         assert!(
@@ -367,31 +429,25 @@ mod tests {
     #[cfg(feature = "fastskill")]
     #[test]
     fn test_fastskill_resolve_error_on_load_failure() {
-        struct MockResolvingProvider;
-        impl SkillProvider for MockResolvingProvider {
-            fn discover(&self, _: &[PathBuf]) -> Vec<DiscoveredSkill> {
-                vec![]
-            }
-            fn load(
-                &self,
-                name: &str,
-                _: &[DiscoveredSkill],
-            ) -> Result<String, crate::errors::AgentError> {
-                Err(crate::errors::AgentError::FastskillResolve {
-                    name: name.to_string(),
-                    reason: "simulated resolver failure".to_string(),
-                })
-            }
-        }
+        let tmp = TempDir::new().unwrap();
+        let config = make_fastskill_config(&tmp);
+        let backend = FastskillSkillBackend::new(&config).unwrap();
+        let skills = vec![DiscoveredSkill {
+            metadata: SkillMetadata {
+                name: "missing-skill".to_string(),
+                description: "Missing content".to_string(),
+                path: tmp.path().join("missing").join("SKILL.md"),
+            },
+            content_path: tmp.path().join("missing").join("SKILL.md"),
+        }];
 
-        let provider = MockResolvingProvider;
-        let result = provider.load("some-skill", &[]);
+        let result = backend.load("missing-skill", &skills);
         assert!(
             matches!(
                 result,
                 Err(crate::errors::AgentError::FastskillResolve { .. })
             ),
-            "provider should return FastskillResolve error"
+            "backend should return FastskillResolve when resolved content cannot be read"
         );
         let err = result.unwrap_err();
         assert!(

@@ -90,3 +90,6 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[patch."https://github.com/goaikit/aikit"]
+aikit-sdk = { git = "https://github.com/aroff/aikit.git", tag = "v0.1.84" }
