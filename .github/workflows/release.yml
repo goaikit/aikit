@@ -126,31 +126,31 @@ jobs:
 
     steps:
       - name: Download Linux GNU artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: aikit-x86_64-unknown-linux-gnu.tar.gz
           path: ./artifacts
 
       - name: Download Linux MUSL artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: aikit-x86_64-unknown-linux-musl.tar.gz
           path: ./artifacts
 
       - name: Download Windows artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: aikit-x86_64-pc-windows-msvc.zip
           path: ./artifacts
 
       - name: Download macOS arm64 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: aikit-aarch64-apple-darwin.tar.gz
           path: ./artifacts
 
       - name: Download macOS x86_64 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: aikit-x86_64-apple-darwin.tar.gz
           path: ./artifacts
@@ -192,7 +192,7 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
 
       - name: Download collected artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: release-artifacts
           path: ./artifacts
