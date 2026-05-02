@@ -13,6 +13,10 @@ pub mod github;
 pub mod models;
 pub mod tui;
 
+pub use core::agent_definition::{
+    parse_agent_markdown, parse_session_agents_json, AgentDefinition, DelegationAllowlist,
+    ParseError,
+};
 pub use error::AikError;
 /// Re-export commonly used types
 pub use models::{

@@ -37,11 +37,13 @@ pub(crate) fn run_inner(
 ) -> Result<Vec<AgentInternalEvent>, AgentError> {
     let mut events = Vec::new();
 
-    // 1. Load AGENTS.md if present
-    let system_instructions = build_system_instructions(&config)?;
-
-    // 2. Discover skills using the appropriate backend
+    // 1. Discover skills using the appropriate backend
     let (skills, provider) = discover_skills_for_run(&config)?;
+
+    // 2. Build system instructions (includes skills catalog when skills are present)
+    let skill_metadatas: Vec<crate::skills::SkillMetadata> =
+        skills.iter().map(|s| s.metadata.clone()).collect();
+    let system_instructions = build_system_instructions(&config, &skill_metadatas)?;
 
     // 3. Build initial context packet
     let budget = TokenBudget {
@@ -195,7 +197,30 @@ pub(crate) fn discover_skills_for_run(
     }
 }
 
-fn build_system_instructions(config: &AgentConfig) -> Result<String, AgentError> {
+pub(crate) fn build_skills_catalog_block(
+    skills: &[crate::skills::SkillMetadata],
+) -> Option<String> {
+    if skills.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(skills.len() + 4);
+    lines.push("## Available Skills".to_string());
+    lines.push(String::new());
+    lines.push(
+        "Use the `read_skill` tool with one of the following names to load a skill's instructions:"
+            .to_string(),
+    );
+    lines.push(String::new());
+    for skill in skills {
+        lines.push(format!("- `{}`: {}", skill.name, skill.description));
+    }
+    Some(lines.join("\n"))
+}
+
+fn build_system_instructions(
+    config: &AgentConfig,
+    skills: &[crate::skills::SkillMetadata],
+) -> Result<String, AgentError> {
     let mut parts = Vec::new();
     parts.push(
         "You are a helpful AI agent. Complete the requested task carefully and accurately."
@@ -207,6 +232,10 @@ fn build_system_instructions(config: &AgentConfig) -> Result<String, AgentError>
             reason: e.to_string(),
         })?;
         parts.push(content);
+    }
+
+    if let Some(catalog) = build_skills_catalog_block(skills) {
+        parts.push(catalog);
     }
 
     Ok(parts.join("\n\n"))
@@ -819,11 +848,83 @@ mod tests {
         std::fs::write(&md_path, "Custom system instructions for testing").unwrap();
         let mut config = make_config(&tmp, false);
         config.agents_md_path = Some(md_path);
-        let instructions = build_system_instructions(&config).unwrap();
+        let instructions = build_system_instructions(&config, &[]).unwrap();
         assert!(
             instructions.contains("Custom system instructions for testing"),
             "build_system_instructions should include md file content"
         );
+    }
+
+    fn make_skill(name: &str, description: &str) -> crate::skills::SkillMetadata {
+        crate::skills::SkillMetadata {
+            name: name.to_string(),
+            description: description.to_string(),
+            path: std::path::PathBuf::new(),
+        }
+    }
+
+    #[test]
+    fn test_catalog_block_empty_returns_none() {
+        assert!(build_skills_catalog_block(&[]).is_none());
+    }
+
+    #[test]
+    fn test_catalog_block_single_skill() {
+        let skills = vec![make_skill("git-summarize", "Summarize git activity")];
+        let block = build_skills_catalog_block(&skills).unwrap();
+        assert!(block.contains("## Available Skills"));
+        assert!(block.contains("- `git-summarize`: Summarize git activity"));
+    }
+
+    #[test]
+    fn test_catalog_block_multiple_skills() {
+        let skills = vec![
+            make_skill("skill-a", "First skill"),
+            make_skill("skill-b", "Second skill"),
+        ];
+        let block = build_skills_catalog_block(&skills).unwrap();
+        let pos_a = block.find("- `skill-a`: First skill").unwrap();
+        let pos_b = block.find("- `skill-b`: Second skill").unwrap();
+        assert!(pos_a < pos_b, "skill-a must appear before skill-b");
+    }
+
+    #[test]
+    fn test_catalog_block_empty_description() {
+        let skills = vec![make_skill("no-desc", "")];
+        let block = build_skills_catalog_block(&skills).unwrap();
+        assert!(
+            block.contains("- `no-desc`: "),
+            "empty description renders as colon-space"
+        );
+    }
+
+    #[test]
+    fn test_catalog_block_header_literal() {
+        let skills = vec![make_skill("x", "y")];
+        let block = build_skills_catalog_block(&skills).unwrap();
+        assert!(block.contains("## Available Skills"));
+    }
+
+    #[test]
+    fn test_build_system_instructions_catalog_after_agents_md() {
+        let tmp = TempDir::new().unwrap();
+        let md_path = tmp.path().join("AGENTS.md");
+        std::fs::write(&md_path, "AGENTS MD CONTENT").unwrap();
+        let mut config = make_config(&tmp, false);
+        config.agents_md_path = Some(md_path);
+        let skills = vec![
+            make_skill("skill-one", "Does thing one"),
+            make_skill("skill-two", "Does thing two"),
+        ];
+        let instructions = build_system_instructions(&config, &skills).unwrap();
+        let pos_agents = instructions.find("AGENTS MD CONTENT").unwrap();
+        let pos_catalog = instructions.find("## Available Skills").unwrap();
+        assert!(
+            pos_agents < pos_catalog,
+            "AGENTS.md content must appear before the skills catalog"
+        );
+        assert!(instructions.contains("- `skill-one`: Does thing one"));
+        assert!(instructions.contains("- `skill-two`: Does thing two"));
     }
 
     #[cfg(feature = "fastskill")]
