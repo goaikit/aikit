@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+ROOT="$(git rev-parse --show-toplevel)"
+[ -x "$ROOT/scripts/ailoop-git-notify.sh" ] && "$ROOT/scripts/ailoop-git-notify.sh" post-commit
+exit 0

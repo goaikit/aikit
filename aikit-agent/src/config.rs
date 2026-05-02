@@ -61,9 +61,12 @@ impl AgentConfig {
             .unwrap_or(12000u64);
 
         let agents_md_path = {
-            let p = workdir.join("AGENTS.md");
-            if p.exists() {
-                Some(p)
+            let agents_md = workdir.join("AGENTS.md");
+            let claude_md = workdir.join("CLAUDE.md");
+            if agents_md.exists() {
+                Some(agents_md)
+            } else if claude_md.exists() {
+                Some(claude_md)
             } else {
                 None
             }
@@ -105,6 +108,7 @@ impl AgentConfig {
 mod tests {
     use super::*;
     use std::env;
+    use tempfile::TempDir;
 
     #[test]
     fn test_from_env_no_api_key() {
@@ -156,5 +160,38 @@ mod tests {
         assert_eq!(config.model, "gpt-4o-mini");
         env::remove_var("OPENAI_API_KEY");
         env::remove_var("AIKIT_MODEL");
+    }
+
+    #[test]
+    fn test_from_env_prefers_agents_md() {
+        let _guard = crate::test_support::env_lock();
+        env::set_var("OPENAI_API_KEY", "test-key");
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "agents content").unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "claude content").unwrap();
+        let config = AgentConfig::from_env(tmp.path().to_path_buf(), false, None).unwrap();
+        assert_eq!(config.agents_md_path, Some(tmp.path().join("AGENTS.md")));
+        env::remove_var("OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn test_from_env_falls_back_to_claude_md() {
+        let _guard = crate::test_support::env_lock();
+        env::set_var("OPENAI_API_KEY", "test-key");
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("CLAUDE.md"), "claude content").unwrap();
+        let config = AgentConfig::from_env(tmp.path().to_path_buf(), false, None).unwrap();
+        assert_eq!(config.agents_md_path, Some(tmp.path().join("CLAUDE.md")));
+        env::remove_var("OPENAI_API_KEY");
+    }
+
+    #[test]
+    fn test_from_env_no_md_files_yields_none() {
+        let _guard = crate::test_support::env_lock();
+        env::set_var("OPENAI_API_KEY", "test-key");
+        let tmp = TempDir::new().unwrap();
+        let config = AgentConfig::from_env(tmp.path().to_path_buf(), false, None).unwrap();
+        assert_eq!(config.agents_md_path, None);
+        env::remove_var("OPENAI_API_KEY");
     }
 }
