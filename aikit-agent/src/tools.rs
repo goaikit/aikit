@@ -377,7 +377,12 @@ impl Tool for ReadSkillTool {
             tool_type: "function".to_string(),
             function: FunctionDefinition {
                 name: "read_skill".to_string(),
-                description: Some("Read the full content of a skill by name".to_string()),
+                description: Some(
+                    "Read the full content of a skill by name. \
+                     Valid skill names are listed in the system prompt under \
+                     '## Available Skills'. Using an unlisted name will return an error."
+                        .to_string(),
+                ),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -542,6 +547,22 @@ mod tests {
         let result = tool.execute(input, &ctx).unwrap();
         assert!(!result.is_error, "should succeed");
         assert_eq!(result.content, "mock skill content");
+    }
+
+    #[test]
+    fn test_read_skill_schema_description_references_catalog() {
+        let provider = Arc::new(MockProvider { content: None });
+        let tool = ReadSkillTool {
+            skills: vec![],
+            provider,
+        };
+        let schema = tool.schema();
+        let desc = schema.function.description.unwrap_or_default();
+        assert!(
+            desc.contains("'## Available Skills'"),
+            "read_skill description must reference '## Available Skills', got: {}",
+            desc
+        );
     }
 
     #[test]
