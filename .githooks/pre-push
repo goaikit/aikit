@@ -40,4 +40,7 @@ echo ""
 echo "🎉 All pre-push checks passed!"
 echo ""
 
+ROOT="$(git rev-parse --show-toplevel)"
+[ -x "$ROOT/scripts/ailoop-git-notify.sh" ] && "$ROOT/scripts/ailoop-git-notify.sh" pre-push || true
+
 exit 0

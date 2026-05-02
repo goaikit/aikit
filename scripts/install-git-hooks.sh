@@ -69,6 +69,9 @@ fi
 if [ -f ".git/hooks/commit-msg" ]; then
     echo "  • commit-msg: Validates conventional commit message format"
 fi
+if [ -f ".git/hooks/post-commit" ]; then
+    echo "  • post-commit: Sends ailoop notification with commit metadata"
+fi
 echo ""
 echo "Note: Hooks are optional but recommended for maintaining code quality."
 echo "      You can skip individual hooks by making them non-executable:"
