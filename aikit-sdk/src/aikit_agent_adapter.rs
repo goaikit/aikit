@@ -249,11 +249,6 @@ fn convert_event(
             },
             None,
         ),
-        AgentInternalEvent::SkillsDiscovered { .. } => (
-            AgentEventStream::Stdout,
-            AgentEventPayload::RawLine(String::new()),
-            None,
-        ),
         AgentInternalEvent::Error { code, message } => {
             let payload = if code == "E_AIKIT_LLM_ERROR_RESPONSE" && message.contains("HTTP 429") {
                 AgentEventPayload::QuotaExceeded {

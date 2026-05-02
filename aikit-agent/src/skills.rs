@@ -362,12 +362,10 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "fastskill")]
     #[test]
     fn test_duplicate_skill_name_uses_first_match() {
         let tmp = TempDir::new().unwrap();
 
-        // Create two roots each containing a skill named "dup-skill"
         let root1 = tmp.path().join("root1");
         let root2 = tmp.path().join("root2");
 
@@ -387,10 +385,9 @@ mod tests {
         )
         .unwrap();
 
-        let config = make_fastskill_config(&tmp);
-        let backend = FastskillSkillBackend::new(&config).unwrap();
+        let provider = FilesystemSkillProvider;
         // Discover from root1 first so it appears first in the slice
-        let skills = backend.discover(&[root1, root2]);
+        let skills = provider.discover(&[root1, root2]);
 
         assert_eq!(
             skills.len(),
@@ -399,7 +396,7 @@ mod tests {
         );
 
         // First-match policy: root1's skill is first in slice, so its content is returned
-        let loaded = backend.load("dup-skill", &skills).unwrap();
+        let loaded = provider.load("dup-skill", &skills).unwrap();
         assert!(
             loaded.contains("First content"),
             "first-match policy: should return first entry in slice order"
