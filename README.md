@@ -190,12 +190,14 @@ Agent selection is **CLI-only**: `-a` / `--agent` is required. `aikit run` does 
 - **`raw_line`**: UTF-8 text line that is not JSON
 - **`raw_bytes`**: non-UTF-8 data as a byte array in JSON
 - **`token_usage_line`**: normalized token counts extracted from a preceding `json_line` (fields: `usage`, `source`, `raw_agent_line_seq`)
+- **`quota_exceeded`**: emitted when the agent reports a rate-limit or quota exhaustion; carries `QuotaExceededInfo` (`agent_key`, `category`, `raw_message`); consumers MUST NOT parse provider text themselves — aikit-sdk owns all quota detection
 
 Example lines:
 
 ```json
 {"agent_key":"claude","seq":1,"stream":"stdout","payload":{"json_line":{"type":"progress","message":"Starting..."}}}
 {"agent_key":"claude","seq":2,"stream":"stdout","payload":{"token_usage_line":{"usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"cache_read_tokens":null,"cache_creation_tokens":null,"reasoning_tokens":null},"source":"Claude","raw_agent_line_seq":1}}}
+{"agent_key":"claude","seq":3,"stream":"stderr","payload":{"quota_exceeded":{"agent_key":"claude","category":"Hourly","raw_message":"Claude usage limit reached. Your limit will reset at 5 PM hour."}}}
 ```
 
 On **Windows**, the Cursor agent is often `agent.cmd`. If spawn fails, set **`AIKIT_CURSOR_AGENT`** to the full path (see [aikit-sdk README: Windows Configuration](aikit-sdk/README.md#windows-configuration)).

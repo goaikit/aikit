@@ -555,6 +555,41 @@ printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
     }
 
     #[test]
+    fn test_stub_claude_quota_uuid_false_positive() {
+        // UUID false-positive regression: successful output containing "429" only inside a UUID
+        // field and a `usage` telemetry field must NOT produce QuotaExceededInfo.
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        write_stub(
+            dir.path(),
+            "claude",
+            r#"printf '{"type":"result","subtype":"success","request_id":"req-429-abc123-uuid","usage":{"input_tokens":100,"output_tokens":50},"result":"All done."}\n'"#,
+        );
+
+        let mut events = Vec::new();
+        let result = with_stub_path(dir.path(), || {
+            run_agent_events("claude", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
+        });
+
+        assert!(result.is_ok(), "Expected Ok, got: {:?}", result.err());
+        let rr = result.unwrap();
+        assert!(
+            rr.quota_exceeded.is_none(),
+            "UUID-only '429' must not produce QuotaExceededInfo"
+        );
+        let quota_events: Vec<_> = events
+            .iter()
+            .filter(|ev| matches!(ev.payload, AgentEventPayload::QuotaExceeded { .. }))
+            .collect();
+        assert!(
+            quota_events.is_empty(),
+            "UUID-only '429' must not emit QuotaExceeded events"
+        );
+    }
+
+    #[test]
     fn test_run_agent_returns_quota_exceeded_error() {
         let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
