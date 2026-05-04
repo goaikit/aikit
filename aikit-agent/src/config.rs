@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::agent_definition::AgentPersona;
 use crate::errors::AgentError;
 use crate::llm::openai_compat::resolve_api_key;
 
@@ -18,6 +20,10 @@ pub struct AgentConfig {
     pub agents_md_path: Option<PathBuf>,
     pub timeout_secs: u64,
     pub connect_timeout_secs: u64,
+    /// Session persona to apply as main-thread defaults (set by CLI after from_env).
+    pub session_persona: Option<AgentPersona>,
+    /// Ephemeral per-process agent definitions (set by CLI after from_env).
+    pub session_agents: HashMap<String, AgentPersona>,
 }
 
 impl AgentConfig {
@@ -100,6 +106,8 @@ impl AgentConfig {
             agents_md_path,
             timeout_secs: 60,
             connect_timeout_secs: 10,
+            session_persona: None,
+            session_agents: HashMap::new(),
         })
     }
 }

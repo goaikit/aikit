@@ -222,6 +222,14 @@ fn build_system_instructions(
     skills: &[crate::skills::SkillMetadata],
 ) -> Result<String, AgentError> {
     let mut parts = Vec::new();
+
+    // Persona prompt is prepended before everything else.
+    if let Some(ref persona) = config.session_persona {
+        if !persona.prompt.is_empty() {
+            parts.push(persona.prompt.clone());
+        }
+    }
+
     parts.push(
         "You are a helpful AI agent. Complete the requested task carefully and accurately."
             .to_string(),
@@ -264,6 +272,22 @@ fn build_tools(
             parent_config: config.clone(),
             gateway,
         }));
+    }
+
+    // Apply persona tool policy (hard filter at construction time).
+    if let Some(ref persona) = config.session_persona {
+        if let Some(ref allowlist) = persona.tools {
+            tools.retain(|t| allowlist.iter().any(|a| a == t.name()));
+        }
+        if let Some(ref denylist) = persona.disallowed_tools {
+            tools.retain(|t| {
+                let keep = !denylist.iter().any(|d| d == t.name());
+                if !keep {
+                    tracing::debug!(tool = %t.name(), "persona denylist removed tool");
+                }
+                keep
+            });
+        }
     }
 
     tools
@@ -559,6 +583,8 @@ mod tests {
             agents_md_path: None,
             timeout_secs: 30,
             connect_timeout_secs: 5,
+            session_persona: None,
+            session_agents: std::collections::HashMap::new(),
         }
     }
 

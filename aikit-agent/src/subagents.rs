@@ -151,6 +151,8 @@ impl Tool for SpawnSubagentTool {
             agents_md_path: None,
             timeout_secs: self.parent_config.timeout_secs,
             connect_timeout_secs: self.parent_config.connect_timeout_secs,
+            session_persona: None,
+            session_agents: std::collections::HashMap::new(),
         };
 
         // Run the sub-agent
@@ -245,6 +247,8 @@ mod tests {
             agents_md_path: None,
             timeout_secs: 30,
             connect_timeout_secs: 5,
+            session_persona: None,
+            session_agents: std::collections::HashMap::new(),
         }
     }
 

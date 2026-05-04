@@ -2,6 +2,7 @@
 //!
 //! This module contains all CLI command implementations.
 
+mod agents;
 mod check;
 mod init;
 mod llm;
@@ -60,6 +61,8 @@ pub enum Commands {
     Run(run::RunArgs),
     /// Invoke an LLM via OpenAI-compatible API
     Llm(llm::LlmArgs),
+    /// List persisted agent definitions
+    Agents(agents::AgentsArgs),
 }
 
 /// Initialize `tracing` when `RUST_LOG` is set or `--debug` is passed (so SDK logs are visible).
@@ -127,6 +130,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Release(args)) => rt.block_on(release::execute(args))?,
         Some(Commands::Run(args)) => run::execute(args)?,
         Some(Commands::Llm(args)) => rt.block_on(llm::execute(args))?,
+        Some(Commands::Agents(args)) => agents::execute(args)?,
         // This should never be reached due to arg_required_else_help = true
         None => unreachable!("arg_required_else_help should prevent None commands"),
     }

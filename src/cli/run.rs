@@ -4,6 +4,10 @@ use anyhow::Result;
 use clap::Parser;
 use std::io::{self, Read, Write};
 
+use crate::core::agent_definition::{
+    load_persisted_registry, parse_agent_markdown, parse_session_agents_json, AgentDefinition,
+    DefinitionRecord, DefinitionSource,
+};
 use crate::tui::progress_render::ProgressRenderer;
 
 #[derive(Parser, Debug)]
@@ -40,6 +44,53 @@ pub struct RunArgs {
     /// Dry-run mode: validate inputs but don't execute agent (for testing)
     #[arg(long, hide = true)]
     pub dry_run: bool,
+
+    /// Session-scoped agent definitions: inline JSON or @<path>
+    #[arg(long, value_name = "JSON_OR_PATH")]
+    pub session_agents: Option<String>,
+
+    /// Session persona: name of a definition to apply as main-thread defaults
+    #[arg(long, value_name = "NAME")]
+    pub session_persona: Option<String>,
+}
+
+/// Load and merge `--session-agents` value into the registry.
+///
+/// The value is either:
+/// - An inline JSON string (parsed with `parse_session_agents_json`)
+/// - `@<path>` — the file is read; `.md` files use `parse_agent_markdown`, others use JSON
+fn load_session_agents(
+    value: &str,
+) -> Result<std::collections::HashMap<String, AgentDefinition>, String> {
+    if let Some(path_str) = value.strip_prefix('@') {
+        let path = std::path::Path::new(path_str);
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            format!(
+                "error: --session-agents: cannot read {}: {}",
+                path.display(),
+                e
+            )
+        })?;
+        let is_md = path.extension().map(|e| e == "md").unwrap_or(false);
+        if is_md {
+            let def = parse_agent_markdown(&content)
+                .map_err(|e| format!("error: --session-agents: {}", e))?;
+            let key = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("agent")
+                .trim_end_matches(".agent")
+                .to_string();
+            let mut map = std::collections::HashMap::new();
+            map.insert(key, def);
+            Ok(map)
+        } else {
+            parse_session_agents_json(&content)
+                .map_err(|e| format!("error: --session-agents: {}", e))
+        }
+    } else {
+        parse_session_agents_json(value).map_err(|e| format!("error: --session-agents: {}", e))
+    }
 }
 
 pub fn execute(args: RunArgs) -> Result<()> {
@@ -73,6 +124,74 @@ pub fn execute(args: RunArgs) -> Result<()> {
         model = Some(pair.model);
     }
 
+    // ── Session registry build ────────────────────────────────────────────────
+
+    // 1. Load persisted definitions from disk.
+    let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut registry = match load_persisted_registry(&workdir) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("warning: could not load persisted agent definitions: {}", e);
+            crate::core::agent_definition::SessionRegistry::new()
+        }
+    };
+
+    // 2. Parse and merge --session-agents (highest priority).
+    let mut session_agents_map: std::collections::HashMap<String, AgentDefinition> =
+        std::collections::HashMap::new();
+    if let Some(ref sa_value) = args.session_agents {
+        match load_session_agents(sa_value) {
+            Ok(map) => {
+                for (key, def) in map {
+                    session_agents_map.insert(key.clone(), def.clone());
+                    registry.merge(
+                        key,
+                        DefinitionRecord {
+                            definition: def,
+                            source: DefinitionSource::Session,
+                            path: None,
+                        },
+                    );
+                }
+            }
+            Err(msg) => {
+                eprintln!("{}", msg);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // 3. Resolve --session-persona from the merged registry.
+    let mut session_persona_json: Option<serde_json::Value> = None;
+    if let Some(ref persona_name) = args.session_persona {
+        match registry.resolve_by_name(persona_name) {
+            Some(record) => match serde_json::to_value(&record.definition) {
+                Ok(v) => session_persona_json = Some(v),
+                Err(e) => {
+                    eprintln!(
+                        "error: --session-persona: failed to serialize definition: {}",
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            },
+            None => {
+                eprintln!(
+                    "error: --session-persona: definition '{}' not found in registry",
+                    persona_name
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Serialize session_agents for RunOptions.
+    let session_agents_json: std::collections::HashMap<String, serde_json::Value> =
+        session_agents_map
+            .iter()
+            .filter_map(|(k, def)| serde_json::to_value(def).ok().map(|v| (k.clone(), v)))
+            .collect();
+
     tracing::debug!(
         agent = %agent,
         model = ?model,
@@ -97,6 +216,12 @@ pub fn execute(args: RunArgs) -> Result<()> {
         println!("Stream mode: {}", args.stream);
         println!("Events mode: {}", args.events);
         println!("Progress mode: {}", args.progress);
+        if args.session_persona.is_some() {
+            println!(
+                "Session persona: {}",
+                args.session_persona.as_deref().unwrap_or("")
+            );
+        }
         println!("Configuration validated successfully (dry-run)");
         return Ok(());
     }
@@ -106,6 +231,12 @@ pub fn execute(args: RunArgs) -> Result<()> {
         .with_stream(args.stream || args.progress);
     if let Some(ref m) = model {
         options = options.with_model(m.clone());
+    }
+    if let Some(persona) = session_persona_json {
+        options = options.with_session_persona(persona);
+    }
+    if !session_agents_json.is_empty() {
+        options = options.with_session_agents(session_agents_json);
     }
 
     if args.events {

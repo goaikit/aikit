@@ -1,3 +1,4 @@
+pub mod agent_definition;
 pub mod compression;
 pub mod config;
 pub mod context;
@@ -8,6 +9,7 @@ pub mod skills;
 pub mod subagents;
 pub mod tools;
 
+pub use agent_definition::AgentPersona;
 pub use config::AgentConfig;
 pub use errors::AgentError;
 pub use llm::{LlmError, LlmGateway, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};

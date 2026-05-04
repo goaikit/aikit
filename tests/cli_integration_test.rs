@@ -1312,4 +1312,334 @@ description = "Test package with invalid name"
             }
         }
     }
+
+    // ── aikit agents tests ───────────────────────────────────────────────────
+
+    /// `aikit agents` exits 0 when no definition files exist.
+    #[test]
+    fn test_agents_empty_registry() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args(["agents"])
+            .assert()
+            .success();
+        Ok(())
+    }
+
+    /// `aikit agents` prints header columns.
+    #[test]
+    fn test_agents_table_columns() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let agents_dir = temp.path().join(".aikit").join("agents");
+        fs::create_dir_all(&agents_dir)?;
+        fs::write(
+            agents_dir.join("reviewer.agent.md"),
+            "---\nname: reviewer\ndescription: Runs reviews\n---\n\nReview code.",
+        )?;
+
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args(["agents"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("NAME"))
+            .stdout(predicate::str::contains("SOURCE"))
+            .stdout(predicate::str::contains("MODEL"))
+            .stdout(predicate::str::contains("TOOLS"))
+            .stdout(predicate::str::contains("DESCRIPTION"));
+        Ok(())
+    }
+
+    /// `aikit agents` shows correct source attribution for project definitions.
+    #[test]
+    fn test_agents_source_attribution() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let agents_dir = temp.path().join(".aikit").join("agents");
+        fs::create_dir_all(&agents_dir)?;
+        fs::write(
+            agents_dir.join("reviewer.agent.md"),
+            "---\nname: reviewer\ndescription: Runs reviews\n---\n\nReview code.",
+        )?;
+
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args(["agents"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("project"));
+        Ok(())
+    }
+
+    /// `aikit agents --json` emits valid JSON array with required keys.
+    #[test]
+    fn test_agents_json_output() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let agents_dir = temp.path().join(".aikit").join("agents");
+        fs::create_dir_all(&agents_dir)?;
+        fs::write(
+            agents_dir.join("worker.agent.md"),
+            "---\nname: worker\ndescription: Does work\ntools:\n  - Read\n  - Grep\n---\n\nWork.",
+        )?;
+
+        let output = cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args(["agents", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(output)?;
+        let arr: serde_json::Value = serde_json::from_str(&text)?;
+        let arr = arr.as_array().expect("JSON array");
+        assert!(!arr.is_empty());
+        let obj = &arr[0];
+        assert!(obj.get("name").is_some());
+        assert!(obj.get("description").is_some());
+        assert!(obj.get("source").is_some());
+        assert!(obj.get("model").is_some());
+        assert!(obj.get("tools").is_some());
+        assert!(obj.get("disallowedTools").is_some());
+        assert!(obj.get("agents").is_some());
+        assert!(obj.get("path").is_some());
+        Ok(())
+    }
+
+    /// `aikit agents --json` empty registry returns empty JSON array.
+    #[test]
+    fn test_agents_json_empty() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let output = cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args(["agents", "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let text = String::from_utf8(output)?;
+        let arr: serde_json::Value = serde_json::from_str(text.trim())?;
+        assert_eq!(arr, serde_json::Value::Array(vec![]));
+        Ok(())
+    }
+
+    // ── --session-agents tests ───────────────────────────────────────────────
+
+    /// `--session-agents` with valid JSON exits successfully (dry-run).
+    #[test]
+    fn test_session_agents_valid_json_dry_run() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args([
+                "run",
+                "-a",
+                "aikit",
+                "--session-agents",
+                r#"{"worker":{"description":"d","prompt":"p"}}"#,
+                "--dry-run",
+                "-p",
+                "hello",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("dry-run"));
+        Ok(())
+    }
+
+    /// `--session-agents` with invalid JSON exits with code 1.
+    #[test]
+    fn test_session_agents_invalid_json() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args([
+                "run",
+                "-a",
+                "aikit",
+                "--session-agents",
+                "not-json",
+                "-p",
+                "hello",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid JSON"));
+        Ok(())
+    }
+
+    /// `--session-agents` missing `description` field exits with code 1.
+    #[test]
+    fn test_session_agents_missing_description() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args([
+                "run",
+                "-a",
+                "aikit",
+                "--session-agents",
+                r#"{"x":{"prompt":"p"}}"#,
+                "-p",
+                "hello",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("missing required field"))
+            .stderr(predicate::str::contains("description"));
+        Ok(())
+    }
+
+    /// `--session-agents @file` with a JSON file works.
+    #[test]
+    fn test_session_agents_at_file_json() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let agents_file = temp.path().join("agents.json");
+        fs::write(
+            &agents_file,
+            r#"{"worker":{"description":"Does work","prompt":"Work."}}"#,
+        )?;
+
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args([
+                "run",
+                "-a",
+                "aikit",
+                "--session-agents",
+                &format!("@{}", agents_file.display()),
+                "--dry-run",
+                "-p",
+                "hello",
+            ])
+            .assert()
+            .success();
+        Ok(())
+    }
+
+    /// `--session-agents @file` with missing file exits with code 1.
+    #[test]
+    fn test_session_agents_at_file_missing() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args([
+                "run",
+                "-a",
+                "aikit",
+                "--session-agents",
+                "@./nonexistent.json",
+                "-p",
+                "hello",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("nonexistent.json"));
+        Ok(())
+    }
+
+    /// `--session-agents @file` with a Markdown file parses correctly.
+    #[test]
+    fn test_session_agents_at_file_markdown() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let md_file = temp.path().join("reviewer.agent.md");
+        fs::write(
+            &md_file,
+            "---\nname: reviewer\ndescription: Runs reviews\n---\n\nReview code.",
+        )?;
+
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args([
+                "run",
+                "-a",
+                "aikit",
+                "--session-agents",
+                &format!("@{}", md_file.display()),
+                "--dry-run",
+                "-p",
+                "hello",
+            ])
+            .assert()
+            .success();
+        Ok(())
+    }
+
+    // ── --session-persona tests ──────────────────────────────────────────────
+
+    /// `--session-persona nonexistent` exits with code 1 and mentions name/not found.
+    #[test]
+    fn test_session_persona_not_found() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args([
+                "run",
+                "-a",
+                "aikit",
+                "--session-persona",
+                "nonexistent",
+                "-p",
+                "hello",
+            ])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("nonexistent"))
+            .stderr(predicate::str::contains("not found"));
+        Ok(())
+    }
+
+    /// `--session-persona` with a valid persona from --session-agents succeeds (dry-run).
+    #[test]
+    fn test_session_persona_found_via_session_agents() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args([
+                "run",
+                "-a",
+                "aikit",
+                "--session-agents",
+                r#"{"code-reviewer":{"name":"code-reviewer","description":"Reviews","prompt":"You review code."}}"#,
+                "--session-persona",
+                "code-reviewer",
+                "--dry-run",
+                "-p",
+                "hello",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Session persona: code-reviewer"));
+        Ok(())
+    }
+
+    /// `--session-persona` resolves from a project definition file.
+    #[test]
+    fn test_session_persona_from_project_file() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempdir()?;
+        let agents_dir = temp.path().join(".aikit").join("agents");
+        fs::create_dir_all(&agents_dir)?;
+        fs::write(
+            agents_dir.join("reviewer.agent.md"),
+            "---\nname: reviewer\ndescription: Runs reviews\n---\n\nReview code.",
+        )?;
+
+        cargo_bin_cmd!("aikit")
+            .current_dir(temp.path())
+            .args([
+                "run",
+                "-a",
+                "aikit",
+                "--session-persona",
+                "reviewer",
+                "--dry-run",
+                "-p",
+                "hello",
+            ])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("Session persona: reviewer"));
+        Ok(())
+    }
 }

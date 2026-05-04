@@ -144,6 +144,10 @@ pub struct RunOptions {
     /// When true, emit `RawTransportLine` events alongside `StreamMessage`
     /// events for debugging. Off by default.
     pub emit_raw_transport: bool,
+    /// Serialized session persona definition (JSON). Only used for the aikit backend.
+    pub session_persona: Option<serde_json::Value>,
+    /// Serialized ephemeral agent definitions (JSON map). Only used for the aikit backend.
+    pub session_agents: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl Default for RunOptions {
@@ -156,6 +160,8 @@ impl Default for RunOptions {
             current_dir: None,
             emit_token_usage_events: true,
             emit_raw_transport: false,
+            session_persona: None,
+            session_agents: std::collections::HashMap::new(),
         }
     }
 }
@@ -201,6 +207,21 @@ impl RunOptions {
     /// Control whether `RawTransportLine` events are emitted.
     pub fn with_emit_raw_transport(mut self, emit: bool) -> Self {
         self.emit_raw_transport = emit;
+        self
+    }
+
+    /// Set the session persona (serialized AgentDefinition JSON).
+    pub fn with_session_persona(mut self, persona: serde_json::Value) -> Self {
+        self.session_persona = Some(persona);
+        self
+    }
+
+    /// Set the session agents map (serialized AgentDefinition JSON values).
+    pub fn with_session_agents(
+        mut self,
+        agents: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Self {
+        self.session_agents = agents;
         self
     }
 }

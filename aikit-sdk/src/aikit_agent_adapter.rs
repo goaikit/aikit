@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::ExitStatus;
 
+use aikit_agent::agent_definition::AgentPersona;
 use aikit_agent::llm::openai_compat::OpenAiCompatProvider;
 use aikit_agent::{AgentConfig, AgentInternalEvent};
 
@@ -33,8 +34,38 @@ where
         .current_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let config = AgentConfig::from_env(workdir, options.stream, options.model.clone())
+    let mut config = AgentConfig::from_env(workdir, options.stream, options.model.clone())
         .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
+
+    // Apply session persona: deserialize from JSON, then apply model override if no CLI --model.
+    if let Some(ref persona_val) = options.session_persona {
+        match serde_json::from_value::<AgentPersona>(persona_val.clone()) {
+            Ok(persona) => {
+                // Apply persona model only when CLI did not specify --model.
+                if options.model.is_none() {
+                    if let Some(ref m) = persona.model {
+                        config.model = m.clone();
+                    }
+                }
+                config.session_persona = Some(persona);
+            }
+            Err(e) => {
+                tracing::warn!("failed to deserialize session persona: {}", e);
+            }
+        }
+    }
+
+    // Apply session agents: deserialize each entry from JSON.
+    for (key, agent_val) in &options.session_agents {
+        match serde_json::from_value::<AgentPersona>(agent_val.clone()) {
+            Ok(persona) => {
+                config.session_agents.insert(key.clone(), persona);
+            }
+            Err(e) => {
+                tracing::warn!("failed to deserialize session agent '{}': {}", key, e);
+            }
+        }
+    }
 
     let gateway = OpenAiCompatProvider::new(config.timeout_secs, config.connect_timeout_secs)
         .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
