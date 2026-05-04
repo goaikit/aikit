@@ -359,6 +359,8 @@ mod tests {
             agents_md_path: None,
             timeout_secs: 10,
             connect_timeout_secs: 5,
+            session_persona: None,
+            session_agents: std::collections::HashMap::new(),
         }
     }
 

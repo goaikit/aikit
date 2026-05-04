@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 /// Which subagents a coordinator may delegate to (VS Code **`agents`** field subset).
@@ -22,8 +22,22 @@ pub enum DelegationAllowlist {
     Names(Vec<String>),
 }
 
+impl serde::Serialize for DelegationAllowlist {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeSeq;
+        match self {
+            DelegationAllowlist::All => s.serialize_str("*"),
+            DelegationAllowlist::None => {
+                let seq = s.serialize_seq(Some(0))?;
+                seq.end()
+            }
+            DelegationAllowlist::Names(v) => v.serialize(s),
+        }
+    }
+}
+
 /// Normalized definition after parsing and validation.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AgentDefinition {
     pub name: String,
     pub description: String,
@@ -368,6 +382,232 @@ pub fn parse_agent_markdown(content: &str) -> Result<AgentDefinition, ParseError
     })
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Registry types
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Source label for a persisted or session-injected definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DefinitionSource {
+    Builtin,
+    Managed,
+    User,
+    Project,
+    Session,
+}
+
+impl std::fmt::Display for DefinitionSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DefinitionSource::Builtin => write!(f, "builtin"),
+            DefinitionSource::Managed => write!(f, "managed"),
+            DefinitionSource::User => write!(f, "user"),
+            DefinitionSource::Project => write!(f, "project"),
+            DefinitionSource::Session => write!(f, "session"),
+        }
+    }
+}
+
+impl DefinitionSource {
+    fn priority(&self) -> u8 {
+        match self {
+            DefinitionSource::Builtin => 0,
+            DefinitionSource::Managed => 1,
+            DefinitionSource::User => 2,
+            DefinitionSource::Project => 3,
+            DefinitionSource::Session => 4,
+        }
+    }
+}
+
+/// A definition together with its provenance.
+#[derive(Debug, Clone)]
+pub struct DefinitionRecord {
+    pub definition: AgentDefinition,
+    pub source: DefinitionSource,
+    /// Absolute path for persisted sources; `None` for session-injected entries.
+    pub path: Option<std::path::PathBuf>,
+}
+
+/// Ordered, merged registry for one process lifetime.
+///
+/// Key = outer JSON id (filename stem or JSON map key).
+pub struct SessionRegistry {
+    entries: std::collections::HashMap<String, DefinitionRecord>,
+}
+
+impl SessionRegistry {
+    pub fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Merge an entry from a higher-priority source; existing keys are overwritten.
+    pub fn merge(&mut self, key: String, record: DefinitionRecord) {
+        self.entries.insert(key, record);
+    }
+
+    /// Resolve by `AgentDefinition.name` (exact, case-sensitive).
+    pub fn resolve_by_name(&self, name: &str) -> Option<&DefinitionRecord> {
+        self.entries.values().find(|r| r.definition.name == name)
+    }
+
+    /// Return all entries sorted by source priority then key.
+    pub fn all_sorted(&self) -> Vec<&DefinitionRecord> {
+        let mut records: Vec<&DefinitionRecord> = self.entries.values().collect();
+        records.sort_by(|a, b| {
+            a.source.priority().cmp(&b.source.priority()).then_with(|| {
+                // find the key for each record
+                let ka = self
+                    .entries
+                    .iter()
+                    .find(|(_, r)| std::ptr::eq(*r, *a))
+                    .map(|(k, _)| k.as_str())
+                    .unwrap_or("");
+                let kb = self
+                    .entries
+                    .iter()
+                    .find(|(_, r)| std::ptr::eq(*r, *b))
+                    .map(|(k, _)| k.as_str())
+                    .unwrap_or("");
+                ka.cmp(kb)
+            })
+        });
+        records
+    }
+
+    /// Return whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Default for SessionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Error type for registry loading.
+#[derive(Debug)]
+pub enum LoadError {
+    Io {
+        path: std::path::PathBuf,
+        source: std::io::Error,
+    },
+    Parse {
+        path: std::path::PathBuf,
+        source: ParseError,
+    },
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoadError::Io { path, source } => {
+                write!(f, "IO error reading {}: {}", path.display(), source)
+            }
+            LoadError::Parse { path, source } => {
+                write!(f, "parse error in {}: {}", path.display(), source)
+            }
+        }
+    }
+}
+
+impl std::error::Error for LoadError {}
+
+/// Scan a single directory and merge its definitions into the registry.
+///
+/// Files ending in `.agent.md` or `.md` are parsed with `parse_agent_markdown`.
+/// Unreadable files emit a warning to stderr and are skipped (no hard error).
+fn scan_dir_into_registry(
+    dir: &std::path::Path,
+    source: DefinitionSource,
+    registry: &mut SessionRegistry,
+) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_md = path.extension().map(|e| e == "md").unwrap_or(false);
+        if !is_md {
+            continue;
+        }
+        let key = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .trim_end_matches(".agent")
+            .to_string();
+        if key.is_empty() {
+            continue;
+        }
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "warning: AGENTS_LIST_IO_ERROR: cannot read {}: {}",
+                    path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+        match parse_agent_markdown(&content) {
+            Ok(def) => {
+                registry.merge(
+                    key,
+                    DefinitionRecord {
+                        definition: def,
+                        source: source.clone(),
+                        path: Some(path),
+                    },
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: AGENTS_LIST_PARSE_WARN: cannot parse {}: {}",
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
+}
+
+/// Load all persisted definitions from the four source directories into a registry.
+///
+/// Priority order (ascending, later overrides earlier):
+/// 1. `<binary-dir>/agents/`  (builtin — reserved, not loaded in this RFC)
+/// 2. `~/.aikit/agents/`      (managed)
+/// 3. `~/.config/aikit/agents/` (user)
+/// 4. `<workdir>/.aikit/agents/` (project)
+pub fn load_persisted_registry(workdir: &std::path::Path) -> Result<SessionRegistry, LoadError> {
+    let mut registry = SessionRegistry::new();
+
+    // managed: ~/.aikit/agents/
+    if let Some(home) = dirs::home_dir() {
+        let managed = home.join(".aikit").join("agents");
+        scan_dir_into_registry(&managed, DefinitionSource::Managed, &mut registry);
+    }
+
+    // user: ~/.config/aikit/agents/
+    if let Some(config_dir) = dirs::config_dir() {
+        let user = config_dir.join("aikit").join("agents");
+        scan_dir_into_registry(&user, DefinitionSource::User, &mut registry);
+    }
+
+    // project: <workdir>/.aikit/agents/
+    let project = workdir.join(".aikit").join("agents");
+    scan_dir_into_registry(&project, DefinitionSource::Project, &mut registry);
+
+    Ok(registry)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -664,5 +904,129 @@ x";
             d.delegation,
             Some(DelegationAllowlist::Names(vec!["SingleAgent".into()]))
         );
+    }
+
+    // ── Registry tests ──────────────────────────────────────────────────────
+
+    fn make_def(name: &str) -> AgentDefinition {
+        AgentDefinition {
+            name: name.to_string(),
+            description: "d".to_string(),
+            prompt: "p".to_string(),
+            tools: None,
+            disallowed_tools: None,
+            model: None,
+            delegation: None,
+        }
+    }
+
+    #[test]
+    fn registry_empty() {
+        let reg = SessionRegistry::new();
+        assert!(reg.is_empty());
+        assert!(reg.resolve_by_name("anything").is_none());
+        assert!(reg.all_sorted().is_empty());
+    }
+
+    #[test]
+    fn registry_single_entry() {
+        let mut reg = SessionRegistry::new();
+        reg.merge(
+            "worker".to_string(),
+            DefinitionRecord {
+                definition: make_def("worker"),
+                source: DefinitionSource::Project,
+                path: None,
+            },
+        );
+        assert!(!reg.is_empty());
+        assert!(reg.resolve_by_name("worker").is_some());
+        assert!(reg.resolve_by_name("other").is_none());
+    }
+
+    #[test]
+    fn registry_project_overrides_user() {
+        let mut reg = SessionRegistry::new();
+        reg.merge(
+            "x".to_string(),
+            DefinitionRecord {
+                definition: make_def("x-user"),
+                source: DefinitionSource::User,
+                path: None,
+            },
+        );
+        reg.merge(
+            "x".to_string(),
+            DefinitionRecord {
+                definition: make_def("x-project"),
+                source: DefinitionSource::Project,
+                path: None,
+            },
+        );
+        let rec = reg.resolve_by_name("x-project").expect("project wins");
+        assert_eq!(rec.definition.name, "x-project");
+    }
+
+    #[test]
+    fn registry_resolve_by_name_exact_match() {
+        let mut reg = SessionRegistry::new();
+        reg.merge(
+            "key".to_string(),
+            DefinitionRecord {
+                definition: make_def("My Persona"),
+                source: DefinitionSource::Session,
+                path: None,
+            },
+        );
+        assert!(reg.resolve_by_name("My Persona").is_some());
+        assert!(reg.resolve_by_name("my persona").is_none());
+        assert!(reg.resolve_by_name("key").is_none());
+    }
+
+    #[test]
+    fn registry_user_invocable_key_parses_ok() {
+        let md = r"---
+name: internal-helper
+description: Hidden from interoperability layer
+user-invocable: false
+tools: [Read]
+---
+
+Only subagents.";
+        let def = parse_agent_markdown(md).unwrap();
+        let mut reg = SessionRegistry::new();
+        reg.merge(
+            "internal-helper".to_string(),
+            DefinitionRecord {
+                definition: def,
+                source: DefinitionSource::Project,
+                path: None,
+            },
+        );
+        assert!(reg.resolve_by_name("internal-helper").is_some());
+    }
+
+    #[test]
+    fn load_persisted_registry_empty_workdir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let reg = load_persisted_registry(tmp.path()).unwrap();
+        assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn load_persisted_registry_project_entry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let agents_dir = tmp.path().join(".aikit").join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("reviewer.agent.md"),
+            "---\nname: reviewer\ndescription: Does reviews\n---\n\nReview code.",
+        )
+        .unwrap();
+        let reg = load_persisted_registry(tmp.path()).unwrap();
+        let rec = reg
+            .resolve_by_name("reviewer")
+            .expect("reviewer in registry");
+        assert_eq!(rec.source, DefinitionSource::Project);
     }
 }
