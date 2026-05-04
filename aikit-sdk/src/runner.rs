@@ -514,7 +514,7 @@ fn build_codex_argv(
 
 /// Builds command-line arguments for claude.
 fn build_claude_argv(
-    prompt: &str,
+    _prompt: &str,
     model: Option<&String>,
     _yolo: bool,
     stream: bool,
@@ -522,7 +522,7 @@ fn build_claude_argv(
     let mut argv = vec![
         OsString::from("claude"),
         OsString::from("-p"),
-        OsString::from(prompt),
+        OsString::from("-"),
         OsString::from("--dangerously-skip-permissions"),
     ];
 
@@ -539,7 +539,7 @@ fn build_claude_argv(
 
 /// Builds command-line arguments for gemini.
 fn build_gemini_argv(
-    prompt: &str,
+    _prompt: &str,
     model: Option<&String>,
     _yolo: bool,
     _stream: bool,
@@ -547,7 +547,7 @@ fn build_gemini_argv(
     let mut argv = vec![
         OsString::from("gemini"),
         OsString::from("--prompt"),
-        OsString::from(prompt),
+        OsString::from("-"),
     ];
 
     if let Some(m) = model {
@@ -560,21 +560,19 @@ fn build_gemini_argv(
 
 /// Builds command-line arguments for opencode.
 fn build_opencode_argv(
-    prompt: &str,
+    _prompt: &str,
     model: Option<&String>,
     yolo: bool,
     _stream: bool,
 ) -> Vec<OsString> {
-    let mut argv = vec![
-        OsString::from("opencode"),
-        OsString::from("--prompt"),
-        OsString::from(prompt),
-    ];
+    let mut argv = vec![OsString::from("opencode")];
 
     if let Some(m) = model {
-        argv.push(OsString::from("--model"));
+        argv.push(OsString::from("-m"));
         argv.push(OsString::from(m.as_str()));
     }
+
+    argv.push(OsString::from("run"));
 
     if yolo {
         argv.push(OsString::from("--yolo"));
@@ -585,7 +583,7 @@ fn build_opencode_argv(
 
 /// Builds command-line arguments for Cursor Agent CLI (headless mode).
 fn build_cursor_agent_argv(
-    prompt: &str,
+    _prompt: &str,
     model: Option<&String>,
     yolo: bool,
     stream: bool,
@@ -605,7 +603,6 @@ fn build_cursor_agent_argv(
         argv.push(OsString::from("--force"));
     }
 
-    argv.push(OsString::from(prompt));
     argv
 }
 
@@ -630,11 +627,11 @@ fn build_codex_argv_events(_prompt: &str, model: Option<&String>, yolo: bool) ->
 }
 
 /// Event-mode argv builder for claude: emits stream-json output.
-fn build_claude_argv_events(prompt: &str, model: Option<&String>, stream: bool) -> Vec<OsString> {
+fn build_claude_argv_events(_prompt: &str, model: Option<&String>, stream: bool) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("claude"),
         OsString::from("-p"),
-        OsString::from(prompt),
+        OsString::from("-"),
         OsString::from("--dangerously-skip-permissions"),
     ];
 
@@ -650,11 +647,11 @@ fn build_claude_argv_events(prompt: &str, model: Option<&String>, stream: bool) 
 }
 
 /// Event-mode argv builder for gemini: emits stream-json output in headless mode.
-fn build_gemini_argv_events(prompt: &str, model: Option<&String>) -> Vec<OsString> {
+fn build_gemini_argv_events(_prompt: &str, model: Option<&String>) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("gemini"),
         OsString::from("--prompt"),
-        OsString::from(prompt),
+        OsString::from("-"),
         OsString::from("--output-format"),
         OsString::from("stream-json"),
         OsString::from("--yolo"),
@@ -669,7 +666,7 @@ fn build_gemini_argv_events(prompt: &str, model: Option<&String>) -> Vec<OsStrin
 }
 
 /// Event-mode argv builder for opencode: uses `run` subcommand with `--format json`.
-fn build_opencode_argv_events(prompt: &str, model: Option<&String>, _yolo: bool) -> Vec<OsString> {
+fn build_opencode_argv_events(_prompt: &str, model: Option<&String>, _yolo: bool) -> Vec<OsString> {
     let mut argv = vec![OsString::from("opencode")];
 
     if let Some(m) = model {
@@ -678,7 +675,6 @@ fn build_opencode_argv_events(prompt: &str, model: Option<&String>, _yolo: bool)
     }
 
     argv.push(OsString::from("run"));
-    argv.push(OsString::from(prompt));
     argv.push(OsString::from("--format"));
     argv.push(OsString::from("json"));
 
@@ -687,7 +683,7 @@ fn build_opencode_argv_events(prompt: &str, model: Option<&String>, _yolo: bool)
 
 /// Event-mode argv builder for Cursor Agent CLI: emits JSON output.
 fn build_cursor_agent_argv_events(
-    prompt: &str,
+    _prompt: &str,
     model: Option<&String>,
     yolo: bool,
     stream: bool,
@@ -713,15 +709,12 @@ fn build_cursor_agent_argv_events(
         argv.push(OsString::from("--force"));
     }
 
-    argv.push(OsString::from(prompt));
     argv
 }
 
-/// Returns whether the agent key expects the prompt written to stdin.
-/// Cursor Agent ("agent") and OpenCode ("opencode") take the prompt as a
-/// positional argument instead.
-fn should_write_stdin(agent_key: &str) -> bool {
-    agent_key != "agent" && agent_key != "opencode"
+/// All runnable external CLIs receive the full prompt on stdin (avoids execve E2BIG).
+fn should_write_stdin(_agent_key: &str) -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -2003,10 +1996,6 @@ where
     let (mut child, _argv) = spawn_agent_piped(agent_key, prompt, &options, true)?;
 
     // Write prompt and close stdin before reading output.
-    // Cursor Agent ("agent") takes the prompt as a positional argument, so
-    // we do not write stdin; we still must `take()` and drop it so the write
-    // end of the pipe closes. Otherwise the child's stdin stays open and some
-    // agents block reading it when stdout is a pipe (non-TTY).
     if should_write_stdin(agent_key) {
         if let Some(mut stdin) = child.stdin.take() {
             stdin
@@ -2555,7 +2544,8 @@ mod tests {
         );
         assert!(argv.contains(&OsString::from("claude")));
         assert!(argv.contains(&OsString::from("-p")));
-        assert!(argv.contains(&OsString::from("test prompt")));
+        assert!(argv.contains(&OsString::from("-")));
+        assert!(!argv.contains(&OsString::from("test prompt")));
         assert!(argv.contains(&OsString::from("--model")));
         assert!(argv.contains(&OsString::from("claude-3-opus")));
         assert!(argv.contains(&OsString::from("--output-format")));
@@ -2574,7 +2564,8 @@ mod tests {
         let argv = build_gemini_argv("test prompt", Some(&"gemini-pro".to_string()), false, false);
         assert!(argv.contains(&OsString::from("gemini")));
         assert!(argv.contains(&OsString::from("--prompt")));
-        assert!(argv.contains(&OsString::from("test prompt")));
+        assert!(argv.contains(&OsString::from("-")));
+        assert!(!argv.contains(&OsString::from("test prompt")));
         assert!(argv.contains(&OsString::from("--model")));
         assert!(argv.contains(&OsString::from("gemini-pro")));
     }
@@ -2588,9 +2579,9 @@ mod tests {
             false,
         );
         assert!(argv.contains(&OsString::from("opencode")));
-        assert!(argv.contains(&OsString::from("--prompt")));
-        assert!(argv.contains(&OsString::from("test prompt")));
-        assert!(argv.contains(&OsString::from("--model")));
+        assert!(argv.contains(&OsString::from("run")));
+        assert!(!argv.contains(&OsString::from("test prompt")));
+        assert!(argv.contains(&OsString::from("-m")));
         assert!(argv.contains(&OsString::from("zai-coding-plan/glm-4.7")));
         assert!(argv.contains(&OsString::from("--yolo")));
     }
@@ -2612,7 +2603,7 @@ mod tests {
         assert!(argv.contains(&OsString::from("--model")));
         assert!(argv.contains(&OsString::from("custom-model")));
         assert!(argv.contains(&OsString::from("--force")));
-        assert!(argv.contains(&OsString::from("test prompt")));
+        assert!(!argv.contains(&OsString::from("test prompt")));
         assert!(!argv.contains(&OsString::from("--prompt")));
         assert!(!argv.contains(&OsString::from("--yolo")));
     }
@@ -3069,7 +3060,7 @@ mod tests {
         let argv = build_opencode_argv_events("test prompt", None, false);
         assert!(argv.contains(&OsString::from("opencode")));
         assert!(argv.contains(&OsString::from("run")));
-        assert!(argv.contains(&OsString::from("test prompt")));
+        assert!(!argv.contains(&OsString::from("test prompt")));
         assert!(argv.contains(&OsString::from("--format")));
         assert!(argv.contains(&OsString::from("json")));
         assert!(!argv.contains(&OsString::from("--json")));
@@ -3101,13 +3092,13 @@ mod tests {
     fn test_build_cursor_agent_argv_events_stream_json() {
         let argv = build_cursor_agent_argv_events("test", None, false, true);
         assert!(argv.contains(&OsString::from("stream-json")));
-        assert!(argv.contains(&OsString::from("test")));
+        assert!(!argv.contains(&OsString::from("test")));
     }
 
     #[test]
     fn test_should_write_stdin() {
-        assert!(!should_write_stdin("agent"));
-        assert!(!should_write_stdin("opencode"));
+        assert!(should_write_stdin("agent"));
+        assert!(should_write_stdin("opencode"));
         assert!(should_write_stdin("codex"));
         assert!(should_write_stdin("claude"));
         assert!(should_write_stdin("gemini"));
