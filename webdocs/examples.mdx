@@ -34,6 +34,34 @@ npm install -g @anthropic-ai/claude-code
 # Each agent has different installation requirements
 ```
 
+## MCP server registration
+
+**Goal:** Add a project-local MCP server entry for Claude (writes or merges `.mcp.json`).
+
+```bash
+cd /path/to/your/repo
+aikit mcp add --agent claude --scope project --project . --name demo-fs \
+  --command npx \
+  --arg -y \
+  --arg @modelcontextprotocol/server-filesystem \
+  --arg .
+```
+
+From Python (after `maturin develop` in `aikit-py/`):
+
+```python
+import aikit_py
+
+aikit_py.add_mcp_server(
+    "claude", "/path/to/your/repo", "demo-fs",
+    scope="project", command="npx",
+    args=["-y", "@modelcontextprotocol/server-filesystem", "."],
+    overwrite=False,
+)
+```
+
+See [MCP registration](/mcp) and [CLI Commands](cli-commands.mdx#mcp).
+
 ## Basic Usage Examples
 
 ### 1. Initialize a New Project

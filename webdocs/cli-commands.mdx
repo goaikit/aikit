@@ -14,6 +14,7 @@ AIKit organizes functionality into logical command groups:
 ### Core Commands
 - **`init`** - Initialize new Spec-Driven Development projects
 - **`run`** - Run a coding agent with a prompt (supports streaming events)
+- **`mcp`** - List supported agents or merge one MCP server into agent config files
 - **`llm`** - Invoke an LLM via OpenAI-compatible API (supports streaming and JSON output)
 - **`check`** - Validate installed tools and AI agent CLIs
 - **`version`** - Display version information
@@ -55,6 +56,7 @@ aikit <command> --help
 |---------|---------|---------|
 | `init` | Create new project | `aikit init my-project` |
 | `run` | Run a coding agent | `aikit run --agent claude -p "Task"` |
+| `mcp` | MCP config merge | `aikit mcp list` / `aikit mcp add --agent claude ...` |
 | `llm` | Invoke an LLM | `aikit llm -m gpt-4o -p "Hello"` |
 | `check` | Validate environment | `aikit check` |
 | `install` | Install package | `aikit install https://github.com/user/repo` |
@@ -217,6 +219,35 @@ Fields:
 See [aikit-sdk README](../aikit-sdk/README.md) for complete streaming API documentation.
 
 Run `aikit run --help` for the authoritative option reference.
+
+### mcp
+
+Register MCP servers in agent-specific config files (JSON or TOML). Six catalog keys are supported: `cursor-agent`, `claude`, `gemini`, `copilot`, `opencode`, `codex` (aliases: `cursor`, `vscode`). See [MCP registration](/mcp) for paths, Rust (`aikit-sdk`), and Python (`aikit-py`) equivalents.
+
+```bash
+# Agents and config paths (project vs global)
+aikit mcp list
+
+# Stdio server: repeat --arg for each argv token; repeat --env KEY=value for env
+aikit mcp add --agent claude --scope project --project . --name fs \
+  --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg .
+
+# HTTP server: repeat --header KEY=value for headers
+aikit mcp add --agent gemini --scope project --project . --name api \
+  --url http://127.0.0.1:8730/mcp
+```
+
+| Flag | Description |
+| --- | --- |
+| `--agent` | Catalog key or alias (`cursor`, `vscode`) |
+| `--scope` | `project` or `global` |
+| `--project` | Project root when scope is project (default `.`) |
+| `--name` | Server id inside `mcpServers` / `servers` / `mcp` / Codex table |
+| `--command` / `--url` | Stdio executable or HTTP URL (exactly one required) |
+| `--arg` | One argv token for stdio (repeat) |
+| `--env` | `KEY=value` for stdio env (repeat) |
+| `--header` | `KEY=value` for HTTP headers (repeat) |
+| `--overwrite` | Replace existing entry with the same name |
 
 ### llm
 
