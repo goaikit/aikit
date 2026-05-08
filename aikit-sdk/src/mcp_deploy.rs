@@ -736,25 +736,25 @@ mod tests {
         std::env::remove_var("APPDATA");
 
         let p = mcp_config_path("copilot", McpScope::Global, tmp.path()).unwrap();
-        #[cfg(windows)]
-        assert_eq!(
-            p,
-            tmp.path()
+        let expected = match std::env::consts::OS {
+            "windows" => tmp
+                .path()
                 .join("AppData")
                 .join("Roaming")
                 .join("Code")
                 .join("User")
-                .join("mcp.json")
-        );
-        #[cfg(not(windows))]
-        assert_eq!(
-            p,
-            tmp.path()
+                .join("mcp.json"),
+            "macos" => tmp
+                .path()
+                .join("Library/Application Support/Code/User/mcp.json"),
+            _ => tmp
+                .path()
                 .join(".config")
                 .join("Code")
                 .join("User")
-                .join("mcp.json")
-        );
+                .join("mcp.json"),
+        };
+        assert_eq!(p, expected);
 
         #[cfg(windows)]
         match prev_appdata {
