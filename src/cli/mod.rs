@@ -6,6 +6,7 @@ mod agents;
 mod check;
 mod init;
 mod llm;
+mod mcp;
 mod release;
 mod run;
 mod template_package; // Old template zip archive builder (used by release command)
@@ -63,6 +64,8 @@ pub enum Commands {
     Llm(llm::LlmArgs),
     /// List persisted agent definitions
     Agents(agents::AgentsArgs),
+    /// Register MCP servers in agent JSON config files
+    Mcp(mcp::McpArgs),
 }
 
 /// Initialize `tracing` when `RUST_LOG` is set or `--debug` is passed (so SDK logs are visible).
@@ -131,6 +134,7 @@ pub fn run() -> Result<()> {
         Some(Commands::Run(args)) => run::execute(args)?,
         Some(Commands::Llm(args)) => rt.block_on(llm::execute(args))?,
         Some(Commands::Agents(args)) => agents::execute(args)?,
+        Some(Commands::Mcp(args)) => mcp::execute(args)?,
         // This should never be reached due to arg_required_else_help = true
         None => unreachable!("arg_required_else_help should prevent None commands"),
     }

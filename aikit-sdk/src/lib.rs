@@ -433,6 +433,7 @@ pub(crate) mod command_resolve;
 pub mod fetch;
 pub mod install;
 pub mod manifest;
+pub mod mcp_deploy;
 
 pub use fetch::TemplateSource;
 pub use install::{
@@ -440,6 +441,11 @@ pub use install::{
     InstallError, InstallTemplateFromSourceOptions, InstallTemplateOptions,
 };
 pub use manifest::{PackageInfo, TemplateManifest};
+pub use mcp_deploy::{
+    add_mcp_server, mcp_config_path, mcp_supported_agents, normalize_mcp_agent_key,
+    parse_env_pairs, parse_header_pairs, AddMcpServerOptions, McpAgentSupportRow, McpDeployError,
+    McpScope, McpServerTransport, MCP_SUPPORTED_AGENT_KEYS,
+};
 
 /// Agent catalog entry containing all supported agents and their capabilities.
 struct AgentEntry<'a> {

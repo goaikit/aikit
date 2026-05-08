@@ -9,12 +9,13 @@ It provides deterministic APIs for:
 - package/template install helpers
 - runnable-agent detection
 - buffered and streaming agent execution
+- MCP server registration (merge into agent JSON) for supported assistants
 
 ## Install
 
 ```toml
 [dependencies]
-aikit-sdk = "0.2.0"
+aikit-sdk = "0.2.1"
 ```
 
 Or from this workspace:
@@ -48,6 +49,31 @@ deploy_command("claude", root, "lint", "# command body")?;
 deploy_skill("cursor-agent", root, "my-skill", "# SKILL.md", None)?;
 deploy_subagent("claude", root, "reviewer", "# subagent")?;
 # Ok::<(), aikit_sdk::DeployError>(())
+```
+
+## MCP config merge
+
+Supported keys: `cursor-agent`, `claude`, `gemini`, `copilot`, `opencode`, `codex` (see `mcp_supported_agents()` and `MCP_SUPPORTED_AGENT_KEYS`). Each uses the on-disk format expected by that product (`mcpServers`, VS Code `servers`, OpenCode `mcp`, or Codex TOML tables). On **Windows**, VS Code user MCP and OpenCode global paths fall back to `<home>\\AppData\\Roaming\\...` when `%APPDATA%` / `config_dir` are missing.
+
+```rust
+use aikit_sdk::{
+    add_mcp_server, mcp_config_path, AddMcpServerOptions, McpScope, McpServerTransport,
+};
+use std::path::Path;
+
+let path = add_mcp_server(AddMcpServerOptions {
+    agent_key: "gemini".into(),
+    scope: McpScope::Project,
+    project_root: Path::new(".").to_path_buf(),
+    server_name: "my-cli".into(),
+    transport: McpServerTransport::Http {
+        url: "http://127.0.0.1:8730/mcp".into(),
+        headers: None,
+    },
+    overwrite: false,
+})?;
+println!("{}", path.display());
+# Ok::<(), aikit_sdk::McpDeployError>(())
 ```
 
 ## Instruction files
