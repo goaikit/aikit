@@ -1,4 +1,4 @@
-use aikit_sdk::{run_agent, run_agent_events, AgentEvent};
+use aikit_sdk::{run_agent, run_agent_events, run_builtin_agent, AgentEvent, OutputMode};
 use aikit_sdk::{ProgressViewConfig, RunError, RunOptions, RunProgress};
 use anyhow::Result;
 use clap::Parser;
@@ -8,7 +8,7 @@ use crate::core::agent_definition::{
     load_persisted_registry, parse_agent_markdown, parse_session_agents_json, AgentDefinition,
     DefinitionRecord, DefinitionSource,
 };
-use crate::tui::progress_render::ProgressRenderer;
+use crate::tui::progress_render::{ProgressRenderer, ProgressRendererSink};
 
 #[derive(Parser, Debug)]
 #[command(about = "Run a coding agent with a prompt (stdin or -p)")]
@@ -239,7 +239,43 @@ pub fn execute(args: RunArgs) -> Result<()> {
         options = options.with_session_agents(session_agents_json);
     }
 
-    if args.events {
+    let is_builtin = agent == "aikit" || agent == "agent";
+
+    if is_builtin {
+        let mode = if args.events {
+            OutputMode::Events
+        } else if args.progress {
+            OutputMode::Progress
+        } else {
+            OutputMode::Plain
+        };
+
+        let progress_sink: Option<Box<dyn aikit_sdk::ProgressSink>> = if args.progress {
+            let renderer = ProgressRenderer::new().unwrap_or_else(|_| ProgressRenderer::non_tty());
+            Some(Box::new(ProgressRendererSink::new(renderer)))
+        } else {
+            None
+        };
+
+        match run_builtin_agent(
+            "aikit",
+            &prompt,
+            options,
+            mode,
+            &mut io::stdout(),
+            &mut io::stderr(),
+            progress_sink,
+        ) {
+            Ok(result) => {
+                let exit_code = result.exit_code().unwrap_or(1);
+                std::process::exit(exit_code);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else if args.events {
         match run_agent_events(&agent, &prompt, options, |event: AgentEvent| {
             if let Ok(line) = serde_json::to_string(&event) {
                 println!("{}", line);
