@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 use std::process::ExitStatus;
+use std::sync::Arc;
 
 use aikit_agent::agent_definition::AgentPersona;
 use aikit_agent::llm::openai_compat::OpenAiCompatProvider;
-use aikit_agent::{AgentConfig, AgentInternalEvent};
+use aikit_agent::{AgentConfig, AgentInternalEvent, HostToolProvider};
 
 use crate::{
     AgentEvent, AgentEventPayload, AgentEventStream, QuotaCategory, QuotaExceededInfo, RunError,
@@ -25,6 +26,7 @@ fn exit_status(code: i32) -> ExitStatus {
 pub fn run_aikit_agent<F>(
     prompt: &str,
     options: &RunOptions,
+    host_tool_provider: Option<Arc<dyn HostToolProvider>>,
     mut on_event: F,
 ) -> Result<RunResult, RunError>
 where
@@ -36,6 +38,7 @@ where
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let mut config = AgentConfig::from_env(workdir, options.stream, options.model.clone())
         .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
+    config.host_tool_provider = host_tool_provider;
 
     // Apply session persona: deserialize from JSON, then apply model override if no CLI --model.
     if let Some(ref persona_val) = options.session_persona {

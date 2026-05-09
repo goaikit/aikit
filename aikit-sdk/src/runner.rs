@@ -1982,9 +1982,10 @@ pub fn run_builtin_agent(
         OutputMode::Progress => {
             let mut sink = progress_sink.ok_or(RunError::MissingProgressSink)?;
             let mut collected: Vec<AgentEvent> = Vec::new();
-            let result = crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, |event| {
-                collected.push(event);
-            })?;
+            let result =
+                crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, None, |event| {
+                    collected.push(event);
+                })?;
             let mut progress = crate::run_progress::RunProgress::new(
                 crate::run_progress::ProgressViewConfig::default(),
             );
@@ -1998,9 +1999,10 @@ pub fn run_builtin_agent(
         }
         OutputMode::Events => {
             let mut collected: Vec<AgentEvent> = Vec::new();
-            let result = crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, |event| {
-                collected.push(event);
-            })?;
+            let result =
+                crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, None, |event| {
+                    collected.push(event);
+                })?;
             for event in &collected {
                 if let Ok(line) = serde_json::to_string(event) {
                     let _ = writeln!(writer, "{}", line);
@@ -2010,7 +2012,8 @@ pub fn run_builtin_agent(
             Ok(result)
         }
         OutputMode::Plain => {
-            let result = crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, |_| {})?;
+            let result =
+                crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, None, |_| {})?;
             let _ = writer.write_all(&result.stdout);
             let _ = err_writer.write_all(&result.stderr);
             Ok(result)
@@ -2107,7 +2110,7 @@ where
     );
 
     if agent_key == "aikit" {
-        return crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, on_event);
+        return crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, None, on_event);
     }
 
     let (mut child, _argv) = spawn_agent_piped(agent_key, prompt, &options, true)?;
