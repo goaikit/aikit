@@ -24,3 +24,5 @@ aikit-agent = { path = "../aikit-agent", version = "0.1.0" }
 [dev-dependencies]
 insta = { version = "1.39", features = ["json"] }
 assert_cmd = "2.0"
+mockito = "1.2"
+serde_json = "1.0"
