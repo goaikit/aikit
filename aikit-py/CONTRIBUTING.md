@@ -23,6 +23,12 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test -p aikit-py
 ```
 
+Python tests (`tests/test_aikit_py.py`, `tests/test_mcp_deploy.py`) require an editable install:
+
+```bash
+cd aikit-py && maturin develop && pytest tests/
+```
+
 ## Guidelines
 
 - Preserve API naming and output shapes already exposed in `aikit_py`.

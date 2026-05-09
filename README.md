@@ -114,7 +114,48 @@ aikit list
 | `aikit package build` | Build distributable package (output: dist/ or .genreleases/) |
 | `aikit package publish <owner/repo>` | Publish package to GitHub (release and assets) |
 | `aikit llm` | Invoke an LLM via OpenAI-compatible API (supports streaming and JSON output) |
+| `aikit mcp list` | Show which agents support MCP config merge and target file paths |
+| `aikit mcp add` | Merge one MCP server into agent config: Cursor / Claude / Gemini / VS Code (`servers`) / OpenCode (`mcp`) / Codex (TOML `mcp_servers`) |
 | `aikit release <version>` | Create GitHub release from .genreleases/ (e.g. v1.0.0) |
+
+## MCP servers (`aikit mcp`)
+
+The catalog has **18** agents; **`aikit mcp add`** supports **six** keys: `cursor-agent` (alias `cursor`), `claude`, `gemini`, `copilot` (alias `vscode`), `opencode`, `codex`. Run `aikit mcp list` for paths.
+
+| Agent key | Scope project | Scope global |
+|-----------|---------------|----------------|
+| `cursor-agent` | `.cursor/mcp.json` (`mcpServers`) | `~/.cursor/mcp.json` |
+| `claude` | `.mcp.json` | `~/.claude.json` (`mcpServers`) |
+| `gemini` | `.gemini/settings.json` | `~/.gemini/settings.json` |
+| `copilot` | `.vscode/mcp.json` (`servers`, VS Code shape) | VS Code `Code/User/mcp.json` (OS-specific) |
+| `opencode` | `opencode.json` (`mcp`) | XDG `.../opencode/opencode.json` |
+| `codex` | `.codex/config.toml` | `~/.codex/config.toml` |
+
+```bash
+aikit mcp list
+
+# Cursor (HTTP)
+aikit mcp add --agent cursor-agent --scope project --name newton \
+  --url http://127.0.0.1:8730/mcp
+
+# Claude Code (stdio)
+aikit mcp add --agent claude --scope project --name gh \
+  --command npx --arg -y --arg @modelcontextprotocol/server-github
+
+# Gemini CLI (merges into settings.json)
+aikit mcp add --agent gemini --scope project --name demo --url http://127.0.0.1:8080/mcp
+
+# VS Code / Copilot (`type` + `servers` entry)
+aikit mcp add --agent copilot --scope project --name fetch --command uvx --arg mcp-server-fetch
+
+# OpenCode (`mcp.<name>` local or remote)
+aikit mcp add --agent opencode --scope project --name tools --command npx --arg -y --arg @pkg/mcp
+
+# Codex (`[mcp_servers.name]` in config.toml)
+aikit mcp add --agent codex --scope project --name ctx7 --command npx --arg -y --arg @upstash/context7-mcp
+```
+
+Use `--overwrite` to replace an existing server id. Repeat `--arg`, `--env KEY=val`, `--header KEY=val` as needed. **Windows:** global `copilot` uses `%APPDATA%\Code\User\mcp.json`, or `<home>\AppData\Roaming\...` if `APPDATA` is unset; global OpenCode uses `%APPDATA%` / Roaming when `config_dir()` is unavailable.
 
 ## Creating and publishing packages
 

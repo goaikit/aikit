@@ -5,7 +5,7 @@ description: "AIKit: multi-agent template package manager, CLI, and Rust/Python 
 
 # AIKit Documentation
 
-**AIKit** is a **multi-agent template package manager and CLI**: install and publish `aikit.toml` packages from GitHub or a local directory, scaffold projects, and run supported coding-agent CLIs. **aikit-sdk** (Rust) and **aikit-py** (Python) provide the same **programmatic gateway** (catalog, paths, deploy, detection, run/events). This site covers installation, commands, packages, and agents.
+**AIKit** is a **multi-agent template package manager and CLI**: install and publish `aikit.toml` packages from GitHub or a local directory, scaffold projects, and run supported coding-agent CLIs. **aikit-sdk** (Rust) and **aikit-py** (Python) provide the same **programmatic gateway** (catalog, paths, deploy, MCP merge, detection, run/events). This site covers installation, commands, packages, agents, and MCP registration.
 
 ## Getting Started
 
@@ -20,13 +20,20 @@ description: "AIKit: multi-agent template package manager, CLI, and Rust/Python 
 
 ## Core Documentation
 
-<Columns cols={3}>
+<Columns cols={2}>
   <Card
     title="CLI Commands"
     icon="terminal"
     href="/cli-commands"
   >
     Complete reference for all AIKit command-line operations, with syntax, options, and examples.
+  </Card>
+  <Card
+    title="MCP registration"
+    icon="plug"
+    href="/mcp"
+  >
+    Merge MCP servers into Cursor, Claude, Gemini, VS Code, OpenCode, and Codex configs via CLI, Rust, or Python.
   </Card>
   <Card
     title="Configuration"
@@ -89,13 +96,14 @@ AIKit helps you:
 - **Ship template packages** (`aikit.toml`) that install into many coding-assistant layouts
 - **Install packages** from **GitHub (owner/repo)** or a **local directory**
 - **Scaffold projects** with `aikit init` and **run** supported agent CLIs with `aikit run`
-- **Automate** the same behavior via **aikit-sdk** / **aikit-py** (catalog, deploy, detection, run, event stream)
+- **Automate** the same behavior via **aikit-sdk** / **aikit-py** (catalog, deploy, MCP merge, detection, run, event stream)
 
 ### Key features
 
 - **Multi-agent layouts** - One package definition, many target agents (18 in the catalog)
 - **CLI + libraries** - `aikit` for day-to-day use; Rust/Python bindings for tools and CI
 - **Runnable agents** - `aikit run` supports `codex`, `claude`, `gemini`, `opencode`, `agent`
+- **MCP registration** - `aikit mcp` plus matching APIs in **aikit-sdk** and **aikit-py** for six assistants
 - **GitHub-oriented publish flow** - `aikit package publish` / `aikit release` for releases and assets
 
 ### Quick example
@@ -119,7 +127,7 @@ This documentation is organized to support your AIKit journey:
 
 1. **Getting Started** - Installation and basic usage
 2. **Core Concepts** - Understanding AIKit's architecture and package system
-3. **Reference Guides** - Detailed documentation for commands, configuration, and agents
+3. **Reference Guides** - Commands, MCP, configuration, and agents
 4. **Examples** - Practical workflows and use cases
 5. **Troubleshooting** - Solutions for common issues
 

@@ -1,14 +1,21 @@
 use aikit_sdk::{
-    get_agent_status as get_agent_status_impl, get_installed_agents as get_installed_agents_impl,
-    is_agent_available as is_agent_available_impl, is_runnable, run_agent as run_agent_impl,
-    run_agent_events, runnable_agents, AgentConfig, AgentStatus, DeployConcept, DeployError,
-    RunOptions,
+    add_mcp_server as add_mcp_server_impl, get_agent_status as get_agent_status_impl,
+    get_installed_agents as get_installed_agents_impl,
+    is_agent_available as is_agent_available_impl, is_runnable,
+    mcp_config_path as mcp_config_path_impl, mcp_supported_agents as mcp_supported_agents_impl,
+    normalize_mcp_agent_key, parse_env_pairs, parse_header_pairs, run_agent as run_agent_impl,
+    run_agent_events, runnable_agents, AddMcpServerOptions, AgentConfig, AgentStatus,
+    DeployConcept, DeployError, McpScope, McpServerTransport, RunOptions,
 };
-use pyo3::exceptions::PyException;
+use pyo3::create_exception;
+use pyo3::exceptions::{PyException, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+create_exception!(aikit_py, McpDeployError, PyException);
 
 // Removed PyDeployError struct and its #[pyclass]
 
@@ -16,6 +23,18 @@ use std::sync::{Arc, Mutex};
 // This replaces the impl From<DeployError> for PyErr, addressing the orphan rule
 fn to_py_result<T>(result: Result<T, DeployError>) -> PyResult<T> {
     result.map_err(|e| PyException::new_err(format!("{}", e)))
+}
+
+fn mcp_to_py<T>(result: Result<T, aikit_sdk::McpDeployError>) -> PyResult<T> {
+    result.map_err(|e| McpDeployError::new_err(e.to_string()))
+}
+
+fn mcp_scope_from_str(scope: &str) -> PyResult<McpScope> {
+    match scope.to_ascii_lowercase().as_str() {
+        "project" => Ok(McpScope::Project),
+        "global" => Ok(McpScope::Global),
+        _ => Err(PyValueError::new_err("scope must be 'project' or 'global'")),
+    }
 }
 
 // Implement the PyO3 bindings for DeployConcept enum.
@@ -393,9 +412,108 @@ fn get_agent_status_py(py: Python<'_>) -> PyResult<Py<PyDict>> {
     get_agent_status(py)
 }
 
+#[pyfunction]
+#[pyo3(name = "mcp_config_path")]
+fn mcp_config_path_py(agent_key: &str, scope: &str, project_root: PathBuf) -> PyResult<String> {
+    let sc = mcp_scope_from_str(scope)?;
+    mcp_to_py(
+        mcp_config_path_impl(agent_key, sc, &project_root)
+            .map(|p| p.to_string_lossy().into_owned()),
+    )
+}
+
+#[pyfunction]
+#[pyo3(signature = (agent_key, project_root, server_name, *, scope="project", command=None, args=None, env=None, url=None, headers=None, overwrite=false))]
+#[allow(clippy::too_many_arguments)]
+fn add_mcp_server(
+    agent_key: String,
+    project_root: PathBuf,
+    server_name: String,
+    scope: &str,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<HashMap<String, String>>,
+    url: Option<String>,
+    headers: Option<HashMap<String, String>>,
+    overwrite: bool,
+) -> PyResult<String> {
+    let sc = mcp_scope_from_str(scope)?;
+    let transport = match (&command, &url) {
+        (Some(cmd), None) => McpServerTransport::Stdio {
+            command: cmd.clone(),
+            args: args.unwrap_or_default(),
+            env,
+        },
+        (None, Some(u)) => McpServerTransport::Http {
+            url: u.clone(),
+            headers,
+        },
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "provide either command= (stdio) or url= (http), not both",
+            ));
+        }
+        (None, None) => {
+            return Err(PyValueError::new_err(
+                "provide command= for stdio or url= for http transport",
+            ));
+        }
+    };
+    let opts = AddMcpServerOptions {
+        agent_key,
+        scope: sc,
+        project_root,
+        server_name,
+        transport,
+        overwrite,
+    };
+    mcp_to_py(add_mcp_server_impl(opts).map(|p| p.to_string_lossy().into_owned()))
+}
+
+#[pyfunction]
+#[pyo3(name = "mcp_supported_agents")]
+fn mcp_supported_agents_py(py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+    let mut out = Vec::new();
+    for row in mcp_supported_agents_impl() {
+        let d = PyDict::new(py);
+        d.set_item("agent_key", row.agent_key)?;
+        d.set_item("display_name", row.display_name)?;
+        d.set_item("project_config_path", row.project_config_path)?;
+        d.set_item("global_config_path", row.global_config_path)?;
+        out.push(d.into_any().unbind());
+    }
+    Ok(out)
+}
+
+#[pyfunction]
+#[pyo3(name = "mcp_supported_agent_keys")]
+fn mcp_supported_agent_keys_py() -> Vec<String> {
+    aikit_sdk::MCP_SUPPORTED_AGENT_KEYS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
+#[pyfunction]
+#[pyo3(name = "normalize_mcp_agent_key")]
+fn normalize_mcp_agent_key_py(key: &str) -> String {
+    normalize_mcp_agent_key(key).to_string()
+}
+
+#[pyfunction]
+fn mcp_parse_env_pairs(pairs: Vec<String>) -> PyResult<HashMap<String, String>> {
+    mcp_to_py(parse_env_pairs(&pairs))
+}
+
+#[pyfunction]
+fn mcp_parse_header_pairs(pairs: Vec<String>) -> PyResult<HashMap<String, String>> {
+    mcp_to_py(parse_header_pairs(&pairs))
+}
+
 #[pymodule]
-fn aikit_py(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add("DeployError", _py.get_type::<PyException>())?;
+fn aikit_py(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("DeployError", py.get_type::<PyException>())?;
+    m.add("McpDeployError", py.get_type::<McpDeployError>())?;
 
     m.add_class::<PyDeployConcept>()?;
     m.add_class::<PyAgentConfig>()?;
@@ -422,5 +540,12 @@ fn aikit_py(_py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_wrapped(wrap_pyfunction!(get_installed_agents_py))?;
     m.add_wrapped(wrap_pyfunction!(get_agent_status))?;
     m.add_wrapped(wrap_pyfunction!(get_agent_status_py))?;
+    m.add_wrapped(wrap_pyfunction!(mcp_config_path_py))?;
+    m.add_wrapped(wrap_pyfunction!(add_mcp_server))?;
+    m.add_wrapped(wrap_pyfunction!(mcp_supported_agents_py))?;
+    m.add_wrapped(wrap_pyfunction!(mcp_supported_agent_keys_py))?;
+    m.add_wrapped(wrap_pyfunction!(normalize_mcp_agent_key_py))?;
+    m.add_wrapped(wrap_pyfunction!(mcp_parse_env_pairs))?;
+    m.add_wrapped(wrap_pyfunction!(mcp_parse_header_pairs))?;
     Ok(())
 }

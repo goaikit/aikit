@@ -9,12 +9,13 @@ It provides deterministic APIs for:
 - package/template install helpers
 - runnable-agent detection
 - buffered and streaming agent execution
+- MCP server registration (merge into agent JSON) for supported assistants
 
 ## Install
 
 ```toml
 [dependencies]
-aikit-sdk = "0.2.0"
+aikit-sdk = "0.2.1"
 ```
 
 Or from this workspace:
@@ -49,6 +50,78 @@ deploy_skill("cursor-agent", root, "my-skill", "# SKILL.md", None)?;
 deploy_subagent("claude", root, "reviewer", "# subagent")?;
 # Ok::<(), aikit_sdk::DeployError>(())
 ```
+
+## MCP config merge
+
+Merge one MCP server definition into the config file each assistant expects. **Supported keys** (see `mcp_supported_agents()` and `MCP_SUPPORTED_AGENT_KEYS`): `cursor-agent`, `claude`, `gemini`, `copilot`, `opencode`, `codex`. **Aliases** (same as CLI): `cursor` → `cursor-agent`, `vscode` → `copilot`.
+
+| Key | Project file (under `project_root`) | Global scope |
+|-----|--------------------------------------|--------------|
+| `cursor-agent` | `.cursor/mcp.json` | `~/.cursor/mcp.json` |
+| `claude` | `.mcp.json` | `~/.claude.json` |
+| `gemini` | `.gemini/settings.json` | `~/.gemini/settings.json` |
+| `copilot` | `.vscode/mcp.json` | VS Code user `mcp.json` (macOS: `~/Library/Application Support/Code/User/…`; Linux: `~/.config/Code/User/…`; Windows: `%APPDATA%\Code\User\…` or `~\AppData\Roaming\…` if unset) |
+| `opencode` | `opencode.json` | User `opencode.json` via XDG / Roaming fallback |
+| `codex` | `.codex/config.toml` | `~/.codex/config.toml` |
+
+**JSON agents** (`cursor-agent`, `claude`, `gemini`): root `mcpServers.<name>`. **Copilot**: root `servers.<name>` with `type` `stdio` or `http`. **OpenCode**: root `mcp.<name>`. **Codex**: `[mcp_servers.<name>]` in TOML.
+
+**Public API:** `add_mcp_server`, `mcp_config_path`, `normalize_mcp_agent_key`, `mcp_supported_agents`, `parse_env_pairs`, `parse_header_pairs`, `MCP_SUPPORTED_AGENT_KEYS`, `AddMcpServerOptions`, `McpScope`, `McpServerTransport`, `McpDeployError`. Errors are `Result<_, McpDeployError>` (unknown agent, unsupported agent, missing home, I/O, JSON/TOML, duplicate name without `overwrite`, bad `KEY=value` pairs).
+
+On **Windows**, VS Code user MCP and OpenCode global paths fall back to `<home>\AppData\Roaming\...` when `%APPDATA%` or `dirs::config_dir()` is missing.
+
+### HTTP transport
+
+```rust
+use aikit_sdk::{
+    add_mcp_server, AddMcpServerOptions, McpScope, McpServerTransport,
+};
+use std::path::Path;
+
+let path = add_mcp_server(AddMcpServerOptions {
+    agent_key: "gemini".into(),
+    scope: McpScope::Project,
+    project_root: Path::new(".").to_path_buf(),
+    server_name: "remote".into(),
+    transport: McpServerTransport::Http {
+        url: "http://127.0.0.1:8730/mcp".into(),
+        headers: None,
+    },
+    overwrite: false,
+})?;
+println!("{}", path.display());
+# Ok::<(), aikit_sdk::McpDeployError>(())
+```
+
+### Stdio transport
+
+```rust
+use aikit_sdk::{
+    add_mcp_server, AddMcpServerOptions, McpScope, McpServerTransport,
+};
+use std::{collections::HashMap, path::Path};
+
+let path = add_mcp_server(AddMcpServerOptions {
+    agent_key: "claude".into(),
+    scope: McpScope::Project,
+    project_root: Path::new(".").to_path_buf(),
+    server_name: "fs".into(),
+    transport: McpServerTransport::Stdio {
+        command: "npx".into(),
+        args: vec![
+            "-y".into(),
+            "@modelcontextprotocol/server-filesystem".into(),
+            ".".into(),
+        ],
+        env: Some(HashMap::from([("FOO".into(), "bar".into())])),
+    },
+    overwrite: false,
+})?;
+println!("{}", path.display());
+# Ok::<(), aikit_sdk::McpDeployError>(())
+```
+
+**Tests:** `AIKIT_MCP_TEST_HOME` overrides the home directory used for global path resolution when `aikit-sdk` is built with `cfg(test)` only (not in normal library builds).
 
 ## Instruction files
 
@@ -105,6 +178,7 @@ cargo test -p aikit-sdk -- --ignored
 
 - Workspace overview: `../README.md`
 - Python bindings: `../aikit-py/README.md`
+- Site docs (MCP): `../webdocs/mcp.mdx`
 - Contributor guide: `CONTRIBUTING.md`
 
 ## License

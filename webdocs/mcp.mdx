@@ -1,0 +1,57 @@
+---
+title: "MCP server registration"
+description: "Merge MCP server definitions into Cursor, Claude, Gemini, VS Code Copilot, OpenCode, and Codex config files via the CLI, aikit-sdk, or aikit-py."
+---
+
+# MCP server registration
+
+AIKit can **merge** one MCP server entry at a time into the JSON or TOML file each assistant already uses. This matches product-specific shapes (`mcpServers`, VS Code `servers`, OpenCode `mcp`, Codex `[mcp_servers.*]`).
+
+## Supported agents
+
+| Catalog key | Also accepted | Notes |
+| --- | --- | --- |
+| `cursor-agent` | `cursor` | `.cursor/mcp.json` |
+| `claude` | | `.mcp.json` / `~/.claude.json` |
+| `gemini` | | `.gemini/settings.json` |
+| `copilot` | `vscode` | `.vscode/mcp.json` or VS Code user `mcp.json` |
+| `opencode` | | `opencode.json` |
+| `codex` | | `.codex/config.toml` |
+
+Run `aikit mcp list` for paths and aliases. Six keys are implemented; the full agent catalog is larger.
+
+## CLI
+
+```bash
+# Table of agents, project vs global paths
+aikit mcp list
+
+# Stdio MCP under project .mcp.json (repeat --arg for each argv token)
+aikit mcp add --agent claude --scope project --project . --name fs \
+  --command npx \
+  --arg -y \
+  --arg @modelcontextprotocol/server-filesystem \
+  --arg .
+
+# HTTP MCP with optional headers (repeat --header KEY=value)
+aikit mcp add --agent gemini --scope project --project . --name api \
+  --url http://127.0.0.1:8730/mcp \
+  --header Authorization=Bearer\ token
+```
+
+- `--scope project|global` — project paths are under `--project` (default `.`); global uses your home directory.
+- Exactly one of `--url` or `--command` is required.
+- `--overwrite` replaces an existing server with the same `--name`.
+
+## Rust (`aikit-sdk`)
+
+Use `add_mcp_server`, `mcp_config_path`, `McpScope`, `McpServerTransport`, and helpers such as `mcp_supported_agents` and `normalize_mcp_agent_key`. See the [aikit-sdk README](https://github.com/goaikit/aikit/blob/main/aikit-sdk/README.md#mcp-config-merge) in the repository.
+
+## Python (`aikit-py`)
+
+Use `add_mcp_server`, `mcp_config_path`, `mcp_supported_agents`, `mcp_supported_agent_keys`, `normalize_mcp_agent_key`, and `mcp_parse_env_pairs` / `mcp_parse_header_pairs`. Raises `McpDeployError` on merge errors. See [aikit-py README](https://github.com/goaikit/aikit/blob/main/aikit-py/README.md#mcp-server-config-merge) and `aikit-py/examples/mcp_deploy_stdio.py`.
+
+## See also
+
+- [CLI Commands](cli-commands.mdx) — full CLI reference including `mcp`
+- [Examples](examples.mdx) — copy-paste MCP snippets

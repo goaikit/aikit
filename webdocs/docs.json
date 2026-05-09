@@ -29,6 +29,7 @@
             "group": "Commands & Usage",
             "pages": [
               "cli-commands",
+              "mcp",
               "examples"
             ]
           },
