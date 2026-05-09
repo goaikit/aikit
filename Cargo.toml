@@ -2,12 +2,23 @@
 members = [".", "aikit-sdk", "aikit-py", "aikit-agent"]
 
 [package]
-name = "aikit"
+name = "aikit-cli"
 version = "0.1.101"
 edition = "2021"
 authors = ["@aroff"]
 description = "Multi-agent template package manager and CLI for aikit.toml packages; aikit-sdk provides the Rust gateway for catalog, deploy, and agent run APIs."
 license = "Apache-2.0"
+repository = "https://github.com/goaikit/aikit"
+keywords = ["ai", "agents", "cli", "mcp", "catalog"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "aikit"
+path = "src/main.rs"
+
+[lib]
+name = "aikit"
+path = "src/lib.rs"
 
 [dependencies]
 # Command-line argument parsing
@@ -43,7 +54,7 @@ walkdir = "2"
 which = "8.0"
 
 # aikit SDK (agent catalog and deploy)
-aikit-sdk = { path = "aikit-sdk" }
+aikit-sdk = { path = "aikit-sdk", version = "0.2.1" }
 
 # Temporary directories
 tempfile = "3.10"

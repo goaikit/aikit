@@ -15,7 +15,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { version = "1", features = ["full"] }
 thiserror = "2.0"
 tracing = "0.1"
-fastskill-core = { git = "https://github.com/gofastskill/fastskill.git", rev = "b698e42a140633a6059e9dbb17731b22cd7696ac", package = "fastskill-core", optional = true, default-features = false, features = ["filesystem-storage"] }
+fastskill-core = { version = "0.9.112", git = "https://github.com/gofastskill/fastskill.git", rev = "b698e42a140633a6059e9dbb17731b22cd7696ac", package = "fastskill-core", optional = true, default-features = false, features = ["filesystem-storage"] }
 
 [dev-dependencies]
 mockito = "1.2"

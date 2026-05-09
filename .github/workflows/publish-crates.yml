@@ -1,0 +1,66 @@
+name: Publish Crates
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify Cargo.toml versions match release tag
+        if: github.event_name == 'release'
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          AIKIT_VER=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          SDK_VER=$(grep '^version = ' aikit-sdk/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          AGENT_VER=$(grep '^version = ' aikit-agent/Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+
+          echo "Tag:         $TAG"
+          echo "aikit-cli:   $AIKIT_VER"
+          echo "aikit-sdk:   $SDK_VER"
+          echo "aikit-agent: $AGENT_VER"
+
+          if [ "$TAG" != "$AIKIT_VER" ]; then
+            echo "::error::aikit-cli version $AIKIT_VER does not match release tag v$TAG"
+            exit 1
+          fi
+
+      - name: Publish aikit-agent
+        run: cargo publish -p aikit-agent
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for aikit-agent to be indexed
+        run: sleep 30
+
+      - name: Publish aikit-sdk
+        run: cargo publish -p aikit-sdk
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for aikit-sdk to be indexed
+        run: sleep 30
+
+      - name: Publish aikit-cli
+        run: cargo publish -p aikit-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
