@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::host_tools::{HostToolDefinition, HostToolProvider};
 use crate::llm::types::{FunctionDefinition, ToolDefinition};
 use crate::skills::{DiscoveredSkill, SkillProvider};
 
@@ -406,6 +407,38 @@ impl Tool for ReadSkillTool {
     }
 }
 
+pub struct HostToolAdapter {
+    pub definition: HostToolDefinition,
+    pub provider: Arc<dyn HostToolProvider>,
+}
+
+impl Tool for HostToolAdapter {
+    fn name(&self) -> &str {
+        &self.definition.name
+    }
+
+    fn schema(&self) -> ToolDefinition {
+        ToolDefinition {
+            tool_type: "function".to_string(),
+            function: FunctionDefinition {
+                name: self.definition.name.clone(),
+                description: self.definition.description.clone(),
+                parameters: self.definition.parameters.clone(),
+            },
+        }
+    }
+
+    fn execute(&self, input: Value, _ctx: &ToolContext) -> Result<ToolOutput, ToolError> {
+        match self.provider.call_tool(&self.definition.name, input) {
+            Ok(text) => Ok(ToolOutput::ok(text)),
+            Err(text) => Ok(ToolOutput::err(format!(
+                "E_AIKIT_HOST_TOOL_EXEC_FAILED: {}",
+                text
+            ))),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -563,6 +596,66 @@ mod tests {
             "read_skill description must reference '## Available Skills', got: {}",
             desc
         );
+    }
+
+    #[test]
+    fn test_host_tool_adapter_ok_output() {
+        use crate::host_tools::{HostToolDefinition, HostToolProvider};
+
+        struct OkProvider;
+        impl HostToolProvider for OkProvider {
+            fn list_tools(&self) -> Vec<HostToolDefinition> {
+                vec![]
+            }
+            fn call_tool(&self, _name: &str, _args: Value) -> Result<String, String> {
+                Ok("success text".to_string())
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx(&tmp);
+        let adapter = HostToolAdapter {
+            definition: HostToolDefinition {
+                name: "my_host_tool".to_string(),
+                description: Some("A test host tool".to_string()),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            provider: Arc::new(OkProvider),
+        };
+        let result = adapter.execute(serde_json::json!({}), &ctx).unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.content, "success text");
+    }
+
+    #[test]
+    fn test_host_tool_adapter_err_output() {
+        use crate::host_tools::{HostToolDefinition, HostToolProvider};
+
+        struct ErrProvider;
+        impl HostToolProvider for ErrProvider {
+            fn list_tools(&self) -> Vec<HostToolDefinition> {
+                vec![]
+            }
+            fn call_tool(&self, _name: &str, _args: Value) -> Result<String, String> {
+                Err("bad thing".to_string())
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let ctx = make_ctx(&tmp);
+        let adapter = HostToolAdapter {
+            definition: HostToolDefinition {
+                name: "my_host_tool".to_string(),
+                description: None,
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            },
+            provider: Arc::new(ErrProvider),
+        };
+        let result = adapter.execute(serde_json::json!({}), &ctx).unwrap();
+        assert!(result.is_error);
+        assert!(result
+            .content
+            .contains("E_AIKIT_HOST_TOOL_EXEC_FAILED: bad thing"));
     }
 
     #[test]

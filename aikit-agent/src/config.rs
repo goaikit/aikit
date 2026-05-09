@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::agent_definition::AgentPersona;
 use crate::errors::AgentError;
+use crate::host_tools::HostToolProvider;
 use crate::llm::openai_compat::resolve_api_key;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentConfig {
     pub model: String,
     pub base_url: String,
@@ -24,6 +26,28 @@ pub struct AgentConfig {
     pub session_persona: Option<AgentPersona>,
     /// Ephemeral per-process agent definitions (set by CLI after from_env).
     pub session_agents: HashMap<String, AgentPersona>,
+    /// Optional host tool provider injected by the embedder.
+    pub host_tool_provider: Option<Arc<dyn HostToolProvider>>,
+}
+
+impl std::fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentConfig")
+            .field("model", &self.model)
+            .field("base_url", &self.base_url)
+            .field("stream", &self.stream)
+            .field("max_iterations", &self.max_iterations)
+            .field("max_subagent_depth", &self.max_subagent_depth)
+            .field("workdir", &self.workdir)
+            .field(
+                "host_tool_provider",
+                &self
+                    .host_tool_provider
+                    .as_ref()
+                    .map(|_| "<HostToolProvider>"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgentConfig {
@@ -108,6 +132,7 @@ impl AgentConfig {
             connect_timeout_secs: 10,
             session_persona: None,
             session_agents: HashMap::new(),
+            host_tool_provider: None,
         })
     }
 }

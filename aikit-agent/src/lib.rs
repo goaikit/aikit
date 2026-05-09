@@ -3,6 +3,7 @@ pub mod compression;
 pub mod config;
 pub mod context;
 pub mod errors;
+pub mod host_tools;
 pub mod llm;
 pub mod loop_runner;
 pub mod skills;
@@ -12,6 +13,7 @@ pub mod tools;
 pub use agent_definition::AgentPersona;
 pub use config::AgentConfig;
 pub use errors::AgentError;
+pub use host_tools::{HostToolDefinition, HostToolProvider};
 pub use llm::{LlmError, LlmGateway, LlmRequest, LlmResponse, LlmStreamEvent, LlmUsage};
 
 #[derive(Debug, Clone)]

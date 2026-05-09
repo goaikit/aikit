@@ -111,3 +111,53 @@ Configuration is resolved from environment variables such as `AIKIT_LLM_URL`,
 
 For deterministic tests or ephemeral task-specific agents, pass a custom
 implementation of `LlmGateway` instead of `OpenAiCompatProvider`.
+
+## Host Tools
+
+Embedders can inject extra LLM-callable tools by implementing `HostToolProvider`
+and setting `config.host_tool_provider` before calling `run`:
+
+```rust
+use std::sync::Arc;
+use aikit_agent::{HostToolDefinition, HostToolProvider};
+
+struct MyProvider;
+
+impl HostToolProvider for MyProvider {
+    fn list_tools(&self) -> Vec<HostToolDefinition> {
+        vec![HostToolDefinition {
+            name: "deploy".to_string(),
+            description: Some("Deploy the current build".to_string()),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "env": { "type": "string", "enum": ["staging", "production"] }
+                },
+                "required": ["env"]
+            }),
+        }]
+    }
+
+    fn call_tool(&self, name: &str, args: serde_json::Value) -> Result<String, String> {
+        match name {
+            "deploy" => Ok(format!("deployed to {}", args["env"].as_str().unwrap_or("?"))),
+            other => Err(format!("unknown tool: {}", other)),
+        }
+    }
+}
+
+let mut config = AgentConfig::from_env(workdir, false, None)?;
+config.host_tool_provider = Some(Arc::new(MyProvider));
+```
+
+**Sandboxing:** Host tools do NOT receive `ToolContext` and are therefore NOT
+sandbox-constrained by aikit. The embedder is fully responsible for path
+validation, resource limits, and any other safety constraints.
+
+**Risky built-ins and `yolo` mode:** Built-in tools such as `run_bash` are
+subject to `AgentPersona.disallowed_tools` filtering, which can be used to
+restrict them in non-`yolo` flows. Host tools are subject to the same
+`AgentPersona` allowlist/denylist filtering, but aikit does not enforce any
+confirmation step for host tool calls. **Embedders MUST implement their own
+confirmation logic** before executing destructive or side-effectful host
+operations.

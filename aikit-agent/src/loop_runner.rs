@@ -12,7 +12,8 @@ use crate::skills::SkillProvider;
 use crate::skills::FilesystemSkillProvider;
 use crate::subagents::SpawnSubagentTool;
 use crate::tools::{
-    GitTool, ReadFileTool, ReadSkillTool, RunBashTool, Tool, ToolContext, WriteFileTool,
+    GitTool, HostToolAdapter, ReadFileTool, ReadSkillTool, RunBashTool, Tool, ToolContext,
+    WriteFileTool,
 };
 use crate::AgentInternalEvent;
 
@@ -37,7 +38,12 @@ pub(crate) fn run_inner(
 ) -> Result<Vec<AgentInternalEvent>, AgentError> {
     let mut events = Vec::new();
 
-    // 1. Discover skills using the appropriate backend
+    // 1. Discover skills using the appropriate backend.
+    // AK-08 DEFERRED (issue #29): Remote-skills parity for embedded runs. The embedded path
+    // already supports local skills via config.skills_dirs (set from AIKIT_SKILLS_DIR or
+    // .aikit/skills/). Remote skill resolution via the fastskill feature flag works identically
+    // in both CLI and embedded paths when the feature is enabled. Full remote-skills parity
+    // for embedded runs is deferred to a follow-up issue.
     let (skills, provider) = discover_skills_for_run(&config)?;
 
     // 2. Build system instructions (includes skills catalog when skills are present)
@@ -272,6 +278,25 @@ fn build_tools(
             parent_config: config.clone(),
             gateway,
         }));
+    }
+
+    // Merge host tools, skipping any whose name collides with a built-in.
+    if let Some(ref host_provider) = config.host_tool_provider {
+        let builtin_names: std::collections::HashSet<String> =
+            tools.iter().map(|t| t.name().to_string()).collect();
+        for def in host_provider.list_tools() {
+            if builtin_names.contains(def.name.as_str()) {
+                tracing::warn!(
+                    tool = %def.name,
+                    "host tool name collides with built-in; host tool skipped"
+                );
+                continue;
+            }
+            tools.push(Box::new(HostToolAdapter {
+                definition: def,
+                provider: Arc::clone(host_provider),
+            }));
+        }
     }
 
     // Apply persona tool policy (hard filter at construction time).
@@ -585,6 +610,7 @@ mod tests {
             connect_timeout_secs: 5,
             session_persona: None,
             session_agents: std::collections::HashMap::new(),
+            host_tool_provider: None,
         }
     }
 
@@ -1039,6 +1065,131 @@ mod tests {
         assert!(
             !has_error,
             "run_inner should complete without errors when no skills are found"
+        );
+    }
+
+    // ── Host tool tests ──────────────────────────────────────────────────────
+
+    use crate::host_tools::{HostToolDefinition, HostToolProvider};
+
+    struct SimpleHostProvider {
+        tools: Vec<HostToolDefinition>,
+    }
+
+    impl HostToolProvider for SimpleHostProvider {
+        fn list_tools(&self) -> Vec<HostToolDefinition> {
+            self.tools.clone()
+        }
+        fn call_tool(&self, _name: &str, _args: serde_json::Value) -> Result<String, String> {
+            Ok("host result".to_string())
+        }
+    }
+
+    fn make_host_def(name: &str) -> HostToolDefinition {
+        HostToolDefinition {
+            name: name.to_string(),
+            description: None,
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }
+    }
+
+    #[test]
+    fn test_host_tools_merged() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = make_config(&tmp, false);
+        config.host_tool_provider = Some(Arc::new(SimpleHostProvider {
+            tools: vec![make_host_def("my_host_tool")],
+        }));
+        let gateway = Arc::new(MockGateway::new(vec![]));
+        let skills = vec![];
+        let provider: Arc<dyn crate::skills::SkillProvider> =
+            Arc::new(crate::skills::FilesystemSkillProvider);
+        let tools = build_tools(&config, gateway, &skills, provider);
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            names.contains(&"my_host_tool"),
+            "host tool should be in the tool list: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_host_tool_name_collision_skips_host() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = make_config(&tmp, false);
+        config.host_tool_provider = Some(Arc::new(SimpleHostProvider {
+            tools: vec![make_host_def("run_bash")],
+        }));
+        let gateway = Arc::new(MockGateway::new(vec![]));
+        let skills = vec![];
+        let provider: Arc<dyn crate::skills::SkillProvider> =
+            Arc::new(crate::skills::FilesystemSkillProvider);
+        let tools = build_tools(&config, gateway, &skills, provider);
+        let run_bash_count = tools.iter().filter(|t| t.name() == "run_bash").count();
+        assert_eq!(
+            run_bash_count, 1,
+            "should have exactly one run_bash (built-in)"
+        );
+    }
+
+    #[test]
+    fn test_persona_allowlist_applies_to_host_tool() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = make_config(&tmp, false);
+        config.host_tool_provider = Some(Arc::new(SimpleHostProvider {
+            tools: vec![make_host_def("my_host_tool")],
+        }));
+        config.session_persona = Some(crate::agent_definition::AgentPersona {
+            name: "test".to_string(),
+            description: String::new(),
+            prompt: String::new(),
+            model: None,
+            tools: Some(vec!["read_file".to_string()]),
+            disallowed_tools: None,
+        });
+        let gateway = Arc::new(MockGateway::new(vec![]));
+        let skills = vec![];
+        let provider: Arc<dyn crate::skills::SkillProvider> =
+            Arc::new(crate::skills::FilesystemSkillProvider);
+        let tools = build_tools(&config, gateway, &skills, provider);
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            !names.contains(&"my_host_tool"),
+            "allowlist should exclude host tool: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"read_file"),
+            "allowlist should include read_file: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_persona_denylist_applies_to_host_tool() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = make_config(&tmp, false);
+        config.host_tool_provider = Some(Arc::new(SimpleHostProvider {
+            tools: vec![make_host_def("my_host_tool")],
+        }));
+        config.session_persona = Some(crate::agent_definition::AgentPersona {
+            name: "test".to_string(),
+            description: String::new(),
+            prompt: String::new(),
+            model: None,
+            tools: None,
+            disallowed_tools: Some(vec!["my_host_tool".to_string()]),
+        });
+        let gateway = Arc::new(MockGateway::new(vec![]));
+        let skills = vec![];
+        let provider: Arc<dyn crate::skills::SkillProvider> =
+            Arc::new(crate::skills::FilesystemSkillProvider);
+        let tools = build_tools(&config, gateway, &skills, provider);
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        assert!(
+            !names.contains(&"my_host_tool"),
+            "denylist should exclude host tool: {:?}",
+            names
         );
     }
 }
