@@ -4,7 +4,7 @@
 //! - **TTY mode**: redraws a viewport in-place using cursor manipulation.
 //! - **Non-TTY mode**: appends new lines to stderr without cursor movement.
 
-use aikit_sdk::RunProgress;
+use aikit_sdk::{ProgressSink, RunProgress};
 use crossterm::{
     cursor,
     terminal::{self, ClearType},
@@ -126,5 +126,26 @@ impl ProgressRenderer {
             .execute(terminal::Clear(ClearType::FromCursorDown))?;
         self.last_render_lines = 0;
         Ok(())
+    }
+}
+
+/// Adapter that implements `ProgressSink` using `ProgressRenderer`.
+pub struct ProgressRendererSink {
+    renderer: ProgressRenderer,
+}
+
+impl ProgressRendererSink {
+    pub fn new(renderer: ProgressRenderer) -> Self {
+        Self { renderer }
+    }
+}
+
+impl ProgressSink for ProgressRendererSink {
+    fn on_progress(&mut self, progress: &RunProgress) {
+        let _ = self.renderer.render(progress);
+    }
+
+    fn on_finalize(&mut self, exit_code: i32, token_footer: Option<String>) {
+        let _ = self.renderer.finalize(exit_code, token_footer);
     }
 }

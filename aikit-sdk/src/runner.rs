@@ -291,6 +291,10 @@ pub enum RunError {
     },
     /// Agent terminated due to a quota or rate-limit signal
     QuotaExceeded(QuotaExceededInfo),
+    /// `OutputMode::Progress` was requested but no `ProgressSink` was provided.
+    MissingProgressSink,
+    /// `run_builtin_agent` was called with a key other than "aikit".
+    WrongAgentKey(String),
 }
 
 impl std::fmt::Display for RunError {
@@ -320,6 +324,19 @@ impl std::fmt::Display for RunError {
                     info.agent_key, info.category, info.raw_message
                 )
             }
+            RunError::MissingProgressSink => {
+                write!(
+                    f,
+                    "OutputMode::Progress requires a ProgressSink but none was provided"
+                )
+            }
+            RunError::WrongAgentKey(key) => {
+                write!(
+                    f,
+                    "run_builtin_agent only accepts agent_key \"aikit\", got \"{}\"",
+                    key
+                )
+            }
         }
     }
 }
@@ -334,9 +351,29 @@ impl std::error::Error for RunError {
             RunError::AgentNotRunnable(_)
             | RunError::CallbackPanic(_)
             | RunError::TimedOut { .. }
-            | RunError::QuotaExceeded(_) => None,
+            | RunError::QuotaExceeded(_)
+            | RunError::MissingProgressSink
+            | RunError::WrongAgentKey(_) => None,
         }
     }
+}
+
+/// Selects how built-in agent output is delivered to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OutputMode {
+    /// Write raw agent text bytes to `writer` (plain output).
+    Plain,
+    /// Emit one `AgentEvent` JSON line per event to `writer`.
+    Events,
+    /// Render a live human-readable progress view via `ProgressSink`.
+    Progress,
+}
+
+/// Receives progress updates during a `run_builtin_agent` call in `Progress` mode.
+pub trait ProgressSink: Send {
+    fn on_progress(&mut self, progress: &crate::run_progress::RunProgress);
+    fn on_finalize(&mut self, exit_code: i32, token_footer: Option<String>);
 }
 
 /// Identifies which stream an event or error originated from.
@@ -1920,6 +1957,65 @@ pub fn run_agent(
         return Err(RunError::QuotaExceeded(info));
     }
     Ok(result)
+}
+
+/// Run the built-in aikit agent with a given output mode.
+///
+/// `agent_key` MUST be `"aikit"`; other values return `RunError::WrongAgentKey`.
+/// `writer` receives plain text (Plain mode) or NDJSON lines (Events mode).
+/// `err_writer` receives plain stderr bytes (Plain and Events modes).
+/// `progress_sink` MUST be `Some` when `mode == OutputMode::Progress`.
+pub fn run_builtin_agent(
+    agent_key: &str,
+    prompt: &str,
+    options: RunOptions,
+    mode: OutputMode,
+    writer: &mut dyn std::io::Write,
+    err_writer: &mut dyn std::io::Write,
+    progress_sink: Option<Box<dyn ProgressSink>>,
+) -> Result<RunResult, RunError> {
+    if agent_key != "aikit" {
+        return Err(RunError::WrongAgentKey(agent_key.to_string()));
+    }
+
+    match mode {
+        OutputMode::Progress => {
+            let mut sink = progress_sink.ok_or(RunError::MissingProgressSink)?;
+            let mut collected: Vec<AgentEvent> = Vec::new();
+            let result = crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, |event| {
+                collected.push(event);
+            })?;
+            let mut progress = crate::run_progress::RunProgress::new(
+                crate::run_progress::ProgressViewConfig::default(),
+            );
+            for event in &collected {
+                progress.push("aikit", event);
+                sink.on_progress(&progress);
+            }
+            let exit_code = result.exit_code().unwrap_or(1);
+            sink.on_finalize(exit_code, progress.token_footer());
+            Ok(result)
+        }
+        OutputMode::Events => {
+            let mut collected: Vec<AgentEvent> = Vec::new();
+            let result = crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, |event| {
+                collected.push(event);
+            })?;
+            for event in &collected {
+                if let Ok(line) = serde_json::to_string(event) {
+                    let _ = writeln!(writer, "{}", line);
+                }
+            }
+            let _ = err_writer.write_all(&result.stderr);
+            Ok(result)
+        }
+        OutputMode::Plain => {
+            let result = crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, |_| {})?;
+            let _ = writer.write_all(&result.stdout);
+            let _ = err_writer.write_all(&result.stderr);
+            Ok(result)
+        }
+    }
 }
 
 /// Spawns a reader thread that reads lines (delimited by `\n`) from `reader`

@@ -421,9 +421,10 @@ pub use aikit_agent_adapter::run_aikit_agent;
 pub use runner::{
     aggregate_token_usage, extract_usage_from_line, get_agent_status, get_installed_agents,
     is_agent_available, is_runnable, normalize_json_line, run_agent, run_agent_events,
-    runnable_agents, AgentAvailabilityReason, AgentEvent, AgentEventPayload, AgentEventStream,
-    AgentStatus, MessageKind, MessagePhase, MessageRole, QuotaCategory, QuotaExceededInfo,
-    RunError, RunOptions, RunResult, StreamMessage, TokenUsage, UsageSource,
+    run_builtin_agent, runnable_agents, AgentAvailabilityReason, AgentEvent, AgentEventPayload,
+    AgentEventStream, AgentStatus, MessageKind, MessagePhase, MessageRole, OutputMode,
+    ProgressSink, QuotaCategory, QuotaExceededInfo, RunError, RunOptions, RunResult, StreamMessage,
+    TokenUsage, UsageSource,
 };
 
 pub mod run_progress;

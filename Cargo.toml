@@ -54,7 +54,7 @@ walkdir = "2"
 which = "8.0"
 
 # aikit SDK (agent catalog and deploy)
-aikit-sdk = { path = "aikit-sdk", version = "0.2.1" }
+aikit-sdk = { path = "aikit-sdk", version = "0.3.0" }
 
 # Temporary directories
 tempfile = "3.10"
