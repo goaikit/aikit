@@ -159,7 +159,7 @@ mod tests {
                 raw_agent_line_seq: 6,
             },
         };
-        let jsonl = trace_to_jsonl(&[event.clone()]);
+        let jsonl = trace_to_jsonl(std::slice::from_ref(&event));
         assert!(
             jsonl.contains("\"type\":\"token_usage_line\""),
             "expected token_usage_line type tag, got: {}",
