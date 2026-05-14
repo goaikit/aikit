@@ -4,17 +4,11 @@
 
 use crate::core::package::PackageConfig;
 use anyhow::{Context, Result};
-use clap::Args;
 
 /// Build template zip archives for GitHub releases
-#[derive(Args, Debug)]
+#[derive(Debug)]
 pub struct PackageArgs {
-    /// Version string with 'v' prefix (e.g., v1.0.0)
-    #[arg(value_name = "VERSION")]
     pub release_version: String,
-
-    /// Output directory for zip files
-    #[arg(long, value_name = "DIR", default_value = ".genreleases")]
     pub output_dir: String,
 }
 

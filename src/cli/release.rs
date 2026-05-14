@@ -3,23 +3,14 @@
 //! This module implements the GitHub release creation command.
 
 use anyhow::{Context, Result};
-use clap::Args;
 use std::path::PathBuf;
 use std::process::Command;
 
 /// Create GitHub release with package files
-#[derive(Args, Debug)]
+#[derive(Debug)]
 pub struct ReleaseArgs {
-    /// Version string with 'v' prefix (e.g., v1.0.0)
-    #[arg(value_name = "VERSION")]
     pub release_version: String,
-
-    /// Path to release notes file
-    #[arg(long, value_name = "FILE", default_value = "release_notes.md")]
     pub notes_file: String,
-
-    /// GitHub token for API requests
-    #[arg(long, value_name = "TOKEN")]
     pub github_token: Option<String>,
 }
 

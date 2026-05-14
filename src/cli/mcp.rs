@@ -1,74 +1,27 @@
 //! `aikit mcp` — merge MCP server entries into agent-specific JSON files.
 
 use anyhow::{bail, Result};
-use clap::{Parser, Subcommand, ValueEnum};
 
 use aikit_sdk::{
     add_mcp_server, mcp_supported_agents, normalize_mcp_agent_key, parse_env_pairs,
     parse_header_pairs, AddMcpServerOptions, McpScope, McpServerTransport,
 };
 
-#[derive(Parser, Debug)]
-pub struct McpArgs {
-    #[command(subcommand)]
-    pub cmd: McpCommands,
-}
-
-#[derive(Subcommand, Debug)]
-pub enum McpCommands {
-    /// Agents that support `mcp add` and their config paths
-    List,
-    /// Add or replace one MCP server entry (JSON `mcpServers` / `servers` / `mcp`, or Codex TOML)
-    Add(McpAddArgs),
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
-pub enum ScopeArg {
-    Project,
-    Global,
-}
-
-#[derive(Parser, Debug)]
+#[derive(Debug, Default)]
 pub struct McpAddArgs {
-    /// Agent: `cursor-agent`|`cursor`, `claude`, `gemini`, `copilot`|`vscode`, `opencode`, `codex`
-    #[arg(long)]
     pub agent: String,
-    #[arg(long, value_enum)]
-    pub scope: ScopeArg,
-    /// Project root when `--scope project` (default: current directory)
-    #[arg(long, default_value = ".")]
+    pub scope: String,
     pub project: std::path::PathBuf,
-    /// MCP server id inside `mcpServers`
-    #[arg(long)]
     pub name: String,
-    /// Streamable HTTP / remote MCP URL (mutually exclusive with `--command`)
-    #[arg(long)]
     pub url: Option<String>,
-    /// Executable for stdio MCP (mutually exclusive with `--url`)
-    #[arg(long)]
     pub command: Option<String>,
-    /// One argv token for stdio MCP; repeat for each argument
-    #[arg(long = "arg", action = clap::ArgAction::Append)]
     pub cmd_args: Vec<String>,
-    /// `KEY=value` for stdio `env`; repeat per variable
-    #[arg(long, action = clap::ArgAction::Append)]
     pub env: Vec<String>,
-    /// `KEY=value` for HTTP `headers`; repeat per header
-    #[arg(long, action = clap::ArgAction::Append)]
     pub header: Vec<String>,
-    /// Replace an existing `mcpServers.<name>` entry
-    #[arg(long)]
     pub overwrite: bool,
 }
 
-pub fn execute(args: McpArgs) -> Result<()> {
-    match args.cmd {
-        McpCommands::List => execute_list(),
-        McpCommands::Add(a) => execute_add(a),
-    }
-}
-
-fn execute_list() -> Result<()> {
+pub fn execute_list() -> Result<()> {
     println!(
         "{:<14} {:<16} {:<28} GLOBAL_FILE",
         "AGENT_KEY", "DISPLAY", "PROJECT_FILE",
@@ -93,10 +46,10 @@ fn execute_list() -> Result<()> {
     Ok(())
 }
 
-fn execute_add(args: McpAddArgs) -> Result<()> {
-    let scope = match args.scope {
-        ScopeArg::Project => McpScope::Project,
-        ScopeArg::Global => McpScope::Global,
+pub fn execute_add(args: McpAddArgs) -> Result<()> {
+    let scope = match args.scope.as_str() {
+        "global" => McpScope::Global,
+        _ => McpScope::Project,
     };
 
     let project_root = if args.project.as_os_str().is_empty() {

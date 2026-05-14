@@ -2,7 +2,6 @@ use std::io::Write;
 use std::time::Instant;
 
 use anyhow::Result;
-use clap::Parser;
 use tokio_stream::StreamExt;
 
 use crate::core::llm_http::{
@@ -11,60 +10,23 @@ use crate::core::llm_http::{
     send_chat, send_chat_stream, ChatRequest, JsonUsage, LlmError, SseChunk, StreamEvent,
 };
 
-#[derive(Parser, Debug)]
-#[command(about = "Invoke an LLM via OpenAI-compatible API", group = clap::ArgGroup::new("prompt_input").required(true))]
+#[derive(Debug)]
 pub struct LlmArgs {
-    #[arg(long, short = 'm', value_name = "MODEL")]
     pub model: String,
-
-    #[arg(
-        long,
-        short = 'u',
-        value_name = "URL",
-        default_value = "https://api.openai.com/v1"
-    )]
     pub url: String,
-
-    #[arg(long, short = 'p', group = "prompt_input", value_name = "TEXT")]
     pub prompt: Option<String>,
-
-    #[arg(long, group = "prompt_input", value_name = "FILE")]
     pub prompt_file: Option<String>,
-
-    #[arg(long, value_name = "SYSTEM")]
     pub system: Option<String>,
-
-    #[arg(long)]
     pub stream: bool,
-
-    #[arg(long, short = 'o', value_name = "FILE")]
     pub out: Option<String>,
-
-    #[arg(long, value_name = "FORMAT", default_value = "text")]
     pub format: String,
-
-    #[arg(long, value_name = "TOKENS")]
     pub max_tokens: Option<u32>,
-
-    #[arg(long, value_name = "TEMP")]
     pub temperature: Option<f64>,
-
-    #[arg(long, value_name = "TOP_P")]
     pub top_p: Option<f64>,
-
-    #[arg(long, value_name = "ENV_VAR")]
     pub api_key_env: Option<String>,
-
-    #[arg(long, value_name = "SECS", default_value_t = 120)]
     pub timeout: u64,
-
-    #[arg(long, value_name = "SECS", default_value_t = 10)]
     pub connect_timeout: u64,
-
-    #[arg(long, value_name = "MODE")]
     pub usage: Option<String>,
-
-    #[arg(long)]
     pub quiet: bool,
 }
 

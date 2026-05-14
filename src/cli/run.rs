@@ -1,7 +1,6 @@
 use aikit_sdk::{run_agent, run_agent_events, run_builtin_agent, AgentEvent, OutputMode};
 use aikit_sdk::{ProgressViewConfig, RunError, RunOptions, RunProgress};
 use anyhow::Result;
-use clap::Parser;
 use std::io::{self, Read, Write};
 
 use crate::core::agent_definition::{
@@ -10,47 +9,17 @@ use crate::core::agent_definition::{
 };
 use crate::tui::progress_render::{ProgressRenderer, ProgressRendererSink};
 
-#[derive(Parser, Debug)]
-#[command(about = "Run a coding agent with a prompt (stdin or -p)")]
+#[derive(Debug, Default)]
 pub struct RunArgs {
-    /// Runnable agent key (e.g. `codex`, `claude`, `gemini`, `opencode`, `agent`, `auto`)
-    #[arg(long, short = 'a', value_name = "AGENT")]
     pub agent: String,
-
-    /// Model passed to the agent; if omitted, the agent binary applies its own default
-    #[arg(long, short = 'm', value_name = "MODEL")]
     pub model: Option<String>,
-
-    /// Prompt to run (if not provided, reads from stdin)
-    #[arg(long, short = 'p')]
     pub prompt: Option<String>,
-
-    /// Run in yolo mode (auto-confirm, skip checks)
-    #[arg(long)]
     pub yolo: bool,
-
-    /// Enable streaming output
-    #[arg(long)]
     pub stream: bool,
-
-    /// Emit standardized NDJSON event stream to stdout (one JSON object per line)
-    #[arg(long)]
     pub events: bool,
-
-    /// Display live human-readable progress on stderr (conflicts with --events)
-    #[arg(long, conflicts_with = "events")]
     pub progress: bool,
-
-    /// Dry-run mode: validate inputs but don't execute agent (for testing)
-    #[arg(long, hide = true)]
     pub dry_run: bool,
-
-    /// Session-scoped agent definitions: inline JSON or @<path>
-    #[arg(long, value_name = "JSON_OR_PATH")]
     pub session_agents: Option<String>,
-
-    /// Session persona: name of a definition to apply as main-thread defaults
-    #[arg(long, value_name = "NAME")]
     pub session_persona: Option<String>,
 }
 

@@ -8,49 +8,20 @@ use crate::fs::permissions;
 use crate::git;
 use crate::github::api::GitHubClient;
 use anyhow::{Context, Result};
-use clap::Args;
 
 /// Initialize a new Spec-Driven Development project
-#[derive(Args, Debug)]
+#[derive(Debug, Default)]
 pub struct InitArgs {
-    /// Project name (directory to create). Use '.' for current directory.
-    #[arg(value_name = "PROJECT_NAME")]
     pub project_name: Option<String>,
-
-    /// AI assistant to use (e.g., claude, gemini, copilot)
-    #[arg(long, value_name = "AGENT")]
     pub ai: Option<String>,
-
-    /// Script type (sh or ps)
-    #[arg(long, value_name = "TYPE")]
     pub script: Option<String>,
-
-    /// Initialize in current directory
-    #[arg(long)]
     pub here: bool,
-
-    /// Skip confirmation when merging into non-empty directory
-    #[arg(long)]
     pub force: bool,
-
-    /// Skip Git repository initialization
-    #[arg(long)]
     pub no_git: bool,
-
-    /// GitHub personal access token for API requests
-    #[arg(long, value_name = "TOKEN")]
     pub github_token: Option<String>,
-
-    /// Skip TLS certificate verification (not recommended)
-    #[arg(long)]
     pub skip_tls: bool,
-
-    /// Enable verbose diagnostic output
-    #[arg(long)]
+    #[allow(dead_code)]
     pub debug: bool,
-
-    /// Skip CLI tool validation for selected agent
-    #[arg(long)]
     pub ignore_agent_tools: bool,
 }
 

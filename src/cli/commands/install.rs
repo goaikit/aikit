@@ -9,7 +9,6 @@
 use crate::error::AikError;
 use crate::github::api::GitHubClient as GitHubApiClient;
 use atty;
-use clap::{Args, Subcommand};
 use std::path::PathBuf;
 use toml;
 
@@ -24,43 +23,15 @@ pub enum SourceType {
     },
 }
 
-/// Installation management subcommands
-#[derive(Debug, Subcommand)]
-pub enum InstallCommands {
-    /// Install package from GitHub URL
-    Install(InstallArgs),
-    /// Update installed package
-    Update(UpdateArgs),
-    /// Remove installed package
-    Remove(RemoveArgs),
-    /// List installed packages
-    List(ListArgs),
-}
-
 /// Arguments for install command
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct InstallArgs {
-    /// Package source (GitHub URL or package name)
     pub source: String,
-
-    /// Specific version to install
-    #[arg(short, long)]
     pub install_version: Option<String>,
-
-    /// GitHub token (can also be set via GITHUB_TOKEN or GH_TOKEN env var)
-    #[arg(long)]
     pub token: Option<String>,
-
-    /// Force reinstall if already installed
-    #[arg(long)]
     pub force: bool,
-
-    /// Skip .gitignore modification prompt
-    #[arg(long)]
+    #[allow(dead_code)]
     pub yes: bool,
-
-    /// AI agent to install for (e.g., claude, copilot, cursor-agent)
-    #[arg(long)]
     pub ai: Option<String>,
 }
 
@@ -119,36 +90,24 @@ impl InstallArgs {
 }
 
 /// Arguments for update command
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct UpdateArgs {
-    /// Package name to update
     pub package: String,
-
-    /// Allow breaking changes
-    #[arg(long)]
+    #[allow(dead_code)]
     pub breaking: bool,
 }
 
 /// Arguments for remove command
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct RemoveArgs {
-    /// Package name to remove
     pub package: String,
-
-    /// Force removal without confirmation
-    #[arg(long)]
     pub force: bool,
 }
 
 /// Arguments for list command
-#[derive(Debug, Args)]
+#[derive(Debug, Default)]
 pub struct ListArgs {
-    /// Filter by author
-    #[arg(long)]
     pub author: Option<String>,
-
-    /// Show detailed information
-    #[arg(long)]
     pub detailed: bool,
 }
 
