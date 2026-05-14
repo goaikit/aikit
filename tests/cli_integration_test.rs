@@ -482,10 +482,11 @@ mod tests {
     #[test]
     fn test_missing_subcommand_error() {
         let mut cmd = cargo_bin_cmd!("aikit");
-        cmd.args(["package"]) // Missing subcommand
+        // cli-framework routes missing subcommand to HelpShown → stdout, exit 0
+        cmd.args(["package"])
             .assert()
-            .failure() // clap returns error code but shows help
-            .stderr(predicate::str::contains("Package management commands"));
+            .success()
+            .stdout(predicate::str::contains("Package management commands"));
     }
 
     /// Test error handling for invalid package names
@@ -529,19 +530,19 @@ description = "Test package with invalid name"
     /// Test that running aikit with no arguments shows help
     #[test]
     fn test_no_arguments_shows_help() {
-        // With arg_required_else_help, clap should show help and exit with code 2
-        // This is a basic test to ensure the CLI behaves as expected
+        // cli-framework routes arg_required_else_help to HelpShown → stdout, exit 0
         let output = cargo_bin_cmd!("aikit")
             .output()
             .expect("Failed to run command");
 
-        // Should exit with code 2 (clap's default for help/error)
-        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(output.status.code(), Some(0));
 
-        // Should have some output (help message)
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!stderr.is_empty(), "Should have error/help output");
-        assert!(stderr.contains("Usage") || stderr.contains("aikit"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("Usage") || stdout.contains("aikit"),
+            "stdout: {}",
+            stdout
+        );
     }
 
     /// Test that --help output includes version flag

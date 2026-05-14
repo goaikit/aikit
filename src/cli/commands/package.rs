@@ -5,96 +5,41 @@
 //! - package build: Build distributable package
 //! - package publish: Publish package to registry
 
-use clap::{Args, Subcommand};
-
-/// Package management subcommands
-#[derive(Debug, Subcommand)]
-pub enum PackageCommands {
-    /// Initialize a new package with aikit.toml
-    Init(PackageInitArgs),
-    /// Validate package structure and that templates exist (install-ready)
-    Validate(PackageValidateArgs),
-    /// Build package for distribution
-    Build(PackageBuildArgs),
-    /// Publish package to registry
-    Publish(PackagePublishArgs),
-}
-
 /// Arguments for package validate command
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct PackageValidateArgs {
-    /// Package directory (default: current directory)
-    #[arg(short, long, default_value = ".")]
     pub path: String,
 }
 
 /// Arguments for package init command
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct PackageInitArgs {
-    /// Package name (required)
     pub name: String,
-
-    /// Package description
-    #[arg(short, long)]
     pub description: Option<String>,
-
-    /// Package version (default: 0.1.0)
-    #[arg(short, long, default_value = "0.1.0")]
     pub package_version: String,
-
-    /// Author name
-    #[arg(short, long)]
     pub author: Option<String>,
-
-    /// Skip interactive prompts
-    #[arg(long)]
     pub yes: bool,
 }
 
 /// Arguments for package build command
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct PackageBuildArgs {
-    /// Output directory (default: dist/)
-    #[arg(short, long, default_value = "dist")]
     pub output: String,
-
-    /// Target agents (comma-separated, default: all)
-    #[arg(long)]
+    #[allow(dead_code)]
     pub agents: Option<String>,
-
-    /// Include source files
-    #[arg(long)]
+    #[allow(dead_code)]
     pub include_sources: bool,
 }
 
 /// Arguments for package publish command
-#[derive(Debug, Args)]
+#[derive(Debug)]
 pub struct PackagePublishArgs {
-    /// Repository in format "owner/repo" (required)
     pub repo: String,
-
-    /// Path to package ZIP file (default: dist/{name}-{version}.zip)
-    #[arg(short, long)]
     pub package: Option<String>,
-
-    /// Version tag for the release (default: from aikit.toml)
-    #[arg(short, long)]
     pub tag: Option<String>,
-
-    /// Release title (default: "Release {version}")
-    #[arg(long)]
     pub title: Option<String>,
-
-    /// Release notes (default: auto-generated)
-    #[arg(long)]
     pub notes: Option<String>,
-
-    /// GitHub token (can also be set via GITHUB_TOKEN env var)
-    #[arg(long)]
     pub token: Option<String>,
-
-    /// Don't create a release, just upload to existing release
-    #[arg(long)]
     pub no_release: bool,
 }
 

@@ -21,8 +21,8 @@ name = "aikit"
 path = "src/lib.rs"
 
 [dependencies]
-# Command-line argument parsing
-clap = { version = "4.5", features = ["derive"] }
+# CLI framework (replaces direct clap usage)
+cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "7414db5", features = ["testkit", "mcp-server"] }
 
 # HTTP client for GitHub API
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }

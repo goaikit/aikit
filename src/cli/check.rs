@@ -6,10 +6,9 @@ use crate::core::agent::get_agent_configs;
 use crate::tui::output::{format_tree, TreeItem};
 use aikit_sdk::{get_agent_status, AgentAvailabilityReason};
 use anyhow::Result;
-use clap::Args;
 
 /// Check installed tools and AI agent CLIs
-#[derive(Args, Debug)]
+#[derive(Debug, Default)]
 pub struct CheckArgs {
     // No arguments for check command
 }

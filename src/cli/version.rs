@@ -5,14 +5,11 @@
 use crate::github::api::GitHubClient;
 use crate::tui::output::{format_panel, format_table};
 use anyhow::Result;
-use clap::Args;
 use std::env;
 
 /// Display version information
-#[derive(Args, Debug)]
+#[derive(Debug, Default)]
 pub struct VersionArgs {
-    /// GitHub token for API requests (optional)
-    #[arg(long, value_name = "TOKEN")]
     pub github_token: Option<String>,
 }
 

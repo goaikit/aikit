@@ -50,6 +50,32 @@ pub enum AikError {
 
     #[error("{0}")]
     Llm(#[from] crate::core::llm_http::LlmError),
+
+    #[error("command not found in registry: {0}")]
+    #[allow(dead_code)]
+    CommandNotFound(String),
+
+    #[error("argument validation failed: {0}")]
+    #[allow(dead_code)]
+    ValidationError(String),
+
+    #[error("risk policy blocked command '{0}': set ALLOW_DESTRUCTIVE_COMMANDS=1 to proceed")]
+    #[allow(dead_code)]
+    RiskPolicyBlocked(String),
+
+    #[error("no LLM provider configured: set AIKIT_LLM_URL + AIKIT_MODEL, or OPENAI_API_KEY / ANTHROPIC_API_KEY")]
+    #[allow(dead_code)]
+    LlmNotConfigured,
+
+    #[error(
+        "ailoop server unreachable at {0}: verify AILOOP_SERVER is set and the server is running"
+    )]
+    #[allow(dead_code)]
+    AiloopUnreachable(String),
+
+    #[error("MCP serve startup failed: {0}")]
+    #[allow(dead_code)]
+    McpServeError(String),
 }
 
 impl From<Box<dyn std::error::Error>> for AikError {

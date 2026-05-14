@@ -1,15 +1,11 @@
 use anyhow::Result;
-use clap::Parser;
 
 use crate::core::agent_definition::{
     load_persisted_registry, DefinitionRecord, DelegationAllowlist,
 };
 
-#[derive(Parser, Debug)]
-#[command(about = "List persisted agent definitions")]
+#[derive(Debug, Default)]
 pub struct AgentsArgs {
-    /// Emit JSON array to stdout instead of a human-readable table
-    #[arg(long)]
     pub json: bool,
 }
 
