@@ -70,10 +70,63 @@ pub(crate) fn run_inner(
     );
 
     // 5. Main agent loop
+    run_loop(&config, &mut context, &tools, &gateway, &mut events)?;
+
+    Ok(events)
+}
+
+/// Run the agent loop starting from an existing context seeded with prior conversation turns.
+pub fn run_with_context(
+    config: AgentConfig,
+    prior_turns: Vec<Turn>,
+    new_prompt: &str,
+    gateway: Box<dyn LlmGateway>,
+) -> Result<Vec<AgentInternalEvent>, AgentError> {
+    let gateway: Arc<dyn LlmGateway> = Arc::from(gateway);
+    let mut events = Vec::new();
+
+    let (skills, provider) = discover_skills_for_run(&config)?;
+
+    let skill_metadatas: Vec<crate::skills::SkillMetadata> =
+        skills.iter().map(|s| s.metadata.clone()).collect();
+    let system_instructions = build_system_instructions(&config, &skill_metadatas)?;
+
+    let budget = TokenBudget {
+        total_budget: config.context_budget_tokens,
+        reserve_for_tools: 1000,
+        reserve_for_output: 2000,
+    };
+    let mut context = ContextPacket::new(system_instructions, budget);
+    context.skills_summary = skills.iter().map(|s| s.metadata.clone()).collect();
+
+    for turn in prior_turns {
+        context.add_turn(turn);
+    }
+    context.add_turn(Turn::user(new_prompt));
+
+    let tools = build_tools(
+        &config,
+        Arc::clone(&gateway),
+        &skills,
+        Arc::clone(&provider),
+    );
+
+    run_loop(&config, &mut context, &tools, &gateway, &mut events)?;
+
+    Ok(events)
+}
+
+fn run_loop(
+    config: &AgentConfig,
+    context: &mut ContextPacket,
+    tools: &[Box<dyn Tool>],
+    gateway: &Arc<dyn LlmGateway>,
+    events: &mut Vec<AgentInternalEvent>,
+) -> Result<(), AgentError> {
     for iteration in 0..config.max_iterations {
         // Check context budget and compress if needed
         if let Some(compression) =
-            maybe_compress(&mut context).map_err(|e| AgentError::ContextCompression {
+            maybe_compress(context).map_err(|e| AgentError::ContextCompression {
                 message: e.to_string(),
             })?
         {
@@ -86,13 +139,13 @@ pub(crate) fn run_inner(
 
         // Build LLM request
         let tool_schemas: Vec<_> = tools.iter().map(|t| t.schema()).collect();
-        let req = build_llm_request(&config, &context, tool_schemas);
+        let req = build_llm_request(config, context, tool_schemas);
 
         // Call LLM
         let (response_text, tool_calls, finish_reason, usage) = if config.stream {
-            call_stream(&*gateway, req, &mut events)?
+            call_stream(gateway.as_ref(), req, events)?
         } else {
-            call_complete(&*gateway, req, &mut events)?
+            call_complete(gateway.as_ref(), req, events)?
         };
 
         // Emit usage event if present
@@ -142,7 +195,7 @@ pub(crate) fn run_inner(
                     call_id: call_id.clone(),
                 });
 
-                let output = execute_tool(&tools, &tool_name, args, &tool_ctx);
+                let output = execute_tool(tools, &tool_name, args, &tool_ctx);
 
                 events.push(AgentInternalEvent::ToolResult {
                     call_id: call_id.clone(),
@@ -182,7 +235,7 @@ pub(crate) fn run_inner(
         }
     }
 
-    Ok(events)
+    Ok(())
 }
 
 pub(crate) fn discover_skills_for_run(

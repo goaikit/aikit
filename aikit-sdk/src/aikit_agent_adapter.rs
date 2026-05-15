@@ -3,9 +3,14 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 
 use aikit_agent::agent_definition::AgentPersona;
+use aikit_agent::context::{ContextToolCall, ContextToolResult};
 use aikit_agent::llm::openai_compat::OpenAiCompatProvider;
-use aikit_agent::{AgentConfig, AgentInternalEvent, HostToolProvider};
+use aikit_agent::{AgentConfig, AgentInternalEvent, HostToolProvider, Turn};
 
+use crate::session_store::{
+    now_rfc3339, SessionFile, SessionStore, SessionStoreError, SessionToolCall, SessionToolResult,
+    SessionTurn,
+};
 use crate::{
     AgentEvent, AgentEventPayload, AgentEventStream, QuotaCategory, QuotaExceededInfo, RunError,
     RunOptions, RunResult, TokenUsage, UsageSource,
@@ -73,22 +78,217 @@ where
     let gateway = OpenAiCompatProvider::new(config.timeout_secs, config.connect_timeout_secs)
         .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
 
-    match aikit_agent::run(config, prompt, Box::new(gateway)) {
-        Ok(events) => emit_events(events, options, &mut on_event, true),
-        Err(err) => {
-            let mut result = emit_events(
-                vec![AgentInternalEvent::Error {
-                    code: error_code(&err.to_string()),
-                    message: err.to_string(),
-                }],
-                options,
-                &mut on_event,
-                false,
-            )?;
-            result.stderr = err.to_string().into_bytes();
-            Ok(result)
+    let store = SessionStore::open();
+    let cwd = options
+        .current_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let cwd_str = cwd.to_string_lossy().into_owned();
+
+    if let Some(ref session_id) = options.session_id {
+        // Resume existing session.
+        let session = store.load(session_id).map_err(|e| match e {
+            SessionStoreError::NotFound(id) => RunError::SessionNotFound(id),
+            SessionStoreError::Parse { id, reason } => RunError::SessionLoadFailed { id, reason },
+            SessionStoreError::Io(io_err) => RunError::SessionLoadFailed {
+                id: session_id.clone(),
+                reason: io_err.to_string(),
+            },
+        })?;
+
+        let prior_turns = session_turns_to_turns(&session.turns);
+
+        match aikit_agent::run_with_context(config, prior_turns, prompt, Box::new(gateway)) {
+            Ok(events) => {
+                let new_turns = internal_events_to_turns(prompt, &events);
+                let mut updated_session = session;
+                updated_session.turns.extend(new_turns);
+                updated_session.updated_at = now_rfc3339();
+                let _ = store.save(&updated_session);
+                let _ = store.update_index(&cwd_str, &updated_session.session_id);
+                emit_events(events, options, &mut on_event, true)
+            }
+            Err(err) => {
+                let mut result = emit_events(
+                    vec![AgentInternalEvent::Error {
+                        code: error_code(&err.to_string()),
+                        message: err.to_string(),
+                    }],
+                    options,
+                    &mut on_event,
+                    false,
+                )?;
+                result.stderr = err.to_string().into_bytes();
+                Ok(result)
+            }
+        }
+    } else {
+        // New session: generate UUID, run, save.
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let now = now_rfc3339();
+
+        match aikit_agent::run(config, prompt, Box::new(gateway)) {
+            Ok(events) => {
+                let turns = internal_events_to_turns(prompt, &events);
+                let session = SessionFile {
+                    session_id: session_id.clone(),
+                    agent: "aikit".to_string(),
+                    created_at: now.clone(),
+                    updated_at: now,
+                    cwd: cwd_str.clone(),
+                    turns,
+                };
+                let _ = store.save(&session);
+                let _ = store.update_index(&cwd_str, &session_id);
+                eprintln!("Session: {}", session_id);
+                emit_events(events, options, &mut on_event, true)
+            }
+            Err(err) => {
+                let mut result = emit_events(
+                    vec![AgentInternalEvent::Error {
+                        code: error_code(&err.to_string()),
+                        message: err.to_string(),
+                    }],
+                    options,
+                    &mut on_event,
+                    false,
+                )?;
+                result.stderr = err.to_string().into_bytes();
+                Ok(result)
+            }
         }
     }
+}
+
+fn internal_events_to_turns(prompt: &str, events: &[AgentInternalEvent]) -> Vec<SessionTurn> {
+    let mut turns: Vec<SessionTurn> = Vec::new();
+
+    turns.push(SessionTurn {
+        role: "user".to_string(),
+        content: prompt.to_string(),
+        tool_calls: None,
+        tool_results: None,
+    });
+
+    let mut current_assistant: Option<SessionTurn> = None;
+    let mut pending_tool_calls: Vec<SessionToolCall> = Vec::new();
+    let mut pending_tool_results: Vec<SessionToolResult> = Vec::new();
+
+    for event in events {
+        match event {
+            AgentInternalEvent::TextFinal { content, .. } => {
+                // Flush any pending tool results from previous step
+                if !pending_tool_results.is_empty() {
+                    if let Some(asst) = current_assistant.take() {
+                        turns.push(asst);
+                    }
+                    turns.push(SessionTurn {
+                        role: "tool".to_string(),
+                        content: String::new(),
+                        tool_calls: None,
+                        tool_results: Some(std::mem::take(&mut pending_tool_results)),
+                    });
+                }
+                current_assistant = Some(SessionTurn {
+                    role: "assistant".to_string(),
+                    content: content.clone(),
+                    tool_calls: None,
+                    tool_results: None,
+                });
+                pending_tool_calls.clear();
+            }
+            AgentInternalEvent::ToolUse {
+                tool_name,
+                tool_input,
+                call_id,
+            } => {
+                pending_tool_calls.push(SessionToolCall {
+                    id: call_id.clone(),
+                    name: tool_name.clone(),
+                    input: tool_input.to_string(),
+                });
+            }
+            AgentInternalEvent::ToolResult {
+                call_id, output, ..
+            } => {
+                pending_tool_results.push(SessionToolResult {
+                    tool_call_id: call_id.clone(),
+                    name: String::new(),
+                    output: output.clone(),
+                });
+            }
+            AgentInternalEvent::StepFinish { .. } => {
+                if !pending_tool_calls.is_empty() {
+                    if let Some(ref mut asst) = current_assistant {
+                        asst.tool_calls = Some(std::mem::take(&mut pending_tool_calls));
+                    }
+                    if !pending_tool_results.is_empty() {
+                        if let Some(asst) = current_assistant.take() {
+                            turns.push(asst);
+                        }
+                        turns.push(SessionTurn {
+                            role: "tool".to_string(),
+                            content: String::new(),
+                            tool_calls: None,
+                            tool_results: Some(std::mem::take(&mut pending_tool_results)),
+                        });
+                    } else if let Some(asst) = current_assistant.take() {
+                        turns.push(asst);
+                    }
+                } else if let Some(asst) = current_assistant.take() {
+                    turns.push(asst);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Flush any remaining assistant turn
+    if let Some(asst) = current_assistant {
+        turns.push(asst);
+    }
+
+    turns
+}
+
+fn session_turns_to_turns(session_turns: &[SessionTurn]) -> Vec<Turn> {
+    session_turns
+        .iter()
+        .map(|st| match st.role.as_str() {
+            "assistant" => {
+                if let Some(ref calls) = st.tool_calls {
+                    let ctx_calls: Vec<ContextToolCall> = calls
+                        .iter()
+                        .map(|c| ContextToolCall {
+                            id: c.id.clone(),
+                            name: c.name.clone(),
+                            arguments: c.input.clone(),
+                        })
+                        .collect();
+                    Turn::assistant_with_tool_calls(&st.content, ctx_calls)
+                } else {
+                    Turn::assistant(&st.content)
+                }
+            }
+            "tool" => {
+                let results = st
+                    .tool_results
+                    .as_ref()
+                    .map(|rs| {
+                        rs.iter()
+                            .map(|r| ContextToolResult {
+                                call_id: r.tool_call_id.clone(),
+                                output: r.output.clone(),
+                                is_error: false,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                Turn::tool_result(results)
+            }
+            _ => Turn::user(&st.content),
+        })
+        .collect()
 }
 
 fn emit_error<F>(_prompt: &str, options: &RunOptions, on_event: &mut F, message: String) -> RunError

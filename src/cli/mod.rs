@@ -611,6 +611,19 @@ fn cmd_run() -> Command {
                     requires: vec![],
                     help: "Session persona: name of a definition to apply as main-thread defaults",
                 },
+                opt_short("resume", 'r', "Resume session with the given session ID"),
+                ArgSpec {
+                    name: "resume-last",
+                    short: None,
+                    long: Some("resume-last"),
+                    kind: ArgKind::Flag,
+                    value_type: ArgValueType::Bool,
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec!["resume"],
+                    requires: vec![],
+                    help: "Resume the most recent session for the current directory",
+                },
             ],
             ..CommandSpec::default()
         })),
@@ -633,6 +646,8 @@ fn cmd_run() -> Command {
                     dry_run: get_bool(&args, "dry-run"),
                     session_agents: get_opt(&args, "session-agents"),
                     session_persona: get_opt(&args, "session-persona"),
+                    resume: get_opt(&args, "resume"),
+                    resume_last: get_bool(&args, "resume-last"),
                 };
                 // run::execute is synchronous and creates its own tokio runtime internally
                 // (via block_on_async in aikit-agent). Using spawn_blocking avoids a

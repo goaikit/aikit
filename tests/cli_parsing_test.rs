@@ -148,4 +148,75 @@ mod tests {
             "expected error diagnostic for missing --url or --command"
         );
     }
+
+    /// --resume <id> is accepted by the CLI parser
+    #[tokio::test]
+    async fn test_run_dry_run_with_resume_id() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "run",
+                "--agent",
+                "codex",
+                "--dry-run",
+                "-p",
+                "hello",
+                "--resume",
+                "test-session-id",
+            ])
+            .await;
+        assert_eq!(
+            out.exit_code, 0,
+            "dry-run with --resume should succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// -r <id> short form is accepted by the CLI parser
+    #[tokio::test]
+    async fn test_run_dry_run_with_resume_short() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "run",
+                "--agent",
+                "codex",
+                "--dry-run",
+                "-p",
+                "hello",
+                "-r",
+                "test-session-id",
+            ])
+            .await;
+        assert_eq!(
+            out.exit_code, 0,
+            "dry-run with -r should succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// --resume-last is accepted by the CLI parser
+    #[tokio::test]
+    async fn test_run_dry_run_with_resume_last() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "run",
+                "--agent",
+                "codex",
+                "--dry-run",
+                "-p",
+                "hello",
+                "--resume-last",
+            ])
+            .await;
+        assert_eq!(
+            out.exit_code, 0,
+            "dry-run with --resume-last should succeed; stderr: {}",
+            out.stderr
+        );
+    }
 }

@@ -1,27 +1,28 @@
 use crate::skills::SkillMetadata;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnRole {
     User,
     Assistant,
     Tool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextToolResult {
     pub call_id: String,
     pub output: String,
     pub is_error: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Turn {
     pub role: TurnRole,
     pub content: String,
@@ -187,5 +188,55 @@ mod tests {
         packet.add_turn(Turn::assistant("Rust is a systems programming language."));
         let tokens = packet.estimated_tokens();
         assert!(tokens > 0);
+    }
+
+    #[test]
+    fn test_turn_role_serde_round_trip() {
+        let roles = [TurnRole::User, TurnRole::Assistant, TurnRole::Tool];
+        for role in &roles {
+            let json = serde_json::to_string(role).unwrap();
+            let back: TurnRole = serde_json::from_str(&json).unwrap();
+            assert_eq!(role, &back);
+        }
+    }
+
+    #[test]
+    fn test_turn_serde_round_trip() {
+        let turn = Turn {
+            role: TurnRole::User,
+            content: "hello".to_string(),
+            tool_calls: None,
+            tool_results: None,
+        };
+        let json = serde_json::to_string(&turn).unwrap();
+        let back: Turn = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content, "hello");
+        assert!(matches!(back.role, TurnRole::User));
+    }
+
+    #[test]
+    fn test_context_tool_call_serde_round_trip() {
+        let call = ContextToolCall {
+            id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: r#"{"path":"foo"}"#.to_string(),
+        };
+        let json = serde_json::to_string(&call).unwrap();
+        let back: ContextToolCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "call-1");
+        assert_eq!(back.name, "read_file");
+    }
+
+    #[test]
+    fn test_context_tool_result_serde_round_trip() {
+        let result = ContextToolResult {
+            call_id: "call-1".to_string(),
+            output: "file content".to_string(),
+            is_error: false,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ContextToolResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.call_id, "call-1");
+        assert!(!back.is_error);
     }
 }
