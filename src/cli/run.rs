@@ -206,7 +206,7 @@ pub fn execute(args: RunArgs) -> Result<()> {
         match store.last_for_cwd(&workdir.to_string_lossy()) {
             Ok(Some(id)) => Some(id),
             Ok(None) => {
-                eprintln!("error: no previous session found for current directory");
+                eprintln!("error: no previous session found for this directory");
                 std::process::exit(1);
             }
             Err(e) => {

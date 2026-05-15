@@ -642,9 +642,36 @@ mod tests {
     use super::*;
     use crate::llm::mock::{MockGateway, MockResponse};
     use crate::llm::types::{
-        LlmError, LlmResponse, LlmStreamEvent, LlmStreamHandle, ToolCall, ToolCallFunction,
+        LlmError, LlmRequest, LlmResponse, LlmStreamEvent, LlmStreamHandle, ToolCall,
+        ToolCallFunction,
     };
     use tempfile::TempDir;
+
+    /// A gateway that records every outbound LlmRequest for inspection.
+    struct CapturingGateway {
+        captured: std::sync::Arc<std::sync::Mutex<Vec<LlmRequest>>>,
+        inner: MockGateway,
+    }
+
+    impl CapturingGateway {
+        fn new(responses: Vec<MockResponse>) -> Self {
+            Self {
+                captured: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                inner: MockGateway::new(responses),
+            }
+        }
+    }
+
+    impl LlmGateway for CapturingGateway {
+        fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+            self.captured.lock().unwrap().push(req.clone());
+            self.inner.complete(req)
+        }
+        fn stream(&self, req: LlmRequest) -> Result<LlmStreamHandle, LlmError> {
+            self.captured.lock().unwrap().push(req.clone());
+            self.inner.stream(req)
+        }
+    }
 
     fn make_config(tmp: &TempDir, stream: bool) -> AgentConfig {
         AgentConfig {
@@ -684,6 +711,107 @@ mod tests {
         assert!(
             has_text_final,
             "should have TextFinal event with response text"
+        );
+    }
+
+    /// run_with_context() seeds the LLM request with prior turns before the new user message.
+    #[test]
+    fn test_run_with_context_seeds_prior_turns_in_order() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp, false);
+
+        let prior_turns = vec![Turn::user("What is 2+2?"), Turn::assistant("4")];
+
+        let gw = CapturingGateway::new(vec![MockResponse::text("Based on our prior chat...")]);
+        let captured = std::sync::Arc::clone(&gw.captured);
+
+        let _events = run_with_context(config, prior_turns, "What is 3+3?", Box::new(gw)).unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert!(
+            !requests.is_empty(),
+            "at least one LLM request must be made"
+        );
+        let first_req = &requests[0];
+
+        let non_system: Vec<_> = first_req
+            .messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .collect();
+
+        assert!(
+            non_system.len() >= 3,
+            "expected at least 3 non-system messages (2 prior + 1 new), got {}",
+            non_system.len()
+        );
+        assert_eq!(
+            non_system[0].content.as_deref(),
+            Some("What is 2+2?"),
+            "first prior turn should be user message"
+        );
+        assert_eq!(non_system[0].role, "user");
+        assert_eq!(
+            non_system[1].content.as_deref(),
+            Some("4"),
+            "second prior turn should be assistant message"
+        );
+        assert_eq!(non_system[1].role, "assistant");
+        assert_eq!(
+            non_system[2].content.as_deref(),
+            Some("What is 3+3?"),
+            "new user message should be last"
+        );
+        assert_eq!(non_system[2].role, "user");
+    }
+
+    /// run_with_context() includes tool calls from seeded turns in the LLM message list.
+    #[test]
+    fn test_run_with_context_includes_tool_calls_from_prior_turns() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp, false);
+
+        let prior_turns = vec![
+            Turn::user("Read the file"),
+            Turn::assistant_with_tool_calls(
+                "",
+                vec![ContextToolCall {
+                    id: "call-prior-1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"README.md"}"#.to_string(),
+                }],
+            ),
+            Turn::tool_result(vec![ContextToolResult {
+                call_id: "call-prior-1".to_string(),
+                output: "# README content".to_string(),
+                is_error: false,
+            }]),
+        ];
+
+        let gw = CapturingGateway::new(vec![MockResponse::text("Done reading.")]);
+        let captured = std::sync::Arc::clone(&gw.captured);
+
+        let _events = run_with_context(config, prior_turns, "Summarise it", Box::new(gw)).unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert!(!requests.is_empty());
+        let first_req = &requests[0];
+
+        let has_tool_call_msg = first_req.messages.iter().any(|m| {
+            m.tool_calls
+                .as_ref()
+                .map(|tc| !tc.is_empty())
+                .unwrap_or(false)
+        });
+        assert!(
+            has_tool_call_msg,
+            "prior tool-call turn must appear in the outbound message list"
+        );
+
+        let has_tool_result_msg = first_req.messages.iter().any(|m| m.tool_call_id.is_some());
+        assert!(
+            has_tool_result_msg,
+            "prior tool-result turn must appear in the outbound message list"
         );
     }
 

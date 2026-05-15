@@ -48,6 +48,12 @@ pub struct SessionStore {
     pub sessions_dir: PathBuf,
 }
 
+impl Default for SessionStore {
+    fn default() -> Self {
+        Self::open()
+    }
+}
+
 impl SessionStore {
     /// Resolves AIKIT_SESSIONS_DIR env var, then ~/.aikit/sessions/. Creates dir if absent.
     pub fn open() -> Self {
