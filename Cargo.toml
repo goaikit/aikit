@@ -27,6 +27,11 @@ cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "7414db5
 # HTTP client for GitHub API
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
+# Force vendored OpenSSL so musl cross-compiles don't require libssl-dev on the runner.
+# native-tls/openssl-sys is pulled in transitively (anthropic-sdk, cli-framework default features)
+# even though we configure reqwest with rustls-tls everywhere.
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
 # ZIP archive handling
 zip = "0.6.6"
 

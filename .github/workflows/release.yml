@@ -96,7 +96,7 @@ jobs:
             binary-name: aikit
             archive-format: tar.gz
             use-cross: false
-          - os: macos-15-intel
+          - os: macos-13
             target: x86_64-apple-darwin
             binary-name: aikit
             archive-format: tar.gz
