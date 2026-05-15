@@ -5,7 +5,7 @@ use std::sync::Arc;
 use aikit_agent::agent_definition::AgentPersona;
 use aikit_agent::context::{ContextToolCall, ContextToolResult};
 use aikit_agent::llm::openai_compat::OpenAiCompatProvider;
-use aikit_agent::{AgentConfig, AgentInternalEvent, HostToolProvider, Turn};
+use aikit_agent::{AgentConfig, AgentInternalEvent, HostToolProvider, LlmGateway, Turn};
 
 use crate::session_store::{
     now_rfc3339, SessionFile, SessionStore, SessionStoreError, SessionToolCall, SessionToolResult,
@@ -45,6 +45,41 @@ where
         .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
     config.host_tool_provider = host_tool_provider;
 
+    apply_session_options(options, &mut config);
+
+    let gateway = OpenAiCompatProvider::new(config.timeout_secs, config.connect_timeout_secs)
+        .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
+
+    run_with_config_and_gateway(prompt, options, config, Box::new(gateway), &mut on_event)
+}
+
+/// Run the builtin aikit agent with an externally-supplied LLM gateway.
+///
+/// Intended for integration tests that need to inject a mock gateway. In
+/// production code, use [`run_aikit_agent`] which creates the gateway from
+/// environment configuration.
+pub fn run_aikit_agent_with_gateway<F>(
+    prompt: &str,
+    options: &RunOptions,
+    gateway: Box<dyn LlmGateway>,
+    mut on_event: F,
+) -> Result<RunResult, RunError>
+where
+    F: FnMut(AgentEvent) + Send,
+{
+    let workdir = options
+        .current_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let mut config = AgentConfig::from_env(workdir, options.stream, options.model.clone())
+        .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
+
+    apply_session_options(options, &mut config);
+
+    run_with_config_and_gateway(prompt, options, config, gateway, &mut on_event)
+}
+
+fn apply_session_options(options: &RunOptions, config: &mut AgentConfig) {
     // Apply session persona: deserialize from JSON, then apply model override if no CLI --model.
     if let Some(ref persona_val) = options.session_persona {
         match serde_json::from_value::<AgentPersona>(persona_val.clone()) {
@@ -74,10 +109,18 @@ where
             }
         }
     }
+}
 
-    let gateway = OpenAiCompatProvider::new(config.timeout_secs, config.connect_timeout_secs)
-        .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
-
+fn run_with_config_and_gateway<F>(
+    prompt: &str,
+    options: &RunOptions,
+    config: AgentConfig,
+    gateway: Box<dyn LlmGateway>,
+    on_event: &mut F,
+) -> Result<RunResult, RunError>
+where
+    F: FnMut(AgentEvent) + Send,
+{
     let store = SessionStore::open();
     let cwd = options
         .current_dir
@@ -98,7 +141,7 @@ where
 
         let prior_turns = session_turns_to_turns(&session.turns);
 
-        match aikit_agent::run_with_context(config, prior_turns, prompt, Box::new(gateway)) {
+        match aikit_agent::run_with_context(config, prior_turns, prompt, gateway) {
             Ok(events) => {
                 let new_turns = internal_events_to_turns(prompt, &events);
                 let mut updated_session = session;
@@ -106,7 +149,7 @@ where
                 updated_session.updated_at = now_rfc3339();
                 let _ = store.save(&updated_session);
                 let _ = store.update_index(&cwd_str, &updated_session.session_id);
-                emit_events(events, options, &mut on_event, true)
+                emit_events(events, options, on_event, true)
             }
             Err(err) => {
                 let mut result = emit_events(
@@ -115,7 +158,7 @@ where
                         message: err.to_string(),
                     }],
                     options,
-                    &mut on_event,
+                    on_event,
                     false,
                 )?;
                 result.stderr = err.to_string().into_bytes();
@@ -127,7 +170,7 @@ where
         let session_id = uuid::Uuid::new_v4().to_string();
         let now = now_rfc3339();
 
-        match aikit_agent::run(config, prompt, Box::new(gateway)) {
+        match aikit_agent::run(config, prompt, gateway) {
             Ok(events) => {
                 let turns = internal_events_to_turns(prompt, &events);
                 let session = SessionFile {
@@ -140,8 +183,10 @@ where
                 };
                 let _ = store.save(&session);
                 let _ = store.update_index(&cwd_str, &session_id);
-                eprintln!("Session: {}", session_id);
-                emit_events(events, options, &mut on_event, true)
+                let mut result = emit_events(events, options, on_event, true)?;
+                let session_line = format!("Session: {}\n", session_id);
+                result.stderr.extend_from_slice(session_line.as_bytes());
+                Ok(result)
             }
             Err(err) => {
                 let mut result = emit_events(
@@ -150,7 +195,7 @@ where
                         message: err.to_string(),
                     }],
                     options,
-                    &mut on_event,
+                    on_event,
                     false,
                 )?;
                 result.stderr = err.to_string().into_bytes();

@@ -3424,6 +3424,53 @@ mod tests {
     }
 
     #[test]
+    fn test_build_codex_argv_events_with_session_id() {
+        let argv = build_codex_argv_events("test", None, false, Some("test-id-123"));
+        let argv_str: Vec<&str> = argv.iter().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(argv_str[0], "codex");
+        assert_eq!(argv_str[1], "resume");
+        assert_eq!(argv_str[2], "test-id-123");
+        assert!(argv.contains(&OsString::from("--json")));
+        assert!(!argv.contains(&OsString::from("exec")));
+    }
+
+    #[test]
+    fn test_build_claude_argv_events_with_session_id() {
+        let argv = build_claude_argv_events("test", None, false, Some("test-id-456"));
+        assert!(argv.contains(&OsString::from("--resume")));
+        assert!(argv.contains(&OsString::from("test-id-456")));
+        let resume_pos = argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(argv[resume_pos + 1], OsString::from("test-id-456"));
+    }
+
+    #[test]
+    fn test_build_gemini_argv_events_with_session_id() {
+        let argv = build_gemini_argv_events("test", None, Some("test-id-789"));
+        assert!(argv.contains(&OsString::from("--resume")));
+        assert!(argv.contains(&OsString::from("test-id-789")));
+        let resume_pos = argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(argv[resume_pos + 1], OsString::from("test-id-789"));
+    }
+
+    #[test]
+    fn test_build_opencode_argv_events_with_session_id() {
+        let argv = build_opencode_argv_events("test", None, false, Some("test-id-abc"));
+        assert!(argv.contains(&OsString::from("--session")));
+        assert!(argv.contains(&OsString::from("test-id-abc")));
+        let session_pos = argv.iter().position(|a| a == "--session").unwrap();
+        assert_eq!(argv[session_pos + 1], OsString::from("test-id-abc"));
+    }
+
+    #[test]
+    fn test_build_cursor_agent_argv_events_with_session_id() {
+        let argv = build_cursor_agent_argv_events("test", None, false, false, Some("test-id-def"));
+        assert!(argv.contains(&OsString::from("--resume")));
+        assert!(argv.contains(&OsString::from("test-id-def")));
+        let resume_pos = argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(argv[resume_pos + 1], OsString::from("test-id-def"));
+    }
+
+    #[test]
     fn test_should_write_stdin() {
         assert!(should_write_stdin("agent"));
         assert!(should_write_stdin("opencode"));
