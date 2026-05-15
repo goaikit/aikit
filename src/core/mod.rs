@@ -6,7 +6,6 @@ pub mod agent_definition;
 pub mod fallback;
 pub mod filesystem;
 pub mod git;
-pub mod llm_http;
 pub mod lock;
 pub mod package;
 pub mod registry;

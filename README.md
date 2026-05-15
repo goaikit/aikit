@@ -6,7 +6,7 @@
 
 ## Workspace crates
 
-- `aikit` (root crate): CLI for package lifecycle, install/init flows, release, run/llm commands
+- `aikit` (root crate): CLI for package lifecycle, install/init flows, release, run commands
 - [`aikit-sdk`](aikit-sdk/README.md): Rust library for catalog/deploy and run/event APIs
 - [`aikit-py`](aikit-py/README.md): Python package exposing the same gateway behaviors
 - [`aikit-agent`](aikit-agent/README.md): in-process agent runtime used by `aikit run -a aikit`
@@ -113,7 +113,6 @@ aikit list
 | `aikit package init <name>` | Create a new package with aikit.toml |
 | `aikit package build` | Build distributable package (output: dist/ or .genreleases/) |
 | `aikit package publish <owner/repo>` | Publish package to GitHub (release and assets) |
-| `aikit llm` | Invoke an LLM via OpenAI-compatible API (supports streaming and JSON output) |
 | `aikit mcp list` | Show which agents support MCP config merge and target file paths |
 | `aikit mcp add` | Merge one MCP server into agent config: Cursor / Claude / Gemini / VS Code (`servers`) / OpenCode (`mcp`) / Codex (TOML `mcp_servers`) |
 | `aikit release <version>` | Create GitHub release from .genreleases/ (e.g. v1.0.0) |

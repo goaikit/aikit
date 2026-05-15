@@ -4,7 +4,7 @@
 
 AIKIT is a Rust workspace centered on a CLI (`aikit`) plus reusable runtime libraries:
 
-- `aikit` (root crate): user-facing commands (`init`, `install`, `update`, `remove`, `list`, `check`, `package`, `release`, `run`, `llm`)
+- `aikit` (root crate): user-facing commands (`init`, `install`, `update`, `remove`, `list`, `check`, `package`, `release`, `run`)
 - `aikit-sdk`: Rust API for agent catalog/deploy/run/event flows
 - `aikit-py`: Python package and bindings around the same SDK behaviors
 - `aikit-agent`: in-process runtime used by `aikit run -a aikit`
@@ -71,7 +71,7 @@ This split keeps parsing and UX concerns separated from domain logic and externa
 2. Build distributable assets from package templates.
 3. Publish release artifacts to GitHub (via configured token and `gh` workflows where applicable).
 
-### Run / LLM
+### Run
 1. Resolve agent/provider and runtime options.
 2. Stream or buffer model output.
 3. Optionally emit structured events for automation and tool integration.

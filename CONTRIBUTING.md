@@ -2,7 +2,7 @@
 
 This repository is a Rust workspace with multiple crates:
 
-- `aikit` (root CLI): package install/init/build/publish, checks, release, run/llm entry points
+- `aikit` (root CLI): package install/init/build/publish, checks, release, run entry points
 - `aikit-sdk`: reusable Rust gateway for catalog, deploy, and agent run/event APIs
 - `aikit-py`: Python bindings and package
 - `aikit-agent`: in-process agent runtime used by `aikit run -a aikit`

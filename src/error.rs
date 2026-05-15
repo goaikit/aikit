@@ -48,9 +48,6 @@ pub enum AikError {
     #[error("Generic error: {0}")]
     Generic(String),
 
-    #[error("{0}")]
-    Llm(#[from] crate::core::llm_http::LlmError),
-
     #[error("command not found in registry: {0}")]
     #[allow(dead_code)]
     CommandNotFound(String),
@@ -62,10 +59,6 @@ pub enum AikError {
     #[error("risk policy blocked command '{0}': set ALLOW_DESTRUCTIVE_COMMANDS=1 to proceed")]
     #[allow(dead_code)]
     RiskPolicyBlocked(String),
-
-    #[error("no LLM provider configured: set AIKIT_LLM_URL + AIKIT_MODEL, or OPENAI_API_KEY / ANTHROPIC_API_KEY")]
-    #[allow(dead_code)]
-    LlmNotConfigured,
 
     #[error(
         "ailoop server unreachable at {0}: verify AILOOP_SERVER is set and the server is running"
