@@ -27,10 +27,6 @@ cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "7414db5
 # HTTP client for GitHub API
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
-# Force vendored OpenSSL so musl cross-compiles don't require libssl-dev on the runner.
-# native-tls/openssl-sys is pulled in transitively (anthropic-sdk, cli-framework default features)
-# even though we configure reqwest with rustls-tls everywhere.
-openssl-sys = { version = "0.9", features = ["vendored"] }
 
 # ZIP archive handling
 zip = "0.6.6"
@@ -87,6 +83,14 @@ urlencoding = "2.1.3"
 regex = "1.10"
 indicatif = "0.18"  # Progress bars
 dialoguer = "0.12"  # Interactive prompts
+
+# Vendor OpenSSL only for the musl cross-build. native-tls/openssl-sys is pulled
+# in transitively (anthropic-sdk, cli-framework default features) even though
+# every reqwest dep uses rustls-tls; on musl there is no system libssl-dev on
+# the runner, so without vendored the cross-build fails. On Windows the vendored
+# path needs perl/nasm and breaks, so we keep the system path there.
+[target.x86_64-unknown-linux-musl.dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }
 
 [dev-dependencies]
 # Testing utilities

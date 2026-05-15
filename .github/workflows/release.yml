@@ -96,11 +96,6 @@ jobs:
             binary-name: aikit
             archive-format: tar.gz
             use-cross: false
-          - os: macos-13
-            target: x86_64-apple-darwin
-            binary-name: aikit
-            archive-format: tar.gz
-            use-cross: false
 
     steps:
       - name: Checkout code
@@ -149,12 +144,6 @@ jobs:
           name: aikit-aarch64-apple-darwin.tar.gz
           path: ./artifacts
 
-      - name: Download macOS x86_64 artifact
-        uses: actions/download-artifact@v8
-        with:
-          name: aikit-x86_64-apple-darwin.tar.gz
-          path: ./artifacts
-
       - name: Verify required artifacts
         run: |
           REQUIRED=(
@@ -162,7 +151,6 @@ jobs:
             "aikit-x86_64-unknown-linux-musl.tar.gz"
             "aikit-x86_64-pc-windows-msvc.zip"
             "aikit-aarch64-apple-darwin.tar.gz"
-            "aikit-x86_64-apple-darwin.tar.gz"
           )
 
           for asset in "${REQUIRED[@]}"; do
@@ -205,7 +193,6 @@ jobs:
             "artifacts/aikit-x86_64-unknown-linux-musl.tar.gz"
             "artifacts/aikit-x86_64-pc-windows-msvc.zip"
             "artifacts/aikit-aarch64-apple-darwin.tar.gz"
-            "artifacts/aikit-x86_64-apple-darwin.tar.gz"
           )
 
           for file in "${FILES[@]}"; do
@@ -253,7 +240,6 @@ jobs:
             echo ""
             echo "### macOS"
             echo "- aikit-aarch64-apple-darwin.tar.gz"
-            echo "- aikit-x86_64-apple-darwin.tar.gz"
             echo ""
             echo "### Windows"
             echo "- aikit-x86_64-pc-windows-msvc.zip"
@@ -332,7 +318,6 @@ jobs:
             "aikit-x86_64-unknown-linux-musl.tar.gz"
             "aikit-x86_64-pc-windows-msvc.zip"
             "aikit-aarch64-apple-darwin.tar.gz"
-            "aikit-x86_64-apple-darwin.tar.gz"
           )
 
           for asset in "${required_assets[@]}"; do
@@ -355,7 +340,6 @@ jobs:
 
           grep -q "version \"$VERSION\"" Formula/aikit.rb || { echo "Formula version mismatch"; exit 1; }
           grep -q 'aikit-aarch64-apple-darwin.tar.gz' Formula/aikit.rb || { echo "Missing macOS arm64 URL"; exit 1; }
-          grep -q 'aikit-x86_64-apple-darwin.tar.gz' Formula/aikit.rb || { echo "Missing macOS x86_64 URL"; exit 1; }
           grep -q 'aikit-x86_64-unknown-linux-gnu.tar.gz' Formula/aikit.rb || { echo "Missing Linux GNU URL"; exit 1; }
           grep -q 'aikit-x86_64-unknown-linux-musl.tar.gz' Formula/aikit.rb || { echo "Missing Linux MUSL URL"; exit 1; }
         env:
