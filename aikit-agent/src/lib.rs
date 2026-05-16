@@ -75,6 +75,9 @@ pub fn run(
     loop_runner::run(config, prompt, gateway)
 }
 
+pub use context::Turn;
+pub use loop_runner::run_with_context;
+
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::sync::{Mutex, MutexGuard, OnceLock};

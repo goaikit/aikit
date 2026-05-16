@@ -19,6 +19,7 @@ dirs = "6.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 zip = "2.3"
 tempfile = "3.12"
+uuid = { version = "1", features = ["v4"] }
 aikit-agent = { path = "../aikit-agent", version = "0.1.0" }
 
 [dev-dependencies]

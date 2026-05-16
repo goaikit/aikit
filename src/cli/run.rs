@@ -1,3 +1,4 @@
+use aikit_sdk::session_store::SessionStore;
 use aikit_sdk::{run_agent, run_agent_events, run_builtin_agent, AgentEvent, OutputMode};
 use aikit_sdk::{ProgressViewConfig, RunError, RunOptions, RunProgress};
 use anyhow::Result;
@@ -21,6 +22,8 @@ pub struct RunArgs {
     pub dry_run: bool,
     pub session_agents: Option<String>,
     pub session_persona: Option<String>,
+    pub resume: Option<String>,
+    pub resume_last: bool,
 }
 
 /// Load and merge `--session-agents` value into the registry.
@@ -195,6 +198,26 @@ pub fn execute(args: RunArgs) -> Result<()> {
         return Ok(());
     }
 
+    // Resolve session ID from --resume or --resume-last.
+    let resolved_session_id: Option<String> = if let Some(ref id) = args.resume {
+        Some(id.clone())
+    } else if args.resume_last {
+        let store = SessionStore::open();
+        match store.last_for_cwd(&workdir.to_string_lossy()) {
+            Ok(Some(id)) => Some(id),
+            Ok(None) => {
+                eprintln!("error: no previous session found for this directory");
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("error: could not read session index: {:?}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     let mut options = RunOptions::new()
         .with_yolo(args.yolo)
         .with_stream(args.stream || args.progress);
@@ -206,6 +229,9 @@ pub fn execute(args: RunArgs) -> Result<()> {
     }
     if !session_agents_json.is_empty() {
         options = options.with_session_agents(session_agents_json);
+    }
+    if let Some(ref sid) = resolved_session_id {
+        options = options.with_session_id(sid.clone());
     }
 
     let is_builtin = agent == "aikit" || agent == "agent";

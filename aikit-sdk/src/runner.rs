@@ -148,6 +148,8 @@ pub struct RunOptions {
     pub session_persona: Option<serde_json::Value>,
     /// Serialized ephemeral agent definitions (JSON map). Only used for the aikit backend.
     pub session_agents: std::collections::HashMap<String, serde_json::Value>,
+    /// Session ID for resume. None = new session (default, preserves existing behaviour).
+    pub session_id: Option<String>,
 }
 
 impl Default for RunOptions {
@@ -162,6 +164,7 @@ impl Default for RunOptions {
             emit_raw_transport: false,
             session_persona: None,
             session_agents: std::collections::HashMap::new(),
+            session_id: None,
         }
     }
 }
@@ -222,6 +225,12 @@ impl RunOptions {
         agents: std::collections::HashMap<String, serde_json::Value>,
     ) -> Self {
         self.session_agents = agents;
+        self
+    }
+
+    /// Set the session ID for resume. None (default) starts a new session.
+    pub fn with_session_id(mut self, id: impl Into<String>) -> Self {
+        self.session_id = Some(id.into());
         self
     }
 }
@@ -295,6 +304,10 @@ pub enum RunError {
     MissingProgressSink,
     /// `run_builtin_agent` was called with a key other than "aikit".
     WrongAgentKey(String),
+    /// Session file does not exist at the expected path.
+    SessionNotFound(String),
+    /// Session file exists but could not be loaded or deserialized.
+    SessionLoadFailed { id: String, reason: String },
 }
 
 impl std::fmt::Display for RunError {
@@ -337,6 +350,12 @@ impl std::fmt::Display for RunError {
                     key
                 )
             }
+            RunError::SessionNotFound(id) => {
+                write!(f, "error: session '{}' not found", id)
+            }
+            RunError::SessionLoadFailed { id, reason } => {
+                write!(f, "error: session '{}' could not be loaded: {}", id, reason)
+            }
         }
     }
 }
@@ -353,7 +372,9 @@ impl std::error::Error for RunError {
             | RunError::TimedOut { .. }
             | RunError::QuotaExceeded(_)
             | RunError::MissingProgressSink
-            | RunError::WrongAgentKey(_) => None,
+            | RunError::WrongAgentKey(_)
+            | RunError::SessionNotFound(_)
+            | RunError::SessionLoadFailed { .. } => None,
         }
     }
 }
@@ -551,8 +572,17 @@ fn build_codex_argv(
     model: Option<&String>,
     yolo: bool,
     _stream: bool,
+    session_id: Option<&str>,
 ) -> Vec<OsString> {
-    let mut argv = vec![OsString::from("codex"), OsString::from("exec")];
+    let mut argv = if let Some(id) = session_id {
+        vec![
+            OsString::from("codex"),
+            OsString::from("resume"),
+            OsString::from(id),
+        ]
+    } else {
+        vec![OsString::from("codex"), OsString::from("exec")]
+    };
 
     if let Some(m) = model {
         argv.push(OsString::from("-m"));
@@ -576,6 +606,7 @@ fn build_claude_argv(
     model: Option<&String>,
     _yolo: bool,
     stream: bool,
+    session_id: Option<&str>,
 ) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("claude"),
@@ -592,6 +623,11 @@ fn build_claude_argv(
     argv.push(OsString::from("--output-format"));
     argv.push(OsString::from(if stream { "stream-json" } else { "text" }));
 
+    if let Some(id) = session_id {
+        argv.push(OsString::from("--resume"));
+        argv.push(OsString::from(id));
+    }
+
     argv
 }
 
@@ -601,6 +637,7 @@ fn build_gemini_argv(
     model: Option<&String>,
     _yolo: bool,
     _stream: bool,
+    session_id: Option<&str>,
 ) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("gemini"),
@@ -613,6 +650,11 @@ fn build_gemini_argv(
         argv.push(OsString::from(m.as_str()));
     }
 
+    if let Some(id) = session_id {
+        argv.push(OsString::from("--resume"));
+        argv.push(OsString::from(id));
+    }
+
     argv
 }
 
@@ -622,6 +664,7 @@ fn build_opencode_argv(
     model: Option<&String>,
     yolo: bool,
     _stream: bool,
+    session_id: Option<&str>,
 ) -> Vec<OsString> {
     let mut argv = vec![OsString::from("opencode")];
 
@@ -636,6 +679,11 @@ fn build_opencode_argv(
         argv.push(OsString::from("--yolo"));
     }
 
+    if let Some(id) = session_id {
+        argv.push(OsString::from("--session"));
+        argv.push(OsString::from(id));
+    }
+
     argv
 }
 
@@ -645,6 +693,7 @@ fn build_cursor_agent_argv(
     model: Option<&String>,
     yolo: bool,
     stream: bool,
+    session_id: Option<&str>,
 ) -> Vec<OsString> {
     let mut argv = vec![OsString::from("agent"), OsString::from("--print")];
 
@@ -661,12 +710,30 @@ fn build_cursor_agent_argv(
         argv.push(OsString::from("--force"));
     }
 
+    if let Some(id) = session_id {
+        argv.push(OsString::from("--resume"));
+        argv.push(OsString::from(id));
+    }
+
     argv
 }
 
 /// Event-mode argv builder for codex: emits machine-readable JSON output.
-fn build_codex_argv_events(_prompt: &str, model: Option<&String>, yolo: bool) -> Vec<OsString> {
-    let mut argv = vec![OsString::from("codex"), OsString::from("exec")];
+fn build_codex_argv_events(
+    _prompt: &str,
+    model: Option<&String>,
+    yolo: bool,
+    session_id: Option<&str>,
+) -> Vec<OsString> {
+    let mut argv = if let Some(id) = session_id {
+        vec![
+            OsString::from("codex"),
+            OsString::from("resume"),
+            OsString::from(id),
+        ]
+    } else {
+        vec![OsString::from("codex"), OsString::from("exec")]
+    };
 
     if let Some(m) = model {
         argv.push(OsString::from("-m"));
@@ -685,7 +752,12 @@ fn build_codex_argv_events(_prompt: &str, model: Option<&String>, yolo: bool) ->
 }
 
 /// Event-mode argv builder for claude: emits stream-json output.
-fn build_claude_argv_events(_prompt: &str, model: Option<&String>, stream: bool) -> Vec<OsString> {
+fn build_claude_argv_events(
+    _prompt: &str,
+    model: Option<&String>,
+    stream: bool,
+    session_id: Option<&str>,
+) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("claude"),
         OsString::from("-p"),
@@ -701,11 +773,20 @@ fn build_claude_argv_events(_prompt: &str, model: Option<&String>, stream: bool)
     argv.push(OsString::from("--output-format"));
     argv.push(OsString::from(if stream { "stream-json" } else { "json" }));
 
+    if let Some(id) = session_id {
+        argv.push(OsString::from("--resume"));
+        argv.push(OsString::from(id));
+    }
+
     argv
 }
 
 /// Event-mode argv builder for gemini: emits stream-json output in headless mode.
-fn build_gemini_argv_events(_prompt: &str, model: Option<&String>) -> Vec<OsString> {
+fn build_gemini_argv_events(
+    _prompt: &str,
+    model: Option<&String>,
+    session_id: Option<&str>,
+) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("gemini"),
         OsString::from("--prompt"),
@@ -720,11 +801,21 @@ fn build_gemini_argv_events(_prompt: &str, model: Option<&String>) -> Vec<OsStri
         argv.push(OsString::from(m.as_str()));
     }
 
+    if let Some(id) = session_id {
+        argv.push(OsString::from("--resume"));
+        argv.push(OsString::from(id));
+    }
+
     argv
 }
 
 /// Event-mode argv builder for opencode: uses `run` subcommand with `--format json`.
-fn build_opencode_argv_events(_prompt: &str, model: Option<&String>, _yolo: bool) -> Vec<OsString> {
+fn build_opencode_argv_events(
+    _prompt: &str,
+    model: Option<&String>,
+    _yolo: bool,
+    session_id: Option<&str>,
+) -> Vec<OsString> {
     let mut argv = vec![OsString::from("opencode")];
 
     if let Some(m) = model {
@@ -736,6 +827,11 @@ fn build_opencode_argv_events(_prompt: &str, model: Option<&String>, _yolo: bool
     argv.push(OsString::from("--format"));
     argv.push(OsString::from("json"));
 
+    if let Some(id) = session_id {
+        argv.push(OsString::from("--session"));
+        argv.push(OsString::from(id));
+    }
+
     argv
 }
 
@@ -745,6 +841,7 @@ fn build_cursor_agent_argv_events(
     model: Option<&String>,
     yolo: bool,
     stream: bool,
+    session_id: Option<&str>,
 ) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from("agent"),
@@ -765,6 +862,11 @@ fn build_cursor_agent_argv_events(
 
     if yolo {
         argv.push(OsString::from("--force"));
+    }
+
+    if let Some(id) = session_id {
+        argv.push(OsString::from("--resume"));
+        argv.push(OsString::from(id));
     }
 
     argv
@@ -1867,39 +1969,62 @@ fn spawn_agent_piped(
         return Err(RunError::AgentNotRunnable(agent_key.to_string()));
     }
 
+    let sid = options.session_id.as_deref();
     let argv = if events_mode {
         match agent_key {
-            "codex" => build_codex_argv_events(prompt, options.model.as_ref(), options.yolo),
-            "claude" => build_claude_argv_events(prompt, options.model.as_ref(), options.stream),
-            "gemini" => build_gemini_argv_events(prompt, options.model.as_ref()),
-            "opencode" => build_opencode_argv_events(prompt, options.model.as_ref(), options.yolo),
+            "codex" => build_codex_argv_events(prompt, options.model.as_ref(), options.yolo, sid),
+            "claude" => {
+                build_claude_argv_events(prompt, options.model.as_ref(), options.stream, sid)
+            }
+            "gemini" => build_gemini_argv_events(prompt, options.model.as_ref(), sid),
+            "opencode" => {
+                build_opencode_argv_events(prompt, options.model.as_ref(), options.yolo, sid)
+            }
             "agent" => build_cursor_agent_argv_events(
                 prompt,
                 options.model.as_ref(),
                 options.yolo,
                 options.stream,
+                sid,
             ),
             _ => unreachable!(),
         }
     } else {
         match agent_key {
-            "codex" => {
-                build_codex_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
-            }
-            "claude" => {
-                build_claude_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
-            }
-            "gemini" => {
-                build_gemini_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
-            }
-            "opencode" => {
-                build_opencode_argv(prompt, options.model.as_ref(), options.yolo, options.stream)
-            }
+            "codex" => build_codex_argv(
+                prompt,
+                options.model.as_ref(),
+                options.yolo,
+                options.stream,
+                sid,
+            ),
+            "claude" => build_claude_argv(
+                prompt,
+                options.model.as_ref(),
+                options.yolo,
+                options.stream,
+                sid,
+            ),
+            "gemini" => build_gemini_argv(
+                prompt,
+                options.model.as_ref(),
+                options.yolo,
+                options.stream,
+                sid,
+            ),
+            "opencode" => build_opencode_argv(
+                prompt,
+                options.model.as_ref(),
+                options.yolo,
+                options.stream,
+                sid,
+            ),
             "agent" => build_cursor_agent_argv(
                 prompt,
                 options.model.as_ref(),
                 options.yolo,
                 options.stream,
+                sid,
             ),
             _ => unreachable!(),
         }
@@ -2637,7 +2762,7 @@ mod tests {
 
     #[test]
     fn test_build_codex_argv_contains_exec_and_model() {
-        let argv = build_codex_argv("test prompt", Some(&"gpt-4".to_string()), true, false);
+        let argv = build_codex_argv("test prompt", Some(&"gpt-4".to_string()), true, false, None);
         assert!(argv.contains(&OsString::from("codex")));
         assert!(argv.contains(&OsString::from("exec")));
         assert!(argv.contains(&OsString::from("-m")));
@@ -2648,10 +2773,22 @@ mod tests {
 
     #[test]
     fn test_build_codex_argv_no_model() {
-        let argv = build_codex_argv("test prompt", None, false, false);
+        let argv = build_codex_argv("test prompt", None, false, false, None);
         assert!(!argv.contains(&OsString::from("-m")));
         assert!(!argv.contains(&OsString::from("--yolo")));
         assert!(argv.contains(&OsString::from("--json")));
+    }
+
+    #[test]
+    fn test_build_codex_argv_with_session_id() {
+        let argv = build_codex_argv("test prompt", None, false, false, Some("test-session-id"));
+        assert!(argv.contains(&OsString::from("codex")));
+        assert!(argv.contains(&OsString::from("resume")));
+        assert!(argv.contains(&OsString::from("test-session-id")));
+        assert!(!argv.contains(&OsString::from("exec")));
+        let resume_pos = argv.iter().position(|a| a == "resume").unwrap();
+        let id_pos = argv.iter().position(|a| a == "test-session-id").unwrap();
+        assert_eq!(id_pos, resume_pos + 1);
     }
 
     #[test]
@@ -2661,6 +2798,7 @@ mod tests {
             Some(&"claude-3-opus".to_string()),
             false,
             true,
+            None,
         );
         assert!(argv.contains(&OsString::from("claude")));
         assert!(argv.contains(&OsString::from("-p")));
@@ -2674,14 +2812,27 @@ mod tests {
 
     #[test]
     fn test_build_claude_argv_text_format() {
-        let argv = build_claude_argv("test prompt", None, false, false);
+        let argv = build_claude_argv("test prompt", None, false, false, None);
         assert!(argv.contains(&OsString::from("text")));
         assert!(!argv.contains(&OsString::from("stream-json")));
     }
 
     #[test]
+    fn test_build_claude_argv_with_session_id() {
+        let argv = build_claude_argv("test prompt", None, false, false, Some("test-session-id"));
+        assert!(argv.contains(&OsString::from("--resume")));
+        assert!(argv.contains(&OsString::from("test-session-id")));
+    }
+
+    #[test]
     fn test_build_gemini_argv_contains_prompt_and_model() {
-        let argv = build_gemini_argv("test prompt", Some(&"gemini-pro".to_string()), false, false);
+        let argv = build_gemini_argv(
+            "test prompt",
+            Some(&"gemini-pro".to_string()),
+            false,
+            false,
+            None,
+        );
         assert!(argv.contains(&OsString::from("gemini")));
         assert!(argv.contains(&OsString::from("--prompt")));
         assert!(argv.contains(&OsString::from("-")));
@@ -2691,12 +2842,20 @@ mod tests {
     }
 
     #[test]
+    fn test_build_gemini_argv_with_session_id() {
+        let argv = build_gemini_argv("test prompt", None, false, false, Some("test-session-id"));
+        assert!(argv.contains(&OsString::from("--resume")));
+        assert!(argv.contains(&OsString::from("test-session-id")));
+    }
+
+    #[test]
     fn test_build_opencode_argv_contains_prompt_and_model() {
         let argv = build_opencode_argv(
             "test prompt",
             Some(&"zai-coding-plan/glm-4.7".to_string()),
             true,
             false,
+            None,
         );
         assert!(argv.contains(&OsString::from("opencode")));
         assert!(argv.contains(&OsString::from("run")));
@@ -2708,14 +2867,26 @@ mod tests {
 
     #[test]
     fn test_build_opencode_argv_no_options() {
-        let argv = build_opencode_argv("test prompt", None, false, false);
+        let argv = build_opencode_argv("test prompt", None, false, false, None);
         assert!(!argv.contains(&OsString::from("--yolo")));
     }
 
     #[test]
+    fn test_build_opencode_argv_with_session_id() {
+        let argv = build_opencode_argv("test prompt", None, false, false, Some("test-session-id"));
+        assert!(argv.contains(&OsString::from("--session")));
+        assert!(argv.contains(&OsString::from("test-session-id")));
+    }
+
+    #[test]
     fn test_build_agent_argv_contains_all_options() {
-        let argv =
-            build_cursor_agent_argv("test prompt", Some(&"custom-model".to_string()), true, true);
+        let argv = build_cursor_agent_argv(
+            "test prompt",
+            Some(&"custom-model".to_string()),
+            true,
+            true,
+            None,
+        );
         assert!(argv.contains(&OsString::from("agent")));
         assert!(argv.contains(&OsString::from("--print")));
         assert!(argv.contains(&OsString::from("--output-format")));
@@ -2726,6 +2897,43 @@ mod tests {
         assert!(!argv.contains(&OsString::from("test prompt")));
         assert!(!argv.contains(&OsString::from("--prompt")));
         assert!(!argv.contains(&OsString::from("--yolo")));
+    }
+
+    #[test]
+    fn test_build_agent_argv_with_session_id() {
+        let argv =
+            build_cursor_agent_argv("test prompt", None, false, false, Some("test-session-id"));
+        assert!(argv.contains(&OsString::from("--resume")));
+        assert!(argv.contains(&OsString::from("test-session-id")));
+    }
+
+    #[test]
+    fn test_run_options_session_id_default_is_none() {
+        assert_eq!(RunOptions::default().session_id, None);
+    }
+
+    #[test]
+    fn test_run_options_with_session_id() {
+        let opts = RunOptions::default().with_session_id("abc");
+        assert_eq!(opts.session_id, Some("abc".to_string()));
+    }
+
+    #[test]
+    fn test_run_error_session_not_found_display() {
+        let err = RunError::SessionNotFound("x".to_string());
+        assert_eq!(err.to_string(), "error: session 'x' not found");
+    }
+
+    #[test]
+    fn test_run_error_session_load_failed_display() {
+        let err = RunError::SessionLoadFailed {
+            id: "x".to_string(),
+            reason: "bad json".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "error: session 'x' could not be loaded: bad json"
+        );
     }
 
     #[test]
@@ -3147,7 +3355,7 @@ mod tests {
 
     #[test]
     fn test_build_codex_argv_events_has_json_flag() {
-        let argv = build_codex_argv_events("test", Some(&"gpt-4".to_string()), true);
+        let argv = build_codex_argv_events("test", Some(&"gpt-4".to_string()), true, None);
         assert!(argv.contains(&OsString::from("--json")));
         assert!(argv.contains(&OsString::from("--yolo")));
         assert!(argv.contains(&OsString::from("-m")));
@@ -3155,20 +3363,20 @@ mod tests {
 
     #[test]
     fn test_build_claude_argv_events_json_format() {
-        let argv = build_claude_argv_events("test", None, false);
+        let argv = build_claude_argv_events("test", None, false, None);
         assert!(argv.contains(&OsString::from("--output-format")));
         assert!(argv.contains(&OsString::from("json")));
     }
 
     #[test]
     fn test_build_claude_argv_events_stream_json_format() {
-        let argv = build_claude_argv_events("test", None, true);
+        let argv = build_claude_argv_events("test", None, true, None);
         assert!(argv.contains(&OsString::from("stream-json")));
     }
 
     #[test]
     fn test_build_gemini_argv_events_stream_json_headless() {
-        let argv = build_gemini_argv_events("test", None);
+        let argv = build_gemini_argv_events("test", None, None);
         assert!(argv.contains(&OsString::from("--output-format")));
         assert!(argv.contains(&OsString::from("stream-json")));
         assert!(argv.contains(&OsString::from("--yolo")));
@@ -3177,7 +3385,7 @@ mod tests {
 
     #[test]
     fn test_build_opencode_argv_events_uses_run_subcommand() {
-        let argv = build_opencode_argv_events("test prompt", None, false);
+        let argv = build_opencode_argv_events("test prompt", None, false, None);
         assert!(argv.contains(&OsString::from("opencode")));
         assert!(argv.contains(&OsString::from("run")));
         assert!(!argv.contains(&OsString::from("test prompt")));
@@ -3190,7 +3398,7 @@ mod tests {
     #[test]
     fn test_build_opencode_argv_events_with_model() {
         let model = "zai-coding-plan/glm-4.7".to_string();
-        let argv = build_opencode_argv_events("test", Some(&model), false);
+        let argv = build_opencode_argv_events("test", Some(&model), false, None);
         assert!(argv.contains(&OsString::from("-m")));
         assert!(argv.contains(&OsString::from("zai-coding-plan/glm-4.7")));
         // -m must appear before "run"
@@ -3201,7 +3409,7 @@ mod tests {
 
     #[test]
     fn test_build_agent_argv_events_has_json_flag() {
-        let argv = build_cursor_agent_argv_events("test", None, false, false);
+        let argv = build_cursor_agent_argv_events("test", None, false, false, None);
         assert!(argv.contains(&OsString::from("--print")));
         assert!(argv.contains(&OsString::from("--output-format")));
         assert!(argv.contains(&OsString::from("json")));
@@ -3210,9 +3418,56 @@ mod tests {
 
     #[test]
     fn test_build_cursor_agent_argv_events_stream_json() {
-        let argv = build_cursor_agent_argv_events("test", None, false, true);
+        let argv = build_cursor_agent_argv_events("test", None, false, true, None);
         assert!(argv.contains(&OsString::from("stream-json")));
         assert!(!argv.contains(&OsString::from("test")));
+    }
+
+    #[test]
+    fn test_build_codex_argv_events_with_session_id() {
+        let argv = build_codex_argv_events("test", None, false, Some("test-id-123"));
+        let argv_str: Vec<&str> = argv.iter().map(|s| s.to_str().unwrap()).collect();
+        assert_eq!(argv_str[0], "codex");
+        assert_eq!(argv_str[1], "resume");
+        assert_eq!(argv_str[2], "test-id-123");
+        assert!(argv.contains(&OsString::from("--json")));
+        assert!(!argv.contains(&OsString::from("exec")));
+    }
+
+    #[test]
+    fn test_build_claude_argv_events_with_session_id() {
+        let argv = build_claude_argv_events("test", None, false, Some("test-id-456"));
+        assert!(argv.contains(&OsString::from("--resume")));
+        assert!(argv.contains(&OsString::from("test-id-456")));
+        let resume_pos = argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(argv[resume_pos + 1], OsString::from("test-id-456"));
+    }
+
+    #[test]
+    fn test_build_gemini_argv_events_with_session_id() {
+        let argv = build_gemini_argv_events("test", None, Some("test-id-789"));
+        assert!(argv.contains(&OsString::from("--resume")));
+        assert!(argv.contains(&OsString::from("test-id-789")));
+        let resume_pos = argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(argv[resume_pos + 1], OsString::from("test-id-789"));
+    }
+
+    #[test]
+    fn test_build_opencode_argv_events_with_session_id() {
+        let argv = build_opencode_argv_events("test", None, false, Some("test-id-abc"));
+        assert!(argv.contains(&OsString::from("--session")));
+        assert!(argv.contains(&OsString::from("test-id-abc")));
+        let session_pos = argv.iter().position(|a| a == "--session").unwrap();
+        assert_eq!(argv[session_pos + 1], OsString::from("test-id-abc"));
+    }
+
+    #[test]
+    fn test_build_cursor_agent_argv_events_with_session_id() {
+        let argv = build_cursor_agent_argv_events("test", None, false, false, Some("test-id-def"));
+        assert!(argv.contains(&OsString::from("--resume")));
+        assert!(argv.contains(&OsString::from("test-id-def")));
+        let resume_pos = argv.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(argv[resume_pos + 1], OsString::from("test-id-def"));
     }
 
     #[test]

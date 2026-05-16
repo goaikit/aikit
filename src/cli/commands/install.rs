@@ -117,7 +117,6 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     use crate::core::git::GitHubClient;
     use crate::core::ux::{create_spinner, show_info, show_success, show_warning};
     use crate::models::registry::LocalRegistry;
-    use std::path::PathBuf;
 
     let spinner = create_spinner("Detecting source type...");
     spinner.enable_steady_tick(std::time::Duration::from_millis(100));
@@ -128,12 +127,17 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
         println!("Version: {}", version);
     }
 
-    // Find or create .aikit directory
+    // Find or create .aikit directory.
+    // Use an absolute path so all downstream operations (WalkDir, glob matching,
+    // fs::copy) behave consistently across platforms — relative paths combined
+    // with an empty project_root caused silent artifact-copy failures on Windows.
     let aik_dir = match AikDirectory::find() {
         Ok(dir) => dir,
         Err(_) => {
-            // .aikit not found, create it in current directory
-            let aik_dir = AikDirectory::new(PathBuf::from(".aikit"));
+            let cwd = std::env::current_dir().map_err(|e| {
+                AikError::Generic(format!("Failed to read current directory: {}", e))
+            })?;
+            let aik_dir = AikDirectory::new(cwd.join(".aikit"));
             println!("Creating .aikit directory...");
             aik_dir.create()?;
             aik_dir
@@ -361,9 +365,10 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     let agent_scope = selected_agents.first().map(|s| s.as_str());
     let mappings = package.get_artifact_mappings(agent_scope);
 
-    if let Err(e) = aikit_sdk::copy_artifacts(&package_root, &project_root, &mappings) {
-        eprintln!("Warning: Copy artifacts: {}", e);
-    }
+    // Artifact copy must succeed — otherwise the package isn't actually installed
+    // from the user's perspective (e.g. `.newton/` would be missing for newton).
+    aikit_sdk::copy_artifacts(&package_root, &project_root, &mappings)
+        .map_err(|e| AikError::Generic(format!("Failed to copy artifacts: {}", e)))?;
 
     println!(
         "✅ Package '{}' v{} installed successfully!",

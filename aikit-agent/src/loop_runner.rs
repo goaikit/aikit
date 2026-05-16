@@ -70,10 +70,63 @@ pub(crate) fn run_inner(
     );
 
     // 5. Main agent loop
+    run_loop(&config, &mut context, &tools, &gateway, &mut events)?;
+
+    Ok(events)
+}
+
+/// Run the agent loop starting from an existing context seeded with prior conversation turns.
+pub fn run_with_context(
+    config: AgentConfig,
+    prior_turns: Vec<Turn>,
+    new_prompt: &str,
+    gateway: Box<dyn LlmGateway>,
+) -> Result<Vec<AgentInternalEvent>, AgentError> {
+    let gateway: Arc<dyn LlmGateway> = Arc::from(gateway);
+    let mut events = Vec::new();
+
+    let (skills, provider) = discover_skills_for_run(&config)?;
+
+    let skill_metadatas: Vec<crate::skills::SkillMetadata> =
+        skills.iter().map(|s| s.metadata.clone()).collect();
+    let system_instructions = build_system_instructions(&config, &skill_metadatas)?;
+
+    let budget = TokenBudget {
+        total_budget: config.context_budget_tokens,
+        reserve_for_tools: 1000,
+        reserve_for_output: 2000,
+    };
+    let mut context = ContextPacket::new(system_instructions, budget);
+    context.skills_summary = skills.iter().map(|s| s.metadata.clone()).collect();
+
+    for turn in prior_turns {
+        context.add_turn(turn);
+    }
+    context.add_turn(Turn::user(new_prompt));
+
+    let tools = build_tools(
+        &config,
+        Arc::clone(&gateway),
+        &skills,
+        Arc::clone(&provider),
+    );
+
+    run_loop(&config, &mut context, &tools, &gateway, &mut events)?;
+
+    Ok(events)
+}
+
+fn run_loop(
+    config: &AgentConfig,
+    context: &mut ContextPacket,
+    tools: &[Box<dyn Tool>],
+    gateway: &Arc<dyn LlmGateway>,
+    events: &mut Vec<AgentInternalEvent>,
+) -> Result<(), AgentError> {
     for iteration in 0..config.max_iterations {
         // Check context budget and compress if needed
         if let Some(compression) =
-            maybe_compress(&mut context).map_err(|e| AgentError::ContextCompression {
+            maybe_compress(context).map_err(|e| AgentError::ContextCompression {
                 message: e.to_string(),
             })?
         {
@@ -86,13 +139,13 @@ pub(crate) fn run_inner(
 
         // Build LLM request
         let tool_schemas: Vec<_> = tools.iter().map(|t| t.schema()).collect();
-        let req = build_llm_request(&config, &context, tool_schemas);
+        let req = build_llm_request(config, context, tool_schemas);
 
         // Call LLM
         let (response_text, tool_calls, finish_reason, usage) = if config.stream {
-            call_stream(&*gateway, req, &mut events)?
+            call_stream(gateway.as_ref(), req, events)?
         } else {
-            call_complete(&*gateway, req, &mut events)?
+            call_complete(gateway.as_ref(), req, events)?
         };
 
         // Emit usage event if present
@@ -142,7 +195,7 @@ pub(crate) fn run_inner(
                     call_id: call_id.clone(),
                 });
 
-                let output = execute_tool(&tools, &tool_name, args, &tool_ctx);
+                let output = execute_tool(tools, &tool_name, args, &tool_ctx);
 
                 events.push(AgentInternalEvent::ToolResult {
                     call_id: call_id.clone(),
@@ -182,7 +235,7 @@ pub(crate) fn run_inner(
         }
     }
 
-    Ok(events)
+    Ok(())
 }
 
 pub(crate) fn discover_skills_for_run(
@@ -589,9 +642,36 @@ mod tests {
     use super::*;
     use crate::llm::mock::{MockGateway, MockResponse};
     use crate::llm::types::{
-        LlmError, LlmResponse, LlmStreamEvent, LlmStreamHandle, ToolCall, ToolCallFunction,
+        LlmError, LlmRequest, LlmResponse, LlmStreamEvent, LlmStreamHandle, ToolCall,
+        ToolCallFunction,
     };
     use tempfile::TempDir;
+
+    /// A gateway that records every outbound LlmRequest for inspection.
+    struct CapturingGateway {
+        captured: std::sync::Arc<std::sync::Mutex<Vec<LlmRequest>>>,
+        inner: MockGateway,
+    }
+
+    impl CapturingGateway {
+        fn new(responses: Vec<MockResponse>) -> Self {
+            Self {
+                captured: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+                inner: MockGateway::new(responses),
+            }
+        }
+    }
+
+    impl LlmGateway for CapturingGateway {
+        fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+            self.captured.lock().unwrap().push(req.clone());
+            self.inner.complete(req)
+        }
+        fn stream(&self, req: LlmRequest) -> Result<LlmStreamHandle, LlmError> {
+            self.captured.lock().unwrap().push(req.clone());
+            self.inner.stream(req)
+        }
+    }
 
     fn make_config(tmp: &TempDir, stream: bool) -> AgentConfig {
         AgentConfig {
@@ -631,6 +711,107 @@ mod tests {
         assert!(
             has_text_final,
             "should have TextFinal event with response text"
+        );
+    }
+
+    /// run_with_context() seeds the LLM request with prior turns before the new user message.
+    #[test]
+    fn test_run_with_context_seeds_prior_turns_in_order() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp, false);
+
+        let prior_turns = vec![Turn::user("What is 2+2?"), Turn::assistant("4")];
+
+        let gw = CapturingGateway::new(vec![MockResponse::text("Based on our prior chat...")]);
+        let captured = std::sync::Arc::clone(&gw.captured);
+
+        let _events = run_with_context(config, prior_turns, "What is 3+3?", Box::new(gw)).unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert!(
+            !requests.is_empty(),
+            "at least one LLM request must be made"
+        );
+        let first_req = &requests[0];
+
+        let non_system: Vec<_> = first_req
+            .messages
+            .iter()
+            .filter(|m| m.role != "system")
+            .collect();
+
+        assert!(
+            non_system.len() >= 3,
+            "expected at least 3 non-system messages (2 prior + 1 new), got {}",
+            non_system.len()
+        );
+        assert_eq!(
+            non_system[0].content.as_deref(),
+            Some("What is 2+2?"),
+            "first prior turn should be user message"
+        );
+        assert_eq!(non_system[0].role, "user");
+        assert_eq!(
+            non_system[1].content.as_deref(),
+            Some("4"),
+            "second prior turn should be assistant message"
+        );
+        assert_eq!(non_system[1].role, "assistant");
+        assert_eq!(
+            non_system[2].content.as_deref(),
+            Some("What is 3+3?"),
+            "new user message should be last"
+        );
+        assert_eq!(non_system[2].role, "user");
+    }
+
+    /// run_with_context() includes tool calls from seeded turns in the LLM message list.
+    #[test]
+    fn test_run_with_context_includes_tool_calls_from_prior_turns() {
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp, false);
+
+        let prior_turns = vec![
+            Turn::user("Read the file"),
+            Turn::assistant_with_tool_calls(
+                "",
+                vec![ContextToolCall {
+                    id: "call-prior-1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: r#"{"path":"README.md"}"#.to_string(),
+                }],
+            ),
+            Turn::tool_result(vec![ContextToolResult {
+                call_id: "call-prior-1".to_string(),
+                output: "# README content".to_string(),
+                is_error: false,
+            }]),
+        ];
+
+        let gw = CapturingGateway::new(vec![MockResponse::text("Done reading.")]);
+        let captured = std::sync::Arc::clone(&gw.captured);
+
+        let _events = run_with_context(config, prior_turns, "Summarise it", Box::new(gw)).unwrap();
+
+        let requests = captured.lock().unwrap();
+        assert!(!requests.is_empty());
+        let first_req = &requests[0];
+
+        let has_tool_call_msg = first_req.messages.iter().any(|m| {
+            m.tool_calls
+                .as_ref()
+                .map(|tc| !tc.is_empty())
+                .unwrap_or(false)
+        });
+        assert!(
+            has_tool_call_msg,
+            "prior tool-call turn must appear in the outbound message list"
+        );
+
+        let has_tool_result_msg = first_req.messages.iter().any(|m| m.tool_call_id.is_some());
+        assert!(
+            has_tool_result_msg,
+            "prior tool-result turn must appear in the outbound message list"
         );
     }
 

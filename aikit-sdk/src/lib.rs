@@ -416,11 +416,13 @@ pub fn deploy_subagent(
 
 pub mod aikit_agent_adapter;
 pub mod runner;
+pub mod session_store;
 
 // Re-export host tool types so cli-framework can depend on aikit-sdk alone.
 pub use aikit_agent::{HostToolDefinition, HostToolProvider};
 
-pub use aikit_agent_adapter::run_aikit_agent;
+pub use aikit_agent::loop_runner::run_with_context;
+pub use aikit_agent_adapter::{run_aikit_agent, run_aikit_agent_with_gateway};
 pub use runner::{
     aggregate_token_usage, extract_usage_from_line, get_agent_status, get_installed_agents,
     is_agent_available, is_runnable, normalize_json_line, run_agent, run_agent_events,

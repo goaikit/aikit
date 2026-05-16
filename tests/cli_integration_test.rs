@@ -998,7 +998,9 @@ description = "Test package with invalid name"
             .stdout(predicate::str::contains("--model"))
             .stdout(predicate::str::contains("--prompt"))
             .stdout(predicate::str::contains("--yolo"))
-            .stdout(predicate::str::contains("--stream"));
+            .stdout(predicate::str::contains("--stream"))
+            .stdout(predicate::str::contains("--resume"))
+            .stdout(predicate::str::contains("--resume-last"));
 
         Ok(())
     }
