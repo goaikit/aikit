@@ -61,4 +61,55 @@ mod tests {
             stderr
         );
     }
+
+    #[test]
+    fn test_agents_deprecated_emits_warning() {
+        let output = Command::new("aikit")
+            .arg("agents")
+            .output()
+            .expect("Failed to execute aikit agents");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("deprecated"),
+            "aikit agents must print a deprecation warning; stderr:\n{}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_mcp_list_deprecated_emits_warning() {
+        let output = Command::new("aikit")
+            .args(["mcp", "list"])
+            .output()
+            .expect("Failed to execute aikit mcp list");
+
+        assert!(output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("deprecated"),
+            "aikit mcp list must print a deprecation warning; stderr:\n{}",
+            stderr
+        );
+    }
+
+    #[test]
+    fn test_agent_help_lists_subcommands() {
+        let output = Command::new("aikit")
+            .args(["agent", "--help"])
+            .output()
+            .expect("Failed to execute aikit agent --help");
+
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        for sub in &["run", "list", "mcp", "check"] {
+            assert!(
+                stdout.contains(sub),
+                "aikit agent --help must list '{}' subcommand; got:\n{}",
+                sub,
+                stdout
+            );
+        }
+    }
 }
