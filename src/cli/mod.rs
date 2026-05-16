@@ -46,21 +46,50 @@ pub fn build_app() -> Result<AikitApp> {
     builder = builder.register_command(cmd_remove())?;
     builder = builder.register_command(cmd_list())?;
     builder = builder.register_command(cmd_release())?;
-    builder = builder.register_command(cmd_run())?;
-    builder = builder.register_command(cmd_agents())?;
+    builder = builder.register_command(cmd_run_deprecated())?;
+    builder = builder.register_command(cmd_agents_deprecated())?;
 
     let mcp_path = CommandPath::new(&["mcp"])?;
     builder = builder.register_group(
         &mcp_path,
         GroupMetadata {
-            summary: "MCP server management",
+            summary: "MCP server management (deprecated — use `aikit agent mcp`)",
             hidden: false,
         },
     )?;
     let mcp_list_path = CommandPath::new(&["mcp", "list"])?;
     let mcp_add_path = CommandPath::new(&["mcp", "add"])?;
-    builder = builder.register_command_at(&mcp_list_path, cmd_mcp_list())?;
-    builder = builder.register_command_at(&mcp_add_path, cmd_mcp_add())?;
+    builder = builder.register_command_at(&mcp_list_path, cmd_mcp_list_deprecated())?;
+    builder = builder.register_command_at(&mcp_add_path, cmd_mcp_add_deprecated())?;
+
+    // agent group — canonical entry point for all agent-related commands
+    let agent_path = CommandPath::new(&["agent"])?;
+    builder = builder.register_group(
+        &agent_path,
+        GroupMetadata {
+            summary: "Agent run and management commands",
+            hidden: false,
+        },
+    )?;
+    let agent_run_path = CommandPath::new(&["agent", "run"])?;
+    let agent_list_path = CommandPath::new(&["agent", "list"])?;
+    let agent_check_path = CommandPath::new(&["agent", "check"])?;
+    builder = builder.register_command_at(&agent_run_path, cmd_run())?;
+    builder = builder.register_command_at(&agent_list_path, cmd_agent_list())?;
+    builder = builder.register_command_at(&agent_check_path, cmd_agent_check())?;
+
+    let agent_mcp_path = CommandPath::new(&["agent", "mcp"])?;
+    builder = builder.register_group(
+        &agent_mcp_path,
+        GroupMetadata {
+            summary: "MCP server management",
+            hidden: false,
+        },
+    )?;
+    let agent_mcp_list_path = CommandPath::new(&["agent", "mcp", "list"])?;
+    let agent_mcp_add_path = CommandPath::new(&["agent", "mcp", "add"])?;
+    builder = builder.register_command_at(&agent_mcp_list_path, cmd_mcp_list())?;
+    builder = builder.register_command_at(&agent_mcp_add_path, cmd_mcp_add())?;
 
     let package_path = CommandPath::new(&["package"])?;
     builder = builder.register_group(
@@ -682,6 +711,121 @@ fn cmd_agents() -> Command {
             })
         }),
     }
+}
+
+fn cmd_agent_list() -> Command {
+    Command {
+        id: "list",
+        summary: "List persisted agent definitions",
+        syntax: Some("agent list [--json]"),
+        category: Some("agents"),
+        spec: Some(Arc::new(CommandSpec {
+            summary: "List persisted agent definitions",
+            args: vec![flag("json", "Emit JSON array to stdout instead of a table")],
+            ..CommandSpec::default()
+        })),
+        validator: None,
+        expose_mcp: false,
+        execute: Arc::new(|_ctx, args| {
+            Box::pin(async move {
+                let agents_args = agents::AgentsArgs {
+                    json: get_bool(&args, "json"),
+                };
+                agents::execute(agents_args).map_err(|e| anyhow::anyhow!("{}", e))
+            })
+        }),
+    }
+}
+
+fn cmd_agent_check() -> Command {
+    Command {
+        id: "check",
+        summary: "Check availability of AI agent CLIs (claude, codex, gemini, opencode)",
+        syntax: Some("agent check"),
+        category: Some("agents"),
+        spec: Some(Arc::new(CommandSpec {
+            summary: "Check availability of AI agent CLIs",
+            args: vec![],
+            ..CommandSpec::default()
+        })),
+        validator: None,
+        expose_mcp: false,
+        execute: Arc::new(|_ctx, _args| {
+            Box::pin(async move {
+                check::execute_agent_check(check::AgentCheckArgs {})
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            })
+        }),
+    }
+}
+
+fn cmd_run_deprecated() -> Command {
+    let mut cmd = cmd_run();
+    cmd.id = "run";
+    cmd.summary = "(deprecated) Run a coding agent — use `aikit agent run` instead";
+    let inner_execute = cmd.execute.clone();
+    cmd.execute = Arc::new(move |ctx, args| {
+        let inner = inner_execute.clone();
+        Box::pin(async move {
+            eprintln!(
+                "warning: `aikit run` is deprecated; use `aikit agent run` instead. \
+                 This alias will be removed in the next major release."
+            );
+            (inner)(ctx, args).await
+        })
+    });
+    cmd
+}
+
+fn cmd_agents_deprecated() -> Command {
+    let mut cmd = cmd_agents();
+    cmd.summary = "(deprecated) List agent definitions — use `aikit agent list` instead";
+    let inner_execute = cmd.execute.clone();
+    cmd.execute = Arc::new(move |ctx, args| {
+        let inner = inner_execute.clone();
+        Box::pin(async move {
+            eprintln!(
+                "warning: `aikit agents` is deprecated; use `aikit agent list` instead. \
+                 This alias will be removed in the next major release."
+            );
+            (inner)(ctx, args).await
+        })
+    });
+    cmd
+}
+
+fn cmd_mcp_list_deprecated() -> Command {
+    let mut cmd = cmd_mcp_list();
+    cmd.summary = "(deprecated) List MCP agents — use `aikit agent mcp list` instead";
+    let inner_execute = cmd.execute.clone();
+    cmd.execute = Arc::new(move |ctx, args| {
+        let inner = inner_execute.clone();
+        Box::pin(async move {
+            eprintln!(
+                "warning: `aikit mcp list` is deprecated; use `aikit agent mcp list` instead. \
+                 This alias will be removed in the next major release."
+            );
+            (inner)(ctx, args).await
+        })
+    });
+    cmd
+}
+
+fn cmd_mcp_add_deprecated() -> Command {
+    let mut cmd = cmd_mcp_add();
+    cmd.summary = "(deprecated) Add MCP server — use `aikit agent mcp add` instead";
+    let inner_execute = cmd.execute.clone();
+    cmd.execute = Arc::new(move |ctx, args| {
+        let inner = inner_execute.clone();
+        Box::pin(async move {
+            eprintln!(
+                "warning: `aikit mcp add` is deprecated; use `aikit agent mcp add` instead. \
+                 This alias will be removed in the next major release."
+            );
+            (inner)(ctx, args).await
+        })
+    });
+    cmd
 }
 
 fn cmd_mcp_list() -> Command {

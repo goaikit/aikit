@@ -286,6 +286,7 @@ impl PyRunOptions {
 }
 
 #[pyfunction]
+#[pyo3(signature = (agent_key, prompt, model=None, yolo=false, stream=false, session_id=None))]
 fn run_agent(
     py: Python<'_>,
     agent_key: &str,
@@ -293,9 +294,13 @@ fn run_agent(
     model: Option<String>,
     yolo: bool,
     stream: bool,
+    session_id: Option<String>,
 ) -> PyResult<Py<PyDict>> {
     let mut options = RunOptions::new().with_yolo(yolo).with_stream(stream);
     options.model = model;
+    if let Some(sid) = session_id {
+        options = options.with_session_id(sid);
+    }
 
     let result = run_agent_impl(agent_key, prompt, options)
         .map_err(|e| PyException::new_err(format!("{}", e)))?;
@@ -308,7 +313,8 @@ fn run_agent(
 }
 
 #[pyfunction]
-#[pyo3(signature = (agent_key, prompt, on_event, model=None, yolo=false, stream=false))]
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (agent_key, prompt, on_event, model=None, yolo=false, stream=false, session_id=None))]
 fn run_agent_events_py(
     py: Python<'_>,
     agent_key: &str,
@@ -317,9 +323,13 @@ fn run_agent_events_py(
     model: Option<String>,
     yolo: bool,
     stream: bool,
+    session_id: Option<String>,
 ) -> PyResult<Py<PyDict>> {
     let mut options = RunOptions::new().with_yolo(yolo).with_stream(stream);
     options.model = model;
+    if let Some(sid) = session_id {
+        options = options.with_session_id(sid);
+    }
     let callback_error: Arc<Mutex<Option<PyErr>>> = Arc::new(Mutex::new(None));
     let callback_error_ref = callback_error.clone();
 
