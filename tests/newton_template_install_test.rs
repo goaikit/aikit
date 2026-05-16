@@ -16,7 +16,12 @@ mod tests {
     #[test]
     fn test_install_newton_template() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let work = temp.path();
+        // Canonicalize: on Windows tempdir() may hand back a short-form / non-canonical
+        // path, while the spawned `aikit` process resolves its cwd via std::env::current_dir()
+        // to the canonical long form. Without canonicalizing here, the path the CLI uses to
+        // create `.newton/` diverges from `temp.path()` and assertions miss the directory.
+        let work_buf = temp.path().canonicalize()?;
+        let work = work_buf.as_path();
 
         // Get the path to the Newton template fixture
         let fixture_path = format!(
@@ -83,7 +88,8 @@ mod tests {
     #[test]
     fn test_install_newton_template_readme_content() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let work = temp.path();
+        let work_buf = temp.path().canonicalize()?;
+        let work = work_buf.as_path();
 
         let fixture_path = format!(
             "{}/tests/fixtures/newton-template",
@@ -111,7 +117,8 @@ mod tests {
     #[test]
     fn test_install_newton_template_scripts_content() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let work = temp.path();
+        let work_buf = temp.path().canonicalize()?;
+        let work = work_buf.as_path();
 
         let fixture_path = format!(
             "{}/tests/fixtures/newton-template",
@@ -153,7 +160,8 @@ mod tests {
     #[test]
     fn test_install_newton_template_force() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let work = temp.path();
+        let work_buf = temp.path().canonicalize()?;
+        let work = work_buf.as_path();
 
         let fixture_path = format!(
             "{}/tests/fixtures/newton-template",
