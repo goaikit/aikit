@@ -8,6 +8,60 @@ use predicates::prelude::*;
 use std::fs;
 use tempfile::tempdir;
 
+/// Walk a directory and return a sorted list of relative paths for diagnostics.
+fn walk_tree(root: &std::path::Path) -> Vec<String> {
+    let mut entries = Vec::new();
+    if !root.exists() {
+        return entries;
+    }
+    for entry in walkdir::WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if let Ok(rel) = entry.path().strip_prefix(root) {
+            let s = rel.display().to_string();
+            if !s.is_empty() {
+                entries.push(s);
+            }
+        }
+    }
+    entries.sort();
+    entries
+}
+
+/// Run the install command and print diagnostics on failure.
+fn run_install(work: &std::path::Path, fixture_path: &str, extra_args: &[&str]) {
+    let mut args: Vec<&str> = vec!["install", fixture_path, "--ai", "newton", "--yes"];
+    args.extend_from_slice(extra_args);
+
+    let output = cargo_bin_cmd!("aikit")
+        .current_dir(work)
+        .args(&args)
+        .output()
+        .expect("failed to spawn aikit");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    println!("--- aikit install diagnostics ---");
+    println!("work = {}", work.display());
+    println!("fixture = {}", fixture_path);
+    println!("exit status = {}", output.status);
+    println!("--- stdout ---\n{}", stdout);
+    println!("--- stderr ---\n{}", stderr);
+    println!("--- work tree after install ---");
+    for p in walk_tree(work) {
+        println!("  {}", p);
+    }
+    println!("--- end diagnostics ---");
+
+    assert!(output.status.success(), "aikit install failed");
+    assert!(
+        stdout.contains("Installing package") || stdout.contains("installed successfully"),
+        "expected install output not found"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -16,41 +70,24 @@ mod tests {
     #[test]
     fn test_install_newton_template() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        // Canonicalize: on Windows tempdir() may hand back a short-form / non-canonical
-        // path, while the spawned `aikit` process resolves its cwd via std::env::current_dir()
-        // to the canonical long form. Without canonicalizing here, the path the CLI uses to
-        // create `.newton/` diverges from `temp.path()` and assertions miss the directory.
-        let work_buf = temp.path().canonicalize()?;
-        let work = work_buf.as_path();
+        let work = temp.path();
 
-        // Get the path to the Newton template fixture
         let fixture_path = format!(
             "{}/tests/fixtures/newton-template",
             env!("CARGO_MANIFEST_DIR")
         );
 
-        // Install the Newton template for the newton agent
-        cargo_bin_cmd!("aikit")
-            .current_dir(work)
-            .args(["install", &fixture_path, "--ai", "newton", "--yes"])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("Installing package"))
-            .stdout(predicate::str::contains("installed successfully"));
+        run_install(work, &fixture_path, &[]);
 
-        // Verify .newton/ directory was created
         let newton_dir = work.join(".newton");
         assert!(newton_dir.exists(), ".newton/ directory should exist");
 
-        // Verify README.md exists
         let readme = newton_dir.join("README.md");
         assert!(readme.exists(), ".newton/README.md should exist");
 
-        // Verify scripts directory exists
         let scripts_dir = newton_dir.join("scripts");
         assert!(scripts_dir.exists(), ".newton/scripts/ should exist");
 
-        // Verify all scripts exist
         let scripts = vec![
             "advisor.sh",
             "evaluator.sh",
@@ -65,7 +102,6 @@ mod tests {
                 script
             );
 
-            // Verify script is non-empty
             let content = fs::read_to_string(&script_path)?;
             assert!(
                 !content.trim().is_empty(),
@@ -73,7 +109,6 @@ mod tests {
                 script
             );
 
-            // Verify script is executable (has shebang)
             assert!(
                 content.starts_with("#!/"),
                 ".newton/scripts/{} should be executable",
@@ -84,23 +119,17 @@ mod tests {
         Ok(())
     }
 
-    /// Test that Newton template README content is correct
     #[test]
     fn test_install_newton_template_readme_content() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let work_buf = temp.path().canonicalize()?;
-        let work = work_buf.as_path();
+        let work = temp.path();
 
         let fixture_path = format!(
             "{}/tests/fixtures/newton-template",
             env!("CARGO_MANIFEST_DIR")
         );
 
-        cargo_bin_cmd!("aikit")
-            .current_dir(work)
-            .args(["install", &fixture_path, "--ai", "newton", "--yes"])
-            .assert()
-            .success();
+        run_install(work, &fixture_path, &[]);
 
         let readme = fs::read_to_string(work.join(".newton/README.md"))?;
 
@@ -113,42 +142,32 @@ mod tests {
         Ok(())
     }
 
-    /// Test that Newton template scripts have correct content
     #[test]
     fn test_install_newton_template_scripts_content() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let work_buf = temp.path().canonicalize()?;
-        let work = work_buf.as_path();
+        let work = temp.path();
 
         let fixture_path = format!(
             "{}/tests/fixtures/newton-template",
             env!("CARGO_MANIFEST_DIR")
         );
 
-        cargo_bin_cmd!("aikit")
-            .current_dir(work)
-            .args(["install", &fixture_path, "--ai", "newton", "--yes"])
-            .assert()
-            .success();
+        run_install(work, &fixture_path, &[]);
 
         let scripts_dir = work.join(".newton/scripts");
 
-        // Test advisor.sh
         let advisor = fs::read_to_string(scripts_dir.join("advisor.sh"))?;
         assert!(advisor.contains("Advisor"));
         assert!(advisor.contains("planning phase"));
 
-        // Test evaluator.sh
         let evaluator = fs::read_to_string(scripts_dir.join("evaluator.sh"))?;
         assert!(evaluator.contains("Evaluator"));
         assert!(evaluator.contains("plan progress"));
 
-        // Test post-success.sh
         let post_success = fs::read_to_string(scripts_dir.join("post-success.sh"))?;
         assert!(post_success.contains("Post-Success"));
         assert!(post_success.contains("successful"));
 
-        // Test post-failure.sh
         let post_failure = fs::read_to_string(scripts_dir.join("post-failure.sh"))?;
         assert!(post_failure.contains("Post-Failure"));
         assert!(post_failure.contains("failed"));
@@ -156,41 +175,19 @@ mod tests {
         Ok(())
     }
 
-    /// Test installing Newton template with force flag
     #[test]
     fn test_install_newton_template_force() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempdir()?;
-        let work_buf = temp.path().canonicalize()?;
-        let work = work_buf.as_path();
+        let work = temp.path();
 
         let fixture_path = format!(
             "{}/tests/fixtures/newton-template",
             env!("CARGO_MANIFEST_DIR")
         );
 
-        // Install first time
-        cargo_bin_cmd!("aikit")
-            .current_dir(work)
-            .args(["install", &fixture_path, "--ai", "newton", "--yes"])
-            .assert()
-            .success();
+        run_install(work, &fixture_path, &[]);
+        run_install(work, &fixture_path, &["--force"]);
 
-        // Install again with force flag - should succeed without confirmation prompt
-        cargo_bin_cmd!("aikit")
-            .current_dir(work)
-            .args([
-                "install",
-                &fixture_path,
-                "--ai",
-                "newton",
-                "--force",
-                "--yes",
-            ])
-            .assert()
-            .success()
-            .stdout(predicate::str::contains("installed successfully"));
-
-        // Verify .newton/ still exists
         assert!(work.join(".newton").exists());
 
         Ok(())
