@@ -32,18 +32,24 @@ fn chat_completion_json(content: &str) -> String {
     .to_string()
 }
 
-/// Parse NDJSON output and strip the `seq` field from every object so that
-/// event sequences from two independent runs can be compared for equality.
+/// Parse NDJSON output, strip the `seq` field, and drop events whose payload
+/// is `session_started` (the session_id is a fresh UUID per run and would
+/// otherwise make two independent runs always differ).
 fn parse_ndjson_no_seq(output: &str) -> Vec<Value> {
     output
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|line| {
-            let mut v: Value = serde_json::from_str(line).unwrap_or(Value::Null);
+        .filter_map(|line| {
+            let mut v: Value = serde_json::from_str(line).ok()?;
             if let Value::Object(ref mut map) = v {
                 map.remove("seq");
+                if let Some(Value::Object(payload)) = map.get("payload") {
+                    if payload.contains_key("session_started") {
+                        return None;
+                    }
+                }
             }
-            v
+            Some(v)
         })
         .collect()
 }

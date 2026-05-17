@@ -1,9 +1,19 @@
 //! `aikit serve` — HTTP server for multi-turn agent sessions with SSE streaming.
+//!
+//! Session model:
+//! - Sessions are created **implicitly** on the first `POST /v1/messages` call
+//!   that omits `session_id`.
+//! - The first SSE frame of a brand-new session is `event: session` carrying
+//!   the freshly-assigned `session_id`. Subsequent calls quote that id in the
+//!   request body to resume.
+//! - For the `aikit` backend the id is assigned by the SDK (and persisted to
+//!   `~/.aikit/sessions/...`). For other backends the id is treated as an
+//!   opaque token forwarded to the underlying CLI's `--resume` flag; if the
+//!   client doesn't supply one for a new run, no `session` frame is emitted.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,11 +29,13 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-use aikit_sdk::{AgentEventPayload, MessageKind, MessagePhase, MessageRole, RunError, RunOptions};
-
-use crate::core::agent_definition::{
-    load_persisted_registry, DefinitionRecord, DelegationAllowlist,
+use aikit_sdk::session_store::{SessionStore, SessionStoreError};
+use aikit_sdk::{
+    get_agent_status, AgentEventPayload, MessageKind, MessagePhase, MessageRole, RunError,
+    RunOptions,
 };
+
+use crate::core::agent::get_agent_configs;
 
 // ── public args ───────────────────────────────────────────────────────────────
 
@@ -47,48 +59,52 @@ struct ServeConfig {
     api_key: Option<String>,
 }
 
-// ── session types ─────────────────────────────────────────────────────────────
+// ── run record (in-memory) ────────────────────────────────────────────────────
 
 #[derive(Clone, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum SessionStatus {
-    Idle,
+enum RunStatus {
     Running,
+    Idle,
     Closed,
 }
 
-#[derive(Clone, Serialize)]
-struct SessionMessage {
-    role: String,
-    content: String,
-    timestamp: DateTime<Utc>,
-}
-
 #[derive(Clone)]
-struct Session {
-    session_id: String,
+struct RunRecord {
+    /// SDK-assigned session_id (None until the run reports it or completes
+    /// without one).
+    session_id: Option<String>,
+    /// Client-supplied or server-resolved agent key.
     agent: String,
-    model: Option<String>,
-    yolo: bool,
-    status: SessionStatus,
-    created_at: DateTime<Utc>,
+    status: RunStatus,
+    started_at: DateTime<Utc>,
     last_active_at: DateTime<Utc>,
-    messages: Vec<SessionMessage>,
     abort_handle: Option<tokio::task::AbortHandle>,
 }
 
 // ── run function type (injectable for tests) ──────────────────────────────────
 
+pub struct RunFnOutcome {
+    pub exit_code: i32,
+    /// Session id assigned by the SDK. `None` when the backend doesn't expose
+    /// one (e.g. non-aikit agents on a fresh run).
+    pub session_id: Option<String>,
+}
+
 /// Type alias for the agent-run function injected into AppState.
-/// In production: wraps `aikit_sdk::run_agent_events`.
-/// In tests: wraps a stub that emits fixed events without LLM credentials.
-type RunFn = Arc<
+///
+/// Contract:
+/// - Stream SSE events to the provided sender. The first frame for a fresh
+///   session should be `event: session` with `{"session_id": "..."}` so the
+///   client learns the id without waiting for `done`.
+/// - Return the final exit code and (when known) the session_id.
+pub type RunFn = Arc<
     dyn Fn(
             String,
             String,
             RunOptions,
             tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
-        ) -> Result<i32, RunError>
+        ) -> Result<RunFnOutcome, RunError>
         + Send
         + Sync,
 >;
@@ -97,8 +113,9 @@ type RunFn = Arc<
 
 #[derive(Clone)]
 struct AppState {
-    sessions: Arc<Mutex<HashMap<String, Session>>>,
-    workdir: PathBuf,
+    /// Active and recently-completed runs, keyed by an internal request id.
+    /// Cleared when a run is deleted or when the server shuts down.
+    runs: Arc<Mutex<HashMap<String, RunRecord>>>,
     config: ServeConfig,
     run_fn: RunFn,
 }
@@ -106,68 +123,63 @@ struct AppState {
 // ── HTTP body types ───────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
-struct CreateSessionRequest {
+struct SendMessageRequest {
     agent: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    content: String,
+    #[serde(default)]
     model: Option<String>,
     #[serde(default)]
     yolo: bool,
 }
 
 #[derive(Serialize)]
-struct CreateSessionResponse {
-    session_id: String,
-    agent: String,
-    model: Option<String>,
-    status: SessionStatus,
-    created_at: DateTime<Utc>,
+struct AgentInfo {
+    key: String,
+    name: String,
+    available: bool,
 }
 
 #[derive(Serialize)]
-struct ListSessionsResponse {
-    sessions: Vec<SessionSummary>,
+struct ListAgentsResponse {
+    agents: Vec<AgentInfo>,
 }
 
 #[derive(Serialize)]
-struct SessionSummary {
-    session_id: String,
+struct RunSummary {
+    session_id: Option<String>,
     agent: String,
-    status: SessionStatus,
-    created_at: DateTime<Utc>,
+    status: RunStatus,
+    started_at: DateTime<Utc>,
     last_active_at: DateTime<Utc>,
-    turn_count: usize,
 }
 
 #[derive(Serialize)]
-struct GetSessionResponse {
-    session_id: String,
-    agent: String,
-    status: SessionStatus,
-    created_at: DateTime<Utc>,
-    turn_count: usize,
-    messages: Vec<SessionMessage>,
+struct ListRunsResponse {
+    sessions: Vec<RunSummary>,
 }
 
 #[derive(Serialize)]
 struct DeleteSessionResponse {
     session_id: String,
-    status: SessionStatus,
-}
-
-#[derive(Deserialize)]
-struct SendMessageRequest {
-    content: String,
+    status: RunStatus,
 }
 
 #[derive(Serialize)]
 struct SseDonePayload {
     exit_code: i32,
-    turn: usize,
 }
 
 #[derive(Serialize)]
 struct SseErrorPayload {
     code: String,
     message: String,
+}
+
+#[derive(Serialize)]
+struct SseSessionPayload {
+    session_id: String,
 }
 
 #[derive(Serialize)]
@@ -201,32 +213,6 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
 
 // ── agents handler ────────────────────────────────────────────────────────────
 
-fn delegation_to_json(d: &Option<DelegationAllowlist>) -> serde_json::Value {
-    match d {
-        None => serde_json::Value::Null,
-        Some(DelegationAllowlist::All) => serde_json::Value::String("*".to_string()),
-        Some(DelegationAllowlist::None) => serde_json::Value::Array(vec![]),
-        Some(DelegationAllowlist::Names(v)) => {
-            serde_json::Value::Array(v.iter().map(|s| serde_json::json!(s)).collect())
-        }
-    }
-}
-
-fn record_to_json(record: &DefinitionRecord) -> serde_json::Value {
-    serde_json::json!({
-        "name": record.definition.name,
-        "description": record.definition.description,
-        "source": record.source.to_string(),
-        "model": record.definition.model,
-        "tools": record.definition.tools,
-        "disallowedTools": record.definition.disallowed_tools,
-        "agents": delegation_to_json(&record.definition.delegation),
-        "path": record.path.as_ref().map(|p| p.display().to_string()),
-    })
-}
-
-// ── handlers ──────────────────────────────────────────────────────────────────
-
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     let _ = state;
     let version = env!("CARGO_PKG_VERSION");
@@ -237,106 +223,67 @@ async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
-async fn agents_handler(State(state): State<AppState>) -> impl IntoResponse {
-    match load_persisted_registry(&state.workdir) {
-        Ok(registry) => {
-            let records = registry.all_sorted();
-            let agents: Vec<serde_json::Value> =
-                records.iter().map(|r| record_to_json(r)).collect();
-            let body = serde_json::json!({ "agents": agents });
-            (
-                StatusCode::OK,
-                [(axum::http::header::CONTENT_TYPE, "application/json")],
-                serde_json::to_string(&body).unwrap_or_else(|_| r#"{"agents":[]}"#.to_string()),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            tracing::error!("agents_handler: load_persisted_registry failed: {}", e);
-            error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal_error",
-                "Failed to load agent registry",
-            )
-        }
-    }
+/// Build the list of runnable agents (those `aikit run` would accept).
+///
+/// Sources truth from the same SDK calls as `aikit check`: `get_agent_status`
+/// for availability and `get_agent_configs` for display names. Filters to
+/// only available agents — dev tools (git, vscode) and non-runnable entries
+/// never appear.
+fn build_runnable_agents() -> Vec<AgentInfo> {
+    let status_map = get_agent_status();
+    let configs = get_agent_configs();
+
+    let mut agents: Vec<AgentInfo> = status_map
+        .into_iter()
+        .filter(|(_, status)| status.available)
+        .map(|(key, _)| {
+            let name = configs
+                .iter()
+                .find(|c| c.key == key)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| key.clone());
+            AgentInfo {
+                key,
+                name,
+                available: true,
+            }
+        })
+        .collect();
+
+    // get_agent_status returns BTreeMap so it's already sorted by key; but be
+    // explicit so future changes don't surprise callers.
+    agents.sort_by(|a, b| a.key.cmp(&b.key));
+    agents
 }
 
-async fn create_session_handler(
-    State(state): State<AppState>,
-    Json(body): Json<CreateSessionRequest>,
-) -> impl IntoResponse {
-    if body.agent.is_empty() {
-        return error_response(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "invalid_request",
-            "agent field is required",
-        );
-    }
-
-    let mut sessions = state.sessions.lock().unwrap();
-    let active_count = sessions
-        .values()
-        .filter(|s| s.status != SessionStatus::Closed)
-        .count();
-    if active_count >= state.config.max_sessions {
-        return error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "session_limit_reached",
-            &format!(
-                "Maximum of {} concurrent sessions reached",
-                state.config.max_sessions
-            ),
-        );
-    }
-
-    let session_id = Uuid::new_v4().to_string();
-    let now = Utc::now();
-    let session = Session {
-        session_id: session_id.clone(),
-        agent: body.agent.clone(),
-        model: body.model.clone(),
-        yolo: body.yolo,
-        status: SessionStatus::Idle,
-        created_at: now,
-        last_active_at: now,
-        messages: vec![],
-        abort_handle: None,
-    };
-    sessions.insert(session_id.clone(), session);
-
-    let resp = CreateSessionResponse {
-        session_id,
-        agent: body.agent,
-        model: body.model,
-        status: SessionStatus::Idle,
-        created_at: now,
-    };
+async fn agents_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let _ = state;
+    let agents = build_runnable_agents();
+    let resp = ListAgentsResponse { agents };
     (
-        StatusCode::CREATED,
+        StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/json")],
-        serde_json::to_string(&resp).unwrap_or_default(),
+        serde_json::to_string(&resp).unwrap_or_else(|_| r#"{"agents":[]}"#.to_string()),
     )
         .into_response()
 }
 
-async fn list_sessions_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let sessions = state.sessions.lock().unwrap();
-    let summaries: Vec<SessionSummary> = sessions
+// ── session list/get/delete ───────────────────────────────────────────────────
+
+async fn list_runs_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let runs = state.runs.lock().unwrap();
+    let sessions: Vec<RunSummary> = runs
         .values()
-        .filter(|s| s.status != SessionStatus::Closed)
-        .map(|s| SessionSummary {
-            session_id: s.session_id.clone(),
-            agent: s.agent.clone(),
-            status: s.status.clone(),
-            created_at: s.created_at,
-            last_active_at: s.last_active_at,
-            turn_count: s.messages.len() / 2,
+        .filter(|r| r.status != RunStatus::Closed)
+        .map(|r| RunSummary {
+            session_id: r.session_id.clone(),
+            agent: r.agent.clone(),
+            status: r.status.clone(),
+            started_at: r.started_at,
+            last_active_at: r.last_active_at,
         })
         .collect();
-    let resp = ListSessionsResponse {
-        sessions: summaries,
-    };
+    let resp = ListRunsResponse { sessions };
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -344,20 +291,22 @@ async fn list_sessions_handler(State(state): State<AppState>) -> impl IntoRespon
     )
 }
 
-async fn get_session_handler(
+async fn get_run_handler(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    let sessions = state.sessions.lock().unwrap();
-    match sessions.get(&session_id) {
-        Some(s) if s.status != SessionStatus::Closed => {
-            let resp = GetSessionResponse {
-                session_id: s.session_id.clone(),
-                agent: s.agent.clone(),
-                status: s.status.clone(),
-                created_at: s.created_at,
-                turn_count: s.messages.len() / 2,
-                messages: s.messages.clone(),
+    let runs = state.runs.lock().unwrap();
+    let found = runs
+        .values()
+        .find(|r| r.session_id.as_deref() == Some(&session_id) && r.status != RunStatus::Closed);
+    match found {
+        Some(r) => {
+            let resp = RunSummary {
+                session_id: r.session_id.clone(),
+                agent: r.agent.clone(),
+                status: r.status.clone(),
+                started_at: r.started_at,
+                last_active_at: r.last_active_at,
             };
             (
                 StatusCode::OK,
@@ -366,7 +315,7 @@ async fn get_session_handler(
             )
                 .into_response()
         }
-        _ => error_response(
+        None => error_response(
             StatusCode::NOT_FOUND,
             "session_not_found",
             "Session not found",
@@ -374,19 +323,26 @@ async fn get_session_handler(
     }
 }
 
-async fn delete_session_handler(
+async fn delete_run_handler(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
     let abort_handle = {
-        let mut sessions = state.sessions.lock().unwrap();
-        match sessions.get_mut(&session_id) {
-            Some(s) if s.status != SessionStatus::Closed => {
-                let handle = s.abort_handle.take();
-                s.status = SessionStatus::Closed;
-                handle
+        let mut runs = state.runs.lock().unwrap();
+        let key = runs.iter().find_map(|(k, r)| {
+            if r.session_id.as_deref() == Some(&session_id) && r.status != RunStatus::Closed {
+                Some(k.clone())
+            } else {
+                None
             }
-            _ => {
+        });
+        match key {
+            Some(k) => {
+                let r = runs.get_mut(&k).unwrap();
+                r.status = RunStatus::Closed;
+                r.abort_handle.take()
+            }
+            None => {
                 return error_response(
                     StatusCode::NOT_FOUND,
                     "session_not_found",
@@ -402,7 +358,7 @@ async fn delete_session_handler(
 
     let resp = DeleteSessionResponse {
         session_id,
-        status: SessionStatus::Closed,
+        status: RunStatus::Closed,
     };
     (
         StatusCode::OK,
@@ -412,12 +368,20 @@ async fn delete_session_handler(
         .into_response()
 }
 
+// ── messages handler ─────────────────────────────────────────────────────────
+
 async fn messages_handler(
     State(state): State<AppState>,
-    Path(session_id): Path<String>,
     Json(body): Json<SendMessageRequest>,
 ) -> Response {
-    // Pre-flight validation
+    // 1. Body validation
+    if body.agent.trim().is_empty() {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "agent field is required",
+        );
+    }
     if body.content.is_empty() {
         return error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -426,109 +390,138 @@ async fn messages_handler(
         );
     }
 
-    // Validate and transition to Running
-    let session_info = {
-        let mut sessions = state.sessions.lock().unwrap();
-        match sessions.get_mut(&session_id) {
-            None
-            | Some(Session {
-                status: SessionStatus::Closed,
-                ..
-            }) => {
-                return error_response(
-                    StatusCode::NOT_FOUND,
-                    "session_not_found",
-                    "Session not found",
-                );
-            }
-            Some(s) if s.status == SessionStatus::Running => {
+    // 2. Agent must be in the runnable list (and currently available).
+    let agent = body.agent.clone();
+    let runnable = build_runnable_agents();
+    if !runnable.iter().any(|a| a.key == agent) {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "agent_not_found",
+            &format!(
+                "Agent '{}' is not available. Use GET /v1/agents to see available agents.",
+                agent
+            ),
+        );
+    }
+
+    // 3. Resume path: check that the session isn't already mid-run.
+    //    For aikit, attempt a pre-flight disk lookup so we can return 404
+    //    before opening the SSE stream when the id is bogus. If the session
+    //    is unknown to the on-disk store but is currently tracked in memory
+    //    (e.g. it was created earlier this process and the on-disk store is
+    //    elsewhere — common in tests), allow it through and let the SDK
+    //    decide. Other backends always go straight to the SDK; their
+    //    SessionNotFound error is surfaced via the SSE error frame.
+    if let Some(ref sid) = body.session_id {
+        let in_memory = {
+            let runs = state.runs.lock().unwrap();
+            let busy = runs
+                .values()
+                .any(|r| r.session_id.as_deref() == Some(sid) && r.status == RunStatus::Running);
+            if busy {
                 return error_response(
                     StatusCode::CONFLICT,
                     "session_busy",
                     "Session is currently processing a message",
                 );
             }
-            Some(s) => {
-                s.status = SessionStatus::Running;
-                s.last_active_at = Utc::now();
-                s.messages.push(SessionMessage {
-                    role: "user".to_string(),
-                    content: body.content.clone(),
-                    timestamp: Utc::now(),
-                });
-                (
-                    s.agent.clone(),
-                    s.model.clone(),
-                    s.yolo,
-                    s.session_id.clone(),
-                )
+            runs.values().any(|r| r.session_id.as_deref() == Some(sid))
+        };
+
+        if agent == "aikit" && !in_memory {
+            let store = SessionStore::open();
+            match store.load(sid) {
+                Ok(_) => {}
+                Err(SessionStoreError::NotFound(id)) => {
+                    return error_response(
+                        StatusCode::NOT_FOUND,
+                        "session_not_found",
+                        &format!("Session '{}' not found", id),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("session store error: {:?}", e);
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "internal_error",
+                        "Failed to load session",
+                    );
+                }
             }
         }
-    };
+    }
 
-    let (agent, model, yolo, sid) = session_info;
+    // 4. Capacity check: active runs must be < max_sessions.
+    {
+        let runs = state.runs.lock().unwrap();
+        let active = runs
+            .values()
+            .filter(|r| r.status == RunStatus::Running)
+            .count();
+        if active >= state.config.max_sessions {
+            return error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "session_limit_reached",
+                &format!(
+                    "Maximum of {} concurrent sessions reached",
+                    state.config.max_sessions
+                ),
+            );
+        }
+    }
+
+    // 5. Register run.
+    let request_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
+    {
+        let mut runs = state.runs.lock().unwrap();
+        runs.insert(
+            request_id.clone(),
+            RunRecord {
+                session_id: body.session_id.clone(),
+                agent: agent.clone(),
+                status: RunStatus::Running,
+                started_at: now,
+                last_active_at: now,
+                abort_handle: None,
+            },
+        );
+    }
+
+    // 6. Build options and spawn the run.
+    let session_id_in = body.session_id.clone();
     let content = body.content.clone();
+    let model = body.model.clone();
+    let yolo = body.yolo;
     let timeout = Duration::from_secs(state.config.run_timeout_secs);
     let run_fn = state.run_fn.clone();
-    let sessions_ref = Arc::clone(&state.sessions);
+    let runs_ref = Arc::clone(&state.runs);
+
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
     let tx_clone = tx.clone();
-    let session_id_clone = session_id.clone();
+    let request_id_clone = request_id.clone();
 
     let task = tokio::task::spawn(async move {
         let mut options = RunOptions::new()
             .with_yolo(yolo)
             .with_stream(true)
-            .with_timeout(timeout)
-            .with_session_id(&sid);
+            .with_timeout(timeout);
+        if let Some(ref sid) = session_id_in {
+            options = options.with_session_id(sid);
+        }
         if let Some(m) = model {
             options = options.with_model(m);
         }
 
         let tx_inner = tx_clone.clone();
+        let agent_for_run = agent.clone();
         let blocking_handle =
-            tokio::task::spawn_blocking(move || run_fn(agent, content, options, tx_inner));
+            tokio::task::spawn_blocking(move || run_fn(agent_for_run, content, options, tx_inner));
 
-        // Select between the blocking task completing and the client disconnecting.
-        // tx_clone.closed() resolves when the SSE Receiver is dropped (client disconnect).
-        let exit_code: i32 = tokio::select! {
+        let outcome: Result<RunFnOutcome, RunError> = tokio::select! {
             result = blocking_handle => {
                 match result {
-                    Ok(Ok(code)) => code,
-                    Ok(Err(RunError::TimedOut { .. })) => {
-                        let err_payload = serde_json::to_string(&SseErrorPayload {
-                            code: "run_timeout".to_string(),
-                            message: "Run exceeded timeout".to_string(),
-                        })
-                        .unwrap_or_default();
-                        let _ = tx_clone
-                            .send(Ok(Event::default().event("error").data(err_payload)))
-                            .await;
-                        1
-                    }
-                    Ok(Err(RunError::AgentNotRunnable(msg))) => {
-                        let err_payload = serde_json::to_string(&SseErrorPayload {
-                            code: "agent_not_runnable".to_string(),
-                            message: msg,
-                        })
-                        .unwrap_or_default();
-                        let _ = tx_clone
-                            .send(Ok(Event::default().event("error").data(err_payload)))
-                            .await;
-                        1
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!("messages_handler: run_agent_events error: {}", e);
-                        let err_payload = serde_json::to_string(&SseErrorPayload {
-                            code: "internal_error".to_string(),
-                            message: "Internal error".to_string(),
-                        })
-                        .unwrap_or_default();
-                        let _ = tx_clone
-                            .send(Ok(Event::default().event("error").data(err_payload)))
-                            .await;
-                        1
-                    }
+                    Ok(r) => r,
                     Err(join_err) => {
                         if !join_err.is_cancelled() {
                             tracing::error!(
@@ -536,57 +529,115 @@ async fn messages_handler(
                                 join_err
                             );
                         }
-                        -1
+                        // Treat task cancellation as silent close.
+                        let mut runs = runs_ref.lock().unwrap();
+                        if let Some(r) = runs.get_mut(&request_id_clone) {
+                            r.status = RunStatus::Idle;
+                            r.last_active_at = Utc::now();
+                            r.abort_handle = None;
+                        }
+                        return;
                     }
                 }
             }
             _ = tx_clone.closed() => {
-                // Client disconnected — session recovers to Idle immediately.
-                // The blocking thread may continue briefly but tx sends will silently fail.
-                let mut sessions = sessions_ref.lock().unwrap();
-                if let Some(s) = sessions.get_mut(&session_id_clone) {
-                    s.status = SessionStatus::Idle;
-                    s.last_active_at = Utc::now();
-                    s.abort_handle = None;
+                // Client disconnected. Mark idle; the blocking thread may
+                // continue briefly but its sends silently fail.
+                let mut runs = runs_ref.lock().unwrap();
+                if let Some(r) = runs.get_mut(&request_id_clone) {
+                    r.status = RunStatus::Idle;
+                    r.last_active_at = Utc::now();
+                    r.abort_handle = None;
                 }
                 return;
             }
         };
 
-        // Normal completion path: update session and send done frame
-        let turn_count = {
-            let mut sessions = sessions_ref.lock().unwrap();
-            if let Some(s) = sessions.get_mut(&session_id_clone) {
-                s.status = SessionStatus::Idle;
-                s.last_active_at = Utc::now();
-                s.abort_handle = None;
-                s.messages.len() / 2
-            } else {
-                0
+        // Normal completion: emit done (or error) frame, update record.
+        let exit_code = match outcome {
+            Ok(out) => {
+                // Backfill session_id if we learned it from the SDK.
+                if out.session_id.is_some() {
+                    let mut runs = runs_ref.lock().unwrap();
+                    if let Some(r) = runs.get_mut(&request_id_clone) {
+                        if r.session_id.is_none() {
+                            r.session_id = out.session_id.clone();
+                        }
+                    }
+                }
+                out.exit_code
+            }
+            Err(RunError::TimedOut { .. }) => {
+                let err = serde_json::to_string(&SseErrorPayload {
+                    code: "run_timeout".to_string(),
+                    message: "Run exceeded timeout".to_string(),
+                })
+                .unwrap_or_default();
+                let _ = tx_clone
+                    .send(Ok(Event::default().event("error").data(err)))
+                    .await;
+                1
+            }
+            Err(RunError::SessionNotFound(id)) => {
+                // Shouldn't happen — we pre-flight aikit sessions — but other
+                // backends can still bubble this up.
+                let err = serde_json::to_string(&SseErrorPayload {
+                    code: "session_not_found".to_string(),
+                    message: format!("Session '{}' not found", id),
+                })
+                .unwrap_or_default();
+                let _ = tx_clone
+                    .send(Ok(Event::default().event("error").data(err)))
+                    .await;
+                1
+            }
+            Err(RunError::AgentNotRunnable(msg)) => {
+                let err = serde_json::to_string(&SseErrorPayload {
+                    code: "agent_not_runnable".to_string(),
+                    message: msg,
+                })
+                .unwrap_or_default();
+                let _ = tx_clone
+                    .send(Ok(Event::default().event("error").data(err)))
+                    .await;
+                1
+            }
+            Err(e) => {
+                tracing::error!("messages_handler: run error: {}", e);
+                let err = serde_json::to_string(&SseErrorPayload {
+                    code: "internal_error".to_string(),
+                    message: "Internal error".to_string(),
+                })
+                .unwrap_or_default();
+                let _ = tx_clone
+                    .send(Ok(Event::default().event("error").data(err)))
+                    .await;
+                1
             }
         };
 
-        if exit_code >= 0 {
-            let done_payload = serde_json::to_string(&SseDonePayload {
-                exit_code,
-                turn: turn_count,
-            })
-            .unwrap_or_default();
-            let _ = tx_clone
-                .send(Ok(Event::default().event("done").data(done_payload)))
-                .await;
+        {
+            let mut runs = runs_ref.lock().unwrap();
+            if let Some(r) = runs.get_mut(&request_id_clone) {
+                r.status = RunStatus::Idle;
+                r.last_active_at = Utc::now();
+                r.abort_handle = None;
+            }
         }
+
+        let done = serde_json::to_string(&SseDonePayload { exit_code }).unwrap_or_default();
+        let _ = tx_clone
+            .send(Ok(Event::default().event("done").data(done)))
+            .await;
     });
 
-    // Store abort handle
     {
-        let mut sessions = state.sessions.lock().unwrap();
-        if let Some(s) = sessions.get_mut(&session_id) {
-            s.abort_handle = Some(task.abort_handle());
+        let mut runs = state.runs.lock().unwrap();
+        if let Some(r) = runs.get_mut(&request_id) {
+            r.abort_handle = Some(task.abort_handle());
         }
     }
 
-    // Drop the JoinHandle — task runs independently; abort_handle is stored in session
     drop(task);
 
     let stream = ReceiverStream::new(rx);
@@ -639,11 +690,10 @@ fn build_router(state: AppState) -> Router {
     let router = Router::new()
         .route("/health", get(health_handler))
         .route("/v1/agents", get(agents_handler))
-        .route("/v1/sessions", post(create_session_handler))
-        .route("/v1/sessions", get(list_sessions_handler))
-        .route("/v1/sessions/{session_id}", get(get_session_handler))
-        .route("/v1/sessions/{session_id}", delete(delete_session_handler))
-        .route("/v1/sessions/{session_id}/messages", post(messages_handler))
+        .route("/v1/messages", post(messages_handler))
+        .route("/v1/sessions", get(list_runs_handler))
+        .route("/v1/sessions/{session_id}", get(get_run_handler))
+        .route("/v1/sessions/{session_id}", delete(delete_run_handler))
         .fallback(not_found_handler)
         .with_state(state.clone());
 
@@ -656,7 +706,12 @@ fn build_router(state: AppState) -> Router {
 
 // ── production run_fn ─────────────────────────────────────────────────────────
 
-/// Build the production run_fn that calls run_agent_events and forwards events to the SSE channel.
+/// Build the production run_fn that calls run_agent_events and forwards events
+/// to the SSE channel. Captures the SDK-assigned session_id from
+/// `AgentEventPayload::SessionStarted` and:
+///   1. emits it as the first `event: session` SSE frame, and
+///   2. returns it via `RunFnOutcome.session_id` so the server can backfill
+///      its run record.
 pub fn make_production_run_fn() -> RunFn {
     Arc::new(
         move |agent: String,
@@ -665,15 +720,32 @@ pub fn make_production_run_fn() -> RunFn {
               tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>| {
             use aikit_sdk::run_agent_events;
 
-            let result = run_agent_events(&agent, &prompt, options, |event| {
-                let sse_event = agent_event_to_sse(&event);
-                if let Some(ev) = sse_event {
-                    // Best-effort send — if receiver is dropped, client disconnected
-                    let _ = tx.blocking_send(Ok(ev));
+            let captured_session_id = Arc::new(Mutex::new(None::<String>));
+            let captured_for_cb = Arc::clone(&captured_session_id);
+            let tx_cb = tx.clone();
+
+            let result = run_agent_events(&agent, &prompt, options, move |event| {
+                if let AgentEventPayload::SessionStarted { session_id } = &event.payload {
+                    *captured_for_cb.lock().unwrap() = Some(session_id.clone());
+                    let payload = serde_json::to_string(&SseSessionPayload {
+                        session_id: session_id.clone(),
+                    })
+                    .unwrap_or_default();
+                    let _ =
+                        tx_cb.blocking_send(Ok(Event::default().event("session").data(payload)));
+                    return;
+                }
+                if let Some(ev) = agent_event_to_sse(&event) {
+                    let _ = tx_cb.blocking_send(Ok(ev));
                 }
             });
 
-            result.map(|r| r.exit_code().unwrap_or(0))
+            let session_id = captured_session_id.lock().unwrap().clone();
+
+            result.map(|r| RunFnOutcome {
+                exit_code: r.exit_code().unwrap_or(0),
+                session_id,
+            })
         },
     )
 }
@@ -681,6 +753,7 @@ pub fn make_production_run_fn() -> RunFn {
 /// Map an AgentEvent to an SSE Event, returning None if the event should be suppressed.
 fn agent_event_to_sse(event: &aikit_sdk::AgentEvent) -> Option<Event> {
     match &event.payload {
+        AgentEventPayload::SessionStarted { .. } => None, // handled separately
         AgentEventPayload::StreamMessage(msg) => match (msg.role, msg.kind, msg.phase) {
             (MessageRole::Assistant, MessageKind::Message, MessagePhase::Delta)
             | (MessageRole::Assistant, MessageKind::Message, MessagePhase::Final) => {
@@ -725,7 +798,6 @@ fn agent_event_to_sse(event: &aikit_sdk::AgentEvent) -> Option<Event> {
             .to_string();
             Some(Event::default().event("tool_use").data(data))
         }
-        // Suppress token usage, raw transport, and other internal events
         _ => None,
     }
 }
@@ -747,11 +819,8 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
         api_key: args.api_key,
     };
 
-    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-
     let state = AppState {
-        sessions: Arc::new(Mutex::new(HashMap::new())),
-        workdir,
+        runs: Arc::new(Mutex::new(HashMap::new())),
         config: config.clone(),
         run_fn,
     };
@@ -805,17 +874,15 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
         .await
         .map_err(|e| anyhow::anyhow!("server error: {}", e))?;
 
-    // Abort any in-flight sessions
     {
-        let mut sessions = state.sessions.lock().unwrap();
-        for session in sessions.values_mut() {
-            if let Some(handle) = session.abort_handle.take() {
+        let mut runs = state.runs.lock().unwrap();
+        for r in runs.values_mut() {
+            if let Some(handle) = r.abort_handle.take() {
                 handle.abort();
             }
         }
     }
 
-    // Allow up to 5 seconds for tasks to wind down
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     Ok(())
@@ -823,32 +890,67 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
 
 // ── test stub helpers ─────────────────────────────────────────────────────────
 
-/// Build a stub run function that emits a fixed sequence of SSE events and exits with code 0.
-/// `events` is a list of `(event_name, data)` pairs.
-/// No LLM credentials are needed — safe for CI.
+/// Build a stub run_fn that emits the given SSE events and returns success.
+/// If `session_id_for_new` is `Some`, a `session` SSE frame is emitted first
+/// when the incoming RunOptions has no `session_id`, simulating SDK-assigned
+/// session creation.
 #[allow(dead_code)]
 pub fn make_stub_run_fn(events: Vec<(&'static str, &'static str)>) -> RunFn {
-    Arc::new(move |_agent, _prompt, _options, tx| {
+    make_stub_run_fn_with_session(events, None)
+}
+
+/// Stub variant that simulates a fresh-session run: when the incoming options
+/// have no `session_id`, the stub emits `event: session` with the supplied id
+/// and reports it back via `RunFnOutcome.session_id`. When the options DO
+/// carry an id (resume), the stub echoes it instead.
+#[allow(dead_code)]
+pub fn make_stub_run_fn_with_session(
+    events: Vec<(&'static str, &'static str)>,
+    session_id_for_new: Option<String>,
+) -> RunFn {
+    Arc::new(move |_agent, _prompt, options, tx| {
+        // Resolve the session id we will report.
+        let sid: Option<String> = options
+            .session_id
+            .clone()
+            .or_else(|| session_id_for_new.clone());
+
+        if let Some(ref id) = sid {
+            let payload = serde_json::json!({ "session_id": id }).to_string();
+            let _ = tx.blocking_send(Ok(Event::default().event("session").data(payload)));
+        }
+
         for (name, data) in &events {
             let ev = Event::default().event(*name).data(*data);
             let _ = tx.blocking_send(Ok(ev));
         }
-        Ok(0)
+
+        Ok(RunFnOutcome {
+            exit_code: 0,
+            session_id: sid,
+        })
     })
 }
 
-/// Build a stub run function that sleeps for `duration` before returning.
-/// Use this to test concurrent request rejection (409 session_busy).
+/// Build a stub run_fn that sleeps for `duration` before returning success.
+/// Use this to test concurrent-request rejection and disconnect cleanup.
 #[allow(dead_code)]
 pub fn make_blocking_stub_run_fn(duration: Duration) -> RunFn {
-    Arc::new(move |_agent, _prompt, _options, _tx| {
+    Arc::new(move |_agent, _prompt, options, tx| {
+        // Echo the session id if one was provided so resume tests can verify.
+        if let Some(ref id) = options.session_id {
+            let payload = serde_json::json!({ "session_id": id }).to_string();
+            let _ = tx.blocking_send(Ok(Event::default().event("session").data(payload)));
+        }
         std::thread::sleep(duration);
-        Ok(0)
+        Ok(RunFnOutcome {
+            exit_code: 0,
+            session_id: options.session_id.clone(),
+        })
     })
 }
 
-/// Build a stub run function that returns a `RunError::TimedOut` error.
-/// Use this to test the timeout SSE error path.
+/// Build a stub run_fn that returns a `RunError::TimedOut` error.
 #[allow(dead_code)]
 pub fn make_timeout_stub_run_fn() -> RunFn {
     Arc::new(|_agent, _prompt, _options, _tx| {

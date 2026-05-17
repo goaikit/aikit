@@ -1,4 +1,4 @@
-//! Tests client disconnect recovery: session returns to idle when client drops mid-stream.
+//! Tests client disconnect recovery: server cleans up when client drops mid-stream.
 
 use std::time::Duration;
 
@@ -16,7 +16,6 @@ async fn start_server() -> u16 {
         max_sessions: 10,
         api_key: None,
     };
-    // Blocking stub runs longer than the client timeout (200ms) to simulate a long-running agent
     let stub = make_blocking_stub_run_fn(Duration::from_secs(3));
 
     tokio::spawn(async move {
@@ -28,48 +27,43 @@ async fn start_server() -> u16 {
 }
 
 #[tokio::test]
-async fn test_disconnect_session_returns_idle() {
+async fn test_disconnect_frees_session_slot() {
     let port = start_server().await;
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}", port);
 
-    // Create a session
-    let resp = client
-        .post(format!("{}/v1/sessions", base))
-        .json(&serde_json::json!({"agent": "codex"}))
-        .send()
-        .await
-        .unwrap();
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let session_id = body["session_id"].as_str().unwrap().to_string();
-
-    // Start message request in background and immediately drop it (simulate disconnect)
+    // Fire a request with a tight client-side timeout so it drops mid-stream.
     let client2 = reqwest::Client::builder()
         .timeout(Duration::from_millis(200))
         .build()
         .unwrap();
 
     let _ = client2
-        .post(format!("{}/v1/sessions/{}/messages", base, session_id))
-        .json(&serde_json::json!({"content": "disconnect me"}))
+        .post(format!("{}/v1/messages", base))
+        .json(&serde_json::json!({"agent": "aikit", "content": "drop me"}))
         .send()
         .await;
-    // The request either times out or connects; either way the connection drops quickly
 
-    // Give the server time to notice the disconnect and clean up
+    // Give the server time to notice the disconnect and clean up.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Session should be idle (not running)
+    // The session listing should report no active runs.
     let resp = client
-        .get(format!("{}/v1/sessions/{}", base, session_id))
+        .get(format!("{}/v1/sessions", base))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
+    let active_running = body["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["status"] == "running")
+        .count();
     assert_eq!(
-        body["status"], "idle",
-        "session must return to idle after client disconnect; status: {}",
-        body["status"]
+        active_running, 0,
+        "all runs should be idle/closed after disconnect; got: {:?}",
+        body
     );
 }

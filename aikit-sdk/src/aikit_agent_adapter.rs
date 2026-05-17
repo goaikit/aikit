@@ -139,6 +139,8 @@ where
             },
         })?;
 
+        emit_session_started(on_event, &session.session_id);
+
         let prior_turns = session_turns_to_turns(&session.turns);
 
         match aikit_agent::run_with_context(config, prior_turns, prompt, gateway) {
@@ -169,6 +171,8 @@ where
         // New session: generate UUID, run, save.
         let session_id = uuid::Uuid::new_v4().to_string();
         let now = now_rfc3339();
+
+        emit_session_started(on_event, &session_id);
 
         match aikit_agent::run(config, prompt, gateway) {
             Ok(events) => {
@@ -334,6 +338,23 @@ fn session_turns_to_turns(session_turns: &[SessionTurn]) -> Vec<Turn> {
             _ => Turn::user(&st.content),
         })
         .collect()
+}
+
+fn emit_session_started<F>(on_event: &mut F, session_id: &str)
+where
+    F: FnMut(AgentEvent) + Send,
+{
+    let event = AgentEvent {
+        agent_key: "aikit".to_string(),
+        seq: 0,
+        stream: AgentEventStream::Stdout,
+        payload: AgentEventPayload::SessionStarted {
+            session_id: session_id.to_string(),
+        },
+    };
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        on_event(event);
+    }));
 }
 
 fn emit_error<F>(_prompt: &str, options: &RunOptions, on_event: &mut F, message: String) -> RunError

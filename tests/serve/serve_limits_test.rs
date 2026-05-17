@@ -1,12 +1,12 @@
-//! Tests for capacity and concurrency limits: 429, 409, 422.
+//! Tests for capacity and concurrency limits on the new POST /v1/messages flow.
 
 use std::time::Duration;
 
 use aikit::cli::serve::{
-    execute_with_run_fn, make_blocking_stub_run_fn, make_stub_run_fn, ServeArgs,
+    execute_with_run_fn, make_blocking_stub_run_fn, make_stub_run_fn_with_session, RunFn, ServeArgs,
 };
 
-async fn start_limited_server(max_sessions: usize) -> u16 {
+async fn start_server(run_fn: RunFn, max_sessions: usize) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     drop(listener);
@@ -18,33 +18,9 @@ async fn start_limited_server(max_sessions: usize) -> u16 {
         max_sessions,
         api_key: None,
     };
-    let stub = make_stub_run_fn(vec![]);
 
     tokio::spawn(async move {
-        execute_with_run_fn(args, stub).await.ok();
-    });
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    port
-}
-
-async fn start_blocking_server() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-
-    let args = ServeArgs {
-        host: "127.0.0.1".to_string(),
-        port,
-        run_timeout_secs: 30,
-        max_sessions: 10,
-        api_key: None,
-    };
-    // Blocking stub runs longer than the test to simulate a long-running agent
-    let stub = make_blocking_stub_run_fn(Duration::from_secs(5));
-
-    tokio::spawn(async move {
-        execute_with_run_fn(args, stub).await.ok();
+        execute_with_run_fn(args, run_fn).await.ok();
     });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -53,23 +29,28 @@ async fn start_blocking_server() -> u16 {
 
 #[tokio::test]
 async fn test_max_sessions_returns_429() {
-    let port = start_limited_server(1).await;
+    let port = start_server(make_blocking_stub_run_fn(Duration::from_secs(5)), 1).await;
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}", port);
 
-    // Create the one allowed session
-    let resp = client
-        .post(format!("{}/v1/sessions", base))
-        .json(&serde_json::json!({"agent": "codex"}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 201);
+    // Kick off a long-running request that occupies the one allowed slot.
+    let base_a = base.clone();
+    let client_a = client.clone();
+    let first = tokio::spawn(async move {
+        client_a
+            .post(format!("{}/v1/messages", base_a))
+            .json(&serde_json::json!({"agent": "aikit", "content": "blocker"}))
+            .send()
+            .await
+            .unwrap()
+    });
 
-    // Attempt to create another — should get 429
+    // Give the server a moment to register the run.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
     let resp = client
-        .post(format!("{}/v1/sessions", base))
-        .json(&serde_json::json!({"agent": "codex"}))
+        .post(format!("{}/v1/messages", base))
+        .json(&serde_json::json!({"agent": "aikit", "content": "second"}))
         .send()
         .await
         .unwrap();
@@ -81,72 +62,64 @@ async fn test_max_sessions_returns_429() {
             .as_str()
             .unwrap_or("")
             .contains('1'),
-        "error message must contain max_sessions count"
+        "error message must contain the max count"
     );
+
+    first.abort();
 }
 
 #[tokio::test]
-async fn test_empty_content_returns_422() {
-    let port = start_limited_server(10).await;
+async fn test_concurrent_resume_returns_409() {
+    let port = start_server(make_blocking_stub_run_fn(Duration::from_secs(5)), 10).await;
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}", port);
+    let session_id = "shared-session";
 
-    let resp = client
-        .post(format!("{}/v1/sessions", base))
-        .json(&serde_json::json!({"agent": "codex"}))
-        .send()
-        .await
-        .unwrap();
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let session_id = body["session_id"].as_str().unwrap().to_string();
+    // For aikit resume, we need the session to exist on disk. Point the
+    // SessionStore at a temp dir and seed one entry.
+    let tmp = tempfile::tempdir().unwrap();
+    std::env::set_var("AIKIT_SESSIONS_DIR", tmp.path());
+    let path = tmp.path().join(format!("{}.json", session_id));
+    std::fs::write(
+        &path,
+        serde_json::json!({
+            "session_id": session_id,
+            "agent": "aikit",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "cwd": "/tmp",
+            "turns": [],
+        })
+        .to_string(),
+    )
+    .unwrap();
 
-    let resp = client
-        .post(format!("{}/v1/sessions/{}/messages", base, session_id))
-        .json(&serde_json::json!({"content": ""}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 422);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "invalid_request");
-}
-
-#[tokio::test]
-async fn test_concurrent_message_returns_409() {
-    let port = start_blocking_server().await;
-    let client = reqwest::Client::new();
-    let base = format!("http://127.0.0.1:{}", port);
-
-    let resp = client
-        .post(format!("{}/v1/sessions", base))
-        .json(&serde_json::json!({"agent": "codex"}))
-        .send()
-        .await
-        .unwrap();
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let session_id = body["session_id"].as_str().unwrap().to_string();
-
-    let base2 = base.clone();
-    let sid2 = session_id.clone();
-    let client2 = client.clone();
-
-    // Start a long-running message request
-    let first_req = tokio::spawn(async move {
-        client
-            .post(format!("{}/v1/sessions/{}/messages", base, session_id))
-            .json(&serde_json::json!({"content": "hello"}))
+    // Start a long-running resume.
+    let base_a = base.clone();
+    let client_a = client.clone();
+    let first = tokio::spawn(async move {
+        client_a
+            .post(format!("{}/v1/messages", base_a))
+            .json(&serde_json::json!({
+                "agent": "aikit",
+                "session_id": session_id,
+                "content": "first",
+            }))
             .send()
             .await
             .unwrap()
     });
 
-    // Give it time to transition to Running
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Second message while first is running — expect 409
-    let resp = client2
-        .post(format!("{}/v1/sessions/{}/messages", base2, sid2))
-        .json(&serde_json::json!({"content": "concurrent"}))
+    // Second resume for the same session_id → 409.
+    let resp = client
+        .post(format!("{}/v1/messages", base))
+        .json(&serde_json::json!({
+            "agent": "aikit",
+            "session_id": session_id,
+            "content": "second",
+        }))
         .send()
         .await
         .unwrap();
@@ -154,18 +127,18 @@ async fn test_concurrent_message_returns_409() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["code"], "session_busy");
 
-    // Abort the first request to clean up
-    first_req.abort();
+    first.abort();
+    std::env::remove_var("AIKIT_SESSIONS_DIR");
 }
 
 #[tokio::test]
-async fn test_missing_agent_returns_422() {
-    let port = start_limited_server(10).await;
+async fn test_invalid_request_returns_422() {
+    let port = start_server(make_stub_run_fn_with_session(vec![], None), 10).await;
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/sessions", port))
-        .json(&serde_json::json!({"agent": ""}))
+        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .json(&serde_json::json!({"agent": "", "content": "x"}))
         .send()
         .await
         .unwrap();

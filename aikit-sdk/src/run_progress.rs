@@ -169,6 +169,7 @@ impl RunProgress {
                 self.add_row(format!("step> {} {}", iteration, finish_reason));
             }
             AgentEventPayload::RawTransportLine { .. } => {}
+            AgentEventPayload::SessionStarted { .. } => {}
         }
     }
 

@@ -521,6 +521,11 @@ pub enum AgentEventPayload {
         iteration: u32,
         finish_reason: String,
     },
+    /// Emitted once per run as the first event when the SDK has assigned (or
+    /// been given) a session_id. Useful for callers that mint a session
+    /// implicitly (no `session_id` in `RunOptions`) and need to learn the new
+    /// id without parsing stderr.
+    SessionStarted { session_id: String },
 }
 
 /// A single event emitted by a streaming agent run.
@@ -3343,6 +3348,7 @@ mod tests {
                 AgentEventPayload::AikitSubagentResult { .. } => "aikit_subagent_result",
                 AgentEventPayload::AikitContextCompressed { .. } => "aikit_context_compressed",
                 AgentEventPayload::AikitStepFinish { .. } => "aikit_step_finish",
+                AgentEventPayload::SessionStarted { .. } => "session_started",
             };
             payloads.push(kind.to_string());
         });

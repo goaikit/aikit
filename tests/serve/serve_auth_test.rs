@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use aikit::cli::serve::{execute_with_run_fn, make_stub_run_fn, ServeArgs};
+use aikit::cli::serve::{execute_with_run_fn, make_stub_run_fn_with_session, ServeArgs};
 
 async fn start_auth_server(api_key: &str) -> u16 {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -16,7 +16,7 @@ async fn start_auth_server(api_key: &str) -> u16 {
         max_sessions: 10,
         api_key: Some(api_key.to_string()),
     };
-    let stub = make_stub_run_fn(vec![]);
+    let stub = make_stub_run_fn_with_session(vec![], None);
 
     tokio::spawn(async move {
         execute_with_run_fn(args, stub).await.ok();

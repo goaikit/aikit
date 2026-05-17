@@ -1,4 +1,4 @@
-//! Tests timeout handling: run_timeout SSE error followed by done, session returns to idle.
+//! Tests timeout handling: run_timeout SSE error followed by done.
 
 use std::time::Duration;
 
@@ -16,7 +16,6 @@ async fn start_timeout_server(timeout_secs: u64) -> u16 {
         max_sessions: 10,
         api_key: None,
     };
-    // This stub sleeps longer than the configured timeout, causing a TimedOut error
     let stub = make_timeout_stub_run_fn();
 
     tokio::spawn(async move {
@@ -29,23 +28,13 @@ async fn start_timeout_server(timeout_secs: u64) -> u16 {
 
 #[tokio::test]
 async fn test_timeout_emits_sse_error_and_done() {
-    // Use a 1-second timeout; the stub will simulate TimedOut
     let port = start_timeout_server(1).await;
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}", port);
 
     let resp = client
-        .post(format!("{}/v1/sessions", base))
-        .json(&serde_json::json!({"agent": "codex"}))
-        .send()
-        .await
-        .unwrap();
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let session_id = body["session_id"].as_str().unwrap().to_string();
-
-    let resp = client
-        .post(format!("{}/v1/sessions/{}/messages", base, session_id))
-        .json(&serde_json::json!({"content": "trigger timeout"}))
+        .post(format!("{}/v1/messages", base))
+        .json(&serde_json::json!({"agent": "aikit", "content": "trigger timeout"}))
         .send()
         .await
         .unwrap();
@@ -60,7 +49,7 @@ async fn test_timeout_emits_sse_error_and_done() {
     );
     assert!(
         text.contains("run_timeout"),
-        "error event must contain run_timeout code; got:\n{}",
+        "error event must carry run_timeout code; got:\n{}",
         text
     );
     assert!(
@@ -72,19 +61,5 @@ async fn test_timeout_emits_sse_error_and_done() {
         text.contains("exit_code"),
         "done event must contain exit_code; got:\n{}",
         text
-    );
-
-    // Session should return to idle after timeout
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let resp = client
-        .get(format!("{}/v1/sessions/{}", base, session_id))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(
-        body["status"], "idle",
-        "session must return to idle after timeout"
     );
 }
