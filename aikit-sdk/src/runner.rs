@@ -778,6 +778,12 @@ fn build_claude_argv_events(
     argv.push(OsString::from("--output-format"));
     argv.push(OsString::from(if stream { "stream-json" } else { "json" }));
 
+    // claude rejects `--print --output-format=stream-json` without
+    // `--verbose`; it has no effect on the `json` output format.
+    if stream {
+        argv.push(OsString::from("--verbose"));
+    }
+
     if let Some(id) = session_id {
         argv.push(OsString::from("--resume"));
         argv.push(OsString::from(id));
@@ -3483,6 +3489,21 @@ mod tests {
     fn test_build_claude_argv_events_stream_json_format() {
         let argv = build_claude_argv_events("test", None, true, None);
         assert!(argv.contains(&OsString::from("stream-json")));
+        // claude rejects `--print --output-format=stream-json` without
+        // `--verbose`; the builder must add it.
+        assert!(
+            argv.contains(&OsString::from("--verbose")),
+            "stream-json must include --verbose; got argv: {:?}",
+            argv
+        );
+    }
+
+    #[test]
+    fn test_build_claude_argv_events_json_format_no_verbose() {
+        // --verbose is only required for stream-json; don't add noise to
+        // the plain json mode.
+        let argv = build_claude_argv_events("test", None, false, None);
+        assert!(!argv.contains(&OsString::from("--verbose")));
     }
 
     #[test]
