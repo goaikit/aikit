@@ -1,15 +1,22 @@
-//! `aikit serve` — HTTP server for multi-turn agent sessions with SSE streaming.
+//! `aikit serve` — HTTP server for multi-turn agent sessions.
+//!
+//! Two response shapes share one endpoint, `POST /v1/messages`:
+//! - `"stream": true` (default) → `text/event-stream` (SSE) with
+//!   `event: session`, `event: text`, `event: tool_use`, `event: tool_result`,
+//!   `event: error`, then `event: done`.
+//! - `"stream": false` → server runs to completion, accumulates text content,
+//!   and returns a single `application/json` body
+//!   `{session_id, content, exit_code, error?}`.
 //!
 //! Session model:
 //! - Sessions are created **implicitly** on the first `POST /v1/messages` call
 //!   that omits `session_id`.
-//! - The first SSE frame of a brand-new session is `event: session` carrying
-//!   the freshly-assigned `session_id`. Subsequent calls quote that id in the
-//!   request body to resume.
+//! - In SSE mode the first frame is `event: session` carrying the new id; in
+//!   sync mode the id appears in the response body. Subsequent calls quote
+//!   that id in the request body to resume.
 //! - For the `aikit` backend the id is assigned by the SDK (and persisted to
 //!   `~/.aikit/sessions/...`). For other backends the id is treated as an
-//!   opaque token forwarded to the underlying CLI's `--resume` flag; if the
-//!   client doesn't supply one for a new run, no `session` frame is emitted.
+//!   opaque token forwarded to the underlying CLI's `--resume` flag.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -71,15 +78,38 @@ enum RunStatus {
 
 #[derive(Clone)]
 struct RunRecord {
-    /// SDK-assigned session_id (None until the run reports it or completes
-    /// without one).
     session_id: Option<String>,
-    /// Client-supplied or server-resolved agent key.
     agent: String,
     status: RunStatus,
     started_at: DateTime<Utc>,
     last_active_at: DateTime<Utc>,
     abort_handle: Option<tokio::task::AbortHandle>,
+}
+
+// ── typed event channel ───────────────────────────────────────────────────────
+
+/// One structured event from the agent run. The handler converts these to SSE
+/// for stream mode and accumulates them into a single JSON body for sync mode.
+#[derive(Debug, Clone)]
+pub enum StreamFrame {
+    Session {
+        session_id: String,
+    },
+    Text {
+        content: String,
+    },
+    ToolUse {
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        name: String,
+        output: String,
+    },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 // ── run function type (injectable for tests) ──────────────────────────────────
@@ -94,16 +124,15 @@ pub struct RunFnOutcome {
 /// Type alias for the agent-run function injected into AppState.
 ///
 /// Contract:
-/// - Stream SSE events to the provided sender. The first frame for a fresh
-///   session should be `event: session` with `{"session_id": "..."}` so the
-///   client learns the id without waiting for `done`.
+/// - Emit `StreamFrame` values via `tx` as the run progresses. For a fresh
+///   session, the very first frame should be `StreamFrame::Session`.
 /// - Return the final exit code and (when known) the session_id.
 pub type RunFn = Arc<
     dyn Fn(
             String,
             String,
             RunOptions,
-            tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+            tokio::sync::mpsc::Sender<StreamFrame>,
         ) -> Result<RunFnOutcome, RunError>
         + Send
         + Sync,
@@ -113,14 +142,16 @@ pub type RunFn = Arc<
 
 #[derive(Clone)]
 struct AppState {
-    /// Active and recently-completed runs, keyed by an internal request id.
-    /// Cleared when a run is deleted or when the server shuts down.
     runs: Arc<Mutex<HashMap<String, RunRecord>>>,
     config: ServeConfig,
     run_fn: RunFn,
 }
 
 // ── HTTP body types ───────────────────────────────────────────────────────────
+
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Deserialize)]
 struct SendMessageRequest {
@@ -132,6 +163,10 @@ struct SendMessageRequest {
     model: Option<String>,
     #[serde(default)]
     yolo: bool,
+    /// Default `true`. When false, server returns a single JSON body once the
+    /// run completes instead of a `text/event-stream` body.
+    #[serde(default = "default_true")]
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -167,19 +202,12 @@ struct DeleteSessionResponse {
 }
 
 #[derive(Serialize)]
-struct SseDonePayload {
+struct SyncMessageResponse {
+    session_id: Option<String>,
+    content: String,
     exit_code: i32,
-}
-
-#[derive(Serialize)]
-struct SseErrorPayload {
-    code: String,
-    message: String,
-}
-
-#[derive(Serialize)]
-struct SseSessionPayload {
-    session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<ErrorDetail>,
 }
 
 #[derive(Serialize)]
@@ -211,7 +239,34 @@ fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
         .into_response()
 }
 
-// ── agents handler ────────────────────────────────────────────────────────────
+// ── frame → SSE ─────────────────────────────────────────────────────────────
+
+fn frame_to_sse(frame: &StreamFrame) -> Event {
+    match frame {
+        StreamFrame::Session { session_id } => {
+            let data = serde_json::json!({ "session_id": session_id }).to_string();
+            Event::default().event("session").data(data)
+        }
+        StreamFrame::Text { content } => {
+            let data = serde_json::json!({ "content": content }).to_string();
+            Event::default().event("text").data(data)
+        }
+        StreamFrame::ToolUse { name, input } => {
+            let data = serde_json::json!({ "name": name, "input": input }).to_string();
+            Event::default().event("tool_use").data(data)
+        }
+        StreamFrame::ToolResult { name, output } => {
+            let data = serde_json::json!({ "name": name, "output": output }).to_string();
+            Event::default().event("tool_result").data(data)
+        }
+        StreamFrame::Error { code, message } => {
+            let data = serde_json::json!({ "code": code, "message": message }).to_string();
+            Event::default().event("error").data(data)
+        }
+    }
+}
+
+// ── handlers ─────────────────────────────────────────────────────────────────
 
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     let _ = state;
@@ -224,11 +279,6 @@ async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// Build the list of runnable agents (those `aikit run` would accept).
-///
-/// Sources truth from the same SDK calls as `aikit check`: `get_agent_status`
-/// for availability and `get_agent_configs` for display names. Filters to
-/// only available agents — dev tools (git, vscode) and non-runnable entries
-/// never appear.
 fn build_runnable_agents() -> Vec<AgentInfo> {
     let status_map = get_agent_status();
     let configs = get_agent_configs();
@@ -250,8 +300,6 @@ fn build_runnable_agents() -> Vec<AgentInfo> {
         })
         .collect();
 
-    // get_agent_status returns BTreeMap so it's already sorted by key; but be
-    // explicit so future changes don't surprise callers.
     agents.sort_by(|a, b| a.key.cmp(&b.key));
     agents
 }
@@ -370,48 +418,36 @@ async fn delete_run_handler(
 
 // ── messages handler ─────────────────────────────────────────────────────────
 
-async fn messages_handler(
-    State(state): State<AppState>,
-    Json(body): Json<SendMessageRequest>,
-) -> Response {
-    // 1. Body validation
+/// Validation common to stream and sync modes. Returns Some(error_response) if
+/// the request can't proceed.
+fn validate_request(body: &SendMessageRequest, state: &AppState) -> Option<Response> {
     if body.agent.trim().is_empty() {
-        return error_response(
+        return Some(error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_request",
             "agent field is required",
-        );
+        ));
     }
     if body.content.is_empty() {
-        return error_response(
+        return Some(error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_request",
             "content must not be empty",
-        );
+        ));
     }
 
-    // 2. Agent must be in the runnable list (and currently available).
-    let agent = body.agent.clone();
     let runnable = build_runnable_agents();
-    if !runnable.iter().any(|a| a.key == agent) {
-        return error_response(
+    if !runnable.iter().any(|a| a.key == body.agent) {
+        return Some(error_response(
             StatusCode::NOT_FOUND,
             "agent_not_found",
             &format!(
                 "Agent '{}' is not available. Use GET /v1/agents to see available agents.",
-                agent
+                body.agent
             ),
-        );
+        ));
     }
 
-    // 3. Resume path: check that the session isn't already mid-run.
-    //    For aikit, attempt a pre-flight disk lookup so we can return 404
-    //    before opening the SSE stream when the id is bogus. If the session
-    //    is unknown to the on-disk store but is currently tracked in memory
-    //    (e.g. it was created earlier this process and the on-disk store is
-    //    elsewhere — common in tests), allow it through and let the SDK
-    //    decide. Other backends always go straight to the SDK; their
-    //    SessionNotFound error is surfaced via the SSE error frame.
     if let Some(ref sid) = body.session_id {
         let in_memory = {
             let runs = state.runs.lock().unwrap();
@@ -419,58 +455,90 @@ async fn messages_handler(
                 .values()
                 .any(|r| r.session_id.as_deref() == Some(sid) && r.status == RunStatus::Running);
             if busy {
-                return error_response(
+                return Some(error_response(
                     StatusCode::CONFLICT,
                     "session_busy",
                     "Session is currently processing a message",
-                );
+                ));
             }
             runs.values().any(|r| r.session_id.as_deref() == Some(sid))
         };
 
-        if agent == "aikit" && !in_memory {
+        if body.agent == "aikit" && !in_memory {
             let store = SessionStore::open();
             match store.load(sid) {
                 Ok(_) => {}
                 Err(SessionStoreError::NotFound(id)) => {
-                    return error_response(
+                    return Some(error_response(
                         StatusCode::NOT_FOUND,
                         "session_not_found",
                         &format!("Session '{}' not found", id),
-                    );
+                    ));
                 }
                 Err(e) => {
                     tracing::warn!("session store error: {:?}", e);
-                    return error_response(
+                    return Some(error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "internal_error",
                         "Failed to load session",
-                    );
+                    ));
                 }
             }
         }
     }
 
-    // 4. Capacity check: active runs must be < max_sessions.
-    {
-        let runs = state.runs.lock().unwrap();
-        let active = runs
-            .values()
-            .filter(|r| r.status == RunStatus::Running)
-            .count();
-        if active >= state.config.max_sessions {
-            return error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "session_limit_reached",
-                &format!(
-                    "Maximum of {} concurrent sessions reached",
-                    state.config.max_sessions
-                ),
-            );
-        }
+    let runs = state.runs.lock().unwrap();
+    let active = runs
+        .values()
+        .filter(|r| r.status == RunStatus::Running)
+        .count();
+    if active >= state.config.max_sessions {
+        return Some(error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "session_limit_reached",
+            &format!(
+                "Maximum of {} concurrent sessions reached",
+                state.config.max_sessions
+            ),
+        ));
     }
 
-    // 5. Register run.
+    None
+}
+
+/// Map a RunError to a StreamFrame::Error. Returns the exit code that should be
+/// reported alongside it.
+fn run_error_to_frame(err: RunError) -> (StreamFrame, i32) {
+    let frame = match err {
+        RunError::TimedOut { .. } => StreamFrame::Error {
+            code: "run_timeout".to_string(),
+            message: "Run exceeded timeout".to_string(),
+        },
+        RunError::SessionNotFound(id) => StreamFrame::Error {
+            code: "session_not_found".to_string(),
+            message: format!("Session '{}' not found", id),
+        },
+        RunError::AgentNotRunnable(msg) => StreamFrame::Error {
+            code: "agent_not_runnable".to_string(),
+            message: msg,
+        },
+        e => {
+            tracing::error!("run error: {}", e);
+            StreamFrame::Error {
+                code: "internal_error".to_string(),
+                message: "Internal error".to_string(),
+            }
+        }
+    };
+    (frame, 1)
+}
+
+/// Drive the run. Returns the channel receiver, the spawned task handle, and
+/// the in-memory request id assigned to this run.
+fn spawn_run(
+    state: &AppState,
+    body: &SendMessageRequest,
+) -> (tokio::sync::mpsc::Receiver<StreamFrame>, String) {
     let request_id = Uuid::new_v4().to_string();
     let now = Utc::now();
     {
@@ -479,7 +547,7 @@ async fn messages_handler(
             request_id.clone(),
             RunRecord {
                 session_id: body.session_id.clone(),
-                agent: agent.clone(),
+                agent: body.agent.clone(),
                 status: RunStatus::Running,
                 started_at: now,
                 last_active_at: now,
@@ -488,17 +556,16 @@ async fn messages_handler(
         );
     }
 
-    // 6. Build options and spawn the run.
     let session_id_in = body.session_id.clone();
     let content = body.content.clone();
     let model = body.model.clone();
     let yolo = body.yolo;
+    let agent = body.agent.clone();
     let timeout = Duration::from_secs(state.config.run_timeout_secs);
     let run_fn = state.run_fn.clone();
     let runs_ref = Arc::clone(&state.runs);
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
-    let tx_clone = tx.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
     let request_id_clone = request_id.clone();
 
     let task = tokio::task::spawn(async move {
@@ -513,10 +580,9 @@ async fn messages_handler(
             options = options.with_model(m);
         }
 
-        let tx_inner = tx_clone.clone();
-        let agent_for_run = agent.clone();
+        let tx_inner = tx.clone();
         let blocking_handle =
-            tokio::task::spawn_blocking(move || run_fn(agent_for_run, content, options, tx_inner));
+            tokio::task::spawn_blocking(move || run_fn(agent, content, options, tx_inner));
 
         let outcome: Result<RunFnOutcome, RunError> = tokio::select! {
             result = blocking_handle => {
@@ -529,7 +595,6 @@ async fn messages_handler(
                                 join_err
                             );
                         }
-                        // Treat task cancellation as silent close.
                         let mut runs = runs_ref.lock().unwrap();
                         if let Some(r) = runs.get_mut(&request_id_clone) {
                             r.status = RunStatus::Idle;
@@ -540,9 +605,8 @@ async fn messages_handler(
                     }
                 }
             }
-            _ = tx_clone.closed() => {
-                // Client disconnected. Mark idle; the blocking thread may
-                // continue briefly but its sends silently fail.
+            _ = tx.closed() => {
+                // Client disconnected.
                 let mut runs = runs_ref.lock().unwrap();
                 if let Some(r) = runs.get_mut(&request_id_clone) {
                     r.status = RunStatus::Idle;
@@ -553,10 +617,8 @@ async fn messages_handler(
             }
         };
 
-        // Normal completion: emit done (or error) frame, update record.
-        let exit_code = match outcome {
+        let _exit_code = match outcome {
             Ok(out) => {
-                // Backfill session_id if we learned it from the SDK.
                 if out.session_id.is_some() {
                     let mut runs = runs_ref.lock().unwrap();
                     if let Some(r) = runs.get_mut(&request_id_clone) {
@@ -567,52 +629,10 @@ async fn messages_handler(
                 }
                 out.exit_code
             }
-            Err(RunError::TimedOut { .. }) => {
-                let err = serde_json::to_string(&SseErrorPayload {
-                    code: "run_timeout".to_string(),
-                    message: "Run exceeded timeout".to_string(),
-                })
-                .unwrap_or_default();
-                let _ = tx_clone
-                    .send(Ok(Event::default().event("error").data(err)))
-                    .await;
-                1
-            }
-            Err(RunError::SessionNotFound(id)) => {
-                // Shouldn't happen — we pre-flight aikit sessions — but other
-                // backends can still bubble this up.
-                let err = serde_json::to_string(&SseErrorPayload {
-                    code: "session_not_found".to_string(),
-                    message: format!("Session '{}' not found", id),
-                })
-                .unwrap_or_default();
-                let _ = tx_clone
-                    .send(Ok(Event::default().event("error").data(err)))
-                    .await;
-                1
-            }
-            Err(RunError::AgentNotRunnable(msg)) => {
-                let err = serde_json::to_string(&SseErrorPayload {
-                    code: "agent_not_runnable".to_string(),
-                    message: msg,
-                })
-                .unwrap_or_default();
-                let _ = tx_clone
-                    .send(Ok(Event::default().event("error").data(err)))
-                    .await;
-                1
-            }
-            Err(e) => {
-                tracing::error!("messages_handler: run error: {}", e);
-                let err = serde_json::to_string(&SseErrorPayload {
-                    code: "internal_error".to_string(),
-                    message: "Internal error".to_string(),
-                })
-                .unwrap_or_default();
-                let _ = tx_clone
-                    .send(Ok(Event::default().event("error").data(err)))
-                    .await;
-                1
+            Err(err) => {
+                let (frame, code) = run_error_to_frame(err);
+                let _ = tx.send(frame).await;
+                code
             }
         };
 
@@ -625,10 +645,9 @@ async fn messages_handler(
             }
         }
 
-        let done = serde_json::to_string(&SseDonePayload { exit_code }).unwrap_or_default();
-        let _ = tx_clone
-            .send(Ok(Event::default().event("done").data(done)))
-            .await;
+        // tx drops here, closing the channel and signalling completion.
+        drop(tx);
+        let _ = _exit_code;
     });
 
     {
@@ -640,7 +659,70 @@ async fn messages_handler(
 
     drop(task);
 
-    let stream = ReceiverStream::new(rx);
+    (rx, request_id)
+}
+
+async fn messages_handler(
+    State(state): State<AppState>,
+    Json(body): Json<SendMessageRequest>,
+) -> Response {
+    if let Some(err) = validate_request(&body, &state) {
+        return err;
+    }
+
+    let stream_mode = body.stream;
+    let (rx, request_id) = spawn_run(&state, &body);
+
+    if stream_mode {
+        sse_response(rx, Arc::clone(&state.runs), request_id)
+    } else {
+        sync_response(rx, Arc::clone(&state.runs), request_id).await
+    }
+}
+
+/// Convert a receiver of StreamFrame into an SSE response. A terminal
+/// `event: done` frame is appended once the run channel closes. A forwarder
+/// task pumps frames into a second channel so we can append the terminator
+/// without depending on stream combinators outside `tokio_stream`.
+fn sse_response(
+    mut rx: tokio::sync::mpsc::Receiver<StreamFrame>,
+    _runs: Arc<Mutex<HashMap<String, RunRecord>>>,
+    _request_id: String,
+) -> Response {
+    let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+
+    tokio::spawn(async move {
+        let mut saw_error = false;
+        loop {
+            tokio::select! {
+                maybe_frame = rx.recv() => {
+                    match maybe_frame {
+                        Some(frame) => {
+                            if matches!(frame, StreamFrame::Error { .. }) {
+                                saw_error = true;
+                            }
+                            if out_tx.send(Ok(frame_to_sse(&frame))).await.is_err() {
+                                return;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = out_tx.closed() => {
+                    // Client disconnected; drop rx (via `return`) so the run
+                    // task notices via its own `tx.closed()` select branch.
+                    return;
+                }
+            }
+        }
+        let exit_code = if saw_error { 1 } else { 0 };
+        let data = serde_json::json!({ "exit_code": exit_code }).to_string();
+        let _ = out_tx
+            .send(Ok(Event::default().event("done").data(data)))
+            .await;
+    });
+
+    let stream = ReceiverStream::new(out_rx);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -650,6 +732,62 @@ async fn messages_handler(
     headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
 
     (headers, Sse::new(stream)).into_response()
+}
+
+/// Drain the receiver to completion and return a single JSON body. Text
+/// frames are concatenated; the first session id and the first error are kept.
+async fn sync_response(
+    mut rx: tokio::sync::mpsc::Receiver<StreamFrame>,
+    runs: Arc<Mutex<HashMap<String, RunRecord>>>,
+    request_id: String,
+) -> Response {
+    let mut session_id: Option<String> = None;
+    let mut content = String::new();
+    let mut error: Option<ErrorDetail> = None;
+
+    while let Some(frame) = rx.recv().await {
+        match frame {
+            StreamFrame::Session { session_id: id } => {
+                if session_id.is_none() {
+                    session_id = Some(id);
+                }
+            }
+            StreamFrame::Text { content: c } => {
+                content.push_str(&c);
+            }
+            StreamFrame::Error { code, message } => {
+                if error.is_none() {
+                    error = Some(ErrorDetail { code, message });
+                }
+            }
+            // Tool frames are intentionally dropped in sync mode — clients
+            // that need tool visibility should use stream mode.
+            StreamFrame::ToolUse { .. } | StreamFrame::ToolResult { .. } => {}
+        }
+    }
+
+    // Backfill session id from the in-memory record (the run_fn outcome may
+    // have populated it even if no Session frame was emitted).
+    if session_id.is_none() {
+        let runs = runs.lock().unwrap();
+        if let Some(r) = runs.get(&request_id) {
+            session_id.clone_from(&r.session_id);
+        }
+    }
+
+    let exit_code = if error.is_some() { 1 } else { 0 };
+    let resp = SyncMessageResponse {
+        session_id,
+        content,
+        exit_code,
+        error,
+    };
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&resp).unwrap_or_default(),
+    )
+        .into_response()
 }
 
 // ── auth middleware ───────────────────────────────────────────────────────────
@@ -678,13 +816,9 @@ async fn auth_middleware(State(state): State<AppState>, request: Request, next: 
     }
 }
 
-// ── fallback handler ──────────────────────────────────────────────────────────
-
 async fn not_found_handler() -> Response {
     error_response(StatusCode::NOT_FOUND, "not_found", "Not Found")
 }
-
-// ── router ────────────────────────────────────────────────────────────────────
 
 fn build_router(state: AppState) -> Router {
     let router = Router::new()
@@ -706,37 +840,28 @@ fn build_router(state: AppState) -> Router {
 
 // ── production run_fn ─────────────────────────────────────────────────────────
 
-/// Build the production run_fn that calls run_agent_events and forwards events
-/// to the SSE channel. Captures the SDK-assigned session_id from
-/// `AgentEventPayload::SessionStarted` and:
-///   1. emits it as the first `event: session` SSE frame, and
-///   2. returns it via `RunFnOutcome.session_id` so the server can backfill
-///      its run record.
+/// Build the production run_fn that calls `run_agent_events` and translates
+/// SDK events into `StreamFrame` values. Captures the SDK-assigned session_id
+/// both as a frame and in `RunFnOutcome.session_id`.
 pub fn make_production_run_fn() -> RunFn {
     Arc::new(
         move |agent: String,
               prompt: String,
               options: RunOptions,
-              tx: tokio::sync::mpsc::Sender<Result<Event, Infallible>>| {
+              tx: tokio::sync::mpsc::Sender<StreamFrame>| {
             use aikit_sdk::run_agent_events;
 
             let captured_session_id = Arc::new(Mutex::new(None::<String>));
             let captured_for_cb = Arc::clone(&captured_session_id);
             let tx_cb = tx.clone();
 
+            let agent_for_cb = agent.clone();
             let result = run_agent_events(&agent, &prompt, options, move |event| {
-                if let AgentEventPayload::SessionStarted { session_id } = &event.payload {
-                    *captured_for_cb.lock().unwrap() = Some(session_id.clone());
-                    let payload = serde_json::to_string(&SseSessionPayload {
-                        session_id: session_id.clone(),
-                    })
-                    .unwrap_or_default();
-                    let _ =
-                        tx_cb.blocking_send(Ok(Event::default().event("session").data(payload)));
-                    return;
-                }
-                if let Some(ev) = agent_event_to_sse(&event) {
-                    let _ = tx_cb.blocking_send(Ok(ev));
+                if let Some(frame) = agent_event_to_frame(&event, &agent_for_cb) {
+                    if let StreamFrame::Session { ref session_id } = frame {
+                        *captured_for_cb.lock().unwrap() = Some(session_id.clone());
+                    }
+                    let _ = tx_cb.blocking_send(frame);
                 }
             });
 
@@ -750,66 +875,51 @@ pub fn make_production_run_fn() -> RunFn {
     )
 }
 
-/// Map an AgentEvent to an SSE Event, returning None if the event should be suppressed.
-fn agent_event_to_sse(event: &aikit_sdk::AgentEvent) -> Option<Event> {
+/// Map an SDK `AgentEvent` to a typed `StreamFrame`, or None to suppress.
+fn agent_event_to_frame(event: &aikit_sdk::AgentEvent, agent_key: &str) -> Option<StreamFrame> {
     match &event.payload {
-        AgentEventPayload::SessionStarted { .. } => None, // handled separately
+        AgentEventPayload::SessionStarted { session_id } => Some(StreamFrame::Session {
+            session_id: session_id.clone(),
+        }),
         AgentEventPayload::StreamMessage(msg) => match (msg.role, msg.kind, msg.phase) {
             (MessageRole::Assistant, MessageKind::Message, MessagePhase::Delta)
             | (MessageRole::Assistant, MessageKind::Message, MessagePhase::Final) => {
-                let data = serde_json::json!({ "content": msg.text }).to_string();
-                Some(Event::default().event("text").data(data))
-            }
-            (MessageRole::Tool, MessageKind::ToolOutput, _) => {
-                let data = serde_json::json!({
-                    "name": event.agent_key,
-                    "output": msg.text
+                Some(StreamFrame::Text {
+                    content: msg.text.clone(),
                 })
-                .to_string();
-                Some(Event::default().event("tool_result").data(data))
             }
+            (MessageRole::Tool, MessageKind::ToolOutput, _) => Some(StreamFrame::ToolResult {
+                name: agent_key.to_string(),
+                output: msg.text.clone(),
+            }),
             _ => None,
         },
-        AgentEventPayload::QuotaExceeded { info, .. } => {
-            let data = serde_json::json!({
-                "code": "quota_exceeded",
-                "message": info.raw_message
-            })
-            .to_string();
-            Some(Event::default().event("error").data(data))
-        }
-        AgentEventPayload::AikitTextDelta { content, .. } => {
-            let data = serde_json::json!({ "content": content }).to_string();
-            Some(Event::default().event("text").data(data))
-        }
-        AgentEventPayload::AikitTextFinal { content, .. } => {
-            let data = serde_json::json!({ "content": content }).to_string();
-            Some(Event::default().event("text").data(data))
-        }
+        AgentEventPayload::QuotaExceeded { info, .. } => Some(StreamFrame::Error {
+            code: "quota_exceeded".to_string(),
+            message: info.raw_message.clone(),
+        }),
+        AgentEventPayload::AikitTextDelta { content, .. }
+        | AgentEventPayload::AikitTextFinal { content, .. } => Some(StreamFrame::Text {
+            content: content.clone(),
+        }),
         AgentEventPayload::AikitToolUse {
             tool_name,
             tool_input,
             ..
-        } => {
-            let data = serde_json::json!({
-                "name": tool_name,
-                "input": tool_input
-            })
-            .to_string();
-            Some(Event::default().event("tool_use").data(data))
-        }
+        } => Some(StreamFrame::ToolUse {
+            name: tool_name.clone(),
+            input: tool_input.clone(),
+        }),
         _ => None,
     }
 }
 
 // ── entry point ───────────────────────────────────────────────────────────────
 
-/// Start the HTTP server. This function does not return until the server shuts down.
 pub async fn execute(args: ServeArgs) -> anyhow::Result<()> {
     execute_with_run_fn(args, make_production_run_fn()).await
 }
 
-/// Start the HTTP server with an injectable run function (used in tests).
 pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Result<()> {
     let config = ServeConfig {
         host: args.host.clone(),
@@ -890,39 +1000,28 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
 
 // ── test stub helpers ─────────────────────────────────────────────────────────
 
-/// Build a stub run_fn that emits the given SSE events and returns success.
-/// If `session_id_for_new` is `Some`, a `session` SSE frame is emitted first
-/// when the incoming RunOptions has no `session_id`, simulating SDK-assigned
-/// session creation.
-#[allow(dead_code)]
-pub fn make_stub_run_fn(events: Vec<(&'static str, &'static str)>) -> RunFn {
-    make_stub_run_fn_with_session(events, None)
-}
-
-/// Stub variant that simulates a fresh-session run: when the incoming options
-/// have no `session_id`, the stub emits `event: session` with the supplied id
-/// and reports it back via `RunFnOutcome.session_id`. When the options DO
-/// carry an id (resume), the stub echoes it instead.
+/// Test stub that emits the given typed frames and returns success. If
+/// `session_id_for_new` is `Some`, a `Session` frame is emitted first when the
+/// incoming RunOptions has no `session_id` (simulating SDK session creation).
 #[allow(dead_code)]
 pub fn make_stub_run_fn_with_session(
-    events: Vec<(&'static str, &'static str)>,
+    frames: Vec<StreamFrame>,
     session_id_for_new: Option<String>,
 ) -> RunFn {
     Arc::new(move |_agent, _prompt, options, tx| {
-        // Resolve the session id we will report.
         let sid: Option<String> = options
             .session_id
             .clone()
             .or_else(|| session_id_for_new.clone());
 
         if let Some(ref id) = sid {
-            let payload = serde_json::json!({ "session_id": id }).to_string();
-            let _ = tx.blocking_send(Ok(Event::default().event("session").data(payload)));
+            let _ = tx.blocking_send(StreamFrame::Session {
+                session_id: id.clone(),
+            });
         }
 
-        for (name, data) in &events {
-            let ev = Event::default().event(*name).data(*data);
-            let _ = tx.blocking_send(Ok(ev));
+        for frame in &frames {
+            let _ = tx.blocking_send(frame.clone());
         }
 
         Ok(RunFnOutcome {
@@ -932,15 +1031,21 @@ pub fn make_stub_run_fn_with_session(
     })
 }
 
-/// Build a stub run_fn that sleeps for `duration` before returning success.
-/// Use this to test concurrent-request rejection and disconnect cleanup.
+/// Convenience: a stub that emits no frames.
+#[allow(dead_code)]
+pub fn make_stub_run_fn() -> RunFn {
+    make_stub_run_fn_with_session(vec![], None)
+}
+
+/// Stub that sleeps for `duration` before returning success. Used to test
+/// concurrent-request rejection and disconnect cleanup.
 #[allow(dead_code)]
 pub fn make_blocking_stub_run_fn(duration: Duration) -> RunFn {
     Arc::new(move |_agent, _prompt, options, tx| {
-        // Echo the session id if one was provided so resume tests can verify.
         if let Some(ref id) = options.session_id {
-            let payload = serde_json::json!({ "session_id": id }).to_string();
-            let _ = tx.blocking_send(Ok(Event::default().event("session").data(payload)));
+            let _ = tx.blocking_send(StreamFrame::Session {
+                session_id: id.clone(),
+            });
         }
         std::thread::sleep(duration);
         Ok(RunFnOutcome {
@@ -950,7 +1055,7 @@ pub fn make_blocking_stub_run_fn(duration: Duration) -> RunFn {
     })
 }
 
-/// Build a stub run_fn that returns a `RunError::TimedOut` error.
+/// Stub that immediately returns `RunError::TimedOut`.
 #[allow(dead_code)]
 pub fn make_timeout_stub_run_fn() -> RunFn {
     Arc::new(|_agent, _prompt, _options, _tx| {

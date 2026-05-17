@@ -10,7 +10,9 @@
 
 use std::time::Duration;
 
-use aikit::cli::serve::{execute_with_run_fn, make_stub_run_fn_with_session, RunFn, ServeArgs};
+use aikit::cli::serve::{
+    execute_with_run_fn, make_stub_run_fn_with_session, RunFn, ServeArgs, StreamFrame,
+};
 
 fn make_args(port: u16) -> ServeArgs {
     ServeArgs {
@@ -120,7 +122,9 @@ async fn test_new_then_resume_then_new_flow() {
     // The stub mints "stub-session-1" the first time options.session_id is
     // None; on resume it echoes whatever id the client supplied.
     let run_fn = make_stub_run_fn_with_session(
-        vec![("text", r#"{"content":"hello"}"#)],
+        vec![StreamFrame::Text {
+            content: "hello".to_string(),
+        }],
         Some("stub-session-1".to_string()),
     );
     let port = start_server_with(run_fn).await;
@@ -203,6 +207,105 @@ async fn test_new_then_resume_then_new_flow() {
 }
 
 #[tokio::test]
+async fn test_sync_mode_returns_single_json_body() {
+    // Stub emits two text frames; sync mode should concatenate them and
+    // return a JSON body — no SSE.
+    let run_fn = make_stub_run_fn_with_session(
+        vec![
+            StreamFrame::Text {
+                content: "Hello, ".to_string(),
+            },
+            StreamFrame::Text {
+                content: "world!".to_string(),
+            },
+        ],
+        Some("sync-session-1".to_string()),
+    );
+    let port = start_server_with(run_fn).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .json(&serde_json::json!({
+            "agent": "aikit",
+            "content": "hi",
+            "stream": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        ct.contains("application/json"),
+        "sync mode must return JSON, got: {}",
+        ct
+    );
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["session_id"], "sync-session-1");
+    assert_eq!(body["content"], "Hello, world!");
+    assert_eq!(body["exit_code"], 0);
+    assert!(
+        body.get("error").is_none(),
+        "no error expected; got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_mode_resume_uses_supplied_session_id() {
+    // First call (no session_id) creates the session in the in-memory tracker
+    // under the stub's mint id. The second call (with that session_id) is
+    // allowed through the resume pre-flight because it's known in memory, and
+    // the stub then echoes the supplied id.
+    let run_fn = make_stub_run_fn_with_session(
+        vec![StreamFrame::Text {
+            content: "ok".to_string(),
+        }],
+        Some("sync-resume-test".to_string()),
+    );
+    let port = start_server_with(run_fn).await;
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}", port);
+
+    let resp = client
+        .post(format!("{}/v1/messages", base))
+        .json(&serde_json::json!({
+            "agent": "aikit",
+            "content": "first",
+            "stream": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["session_id"], "sync-resume-test");
+
+    let resp = client
+        .post(format!("{}/v1/messages", base))
+        .json(&serde_json::json!({
+            "agent": "aikit",
+            "session_id": "sync-resume-test",
+            "content": "again",
+            "stream": false,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["session_id"], "sync-resume-test");
+    assert_eq!(body["content"], "ok");
+}
+
+#[tokio::test]
 async fn test_unknown_agent_returns_404_before_streaming() {
     let port = start_server_with(make_stub_run_fn_with_session(vec![], None)).await;
     let client = reqwest::Client::new();
@@ -281,7 +384,9 @@ async fn test_aikit_resume_with_unknown_id_returns_404() {
 #[tokio::test]
 async fn test_list_sessions_includes_completed_run() {
     let port = start_server_with(make_stub_run_fn_with_session(
-        vec![("text", r#"{"content":"hi"}"#)],
+        vec![StreamFrame::Text {
+            content: "hi".to_string(),
+        }],
         Some("stub-list-test".to_string()),
     ))
     .await;
