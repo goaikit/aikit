@@ -4,7 +4,6 @@
 //! and verifying that artifacts are correctly copied to .newton/
 
 use assert_cmd::cargo::cargo_bin_cmd;
-use predicates::prelude::*;
 use std::fs;
 use tempfile::tempdir;
 
@@ -31,6 +30,15 @@ fn walk_tree(root: &std::path::Path) -> Vec<String> {
 
 /// Run the install command and print diagnostics on failure.
 fn run_install(work: &std::path::Path, fixture_path: &str, extra_args: &[&str]) {
+    // Pre-create .aikit/ inside the tempdir so AikDirectory::find() short-circuits here
+    // instead of walking up and discovering an unrelated .aikit/ left somewhere above
+    // (observed on the Windows CI runner — install would then write artifacts to that
+    // foreign project root and the tempdir would stay empty).
+    let aikit_dir = work.join(".aikit");
+    if !aikit_dir.exists() {
+        fs::create_dir_all(&aikit_dir).expect("failed to pre-create .aikit/ in tempdir");
+    }
+
     let mut args: Vec<&str> = vec!["install", fixture_path, "--ai", "newton", "--yes"];
     args.extend_from_slice(extra_args);
 
