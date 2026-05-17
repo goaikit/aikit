@@ -1768,7 +1768,42 @@ fn normalize_gemini(
     raw_line_seq: u64,
 ) -> Vec<StreamMessage> {
     let mut results = Vec::new();
+    let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
+    // Current gemini CLI stream-json shape:
+    //   {"type":"message","role":"assistant","content":"...","delta":true}
+    //   {"type":"message","role":"assistant","content":"..."}                  (final)
+    //   {"type":"result","stats":{...}}                                        (run done)
+    //   {"type":"init","session_id":"..."}                                     (ignored)
+    //   {"type":"message","role":"user","content":"..."}                       (echo, skip)
+    if line_type == "message" && value.get("role").and_then(|v| v.as_str()) == Some("assistant") {
+        if let Some(text) = value.get("content").and_then(|v| v.as_str()) {
+            let is_delta = value
+                .get("delta")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let turn_id = value
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            results.push(StreamMessage {
+                text: text.to_string(),
+                phase: if is_delta {
+                    MessagePhase::Delta
+                } else {
+                    MessagePhase::Final
+                },
+                role: MessageRole::Assistant,
+                kind: MessageKind::Message,
+                source: stream,
+                raw_line_seq,
+                turn_id,
+            });
+        }
+    }
+
+    // Legacy/alternative gemini shape (Gemini API direct):
+    //   {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
     if let Some(candidates) = value.get("candidates").and_then(|v| v.as_array()) {
         for candidate in candidates {
             if let Some(parts) = candidate
@@ -1793,7 +1828,8 @@ fn normalize_gemini(
         }
     }
 
-    if value.get("type").and_then(|v| v.as_str()) == Some("result") {
+    // Original `{"type":"result","result":"..."}` shape (some gemini versions)
+    if line_type == "result" {
         if let Some(result_text) = value.get("result").and_then(|v| v.as_str()) {
             results.push(StreamMessage {
                 text: result_text.to_string(),
@@ -2740,6 +2776,75 @@ mod tests {
     use std::os::unix::process::ExitStatusExt;
     #[cfg(windows)]
     use std::os::windows::process::ExitStatusExt;
+
+    #[test]
+    fn test_normalize_gemini_delta_message_is_delta() {
+        let line = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": "I'm doing well, thank you!",
+            "delta": true
+        });
+        let out = normalize_gemini(&line, AgentEventStream::Stdout, 0);
+        assert_eq!(out.len(), 1, "should emit one StreamMessage; got {:?}", out);
+        let m = &out[0];
+        assert_eq!(m.text, "I'm doing well, thank you!");
+        assert_eq!(m.phase, MessagePhase::Delta);
+        assert_eq!(m.role, MessageRole::Assistant);
+        assert_eq!(m.kind, MessageKind::Message);
+    }
+
+    #[test]
+    fn test_normalize_gemini_final_message_is_final() {
+        // No `delta` key, or `delta:false`, ⇒ Final.
+        let line = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": "Done.",
+        });
+        let out = normalize_gemini(&line, AgentEventStream::Stdout, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].phase, MessagePhase::Final);
+
+        let line2 = serde_json::json!({
+            "type": "message",
+            "role": "assistant",
+            "content": "Done.",
+            "delta": false
+        });
+        let out2 = normalize_gemini(&line2, AgentEventStream::Stdout, 0);
+        assert_eq!(out2[0].phase, MessagePhase::Final);
+    }
+
+    #[test]
+    fn test_normalize_gemini_user_echo_and_init_are_ignored() {
+        let user = serde_json::json!({
+            "type": "message",
+            "role": "user",
+            "content": "Hi, how are you?"
+        });
+        assert!(normalize_gemini(&user, AgentEventStream::Stdout, 0).is_empty());
+
+        let init = serde_json::json!({"type":"init","session_id":"abc","model":"gemini-3"});
+        assert!(normalize_gemini(&init, AgentEventStream::Stdout, 0).is_empty());
+
+        let result_with_stats = serde_json::json!({"type":"result","stats":{"total_tokens":10}});
+        // No `result` text → no StreamMessage emitted.
+        assert!(normalize_gemini(&result_with_stats, AgentEventStream::Stdout, 0).is_empty());
+    }
+
+    #[test]
+    fn test_normalize_gemini_legacy_candidates_shape_still_works() {
+        let line = serde_json::json!({
+            "candidates": [{
+                "content": { "parts": [{"text": "hello"}] }
+            }]
+        });
+        let out = normalize_gemini(&line, AgentEventStream::Stdout, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "hello");
+        assert_eq!(out[0].phase, MessagePhase::Delta);
+    }
 
     #[test]
     fn test_runnable_agents_includes_codex_claude_gemini_opencode_agent() {

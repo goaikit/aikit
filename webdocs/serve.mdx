@@ -216,3 +216,44 @@ Authorization: Bearer <key>
 
 Missing or wrong key → `401 unauthorized`. The check applies to all
 endpoints, including `/health`.
+
+## Logging
+
+`aikit serve` installs a `tracing` subscriber that writes to stderr and
+honours the `RUST_LOG` environment variable (default:
+`aikit=info,aikit::serve::run=info,aikit_sdk=warn`).
+
+Useful incantations:
+
+```bash
+# Verbose: see every SDK event mapped to a frame on every run.
+RUST_LOG=aikit::serve::run=debug aikit serve
+
+# Quiet: errors only.
+RUST_LOG=aikit=error aikit serve
+```
+
+Each agent invocation logs at least one `spawning agent run` (info) line and
+one `agent run completed` (info) line that includes the exit code and stderr
+byte count. Non-zero exits log a `warn` with the stderr tail.
+
+## Surfacing agent failures
+
+When an agent exits non-zero with **no recognised assistant output** (a
+common signal of auth failure, missing CLI, or bad model), the sync JSON
+response promotes the captured stderr tail into a structured error so the
+client doesn't get the misleading `{"content":"", "exit_code":0}`:
+
+```json
+{
+  "session_id": null,
+  "content": "",
+  "exit_code": 1,
+  "error": {
+    "code": "agent_error",
+    "message": "claude: not authenticated. Run `claude login` first."
+  }
+}
+```
+
+The same tail is also logged at `warn` level so it ends up in the server log.

@@ -87,6 +87,12 @@ struct RunRecord {
     started_at: DateTime<Utc>,
     last_active_at: DateTime<Utc>,
     abort_handle: Option<tokio::task::AbortHandle>,
+    /// Tail of the last run's stderr (set after the run completes). Used to
+    /// enrich the sync JSON response when the agent printed nothing on
+    /// stdout but exited.
+    stderr_tail: String,
+    /// Last completed exit code, if any.
+    last_exit_code: Option<i32>,
 }
 
 // ── typed event channel ───────────────────────────────────────────────────────
@@ -122,7 +128,15 @@ pub struct RunFnOutcome {
     /// Session id assigned by the SDK. `None` when the backend doesn't expose
     /// one (e.g. non-aikit agents on a fresh run).
     pub session_id: Option<String>,
+    /// Captured stderr from the agent process (truncated to the last
+    /// `MAX_STDERR_TAIL_BYTES`). Empty when nothing was captured. Used to
+    /// surface a useful error in sync responses when `content` is empty.
+    pub stderr_tail: String,
 }
+
+/// Maximum bytes of stderr to surface in the JSON sync response. Larger
+/// agent stderr is truncated from the front (keep the tail).
+const MAX_STDERR_TAIL_BYTES: usize = 2048;
 
 /// Type alias for the agent-run function injected into AppState.
 ///
@@ -583,6 +597,8 @@ fn spawn_run(
                 started_at: now,
                 last_active_at: now,
                 abort_handle: None,
+                stderr_tail: String::new(),
+                last_exit_code: None,
             },
         );
     }
@@ -656,6 +672,14 @@ fn spawn_run(
                         if r.session_id.is_none() {
                             r.session_id = out.session_id.clone();
                         }
+                        r.stderr_tail = out.stderr_tail.clone();
+                        r.last_exit_code = Some(out.exit_code);
+                    }
+                } else {
+                    let mut runs = runs_ref.lock().unwrap();
+                    if let Some(r) = runs.get_mut(&request_id_clone) {
+                        r.stderr_tail = out.stderr_tail.clone();
+                        r.last_exit_code = Some(out.exit_code);
                     }
                 }
                 out.exit_code
@@ -806,16 +830,49 @@ async fn sync_response(
         }
     }
 
-    // Backfill session id from the in-memory record (the run_fn outcome may
-    // have populated it even if no Session frame was emitted).
-    if session_id.is_none() {
-        let runs = runs.lock().unwrap();
-        if let Some(r) = runs.get(&request_id) {
-            session_id.clone_from(&r.session_id);
+    // Backfill session id, stderr, and exit code from the in-memory record
+    // (the run_fn outcome may have populated them even if no frames were
+    // emitted to the channel).
+    let (record_stderr, record_exit) = {
+        let runs_guard = runs.lock().unwrap();
+        if let Some(r) = runs_guard.get(&request_id) {
+            if session_id.is_none() {
+                session_id.clone_from(&r.session_id);
+            }
+            (r.stderr_tail.clone(), r.last_exit_code)
+        } else {
+            (String::new(), None)
         }
-    }
+    };
 
-    let exit_code = if error.is_some() { 1 } else { 0 };
+    // Determine exit code & error:
+    //   - If an explicit Error frame arrived → exit_code 1 with that error.
+    //   - Else use the recorded exit code (0 if missing).
+    //   - If the run exited non-zero with NO mapped content, synthesize an
+    //     `agent_error` error containing the stderr tail so the client gets
+    //     a useful diagnosis instead of `content:""` and `exit_code:0`.
+    let (exit_code, error) = if let Some(e) = error {
+        (1, Some(e))
+    } else {
+        let code = record_exit.unwrap_or(0);
+        if code != 0 && content.is_empty() {
+            let message = if record_stderr.is_empty() {
+                format!("Agent exited with code {}", code)
+            } else {
+                record_stderr.clone()
+            };
+            (
+                code,
+                Some(ErrorDetail {
+                    code: "agent_error".to_string(),
+                    message,
+                }),
+            )
+        } else {
+            (code, None)
+        }
+    };
+
     let resp = SyncMessageResponse {
         session_id,
         content,
@@ -891,28 +948,167 @@ pub fn make_production_run_fn() -> RunFn {
               tx: tokio::sync::mpsc::Sender<StreamFrame>| {
             use aikit_sdk::run_agent_events;
 
+            tracing::info!(
+                target: "aikit::serve::run",
+                agent = %agent,
+                prompt_len = prompt.len(),
+                session_id = ?options.session_id,
+                model = ?options.model,
+                yolo = options.yolo,
+                "spawning agent run"
+            );
+
             let captured_session_id = Arc::new(Mutex::new(None::<String>));
             let captured_for_cb = Arc::clone(&captured_session_id);
             let tx_cb = tx.clone();
+            // Per-run state: if the backend emits any StreamMessage with
+            // phase=Delta, we suppress a later StreamMessage with phase=Final
+            // (it's the concatenation of the deltas; emitting both would
+            // double the content in sync mode). Backends that only emit
+            // Final (e.g. claude in `-p` mode) still get it through.
+            let saw_assistant_delta = Arc::new(Mutex::new(false));
+            let saw_delta_for_cb = Arc::clone(&saw_assistant_delta);
 
             let agent_for_cb = agent.clone();
             let result = run_agent_events(&agent, &prompt, options, move |event| {
-                if let Some(frame) = agent_event_to_frame(&event, &agent_for_cb) {
-                    if let StreamFrame::Session { ref session_id } = frame {
-                        *captured_for_cb.lock().unwrap() = Some(session_id.clone());
+                let payload_kind = payload_kind_name(&event.payload);
+                // Dedup Final-after-Delta for non-aikit assistant messages.
+                if let AgentEventPayload::StreamMessage(msg) = &event.payload {
+                    if msg.role == MessageRole::Assistant && msg.kind == MessageKind::Message {
+                        if msg.phase == MessagePhase::Delta {
+                            *saw_delta_for_cb.lock().unwrap() = true;
+                        } else if msg.phase == MessagePhase::Final
+                            && *saw_delta_for_cb.lock().unwrap()
+                        {
+                            tracing::trace!(
+                                target: "aikit::serve::run",
+                                agent = %agent_for_cb,
+                                payload = payload_kind,
+                                "suppressing Final assistant StreamMessage (deltas already emitted)"
+                            );
+                            return;
+                        }
                     }
-                    let _ = tx_cb.blocking_send(frame);
+                }
+                match agent_event_to_frame(&event, &agent_for_cb) {
+                    Some(frame) => {
+                        let frame_name = frame_kind_name(&frame);
+                        tracing::debug!(
+                            target: "aikit::serve::run",
+                            agent = %agent_for_cb,
+                            payload = payload_kind,
+                            frame = frame_name,
+                            "mapped SDK event to frame"
+                        );
+                        if let StreamFrame::Session { ref session_id } = frame {
+                            *captured_for_cb.lock().unwrap() = Some(session_id.clone());
+                        }
+                        if let Err(e) = tx_cb.blocking_send(frame) {
+                            tracing::warn!(
+                                target: "aikit::serve::run",
+                                agent = %agent_for_cb,
+                                payload = payload_kind,
+                                error = %e,
+                                "frame channel send failed (client likely disconnected)"
+                            );
+                        }
+                    }
+                    None => {
+                        tracing::trace!(
+                            target: "aikit::serve::run",
+                            agent = %agent_for_cb,
+                            payload = payload_kind,
+                            "SDK event suppressed (no matching frame)"
+                        );
+                    }
                 }
             });
 
             let session_id = captured_session_id.lock().unwrap().clone();
 
-            result.map(|r| RunFnOutcome {
-                exit_code: r.exit_code().unwrap_or(0),
-                session_id,
-            })
+            match result {
+                Ok(r) => {
+                    let exit_code = r.exit_code().unwrap_or(0);
+                    let stderr_tail = stderr_tail(&r.stderr);
+                    tracing::info!(
+                        target: "aikit::serve::run",
+                        agent = %agent,
+                        exit_code,
+                        session_id = ?session_id,
+                        stderr_bytes = r.stderr.len(),
+                        "agent run completed"
+                    );
+                    if exit_code != 0 && !stderr_tail.is_empty() {
+                        tracing::warn!(
+                            target: "aikit::serve::run",
+                            agent = %agent,
+                            exit_code,
+                            stderr_tail = %stderr_tail,
+                            "agent exited non-zero"
+                        );
+                    }
+                    Ok(RunFnOutcome {
+                        exit_code,
+                        session_id,
+                        stderr_tail,
+                    })
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: "aikit::serve::run",
+                        agent = %agent,
+                        error = %e,
+                        "agent run failed"
+                    );
+                    Err(e)
+                }
+            }
         },
     )
+}
+
+/// Short name for an `AgentEventPayload` variant, for log fields.
+fn payload_kind_name(p: &AgentEventPayload) -> &'static str {
+    match p {
+        AgentEventPayload::JsonLine(_) => "json_line",
+        AgentEventPayload::RawLine(_) => "raw_line",
+        AgentEventPayload::RawBytes(_) => "raw_bytes",
+        AgentEventPayload::StreamMessage(_) => "stream_message",
+        AgentEventPayload::TokenUsageLine { .. } => "token_usage_line",
+        AgentEventPayload::QuotaExceeded { .. } => "quota_exceeded",
+        AgentEventPayload::RawTransportLine { .. } => "raw_transport_line",
+        AgentEventPayload::AikitTextDelta { .. } => "aikit_text_delta",
+        AgentEventPayload::AikitTextFinal { .. } => "aikit_text_final",
+        AgentEventPayload::AikitToolUse { .. } => "aikit_tool_use",
+        AgentEventPayload::AikitToolResult { .. } => "aikit_tool_result",
+        AgentEventPayload::AikitSubagentSpawn { .. } => "aikit_subagent_spawn",
+        AgentEventPayload::AikitSubagentResult { .. } => "aikit_subagent_result",
+        AgentEventPayload::AikitContextCompressed { .. } => "aikit_context_compressed",
+        AgentEventPayload::AikitStepFinish { .. } => "aikit_step_finish",
+        AgentEventPayload::SessionStarted { .. } => "session_started",
+        _ => "other",
+    }
+}
+
+fn frame_kind_name(f: &StreamFrame) -> &'static str {
+    match f {
+        StreamFrame::Session { .. } => "session",
+        StreamFrame::Text { .. } => "text",
+        StreamFrame::ToolUse { .. } => "tool_use",
+        StreamFrame::ToolResult { .. } => "tool_result",
+        StreamFrame::Error { .. } => "error",
+    }
+}
+
+/// Last `MAX_STDERR_TAIL_BYTES` bytes of `stderr` rendered as a lossy UTF-8
+/// string. Returns empty when there's nothing useful.
+fn stderr_tail(stderr: &[u8]) -> String {
+    if stderr.is_empty() {
+        return String::new();
+    }
+    let start = stderr.len().saturating_sub(MAX_STDERR_TAIL_BYTES);
+    let slice = &stderr[start..];
+    String::from_utf8_lossy(slice).trim().to_string()
 }
 
 /// Map an SDK `AgentEvent` to a typed `StreamFrame`, or None to suppress.
@@ -938,10 +1134,13 @@ fn agent_event_to_frame(event: &aikit_sdk::AgentEvent, agent_key: &str) -> Optio
             code: "quota_exceeded".to_string(),
             message: info.raw_message.clone(),
         }),
-        AgentEventPayload::AikitTextDelta { content, .. }
-        | AgentEventPayload::AikitTextFinal { content, .. } => Some(StreamFrame::Text {
+        // Emit deltas only. `AikitTextFinal` is the concatenation of all
+        // preceding deltas, so emitting both would double the content in
+        // sync mode. SSE clients still get the incremental streaming UX.
+        AgentEventPayload::AikitTextDelta { content, .. } => Some(StreamFrame::Text {
             content: content.clone(),
         }),
+        AgentEventPayload::AikitTextFinal { .. } => None,
         AgentEventPayload::AikitToolUse {
             tool_name,
             tool_input,
@@ -957,7 +1156,26 @@ fn agent_event_to_frame(event: &aikit_sdk::AgentEvent, agent_key: &str) -> Optio
 // ── entry point ───────────────────────────────────────────────────────────────
 
 pub async fn execute(args: ServeArgs) -> anyhow::Result<()> {
+    init_tracing();
     execute_with_run_fn(args, make_production_run_fn()).await
+}
+
+/// Install a tracing subscriber that honours `RUST_LOG` and defaults to
+/// `info` for serve + SDK targets. No-op if a subscriber is already set
+/// (e.g. when invoked from a binary that initialised tracing itself).
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+
+    let default_filter =
+        "aikit=info,aikit_cli=info,aikit::serve=info,aikit::serve::run=info,aikit_sdk=warn";
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Result<()> {
@@ -1067,6 +1285,7 @@ pub fn make_stub_run_fn_with_session(
         Ok(RunFnOutcome {
             exit_code: 0,
             session_id: sid,
+            stderr_tail: String::new(),
         })
     })
 }
@@ -1091,6 +1310,21 @@ pub fn make_blocking_stub_run_fn(duration: Duration) -> RunFn {
         Ok(RunFnOutcome {
             exit_code: 0,
             session_id: options.session_id.clone(),
+            stderr_tail: String::new(),
+        })
+    })
+}
+
+/// Stub that emits no frames, returns a non-zero exit code, and surfaces a
+/// stderr tail. Used to verify the sync handler's empty-content fallback.
+#[allow(dead_code)]
+pub fn make_failing_stub_run_fn(exit_code: i32, stderr_tail: &'static str) -> RunFn {
+    let tail = stderr_tail.to_string();
+    Arc::new(move |_agent, _prompt, _options, _tx| {
+        Ok(RunFnOutcome {
+            exit_code,
+            session_id: None,
+            stderr_tail: tail.clone(),
         })
     })
 }

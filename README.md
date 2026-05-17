@@ -315,6 +315,14 @@ curl -s -X POST http://127.0.0.1:8787/v1/messages \
 Any other explicit `Accept` (e.g. `text/html`) returns `406 Not Acceptable`.
 When `--api-key` is set, every request must carry `Authorization: Bearer <key>`.
 
+**Logs and failure diagnosis:** the server installs a `tracing` subscriber
+that writes to stderr and honours `RUST_LOG`
+(`RUST_LOG=aikit::serve::run=debug aikit serve` shows every SDK event mapped
+to a response frame). When an agent exits non-zero with no recognised
+assistant output, the sync JSON body promotes the captured stderr tail into
+an `error: { code: "agent_error", message: <stderr tail> }` field — no more
+silent `{"content":"", "exit_code":0}`.
+
 ## Supported AI assistants
 
 The catalog covers **18** coding assistants (install/template mapping). Runnable via **`aikit run`** are only: `codex`, `claude`, `gemini`, `opencode`, `agent`, `auto` (routing mode that resolves to a concrete agent).

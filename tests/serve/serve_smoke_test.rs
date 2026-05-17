@@ -11,7 +11,8 @@
 use std::time::Duration;
 
 use aikit::cli::serve::{
-    execute_with_run_fn, make_stub_run_fn_with_session, RunFn, ServeArgs, StreamFrame,
+    execute_with_run_fn, make_failing_stub_run_fn, make_stub_run_fn_with_session, RunFn, ServeArgs,
+    StreamFrame,
 };
 
 fn make_args(port: u16) -> ServeArgs {
@@ -364,6 +365,37 @@ async fn test_default_accept_is_sse() {
         ct.contains("text/event-stream"),
         "default (no Accept) must return SSE, got: {}",
         ct
+    );
+}
+
+#[tokio::test]
+async fn test_sync_empty_content_with_nonzero_exit_surfaces_stderr() {
+    // Simulates the failure mode where the agent process exits non-zero
+    // with no recognisable stdout — exactly what happens when claude/gemini
+    // print only an error to stderr. The sync handler must surface that
+    // tail in the JSON body instead of returning `content:"" exit_code:0`.
+    let stub = make_failing_stub_run_fn(2, "Error: model is overloaded, try later");
+    let port = start_server_with(stub).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["content"], "");
+    assert_eq!(body["exit_code"], 2);
+    assert_eq!(body["error"]["code"], "agent_error");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("model is overloaded"),
+        "stderr tail must appear in error message; got: {body}"
     );
 }
 
