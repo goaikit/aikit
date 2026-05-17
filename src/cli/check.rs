@@ -71,6 +71,41 @@ pub fn execute(_args: CheckArgs) -> Result<()> {
     Ok(())
 }
 
+/// Arguments for the agent-only check sub-command
+#[derive(Debug, Default)]
+pub struct AgentCheckArgs {}
+
+/// Check AI agent CLI availability only (no dev tools like git/VS Code)
+pub fn execute_agent_check(_args: AgentCheckArgs) -> Result<()> {
+    let mut items = Vec::new();
+
+    let agent_status = get_agent_status();
+    let agent_configs = get_agent_configs();
+
+    for (agent_key, status) in &agent_status {
+        let agent_config = agent_configs.iter().find(|a| a.key == *agent_key);
+        let agent_name = agent_config.map(|a| a.name.as_str()).unwrap_or(agent_key);
+
+        let status_text = if status.available {
+            "✓ Available".to_string()
+        } else {
+            let reason = status
+                .reason
+                .as_ref()
+                .map(format_reason_for_user)
+                .unwrap_or_else(|| "Not available".to_string());
+            format!("✗ {}", reason)
+        };
+
+        items.push(TreeItem::new(format!("{}: {}", agent_name, status_text)));
+    }
+
+    let tree = format_tree(&items);
+    println!("{}", tree);
+
+    Ok(())
+}
+
 /// Convert AgentAvailabilityReason to user-facing message
 fn format_reason_for_user(reason: &AgentAvailabilityReason) -> String {
     match reason {

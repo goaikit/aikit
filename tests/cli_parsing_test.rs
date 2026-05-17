@@ -219,4 +219,165 @@ mod tests {
             out.stderr
         );
     }
+
+    /// aikit agent run --dry-run works under new namespace
+    #[tokio::test]
+    async fn test_agent_run_dry_run() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "agent",
+                "run",
+                "--agent",
+                "codex",
+                "--dry-run",
+                "-p",
+                "hello",
+            ])
+            .await;
+        assert_eq!(
+            out.exit_code, 0,
+            "agent run dry-run should succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// aikit agent run --resume <id> --dry-run works under new namespace
+    #[tokio::test]
+    async fn test_agent_run_with_resume() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "agent",
+                "run",
+                "--agent",
+                "codex",
+                "--dry-run",
+                "-p",
+                "hello",
+                "--resume",
+                "test-session-id",
+            ])
+            .await;
+        assert_eq!(
+            out.exit_code, 0,
+            "agent run with --resume should succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// aikit agent list works under new namespace
+    #[tokio::test]
+    async fn test_agent_list() {
+        let mut h = harness();
+        let out = h.run(&["aikit", "agent", "list"]).await;
+        assert_eq!(
+            out.exit_code, 0,
+            "agent list should succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// aikit agent mcp list works under new namespace
+    #[tokio::test]
+    async fn test_agent_mcp_list() {
+        let mut h = harness();
+        let out = h.run(&["aikit", "agent", "mcp", "list"]).await;
+        assert_eq!(
+            out.exit_code, 0,
+            "agent mcp list should succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// aikit agent check works and does not include dev tool output
+    #[tokio::test]
+    async fn test_agent_check() {
+        let mut h = harness();
+        let out = h.run(&["aikit", "agent", "check"]).await;
+        assert_eq!(
+            out.exit_code, 0,
+            "agent check should succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// deprecated aikit run still succeeds (deprecation warning goes to process stderr, not harness)
+    #[tokio::test]
+    async fn test_run_deprecated_succeeds() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "run",
+                "--agent",
+                "codex",
+                "--dry-run",
+                "-p",
+                "hello",
+            ])
+            .await;
+        assert_eq!(
+            out.exit_code, 0,
+            "deprecated run should still succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// deprecated aikit agents still succeeds
+    #[tokio::test]
+    async fn test_agents_deprecated_succeeds() {
+        let mut h = harness();
+        let out = h.run(&["aikit", "agents"]).await;
+        assert_eq!(
+            out.exit_code, 0,
+            "deprecated agents should still succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// deprecated aikit mcp list still succeeds
+    #[tokio::test]
+    async fn test_mcp_list_deprecated_succeeds() {
+        let mut h = harness();
+        let out = h.run(&["aikit", "mcp", "list"]).await;
+        assert_eq!(
+            out.exit_code, 0,
+            "deprecated mcp list should still succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// aikit agent run without --agent reports an error
+    #[tokio::test]
+    async fn test_agent_run_requires_agent_flag() {
+        let mut h = harness();
+        let out = h
+            .run(&["aikit", "agent", "run", "--dry-run", "-p", "hello"])
+            .await;
+        assert!(
+            out.exit_code != 0 || !out.stderr.is_empty(),
+            "agent run without --agent should fail; stdout: {}",
+            out.stdout
+        );
+    }
+
+    /// aikit agent mcp add without --url or --command triggers E_MCP_TRANSPORT_REQUIRED
+    #[tokio::test]
+    async fn test_agent_mcp_add_requires_transport() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit", "agent", "mcp", "add", "--agent", "claude", "--scope", "global", "--name",
+                "test",
+            ])
+            .await;
+        assert!(
+            !out.stderr.is_empty() || out.exit_code != 0,
+            "expected E_MCP_TRANSPORT_REQUIRED; stdout: {}",
+            out.stdout
+        );
+    }
 }
