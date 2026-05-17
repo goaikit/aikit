@@ -71,15 +71,18 @@ jobs:
 
       - name: Check for configured skip labels
         id: check-label
+        env:
+          SKIP_LABELS: ${{ steps.config.outputs.skip_labels }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Get configured skip labels from config (with fallback)
-          SKIP_LABELS='${{ steps.config.outputs.skip_labels }}'
+          # Fallback if config output was empty
           if [ -z "$SKIP_LABELS" ] || [ "$SKIP_LABELS" = "null" ]; then
             SKIP_LABELS='["no-release"]'
           fi
 
           # Get the PR number from the merge commit message
-          PR_NUMBER=$(echo "${{ github.event.head_commit.message }}" | grep -oP '#\K[0-9]+' | head -1 || echo "")
+          PR_NUMBER=$(printf '%s' "$COMMIT_MSG" | grep -oP '#\K[0-9]+' | head -1 || echo "")
 
           if [ -n "$PR_NUMBER" ]; then
             echo "Found PR #$PR_NUMBER in commit message"
@@ -87,41 +90,39 @@ jobs:
             # Check if PR has any of the configured skip labels
             LABELS=$(gh pr view "$PR_NUMBER" --json labels -q '.labels[].name' 2>/dev/null || echo "")
 
-            # Parse JSON array and check each label
-            echo "$SKIP_LABELS" | jq -r '.[]' | while read -r label; do
-              if echo "$LABELS" | grep -qE "^${label}$"; then
+            while IFS= read -r label; do
+              if printf '%s\n' "$LABELS" | grep -qxF -- "$label"; then
                 echo "Found '$label' label on PR #$PR_NUMBER"
-              echo "skip=true" >> $GITHUB_OUTPUT
-              exit 0
-            fi
-            done
+                echo "skip=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            done < <(printf '%s' "$SKIP_LABELS" | jq -r '.[]')
           fi
 
-          echo "skip=false" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Check for configured skip messages
         if: steps.check-label.outputs.skip != 'true'
+        env:
+          SKIP_MESSAGES: ${{ steps.config.outputs.skip_messages }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          # Get configured skip messages from config (with fallback)
-          SKIP_MESSAGES='${{ steps.config.outputs.skip_messages }}'
+          # Fallback if config output was empty
           if [ -z "$SKIP_MESSAGES" ] || [ "$SKIP_MESSAGES" = "null" ]; then
             SKIP_MESSAGES='["[skip release]", "[no release]", "[skip ci]"]'
           fi
 
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
-
-          # Check if commit message contains any configured skip messages
-          echo "$SKIP_MESSAGES" | jq -r '.[]' | while read -r msg; do
-            if echo "$COMMIT_MSG" | grep -q "$msg"; then
+          # Check if commit message contains any configured skip messages.
+          # Use grep -F to treat patterns as fixed strings (skip markers contain []).
+          while IFS= read -r msg; do
+            if printf '%s' "$COMMIT_MSG" | grep -qF -- "$msg"; then
               echo "Found skip message '$msg' in commit"
-              echo "skip=true" >> $GITHUB_OUTPUT
+              echo "skip=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-          done
+          done < <(printf '%s' "$SKIP_MESSAGES" | jq -r '.[]')
 
-          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "skip=false" >> "$GITHUB_OUTPUT"
 
       - name: Get current and last released versions
         if: steps.check-label.outputs.skip != 'true'
