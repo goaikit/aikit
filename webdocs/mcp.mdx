@@ -18,23 +18,23 @@ AIKit can **merge** one MCP server entry at a time into the JSON or TOML file ea
 | `opencode` | | `opencode.json` |
 | `codex` | | `.codex/config.toml` |
 
-Run `aikit mcp list` for paths and aliases. Six keys are implemented; the full agent catalog is larger.
+Run `aikit agent mcp list` for paths and aliases. Six keys are implemented; the full agent catalog is larger.
 
 ## CLI
 
 ```bash
 # Table of agents, project vs global paths
-aikit mcp list
+aikit agent mcp list
 
 # Stdio MCP under project .mcp.json (repeat --arg for each argv token)
-aikit mcp add --agent claude --scope project --project . --name fs \
+aikit agent mcp add --agent claude --scope project --project . --name fs \
   --command npx \
   --arg -y \
   --arg @modelcontextprotocol/server-filesystem \
   --arg .
 
 # HTTP MCP with optional headers (repeat --header KEY=value)
-aikit mcp add --agent gemini --scope project --project . --name api \
+aikit agent mcp add --agent gemini --scope project --project . --name api \
   --url http://127.0.0.1:8730/mcp \
   --header Authorization=Bearer\ token
 ```

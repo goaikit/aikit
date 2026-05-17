@@ -1,15 +1,44 @@
-# AIKIT
+# AIKit
 
-**Multi-agent template package manager and CLI.** Install and publish `aikit.toml` template packages from **GitHub or a local directory**, map them into many coding-assistant layouts, scaffold projects with **`aikit init`**, and run supported agent CLIs with **`aikit run`**. Use **`aikit check`** to see which tools and agents are available.
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-**Programmatic gateway:** [aikit-sdk](aikit-sdk/README.md) (Rust) and [aikit-py](aikit-py/README.md) (Python) expose the same agent catalog, path rules, deploy APIs, availability checks, and run/event APIs for your own tools and automation.
+**One CLI + gateway for every coding-agent CLI on your machine.** AIKit lets
+you run, package, share, and serve AI coding agents the same way regardless
+of whether you're using Claude Code, Codex, Gemini CLI, OpenCode, the
+built-in `aikit` agent, or anything else in the catalog.
+
+## What you get
+
+- **Run any agent the same way** — `aikit agent run --agent <name> -p "…"`
+  works for Claude, Codex, Gemini, OpenCode, and the built-in `aikit` agent.
+  Optional structured event stream (NDJSON) for tooling.
+- **Multi-turn HTTP API** — `aikit serve` exposes the agent runtime over
+  HTTP with both SSE streaming and single-shot JSON responses, selected by
+  the standard `Accept` header. Implicit sessions, resume by id, the works.
+- **Templates and package management** — `aikit init` scaffolds a
+  Spec-Driven Development project; `aikit install/update/remove/list` manage
+  packaged commands, skills, and agent definitions from GitHub or a local
+  path.
+- **Share your own packages** — `aikit package init/build/publish` produces
+  installable artifacts and pushes them to GitHub Releases.
+- **MCP config merge** — `aikit agent mcp add` registers an MCP server
+  entry in whichever agent's config file is appropriate (Cursor, Claude,
+  Gemini, VS Code Copilot, OpenCode, Codex).
+- **One LLM call** — `aikit llm` wraps any OpenAI-compatible endpoint with
+  streaming and structured-output flags.
+- **Rust + Python gateways** — [`aikit-sdk`](aikit-sdk/README.md) (Rust)
+  and [`aikit-py`](aikit-py/README.md) (Python) expose the same catalog,
+  paths, deploy, detection, and run/event APIs programmatically.
 
 ## Workspace crates
 
-- `aikit` (root crate): CLI for package lifecycle, install/init flows, release, run commands
-- [`aikit-sdk`](aikit-sdk/README.md): Rust library for catalog/deploy and run/event APIs
-- [`aikit-py`](aikit-py/README.md): Python package exposing the same gateway behaviors
-- [`aikit-agent`](aikit-agent/README.md): in-process agent runtime used by `aikit run -a aikit`
+This repo is a Cargo workspace:
+
+- [`aikit-sdk`](aikit-sdk) — Rust SDK (catalog, paths, deploy, run, events).
+- [`aikit-py`](aikit-py) — Python bindings over the SDK.
+- [`aikit-agent`](aikit-agent) — Internals for the built-in `aikit` agent.
+- [`aikit-evals`](aikit-evals) — Evaluation harness for agent runs.
+- root crate — the `aikit` CLI binary.
 
 ## Installation
 
@@ -39,231 +68,103 @@ scoop install aikit
 ### Windows
 Download from [GitHub Releases](https://github.com/goaikit/aikit/releases/latest) and add to PATH.
 
-## Quick Start
+Verify with `aikit check` — it reports which agent CLIs are installed.
 
-### Install Newton template (workspace with scripts)
+---
 
-```bash
-# Install Newton template from GitHub or local path
-aikit install gonewton/newton-templates --ai newton --yes
+## Features
 
-# This creates .newton/ with:
-#   .newton/README.md - Template documentation
-#   .newton/scripts/advisor.sh - Planning advisor
-#   .newton/scripts/evaluator.sh - Progress evaluator
-#   .newton/scripts/post-success.sh - Post-success hook
-#   .newton/scripts/post-failure.sh - Post-failure hook
-```
+The rest of this document walks each feature top-down. Every section is
+independent; jump to whatever you need.
 
-### Create a package and deploy to Cursor and Claude
+## 1. Project scaffolding (`aikit init`)
+
+Bootstrap a project with templates for a specific assistant.
 
 ```bash
-# 1. Create a new package (defines aikit.toml and template layout)
-aikit package init my-tools --description "My AI commands"
-
-# 2. Enter the package and add your templates (rules, skills, prompts)
-cd my-tools
-# Edit aikit.toml and add files under templates/ as needed
-
-# 3. Build the package (produces dist/ or agent-specific zips)
-aikit package build
-
-# 4. Publish to GitHub (creates release and uploads assets)
-aikit package publish username/my-tools
-# Or: push repo first, then aikit release v1.0.0
-
-# 5. Install the package for Cursor (in a project that uses Cursor)
-cd /path/to/your-project
-aikit install username/my-tools --ai cursor
-
-# 6. Install the same package for Claude (e.g. in another project or --ai claude)
-aikit install username/my-tools --ai claude
-
-# 7. Verify: list installed packages and check available agents
-aikit list
-aikit check
-```
-
-### Use an existing project with an AI assistant
-
-```bash
-# Create a new Spec-Driven Development project with Claude templates
+# New project for Claude
 aikit init my-project --ai claude
 
-# Or set up in the current directory for Cursor
+# Or scaffold into the current directory for Cursor
 aikit init --here --ai cursor
-
-# Install a community package
-aikit install username/package-name
-aikit list
 ```
 
-## Commands
+`--ai` accepts any catalog key (`claude`, `cursor`, `gemini`, `codex`,
+`copilot`, `opencode`, …). Multiple `--ai` flags add several agents in one
+shot.
 
-| Command | Description |
-|---------|-------------|
-| `aikit init [name]` | Initialize a Spec-Driven Development project with AI assistant templates |
-| `aikit install <source>` | Install packages from GitHub (owner/repo) or local directory (use `--ai <agent>` to specify agent) |
-| `aikit list` | Show installed packages (optional: `--author`, `--detailed`) |
-| `aikit update <pkg>` | Update a package to latest version (optional: `--breaking`) |
-| `aikit remove <pkg>` | Uninstall a package (optional: `--force`) |
-| `aikit check` | Check git, VS Code, and AI agent CLIs availability |
-| `aikit run` | Run a coding agent with a prompt |
-| `aikit serve` | Start an HTTP server for multi-turn agent sessions over JSON or SSE |
-| `aikit version` | Show version |
-| `aikit package init <name>` | Create a new package with aikit.toml |
-| `aikit package build` | Build distributable package (output: dist/ or .genreleases/) |
-| `aikit package publish <owner/repo>` | Publish package to GitHub (release and assets) |
-| `aikit mcp list` | Show which agents support MCP config merge and target file paths |
-| `aikit mcp add` | Merge one MCP server into agent config: Cursor / Claude / Gemini / VS Code (`servers`) / OpenCode (`mcp`) / Codex (TOML `mcp_servers`) |
-| `aikit release <version>` | Create GitHub release from .genreleases/ (e.g. v1.0.0) |
+## 2. Running agents (`aikit agent run`)
 
-## MCP servers (`aikit mcp`)
-
-The catalog has **18** agents; **`aikit mcp add`** supports **six** keys: `cursor-agent` (alias `cursor`), `claude`, `gemini`, `copilot` (alias `vscode`), `opencode`, `codex`. Run `aikit mcp list` for paths.
-
-| Agent key | Scope project | Scope global |
-|-----------|---------------|----------------|
-| `cursor-agent` | `.cursor/mcp.json` (`mcpServers`) | `~/.cursor/mcp.json` |
-| `claude` | `.mcp.json` | `~/.claude.json` (`mcpServers`) |
-| `gemini` | `.gemini/settings.json` | `~/.gemini/settings.json` |
-| `copilot` | `.vscode/mcp.json` (`servers`, VS Code shape) | VS Code `Code/User/mcp.json` (OS-specific) |
-| `opencode` | `opencode.json` (`mcp`) | XDG `.../opencode/opencode.json` |
-| `codex` | `.codex/config.toml` | `~/.codex/config.toml` |
+A uniform CLI front-end for every supported coding-agent binary.
 
 ```bash
-aikit mcp list
+# Inline prompt
+aikit agent run --agent claude -p "Refactor this function for clarity"
 
-# Cursor (HTTP)
-aikit mcp add --agent cursor-agent --scope project --name newton \
-  --url http://127.0.0.1:8730/mcp
+# Prompt from stdin
+echo "Add error handling to main.rs" | aikit agent run --agent opencode
 
-# Claude Code (stdio)
-aikit mcp add --agent claude --scope project --name gh \
-  --command npx --arg -y --arg @modelcontextprotocol/server-github
+# Agent-native streaming
+aikit agent run --agent claude --stream -p "Summarize the project"
 
-# Gemini CLI (merges into settings.json)
-aikit mcp add --agent gemini --scope project --name demo --url http://127.0.0.1:8080/mcp
+# Structured NDJSON event stream (one JSON object per line on stdout)
+aikit agent run --agent claude --events -p "Summarize the project"
 
-# VS Code / Copilot (`type` + `servers` entry)
-aikit mcp add --agent copilot --scope project --name fetch --command uvx --arg mcp-server-fetch
-
-# OpenCode (`mcp.<name>` local or remote)
-aikit mcp add --agent opencode --scope project --name tools --command npx --arg -y --arg @pkg/mcp
-
-# Codex (`[mcp_servers.name]` in config.toml)
-aikit mcp add --agent codex --scope project --name ctx7 --command npx --arg -y --arg @upstash/context7-mcp
+# Combine for streaming events
+aikit agent run --agent claude --events --stream -p "Refactor this module"
 ```
 
-Use `--overwrite` to replace an existing server id. Repeat `--arg`, `--env KEY=val`, `--header KEY=val` as needed. **Windows:** global `copilot` uses `%APPDATA%\Code\User\mcp.json`, or `<home>\AppData\Roaming\...` if `APPDATA` is unset; global OpenCode uses `%APPDATA%` / Roaming when `config_dir()` is unavailable.
-
-## Creating and publishing packages
-
-```bash
-# Create package
-aikit package init my-tools --description "AI dev tools" --package-version 0.1.0
-
-# Add templates and edit aikit.toml, then build
-aikit package build
-
-# Publish (creates GitHub release and uploads)
-aikit package publish username/my-tools
-
-# If you use a flow that produces zips in .genreleases/, create the release with:
-# aikit release v1.0.0 --notes-file release_notes.md
-```
-
-## Configuration
-
-- **GitHub auth:** Set `GITHUB_TOKEN` or `GH_TOKEN` in `.env` or use `--token` / `--github-token` on install, init, or release.
-- **Package manifest:** Each package has an `aikit.toml` (name, version, description). Required for local installs and for publish.
-
-Example `.env`:
-
-```bash
-GITHUB_TOKEN=your_github_token_here
-```
-
-## Running agents
-
-The `aikit run` command allows you to execute AI coding agents directly. It can replace agent CLI wrappers like coder.sh in workflows like Newton.
-
-```bash
-# Run an agent with a prompt
-aikit run --agent opencode -p "Help me refactor this code"
-
-# Read prompt from stdin
-echo "Add error handling" | aikit run --agent claude
-
-# Emit structured NDJSON events to stdout (one JSON object per line)
-aikit run --agent claude --events -p "Summarize the project"
-
-# Combine --events with --stream for streaming-aware JSON output
-aikit run --agent claude --events --stream -p "Refactor this module"
-```
-
-**Supported agents:** `codex`, `claude`, `gemini`, `opencode`, `agent`, `auto`
+**Runnable backends:** `codex`, `claude`, `gemini`, `opencode`, `agent`,
+`aikit` (built-in), `auto` (route to whatever is installed).
 
 **Options:**
 
 | Flag | Short | Description | Default |
 |------|-------|-------------|---------|
-| `--agent` | `-a` | Runnable agent key (`codex`, `claude`, `gemini`, `opencode`, `agent`, `auto`) | **Required** |
-| `--model` | `-m` | Model passed to the agent | Omitted unless `-m` is set; no CLI default (agent binary decides) |
-| `--prompt` | `-p` | Prompt to run | Reads from stdin if omitted |
+| `--agent` | `-a` | Runnable agent key | **Required** |
+| `--model` | `-m` | Model passed to the agent | Agent default |
+| `--prompt` | `-p` | Prompt to run | Reads from stdin |
 | `--yolo` | | Auto-confirm, skip checks | `false` |
-| `--stream` | | Enable agent-native streaming output flags | `false` |
-| `--events` | | Emit NDJSON event stream to stdout | `false` |
-| `--progress` | | Display live human-readable progress on stderr (conflicts with `--events`) | `false` |
+| `--stream` | | Agent-native partial output flags | `false` |
+| `--events` | | NDJSON event stream on stdout | `false` |
+| `--progress` | | Live human-readable progress on stderr (conflicts with `--events`) | `false` |
 
-`aikit run` also accepts the root **`--debug`** flag (global on the `aikit` CLI; it appears in `aikit run --help`).
+`-a`/`--agent` is mandatory. When `-m` is omitted, no model flag is passed
+to the agent — its own default applies.
 
-Agent selection is **CLI-only**: `-a` / `--agent` is required. `aikit run` does not read `CODING_AGENT` or `CODING_AGENT_MODEL`. When `-m` is omitted, no model flag is passed to the agent; the spawned agent applies its own defaults or errors if it requires an explicit model.
+### NDJSON event format
 
-**`--stream` vs `--events`:**
-- `--stream`: Tunes agent-native partial output flags (e.g. `--stream-partial-output`, `stream-json`). Passed through to the agent argv builder.
-- `--events`: Switches the CLI to emit one JSON object per line (NDJSON) to stdout. Process exit code matches the child agent's exit code.
-- Both flags can be combined: `--events --stream` uses events-mode JSON output AND adds stream-partial flags for supported agents.
-
-**NDJSON event format** (when using `--events`): each line is one JSON object with `agent_key`, `seq`, `stream` (`stdout` | `stderr`), and `payload`. The payload is one of:
-
-- **`json_line`**: parsed JSON object from the agent
-- **`raw_line`**: UTF-8 text line that is not JSON
-- **`raw_bytes`**: non-UTF-8 data as a byte array in JSON
-- **`token_usage_line`**: normalized token counts extracted from a preceding `json_line` (fields: `usage`, `source`, `raw_agent_line_seq`)
-- **`quota_exceeded`**: emitted when the agent reports a rate-limit or quota exhaustion; carries `QuotaExceededInfo` (`agent_key`, `category`, `raw_message`); consumers MUST NOT parse provider text themselves — aikit-sdk owns all quota detection
-
-Example lines:
+Each `--events` line is one JSON object: `{agent_key, seq, stream, payload}`.
+`payload` is one of `json_line`, `raw_line`, `raw_bytes`, `token_usage_line`,
+`quota_exceeded`, `stream_message`, or one of the `aikit_*` variants emitted
+by the built-in agent. The same shape is what `aikit-sdk::run_agent_events`
+delivers via callback.
 
 ```json
-{"agent_key":"claude","seq":1,"stream":"stdout","payload":{"json_line":{"type":"progress","message":"Starting..."}}}
-{"agent_key":"claude","seq":2,"stream":"stdout","payload":{"token_usage_line":{"usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150,"cache_read_tokens":null,"cache_creation_tokens":null,"reasoning_tokens":null},"source":"Claude","raw_agent_line_seq":1}}}
-{"agent_key":"claude","seq":3,"stream":"stderr","payload":{"quota_exceeded":{"agent_key":"claude","category":"Hourly","raw_message":"Claude usage limit reached. Your limit will reset at 5 PM hour."}}}
+{"agent_key":"claude","seq":1,"stream":"stdout","payload":{"stream_message":{"text":"Hello","phase":"final","role":"assistant","kind":"message"}}}
+{"agent_key":"claude","seq":2,"stream":"stdout","payload":{"token_usage_line":{"usage":{"input_tokens":100,"output_tokens":50}}}}
 ```
 
-On **Windows**, the Cursor agent is often `agent.cmd`. If spawn fails, set **`AIKIT_CURSOR_AGENT`** to the full path (see [aikit-sdk README: Windows Configuration](aikit-sdk/README.md#windows-configuration)).
+On **Windows**, the Cursor agent is sometimes `agent.cmd`. If spawn fails,
+set `AIKIT_CURSOR_AGENT` to the full path (see
+[aikit-sdk README: Windows Configuration](aikit-sdk/README.md#windows-configuration)).
 
-Run `aikit run --help` for the authoritative option reference.
+`aikit agent list` and `aikit agent check` round out the agent namespace —
+list project-scoped agent definitions, and report which CLIs are installed.
 
-**Programmatic use (gateway libraries):**
+## 3. Multi-turn HTTP API (`aikit serve`)
 
-- **Rust ([aikit-sdk](aikit-sdk/README.md)):** Add `aikit-sdk` to `Cargo.toml`. Use catalog/path/deploy APIs, `run_agent` for buffered stdout/stderr, or `run_agent_events` for the same event stream shape as `aikit run --events` (including optional `token_usage_line` events). Returns `Result<RunResult, RunError>`.
-- **Python ([aikit-py](aikit-py/README.md)):** `pip install aikit-py`. Same surface area from Python: catalog, deploy, `run_agent`, and `run_agent_events_py(..., on_event, ...)` for per-event callbacks (schema matches CLI NDJSON).
-
-## Serving an HTTP API (`aikit serve`)
-
-`aikit serve` exposes the same agent runtime over HTTP, with multi-turn
-sessions and either streaming or single-shot responses. Sessions are created
-implicitly on the first call; the server returns the new `session_id` and the
-client quotes it on subsequent calls to resume.
+`aikit serve` exposes the same agent runtime over HTTP. Sessions are
+created implicitly on the first call; the server returns the new
+`session_id` and the client quotes it back to resume.
 
 ```bash
-# Start on 127.0.0.1:8787 (defaults)
+# Defaults: 127.0.0.1:8787, 300s timeout, 10 concurrent runs
 aikit serve
 
-# Bind, set a request timeout, and require an API key
+# Public bind, longer timeout, require an API key
 aikit serve --host 0.0.0.0 --port 8787 \
-  --run-timeout-secs 300 --max-sessions 10 \
+  --run-timeout-secs 600 --max-sessions 20 \
   --api-key "$(openssl rand -hex 32)"
 ```
 
@@ -272,73 +173,166 @@ aikit serve --host 0.0.0.0 --port 8787 \
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET`  | `/health` | Health check + server version |
-| `GET`  | `/v1/agents` | List runnable agents (same set `aikit run` accepts) |
+| `GET`  | `/v1/agents` | List runnable agents |
 | `POST` | `/v1/messages` | Send a turn; creates or resumes a session |
 | `GET`  | `/v1/sessions` | List active and recently completed runs |
-| `GET`  | `/v1/sessions/{id}` | Inspect a run by `session_id` |
+| `GET`  | `/v1/sessions/{id}` | Inspect one run |
 | `DELETE` | `/v1/sessions/{id}` | Abort and close a run |
 
 **Two response shapes on `/v1/messages`, selected by the `Accept` header:**
 
-`Accept: text/event-stream` (or no `Accept`) — Server-Sent Events with
-`event: session` (first frame, carries the new `session_id`), zero or more
-`event: text` / `event: tool_use` / `event: tool_result`, and a terminal
-`event: done`. Errors arrive as `event: error` followed by `event: done`.
-
 ```bash
+# SSE (incremental — default when Accept is missing or */*)
 curl -sN -X POST http://127.0.0.1:8787/v1/messages \
   -H 'Accept: text/event-stream' \
   -H 'Content-Type: application/json' \
-  -d '{"agent":"aikit","content":"Say hello world."}'
-```
+  -d '{"agent":"aikit","content":"Say hello."}'
 
-`Accept: application/json` — the server runs to completion and returns a
-single JSON body:
-
-```bash
+# Single JSON body (runs to completion, returns assistant text + session_id)
 curl -s -X POST http://127.0.0.1:8787/v1/messages \
   -H 'Accept: application/json' \
   -H 'Content-Type: application/json' \
-  -d '{"agent":"aikit","content":"Say hello world."}' | jq .
-# → {"session_id":"...", "content":"Hello, world!", "exit_code":0}
+  -d '{"agent":"aikit","content":"Say hello."}' | jq .
 ```
 
-To resume, pass the `session_id` back in the body:
-
-```bash
-curl -s -X POST http://127.0.0.1:8787/v1/messages \
-  -H 'Accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d "{\"agent\":\"aikit\",\"session_id\":\"$SID\",\"content\":\"And in French?\"}"
-```
-
-Any other explicit `Accept` (e.g. `text/html`) returns `406 Not Acceptable`.
-When `--api-key` is set, every request must carry `Authorization: Bearer <key>`.
+To resume, pass the `session_id` back in the body. Any other explicit
+`Accept` returns `406 Not Acceptable`. Full reference:
+[webdocs/serve.mdx](webdocs/serve.mdx).
 
 **Logs and failure diagnosis:** the server installs a `tracing` subscriber
-that writes to stderr and honours `RUST_LOG`
-(`RUST_LOG=aikit::serve::run=debug aikit serve` shows every SDK event mapped
-to a response frame). When an agent exits non-zero with no recognised
-assistant output, the sync JSON body promotes the captured stderr tail into
-an `error: { code: "agent_error", message: <stderr tail> }` field — no more
-silent `{"content":"", "exit_code":0}`.
+on stderr that honours `RUST_LOG`
+(`RUST_LOG=aikit::serve::run=debug aikit serve` shows every SDK event
+mapped to a frame). When an agent exits non-zero with no recognised
+output, the sync JSON body promotes the captured stderr tail into
+`error: { code: "agent_error", message: <stderr tail> }` — no more silent
+`{"content":"", "exit_code":0}`.
+
+## 4. Packages
+
+Distribute commands, skills, and agent definitions as `aikit.toml`
+packages. Install them per project for whichever assistant you use.
+
+### Install / update / remove / list
+
+```bash
+# Install from GitHub (owner/repo) or local path; --ai picks the target shape
+aikit install username/my-tools --ai cursor
+aikit install ./my-tools --ai claude
+
+aikit list                       # what's installed (and where)
+aikit update my-tools            # bump to latest
+aikit update my-tools --breaking # allow major version bump
+aikit remove my-tools            # uninstall
+```
+
+### Authoring and publishing
+
+```bash
+# Create a package skeleton with aikit.toml
+aikit package init my-tools --description "My AI commands"
+
+# Build distributable artifacts
+cd my-tools
+aikit package build
+
+# Publish to a GitHub release
+aikit package publish username/my-tools
+
+# Or use the dedicated release command if you produced .genreleases/
+aikit release v1.0.0 --notes-file release_notes.md
+```
+
+A package's `aikit.toml` describes name, version, description, and an
+`[artifacts]` mapping that determines what files land where. The same
+package can target multiple assistants because the artifacts mapping is
+per-agent.
+
+## 5. MCP server registration (`aikit agent mcp`)
+
+Merge one MCP server entry into whichever agent's config file is
+appropriate (`mcpServers` for Cursor/Claude, VS Code `servers`, OpenCode
+`mcp`, Codex `[mcp_servers.*]`).
+
+```bash
+# List supported agents and target paths
+aikit agent mcp list
+
+# Stdio MCP server (repeat --arg per argv token; --env KEY=value per var)
+aikit agent mcp add --agent claude --scope project --project . --name fs \
+  --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg .
+
+# HTTP MCP server (repeat --header KEY=value per header)
+aikit agent mcp add --agent gemini --scope project --project . --name api \
+  --url https://api.example.com/mcp --header X-Auth=secret
+```
+
+Six catalog keys are supported: `cursor-agent` (alias `cursor`), `claude`,
+`gemini`, `copilot` (alias `vscode`), `opencode`, `codex`. Use
+`--overwrite` to replace an existing server id. Full reference:
+[webdocs/mcp.mdx](webdocs/mcp.mdx).
+
+## 6. One-shot LLM (`aikit llm`)
+
+Call any OpenAI-compatible endpoint without writing wrapper code.
+
+```bash
+# Plain prompt
+aikit llm -m gpt-4o -p "Summarise this README in one sentence."
+
+# Streaming output
+aikit llm -m gpt-4o --stream -p "Write a haiku."
+
+# Structured JSON output (with --json-schema)
+aikit llm -m gpt-4o --json -p "Extract name and email from: …"
+```
+
+Uses `OPENAI_API_KEY` by default, or any custom base URL via standard env
+vars.
+
+## 7. Programmatic use
+
+Both crates expose the same capabilities as the CLI:
+
+- **Rust:** [`aikit-sdk`](aikit-sdk/README.md). Add it to `Cargo.toml` and
+  call `run_agent`, `run_agent_events`, `add_mcp_server`, `agent`,
+  `all_agents`, etc.
+- **Python:** [`aikit-py`](aikit-py/README.md). `pip install aikit-py`;
+  same surface area as the SDK (`run_agent`, `run_agent_events_py`,
+  `add_mcp_server`, …).
+
+---
+
+## Configuration
+
+- **GitHub auth:** Set `GITHUB_TOKEN` or `GH_TOKEN` in `.env`, or use
+  `--token`/`--github-token` on `install`/`init`/`release`.
+- **Server auth:** `aikit serve --api-key <key>` or `AIKIT_SERVE_API_KEY`.
+- **Logging:** `RUST_LOG` follows standard `tracing-subscriber` syntax —
+  e.g. `RUST_LOG=aikit::serve::run=debug,aikit_sdk=info`.
+- **Package manifest:** Each package has an `aikit.toml` (name, version,
+  description, `[artifacts]`). Required for local installs and publish.
+
+Example `.env`:
+
+```bash
+GITHUB_TOKEN=your_github_token_here
+```
 
 ## Supported AI assistants
 
-The catalog covers **18** coding assistants (install/template mapping). Runnable via **`aikit run`** are only: `codex`, `claude`, `gemini`, `opencode`, `agent`, `auto` (routing mode that resolves to a concrete agent).
+The catalog covers **18** coding assistants for install/template mapping.
+`aikit agent run` accepts: `codex`, `claude`, `gemini`, `opencode`,
+`agent`, `aikit`, `auto`.
 
-**CLI-based:** Claude, Gemini, Qwen, OpenCode, Codex, Auggie, CodeBuddy, Qoder, Q, Amp, Shai
+**CLI-based:** Claude, Gemini, Qwen, OpenCode, Codex, Auggie, CodeBuddy,
+Qoder, Q, Amp, Shai
 
 **IDE-based:** GitHub Copilot, Cursor, Windsurf, KiloCode, Roo, Bob
 
-Run `aikit check` to see which are installed on your system (git and VS Code are also checked).
+Run `aikit check` to see which are installed on your system.
 
 ## License
 
-Apache License 2.0 - See [LICENSE](LICENSE)
+Apache License 2.0 — see [LICENSE](LICENSE).
 
-Need help? [Open an issue](https://github.com/goaikit/aikit/issues)
-
-Contributor guide: [CONTRIBUTING.md](CONTRIBUTING.md)  
-Architecture: [architecture.md](architecture.md)  
-Testing details: [TESTING.md](TESTING.md)
+Need help? [Open an issue](https://github.com/goaikit/aikit/issues).

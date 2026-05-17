@@ -13,11 +13,12 @@ AIKit organizes functionality into logical command groups:
 
 ### Core Commands
 - **`init`** - Initialize new Spec-Driven Development projects
-- **`run`** - Run a coding agent with a prompt (supports streaming events)
+- **`agent run`** - Run a coding agent with a prompt (supports streaming events)
+- **`agent list`** - List project-scoped agent definitions
+- **`agent mcp`** - List supported agents or merge one MCP server into agent config files
 - **`serve`** - Start an HTTP server for multi-turn agent sessions ([dedicated page](/serve))
-- **`mcp`** - List supported agents or merge one MCP server into agent config files
 - **`llm`** - Invoke an LLM via OpenAI-compatible API (supports streaming and JSON output)
-- **`check`** - Validate installed tools and AI agent CLIs
+- **`check`** / **`agent check`** - Validate installed tools and AI agent CLIs
 - **`version`** - Display version information
 
 ### Package Management
@@ -56,13 +57,19 @@ aikit <command> --help
 | Command | Purpose | Example |
 |---------|---------|---------|
 | `init` | Create new project | `aikit init my-project` |
-| `run` | Run a coding agent | `aikit run --agent claude -p "Task"` |
-| `mcp` | MCP config merge | `aikit mcp list` / `aikit mcp add --agent claude ...` |
+| `agent run` | Run a coding agent | `aikit agent run --agent claude -p "Task"` |
+| `agent mcp` | MCP config merge | `aikit agent mcp list` / `aikit agent mcp add --agent claude ...` |
+| `serve` | Multi-turn HTTP API | `aikit serve --port 8787` |
 | `llm` | Invoke an LLM | `aikit llm -m gpt-4o -p "Hello"` |
 | `check` | Validate environment | `aikit check` |
-| `install` | Install package | `aikit install https://github.com/user/repo` |
+| `install` | Install package | `aikit install owner/repo` |
 | `package init` | Create package | `aikit package init` |
 | `list` | Show installed | `aikit list` |
+
+> **Note:** `aikit run`, `aikit agents`, and `aikit mcp ...` (without
+> the `agent` prefix) are deprecated aliases that print a warning. Use
+> `aikit agent run`, `aikit agent list`, and `aikit agent mcp ...`
+> respectively.
 
 ## Prerequisites
 
@@ -155,27 +162,30 @@ $ aikit init my-claude-project --ai claude
 ✓ Project ready for Spec-Driven Development
 ```
 
-### run
+### agent run
 
-Run a coding agent with a prompt. The `run` command executes AI coding agents directly from the CLI, supporting buffered output, agent-native streaming, and structured NDJSON event delivery.
+Run a coding agent with a prompt. Executes AI coding agents directly from
+the CLI, supporting buffered output, agent-native streaming, and structured
+NDJSON event delivery.
 
-**Runnable agents:** `codex`, `claude`, `gemini`, `opencode`, `agent`, `auto`
+**Runnable agents:** `codex`, `claude`, `gemini`, `opencode`, `agent`,
+`aikit` (built-in), `auto`
 
 ```bash
 # Run an agent with an inline prompt
-aikit run --agent claude -p "Refactor this function for clarity"
+aikit agent run --agent claude -p "Refactor this function for clarity"
 
 # Read prompt from stdin
-echo "Add error handling to main.rs" | aikit run --agent opencode
+echo "Add error handling to main.rs" | aikit agent run --agent opencode
 
 # Enable agent-native streaming output
-aikit run --agent claude --stream -p "Summarize the project"
+aikit agent run --agent claude --stream -p "Summarize the project"
 
 # Emit structured NDJSON events to stdout
-aikit run --agent claude --events -p "Summarize the project"
+aikit agent run --agent claude --events -p "Summarize the project"
 
 # Combine --events and --stream for streaming-aware JSON output
-aikit run --agent claude --events --stream -p "Refactor this module"
+aikit agent run --agent claude --events --stream -p "Refactor this module"
 ```
 
 **Options:**
@@ -191,7 +201,7 @@ aikit run --agent claude --events --stream -p "Refactor this module"
 | `--progress` | | Display live human-readable progress on stderr (conflicts with `--events`) | `false` |
 | `--debug` | | Verbose diagnostic output (global `aikit` flag; shown on `run` help) | `false` |
 
-`-a` / `--agent` is required. `aikit run` does not use `CODING_AGENT` or `CODING_AGENT_MODEL`. Without `-m`, no model is passed through to the agent.
+`-a` / `--agent` is required. `aikit agent run` does not use `CODING_AGENT` or `CODING_AGENT_MODEL`. Without `-m`, no model is passed through to the agent.
 
 #### `--stream` vs `--events`
 
@@ -219,7 +229,16 @@ Fields:
 
 See [aikit-sdk README](../aikit-sdk/README.md) for complete streaming API documentation.
 
-Run `aikit run --help` for the authoritative option reference.
+Run `aikit agent run --help` for the authoritative option reference.
+
+### agent list
+
+Show project-scoped agent definitions discovered under `.aikit/agents/`,
+`~/.config/aikit/agents/`, and `~/.aikit/agents/`.
+
+```bash
+aikit agent list
+```
 
 ### serve
 
@@ -271,20 +290,24 @@ Any other explicit `Accept` returns `406 Not Acceptable`. See the
 [serve API reference](/serve) for full request/response schemas, SSE event
 names, session lifecycle, and error codes.
 
-### mcp
+### agent mcp
 
-Register MCP servers in agent-specific config files (JSON or TOML). Six catalog keys are supported: `cursor-agent`, `claude`, `gemini`, `copilot`, `opencode`, `codex` (aliases: `cursor`, `vscode`). See [MCP registration](/mcp) for paths, Rust (`aikit-sdk`), and Python (`aikit-py`) equivalents.
+Register MCP servers in agent-specific config files (JSON or TOML). Six
+catalog keys are supported: `cursor-agent`, `claude`, `gemini`, `copilot`,
+`opencode`, `codex` (aliases: `cursor`, `vscode`). See
+[MCP registration](/mcp) for paths, Rust (`aikit-sdk`), and Python
+(`aikit-py`) equivalents.
 
 ```bash
 # Agents and config paths (project vs global)
-aikit mcp list
+aikit agent mcp list
 
 # Stdio server: repeat --arg for each argv token; repeat --env KEY=value for env
-aikit mcp add --agent claude --scope project --project . --name fs \
+aikit agent mcp add --agent claude --scope project --project . --name fs \
   --command npx --arg -y --arg @modelcontextprotocol/server-filesystem --arg .
 
 # HTTP server: repeat --header KEY=value for headers
-aikit mcp add --agent gemini --scope project --project . --name api \
+aikit agent mcp add --agent gemini --scope project --project . --name api \
   --url http://127.0.0.1:8730/mcp
 ```
 

@@ -95,15 +95,17 @@ AIKit helps you:
 
 - **Ship template packages** (`aikit.toml`) that install into many coding-assistant layouts
 - **Install packages** from **GitHub (owner/repo)** or a **local directory**
-- **Scaffold projects** with `aikit init` and **run** supported agent CLIs with `aikit run`
+- **Scaffold projects** with `aikit init` and **run** supported agent CLIs with `aikit agent run`
+- **Serve agents over HTTP** with `aikit serve` (multi-turn sessions, SSE or single-shot JSON via `Accept`)
 - **Automate** the same behavior via **aikit-sdk** / **aikit-py** (catalog, deploy, MCP merge, detection, run, event stream)
 
 ### Key features
 
 - **Multi-agent layouts** - One package definition, many target agents (18 in the catalog)
 - **CLI + libraries** - `aikit` for day-to-day use; Rust/Python bindings for tools and CI
-- **Runnable agents** - `aikit run` supports `codex`, `claude`, `gemini`, `opencode`, `agent`
-- **MCP registration** - `aikit mcp` plus matching APIs in **aikit-sdk** and **aikit-py** for six assistants
+- **Runnable agents** - `aikit agent run` supports `codex`, `claude`, `gemini`, `opencode`, `agent`, `aikit`
+- **HTTP API** - `aikit serve` exposes the runtime via REST + SSE with content negotiation
+- **MCP registration** - `aikit agent mcp` plus matching APIs in **aikit-sdk** and **aikit-py** for six assistants
 - **GitHub-oriented publish flow** - `aikit package publish` / `aikit release` for releases and assets
 
 ### Quick example

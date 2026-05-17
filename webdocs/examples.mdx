@@ -40,7 +40,7 @@ npm install -g @anthropic-ai/claude-code
 
 ```bash
 cd /path/to/your/repo
-aikit mcp add --agent claude --scope project --project . --name demo-fs \
+aikit agent mcp add --agent claude --scope project --project . --name demo-fs \
   --command npx \
   --arg -y \
   --arg @modelcontextprotocol/server-filesystem \
@@ -152,7 +152,7 @@ aikit install https://github.com/example/package --debug
 ✓ Downloading from: https://github.com/example/ai-agent-template
 ✓ Installing to: .aikit/packages/ai-agent-template
 ✓ Package installed successfully
-✓ Available commands: aikit run ai-agent-template <command>
+✓ Package available under .aikit/packages/ai-agent-template
 ```
 
 ### 4. List Installed Packages
@@ -348,8 +348,8 @@ aikit install ./dist/my-ai-package-0.1.0.zip --local
 # Test installation
 aikit list | grep my-ai-package
 
-# Run a command
-aikit run my-ai-package analyze --help
+# Verify it appears in your installed list
+aikit list --detailed
 ```
 
 **Step 6: Publish package**
@@ -508,11 +508,11 @@ EOF
 # Validate configuration
 aikit check agents
 
-# Test command execution
-aikit run myagent help
+# Run the agent with a prompt (when myagent is a runnable backend)
+aikit agent run --agent myagent -p "Help me get started"
 
-# List available commands
-aikit list myagent
+# List installed packages
+aikit list
 ```
 
 **Expected output**:
