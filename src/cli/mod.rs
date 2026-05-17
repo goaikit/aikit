@@ -7,6 +7,7 @@ mod init;
 mod mcp;
 mod release;
 mod run;
+pub mod serve;
 mod template_package;
 mod version;
 
@@ -48,6 +49,7 @@ pub fn build_app() -> Result<AikitApp> {
     builder = builder.register_command(cmd_release())?;
     builder = builder.register_command(cmd_run_deprecated())?;
     builder = builder.register_command(cmd_agents_deprecated())?;
+    builder = builder.register_command(cmd_serve())?;
 
     let mcp_path = CommandPath::new(&["mcp"])?;
     builder = builder.register_group(
@@ -1234,6 +1236,59 @@ fn cmd_package_publish() -> Command {
                     no_release: get_bool(&args, "no-release"),
                 };
                 commands::package::execute_publish(pkg_args)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            })
+        }),
+    }
+}
+
+fn cmd_serve() -> Command {
+    Command {
+        id: "serve",
+        summary: "Start an HTTP server exposing a session-based agent API",
+        syntax: Some("serve"),
+        category: Some("agents"),
+        spec: Some(Arc::new(CommandSpec {
+            summary: "Start HTTP server for multi-turn agent sessions (SSE streaming)",
+            args: vec![
+                opt("host", "Bind address (default: 127.0.0.1)"),
+                opt("port", "Port to listen on (default: 8787)"),
+                opt(
+                    "run-timeout-secs",
+                    "Cancel agent runs exceeding N seconds (default: 300)",
+                ),
+                opt("max-sessions", "Max concurrent sessions (default: 10)"),
+                opt(
+                    "api-key",
+                    "Require Authorization: Bearer <key>. Also reads AIKIT_SERVE_API_KEY.",
+                ),
+            ],
+            ..CommandSpec::default()
+        })),
+        validator: None,
+        expose_mcp: false,
+        execute: Arc::new(|_ctx, args| {
+            Box::pin(async move {
+                let serve_args = serve::ServeArgs {
+                    host: get_str(&args, "host", "127.0.0.1"),
+                    port: get_str(&args, "port", "8787")
+                        .parse::<u16>()
+                        .map_err(|_| anyhow::anyhow!("--port must be a valid port number"))?,
+                    run_timeout_secs: get_str(&args, "run-timeout-secs", "300")
+                        .parse::<u64>()
+                        .map_err(|_| {
+                            anyhow::anyhow!("--run-timeout-secs must be a positive integer")
+                        })?,
+                    max_sessions: get_str(&args, "max-sessions", "10")
+                        .parse::<usize>()
+                        .map_err(|_| {
+                            anyhow::anyhow!("--max-sessions must be a positive integer")
+                        })?,
+                    api_key: get_opt(&args, "api-key")
+                        .or_else(|| std::env::var("AIKIT_SERVE_API_KEY").ok()),
+                };
+                serve::execute(serve_args)
                     .await
                     .map_err(|e| anyhow::anyhow!("{}", e))
             })
