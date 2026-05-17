@@ -24,6 +24,11 @@ path = "src/lib.rs"
 # CLI framework (replaces direct clap usage)
 cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "7414db5", features = ["testkit", "mcp-server"] }
 
+# HTTP server for aikit serve
+axum = { version = "0.8", features = ["macros"] }
+tokio-stream = "0.1"
+uuid = { version = "1", features = ["v4"] }
+
 # HTTP client for GitHub API
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
@@ -102,6 +107,30 @@ predicates = "3.0"
 
 # Snapshot testing
 insta = { version = "1.41", features = ["serde"] }
+
+[[test]]
+name = "aikit_serve"
+path = "tests/snapshots/aikit_serve.rs"
+
+[[test]]
+name = "serve_smoke_test"
+path = "tests/serve/serve_smoke_test.rs"
+
+[[test]]
+name = "serve_auth_test"
+path = "tests/serve/serve_auth_test.rs"
+
+[[test]]
+name = "serve_limits_test"
+path = "tests/serve/serve_limits_test.rs"
+
+[[test]]
+name = "serve_timeout_test"
+path = "tests/serve/serve_timeout_test.rs"
+
+[[test]]
+name = "serve_disconnect_test"
+path = "tests/serve/serve_disconnect_test.rs"
 
 [profile.release]
 opt-level = 3
