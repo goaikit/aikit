@@ -1,0 +1,218 @@
+---
+title: "Serve HTTP API"
+description: "Multi-turn agent sessions over HTTP with SSE streaming or single-shot JSON responses, selected by the request's Accept header."
+---
+
+# Serve HTTP API (`aikit serve`)
+
+`aikit serve` starts a small HTTP server in front of the agent runtime. It
+supports multi-turn conversations, two response shapes selected by content
+negotiation, and per-session concurrency control.
+
+## Starting the server
+
+```bash
+# Defaults: 127.0.0.1:8787, 300s timeout, 10 concurrent runs
+aikit serve
+
+# Public bind, longer timeout, API key required
+aikit serve --host 0.0.0.0 --port 8787 \
+  --run-timeout-secs 600 --max-sessions 20 \
+  --api-key "$(openssl rand -hex 32)"
+```
+
+| Flag | Description | Default |
+|------|-------------|---------|
+| `--host` | Bind address | `127.0.0.1` |
+| `--port` | TCP port | `8787` |
+| `--run-timeout-secs` | Abort agent runs that exceed this many seconds | `300` |
+| `--max-sessions` | Maximum concurrent active runs (cap → `429`) | `10` |
+| `--api-key` | Require `Authorization: Bearer <key>` on every request. Also reads `AIKIT_SERVE_API_KEY`. | unset |
+
+A warning is printed if you bind to a non-loopback interface without
+`--api-key`.
+
+## Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET`  | `/health` | Health check + server version |
+| `GET`  | `/v1/agents` | List runnable agents |
+| `POST` | `/v1/messages` | Send a turn; creates or resumes a session |
+| `GET`  | `/v1/sessions` | List active and recently completed runs |
+| `GET`  | `/v1/sessions/{id}` | Inspect one run by `session_id` |
+| `DELETE` | `/v1/sessions/{id}` | Abort and close a run |
+
+### `GET /v1/agents`
+
+Returns only the agents that `aikit run` would currently accept on this host —
+the same list `aikit check` reports. Dev-environment tools like `git` and
+`vscode` never appear.
+
+```json
+{
+  "agents": [
+    { "key": "aikit",  "name": "aikit",  "available": true },
+    { "key": "claude", "name": "claude", "available": true },
+    { "key": "codex",  "name": "codex",  "available": true }
+  ]
+}
+```
+
+## `POST /v1/messages`
+
+Request body:
+
+```json
+{
+  "agent": "aikit",
+  "content": "Say hello world.",
+  "session_id": "...optional, resumes an existing session...",
+  "model": "...optional...",
+  "yolo": false
+}
+```
+
+The response shape is chosen by the `Accept` header.
+
+### Content negotiation
+
+| `Accept` header                            | response          |
+|--------------------------------------------|-------------------|
+| contains `text/event-stream`               | SSE               |
+| contains `application/json` (and not SSE)  | sync JSON         |
+| `*/*`, missing, or absent                  | SSE (default)     |
+| both types present                         | SSE (streaming wins) |
+| any other explicit type                    | `406 Not Acceptable` |
+
+Matching is case-insensitive substring; q-values are ignored.
+
+### SSE response (`Accept: text/event-stream`)
+
+```bash
+curl -sN -X POST http://127.0.0.1:8787/v1/messages \
+  -H 'Accept: text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"aikit","content":"Say hello world."}'
+```
+
+Frame sequence:
+
+```
+event: session
+data: {"session_id":"f261e7a6-..."}
+
+event: text
+data: {"content":"Hello, "}
+
+event: text
+data: {"content":"world!"}
+
+event: done
+data: {"exit_code":0}
+```
+
+Event types:
+
+| Event | Data shape | Meaning |
+|-------|------------|---------|
+| `session` | `{ "session_id": "..." }` | Always the first frame. New runs receive the freshly assigned id; resumes echo the supplied id. |
+| `text` | `{ "content": "..." }` | One assistant text fragment. May be emitted many times. |
+| `tool_use` | `{ "name": "...", "input": ... }` | The agent invoked a tool. |
+| `tool_result` | `{ "name": "...", "output": "..." }` | Tool output returned to the agent. |
+| `error` | `{ "code": "...", "message": "..." }` | A run-time error happened mid-stream. `done` still follows. |
+| `done` | `{ "exit_code": 0\|1 }` | Always the last frame. `1` if any `error` frame was emitted. |
+
+Use `-N` (curl) or the equivalent in your HTTP client to disable buffering —
+otherwise frames may not surface until the run completes.
+
+### Sync JSON response (`Accept: application/json`)
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/v1/messages \
+  -H 'Accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"aikit","content":"Say hello world."}' | jq .
+```
+
+Response body:
+
+```json
+{
+  "session_id": "f261e7a6-...",
+  "content": "Hello, world!",
+  "exit_code": 0
+}
+```
+
+On error, the body gains an `error` object and `exit_code: 1`:
+
+```json
+{
+  "session_id": "f261e7a6-...",
+  "content": "",
+  "exit_code": 1,
+  "error": { "code": "run_timeout", "message": "Run exceeded timeout" }
+}
+```
+
+`tool_use` and `tool_result` events are intentionally dropped in sync mode —
+if you need tool visibility, use SSE.
+
+## Session lifecycle
+
+Sessions are created **implicitly** on the first `POST /v1/messages` that
+omits `session_id`. The server returns the new id (in the first SSE frame or
+the JSON body), and the client quotes it back on the next call to resume.
+
+```bash
+# 1. First turn — server mints a session_id
+SID=$(curl -s -X POST http://127.0.0.1:8787/v1/messages \
+  -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d '{"agent":"aikit","content":"Say hello."}' | jq -r .session_id)
+
+# 2. Resume — same session, more turns
+curl -s -X POST http://127.0.0.1:8787/v1/messages \
+  -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"agent\":\"aikit\",\"session_id\":\"$SID\",\"content\":\"And in French?\"}"
+
+# 3. New conversation — omit session_id again
+curl -s -X POST http://127.0.0.1:8787/v1/messages \
+  -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d '{"agent":"aikit","content":"Write a haiku."}'
+```
+
+For the `aikit` backend the id is assigned by the SDK and persisted to
+`~/.aikit/sessions/<id>.json`. For other backends (`claude`, `codex`, …) the
+id is forwarded to the underlying CLI's `--resume` flag and managed by that
+CLI's own session store.
+
+`GET /v1/sessions` lists runs the server has seen this process; `DELETE
+/v1/sessions/{id}` aborts the run (if mid-flight) and closes the record.
+
+## Error codes
+
+| HTTP | `error.code` | When |
+|------|--------------|------|
+| `422` | `invalid_request` | `agent` or `content` missing / empty |
+| `404` | `agent_not_found` | `agent` is not in `GET /v1/agents` |
+| `404` | `session_not_found` | `session_id` doesn't exist (aikit pre-flight) |
+| `409` | `session_busy` | Another request is mid-run on this `session_id` |
+| `429` | `session_limit_reached` | `--max-sessions` exceeded |
+| `406` | `not_acceptable` | `Accept` doesn't allow JSON or SSE |
+| `401` | `unauthorized` | `--api-key` set and bearer token missing/invalid |
+| `200 (SSE error frame)` | `run_timeout` | Agent exceeded `--run-timeout-secs` |
+| `200 (SSE error frame)` | `agent_not_runnable` | Backend reports the agent isn't runnable |
+| `200 (SSE error frame)` | `internal_error` | Anything else; check server logs |
+
+## Authentication
+
+If you start the server with `--api-key <key>` (or set `AIKIT_SERVE_API_KEY`),
+every request must include:
+
+```
+Authorization: Bearer <key>
+```
+
+Missing or wrong key → `401 unauthorized`. The check applies to all
+endpoints, including `/health`.

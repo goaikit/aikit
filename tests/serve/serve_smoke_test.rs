@@ -207,9 +207,9 @@ async fn test_new_then_resume_then_new_flow() {
 }
 
 #[tokio::test]
-async fn test_sync_mode_returns_single_json_body() {
-    // Stub emits two text frames; sync mode should concatenate them and
-    // return a JSON body — no SSE.
+async fn test_accept_application_json_returns_sync() {
+    // Stub emits two text frames; sync mode concatenates them and returns
+    // a single JSON body — no SSE. Selection is driven entirely by `Accept`.
     let run_fn = make_stub_run_fn_with_session(
         vec![
             StreamFrame::Text {
@@ -226,11 +226,8 @@ async fn test_sync_mode_returns_single_json_body() {
 
     let resp = client
         .post(format!("http://127.0.0.1:{}/v1/messages", port))
-        .json(&serde_json::json!({
-            "agent": "aikit",
-            "content": "hi",
-            "stream": false,
-        }))
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
         .send()
         .await
         .unwrap();
@@ -244,7 +241,7 @@ async fn test_sync_mode_returns_single_json_body() {
         .to_string();
     assert!(
         ct.contains("application/json"),
-        "sync mode must return JSON, got: {}",
+        "Accept: application/json must return JSON, got content-type: {}",
         ct
     );
 
@@ -259,11 +256,11 @@ async fn test_sync_mode_returns_single_json_body() {
 }
 
 #[tokio::test]
-async fn test_sync_mode_resume_uses_supplied_session_id() {
+async fn test_accept_application_json_resume() {
     // First call (no session_id) creates the session in the in-memory tracker
     // under the stub's mint id. The second call (with that session_id) is
     // allowed through the resume pre-flight because it's known in memory, and
-    // the stub then echoes the supplied id.
+    // the stub then echoes the supplied id. Both turns use the JSON shape.
     let run_fn = make_stub_run_fn_with_session(
         vec![StreamFrame::Text {
             content: "ok".to_string(),
@@ -276,11 +273,8 @@ async fn test_sync_mode_resume_uses_supplied_session_id() {
 
     let resp = client
         .post(format!("{}/v1/messages", base))
-        .json(&serde_json::json!({
-            "agent": "aikit",
-            "content": "first",
-            "stream": false,
-        }))
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({"agent": "aikit", "content": "first"}))
         .send()
         .await
         .unwrap();
@@ -290,11 +284,11 @@ async fn test_sync_mode_resume_uses_supplied_session_id() {
 
     let resp = client
         .post(format!("{}/v1/messages", base))
+        .header("Accept", "application/json")
         .json(&serde_json::json!({
             "agent": "aikit",
             "session_id": "sync-resume-test",
             "content": "again",
-            "stream": false,
         }))
         .send()
         .await
@@ -303,6 +297,91 @@ async fn test_sync_mode_resume_uses_supplied_session_id() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["session_id"], "sync-resume-test");
     assert_eq!(body["content"], "ok");
+}
+
+#[tokio::test]
+async fn test_accept_event_stream_returns_sse() {
+    let run_fn = make_stub_run_fn_with_session(
+        vec![StreamFrame::Text {
+            content: "hi".to_string(),
+        }],
+        Some("sse-explicit".to_string()),
+    );
+    let port = start_server_with(run_fn).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .header("Accept", "text/event-stream")
+        .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        ct.contains("text/event-stream"),
+        "Accept: text/event-stream must return SSE, got: {}",
+        ct
+    );
+    let text = resp.text().await.unwrap();
+    assert!(text.contains("event: session"));
+    assert!(text.contains("event: done"));
+}
+
+#[tokio::test]
+async fn test_default_accept_is_sse() {
+    // reqwest sends no explicit Accept (or `*/*`); the server must fall
+    // back to SSE.
+    let run_fn = make_stub_run_fn_with_session(
+        vec![StreamFrame::Text {
+            content: "hi".to_string(),
+        }],
+        Some("sse-default".to_string()),
+    );
+    let port = start_server_with(run_fn).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        ct.contains("text/event-stream"),
+        "default (no Accept) must return SSE, got: {}",
+        ct
+    );
+}
+
+#[tokio::test]
+async fn test_accept_unknown_returns_406() {
+    let port = start_server_with(make_stub_run_fn_with_session(vec![], None)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .header("Accept", "text/html")
+        .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 406);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "not_acceptable");
 }
 
 #[tokio::test]

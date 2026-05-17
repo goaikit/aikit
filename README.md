@@ -109,6 +109,7 @@ aikit list
 | `aikit remove <pkg>` | Uninstall a package (optional: `--force`) |
 | `aikit check` | Check git, VS Code, and AI agent CLIs availability |
 | `aikit run` | Run a coding agent with a prompt |
+| `aikit serve` | Start an HTTP server for multi-turn agent sessions over JSON or SSE |
 | `aikit version` | Show version |
 | `aikit package init <name>` | Create a new package with aikit.toml |
 | `aikit package build` | Build distributable package (output: dist/ or .genreleases/) |
@@ -248,6 +249,71 @@ Run `aikit run --help` for the authoritative option reference.
 
 - **Rust ([aikit-sdk](aikit-sdk/README.md)):** Add `aikit-sdk` to `Cargo.toml`. Use catalog/path/deploy APIs, `run_agent` for buffered stdout/stderr, or `run_agent_events` for the same event stream shape as `aikit run --events` (including optional `token_usage_line` events). Returns `Result<RunResult, RunError>`.
 - **Python ([aikit-py](aikit-py/README.md)):** `pip install aikit-py`. Same surface area from Python: catalog, deploy, `run_agent`, and `run_agent_events_py(..., on_event, ...)` for per-event callbacks (schema matches CLI NDJSON).
+
+## Serving an HTTP API (`aikit serve`)
+
+`aikit serve` exposes the same agent runtime over HTTP, with multi-turn
+sessions and either streaming or single-shot responses. Sessions are created
+implicitly on the first call; the server returns the new `session_id` and the
+client quotes it on subsequent calls to resume.
+
+```bash
+# Start on 127.0.0.1:8787 (defaults)
+aikit serve
+
+# Bind, set a request timeout, and require an API key
+aikit serve --host 0.0.0.0 --port 8787 \
+  --run-timeout-secs 300 --max-sessions 10 \
+  --api-key "$(openssl rand -hex 32)"
+```
+
+**Endpoints:**
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET`  | `/health` | Health check + server version |
+| `GET`  | `/v1/agents` | List runnable agents (same set `aikit run` accepts) |
+| `POST` | `/v1/messages` | Send a turn; creates or resumes a session |
+| `GET`  | `/v1/sessions` | List active and recently completed runs |
+| `GET`  | `/v1/sessions/{id}` | Inspect a run by `session_id` |
+| `DELETE` | `/v1/sessions/{id}` | Abort and close a run |
+
+**Two response shapes on `/v1/messages`, selected by the `Accept` header:**
+
+`Accept: text/event-stream` (or no `Accept`) — Server-Sent Events with
+`event: session` (first frame, carries the new `session_id`), zero or more
+`event: text` / `event: tool_use` / `event: tool_result`, and a terminal
+`event: done`. Errors arrive as `event: error` followed by `event: done`.
+
+```bash
+curl -sN -X POST http://127.0.0.1:8787/v1/messages \
+  -H 'Accept: text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"aikit","content":"Say hello world."}'
+```
+
+`Accept: application/json` — the server runs to completion and returns a
+single JSON body:
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/v1/messages \
+  -H 'Accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"aikit","content":"Say hello world."}' | jq .
+# → {"session_id":"...", "content":"Hello, world!", "exit_code":0}
+```
+
+To resume, pass the `session_id` back in the body:
+
+```bash
+curl -s -X POST http://127.0.0.1:8787/v1/messages \
+  -H 'Accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d "{\"agent\":\"aikit\",\"session_id\":\"$SID\",\"content\":\"And in French?\"}"
+```
+
+Any other explicit `Accept` (e.g. `text/html`) returns `406 Not Acceptable`.
+When `--api-key` is set, every request must carry `Authorization: Bearer <key>`.
 
 ## Supported AI assistants
 

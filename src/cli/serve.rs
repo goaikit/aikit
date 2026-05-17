@@ -1,19 +1,22 @@
 //! `aikit serve` — HTTP server for multi-turn agent sessions.
 //!
-//! Two response shapes share one endpoint, `POST /v1/messages`:
-//! - `"stream": true` (default) → `text/event-stream` (SSE) with
-//!   `event: session`, `event: text`, `event: tool_use`, `event: tool_result`,
-//!   `event: error`, then `event: done`.
-//! - `"stream": false` → server runs to completion, accumulates text content,
-//!   and returns a single `application/json` body
+//! Two response shapes share one endpoint, `POST /v1/messages`, selected by
+//! the request's `Accept` header (HTTP content negotiation):
+//! - `Accept: text/event-stream` → SSE with `event: session`, `event: text`,
+//!   `event: tool_use`, `event: tool_result`, `event: error`, then
+//!   `event: done`.
+//! - `Accept: application/json` → server runs to completion, accumulates the
+//!   assistant text frames, and returns a single JSON body
 //!   `{session_id, content, exit_code, error?}`.
+//! - `Accept: */*`, missing, or both types present → SSE (default).
+//! - Any other explicit media type → `406 Not Acceptable`.
 //!
 //! Session model:
-//! - Sessions are created **implicitly** on the first `POST /v1/messages` call
-//!   that omits `session_id`.
+//! - Sessions are created **implicitly** on the first `POST /v1/messages`
+//!   call that omits `session_id`.
 //! - In SSE mode the first frame is `event: session` carrying the new id; in
-//!   sync mode the id appears in the response body. Subsequent calls quote
-//!   that id in the request body to resume.
+//!   the JSON shape the id appears in the response body. Subsequent calls
+//!   quote that id in the request body to resume.
 //! - For the `aikit` backend the id is assigned by the SDK (and persisted to
 //!   `~/.aikit/sessions/...`). For other backends the id is treated as an
 //!   opaque token forwarded to the underlying CLI's `--resume` flag.
@@ -149,10 +152,6 @@ struct AppState {
 
 // ── HTTP body types ───────────────────────────────────────────────────────────
 
-fn default_true() -> bool {
-    true
-}
-
 #[derive(Deserialize)]
 struct SendMessageRequest {
     agent: String,
@@ -163,10 +162,42 @@ struct SendMessageRequest {
     model: Option<String>,
     #[serde(default)]
     yolo: bool,
-    /// Default `true`. When false, server returns a single JSON body once the
-    /// run completes instead of a `text/event-stream` body.
-    #[serde(default = "default_true")]
-    stream: bool,
+}
+
+/// Response representation negotiated from the request's `Accept` header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponseMode {
+    Sse,
+    Sync,
+    NotAcceptable,
+}
+
+/// Resolve the response representation from an `Accept` header.
+///
+/// - Substring match, case-insensitive.
+/// - Missing/empty header, `*/*`, or both types present → SSE (default).
+/// - `text/event-stream` only → SSE.
+/// - `application/json` only → Sync.
+/// - Any other explicit media type → NotAcceptable (406).
+fn resolve_response_mode(headers: &axum::http::HeaderMap) -> ResponseMode {
+    let raw = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if raw.is_empty() || raw.contains("*/*") {
+        return ResponseMode::Sse;
+    }
+
+    let wants_sse = raw.contains("text/event-stream");
+    let wants_json = raw.contains("application/json");
+
+    match (wants_sse, wants_json) {
+        (true, _) => ResponseMode::Sse,
+        (false, true) => ResponseMode::Sync,
+        (false, false) => ResponseMode::NotAcceptable,
+    }
 }
 
 #[derive(Serialize)]
@@ -664,19 +695,28 @@ fn spawn_run(
 
 async fn messages_handler(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(body): Json<SendMessageRequest>,
 ) -> Response {
+    let mode = resolve_response_mode(&headers);
+    if mode == ResponseMode::NotAcceptable {
+        return error_response(
+            StatusCode::NOT_ACCEPTABLE,
+            "not_acceptable",
+            "Accept must include text/event-stream or application/json",
+        );
+    }
+
     if let Some(err) = validate_request(&body, &state) {
         return err;
     }
 
-    let stream_mode = body.stream;
     let (rx, request_id) = spawn_run(&state, &body);
 
-    if stream_mode {
-        sse_response(rx, Arc::clone(&state.runs), request_id)
-    } else {
-        sync_response(rx, Arc::clone(&state.runs), request_id).await
+    match mode {
+        ResponseMode::Sse => sse_response(rx, Arc::clone(&state.runs), request_id),
+        ResponseMode::Sync => sync_response(rx, Arc::clone(&state.runs), request_id).await,
+        ResponseMode::NotAcceptable => unreachable!(),
     }
 }
 
