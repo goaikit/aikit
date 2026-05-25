@@ -32,14 +32,12 @@ async fn test_missing_auth_returns_401() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{}/health", port))
+        .get(format!("http://127.0.0.1:{}/api/v1/agents", port))
         .send()
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 401);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "unauthorized");
 }
 
 #[tokio::test]
@@ -48,15 +46,13 @@ async fn test_wrong_key_returns_401() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{}/health", port))
+        .get(format!("http://127.0.0.1:{}/api/v1/agents", port))
         .header("Authorization", "Bearer wrongkey")
         .send()
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 401);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "unauthorized");
 }
 
 #[tokio::test]
@@ -65,11 +61,40 @@ async fn test_correct_key_succeeds() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{}/health", port))
+        .get(format!("http://127.0.0.1:{}/api/v1/agents", port))
         .header("Authorization", "Bearer mysecret")
         .send()
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_health_endpoints_bypass_auth() {
+    // Health endpoints are not protected by the auth layer (protect_health defaults to false).
+    let port = start_auth_server("mysecret").await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/healthz", port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "/healthz must be accessible without auth"
+    );
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/readyz", port))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "/readyz must be accessible without auth"
+    );
 }

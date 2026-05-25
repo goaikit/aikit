@@ -39,7 +39,7 @@ async fn test_disconnect_frees_session_slot() {
         .unwrap();
 
     let _ = client2
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({"agent": "aikit", "content": "drop me"}))
         .send()
         .await;
@@ -49,7 +49,7 @@ async fn test_disconnect_frees_session_slot() {
 
     // The session listing should report no active runs.
     let resp = client
-        .get(format!("{}/v1/sessions", base))
+        .get(format!("{}/api/v1/sessions", base))
         .send()
         .await
         .unwrap();

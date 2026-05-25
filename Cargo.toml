@@ -1,6 +1,9 @@
 [workspace]
 members = [".", "aikit-sdk", "aikit-py", "aikit-agent", "aikit-evals"]
 
+[patch."https://github.com/aroff/cli-framework"]
+cli-framework = { path = "/home/sysuser/ws001/aroff/cli-framework" }
+
 [package]
 name = "aikit-cli"
 version = "0.1.120"
@@ -22,7 +25,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # CLI framework (replaces direct clap usage)
-cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "47df85b", features = ["testkit", "mcp-server"] }
+cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "47df85b", features = ["testkit", "mcp-server", "api-server"] }
 
 # HTTP server for aikit serve
 axum = { version = "0.8", features = ["macros"] }
