@@ -1157,6 +1157,11 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
 
     let domain_router = build_router(state.clone());
 
+    #[cfg(feature = "tools")]
+    let domain_router = domain_router.merge(aikit_magictool::router(
+        aikit_magictool::default_registry_state(),
+    ));
+
     let mut builder = ApiServerBuilder::new()
         .version(ApiVersion {
             name: ApiVersionName::new_unchecked("v1"),

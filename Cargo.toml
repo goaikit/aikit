@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "aikit-sdk", "aikit-py", "aikit-agent", "aikit-evals"]
+members = [".", "aikit-sdk", "aikit-py", "aikit-agent", "aikit-evals", "aikit-magictool"]
 
 [package]
 name = "aikit-cli"
@@ -59,6 +59,9 @@ which = "8.0"
 
 # aikit SDK (agent catalog and deploy)
 aikit-sdk = { path = "aikit-sdk", version = "0.3.0" }
+
+# Magic-tool layer (optional; enabled by --features tools)
+aikit-magictool = { path = "aikit-magictool", version = "0.1.0", optional = true, features = ["agent"] }
 
 # Temporary directories
 tempfile = "3.10"
@@ -131,6 +134,9 @@ path = "tests/serve/serve_timeout_test.rs"
 [[test]]
 name = "serve_disconnect_test"
 path = "tests/serve/serve_disconnect_test.rs"
+
+[features]
+tools = ["dep:aikit-magictool"]
 
 [profile.release]
 opt-level = 3
