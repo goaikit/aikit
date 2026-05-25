@@ -24,21 +24,9 @@ built-in `aikit` agent, or anything else in the catalog.
 - **MCP config merge** — `aikit agent mcp add` registers an MCP server
   entry in whichever agent's config file is appropriate (Cursor, Claude,
   Gemini, VS Code Copilot, OpenCode, Codex).
-- **One LLM call** — `aikit llm` wraps any OpenAI-compatible endpoint with
-  streaming and structured-output flags.
 - **Rust + Python gateways** — [`aikit-sdk`](aikit-sdk/README.md) (Rust)
   and [`aikit-py`](aikit-py/README.md) (Python) expose the same catalog,
   paths, deploy, detection, and run/event APIs programmatically.
-
-## Workspace crates
-
-This repo is a Cargo workspace:
-
-- [`aikit-sdk`](aikit-sdk) — Rust SDK (catalog, paths, deploy, run, events).
-- [`aikit-py`](aikit-py) — Python bindings over the SDK.
-- [`aikit-agent`](aikit-agent) — Internals for the built-in `aikit` agent.
-- [`aikit-evals`](aikit-evals) — Evaluation harness for agent runs.
-- root crate — the `aikit` CLI binary.
 
 ## Installation
 
@@ -271,25 +259,7 @@ Six catalog keys are supported: `cursor-agent` (alias `cursor`), `claude`,
 `--overwrite` to replace an existing server id. Full reference:
 [webdocs/mcp.mdx](webdocs/mcp.mdx).
 
-## 6. One-shot LLM (`aikit llm`)
-
-Call any OpenAI-compatible endpoint without writing wrapper code.
-
-```bash
-# Plain prompt
-aikit llm -m gpt-4o -p "Summarise this README in one sentence."
-
-# Streaming output
-aikit llm -m gpt-4o --stream -p "Write a haiku."
-
-# Structured JSON output (with --json-schema)
-aikit llm -m gpt-4o --json -p "Extract name and email from: …"
-```
-
-Uses `OPENAI_API_KEY` by default, or any custom base URL via standard env
-vars.
-
-## 7. Programmatic use
+## 6. Programmatic use
 
 Both crates expose the same capabilities as the CLI:
 

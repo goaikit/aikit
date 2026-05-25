@@ -40,9 +40,9 @@ aikit/
 ## Runtime architecture
 
 1. `src/main.rs` loads environment (`dotenv`) and delegates to `cli::run`.
-2. `src/cli/mod.rs` parses CLI args with `clap`, initializes tracing, and dispatches commands.
+2. `src/cli/mod.rs` registers commands with `cli-framework` (`CommandSpec`), initializes tracing, and dispatches commands.
 3. Command handlers call modules in `src/core`, `src/fs`, `src/github`, and `src/tui`.
-4. Agent execution paths (`run`, `llm`) rely on SDK/runtime crates for provider-specific behavior.
+4. Agent execution paths (`run`) rely on SDK/runtime crates for provider-specific behavior.
 5. `src/cli/serve.rs` starts an `axum` HTTP server. Each request dispatches to `aikit-sdk`
    run/event APIs; `aikit_sdk::session_store` persists session state to `~/.aikit/sessions/`.
 
