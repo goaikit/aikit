@@ -157,8 +157,7 @@ impl Pipeline {
     ///
     /// # Arguments
     /// * `slots` - Values for template placeholders.
-    /// * `runner` - An `AgentRunner` (consumed). Its configuration is extracted
-    ///   before the retry loop so the agent key/model/dir can be reused across attempts.
+    /// * `runner` - An `AgentRunner` whose `run()` is called for each attempt.
     ///
     /// Blocking. Callers needing concurrency MUST use spawn_blocking.
     pub fn run(
@@ -169,24 +168,12 @@ impl Pipeline {
         // Step 1: render the template — fatal if a slot is missing
         let original_prompt = TemplateRenderer::render(&self.template, slots)?;
 
-        // Decompose runner into config so we can rebuild per attempt
-        let (agent_key, model, working_dir) = runner.into_parts();
-
         let mut attempt = 1u32;
         let mut current_prompt = original_prompt.clone();
 
         loop {
-            // Rebuild runner for this attempt
-            let mut attempt_runner = AgentRunner::new().agent(&agent_key);
-            if let Some(ref m) = model {
-                attempt_runner = attempt_runner.model(m);
-            }
-            if let Some(ref d) = working_dir {
-                attempt_runner = attempt_runner.working_dir(d.to_str().unwrap_or(""));
-            }
-
             // Step 2: call the agent — fatal on RunError (no retry)
-            let raw_text = attempt_runner.run(&current_prompt)?;
+            let raw_text = runner.run(&current_prompt)?;
 
             // Step 3: validate
             match ResponseValidator::validate(&raw_text, &self.schema) {
@@ -220,7 +207,7 @@ impl Pipeline {
                         }
                     }
 
-                    // Build augmented retry prompt
+                    // Build augmented retry prompt (§4.6)
                     let mut retry_prompt = original_prompt.clone();
                     retry_prompt.push_str("\n\n## Previous response\n");
                     retry_prompt.push_str(&raw_output);
@@ -246,6 +233,11 @@ impl Pipeline {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_runner::AgentRunner;
+
+    // -----------------------------------------------------------------------
+    // Error display / std::error::Error tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_pipeline_error_display_template_slot_missing() {
@@ -285,10 +277,36 @@ mod tests {
     }
 
     #[test]
+    fn test_pipeline_error_source_agent_invocation() {
+        use crate::runner::RunError;
+        use std::error::Error;
+        let run_err = RunError::AgentNotRunnable("fake".to_string());
+        let err = PipelineError::AgentInvocation { source: run_err };
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn test_pipeline_error_source_others_none() {
+        use std::error::Error;
+        let err = PipelineError::TemplateSlotMissing {
+            slot: "x".to_string(),
+        };
+        assert!(err.source().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Template integration
+    // -----------------------------------------------------------------------
+
+    #[test]
     fn test_template_render_missing_slot_is_fatal() {
         let result = TemplateRenderer::render("Hello {{missing}}", &[]);
         assert!(result.is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Validation integration
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_response_validator_valid_json() {
@@ -317,21 +335,212 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // AC14: max_retries(0) → ValidationFailed returned directly (not MaxRetriesExceeded)
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn test_pipeline_error_source_agent_invocation() {
+    fn test_pipeline_max_retries_0_returns_validation_failed_directly() {
+        let schema =
+            r#"{"type":"object","properties":{"score":{"type":"integer"}},"required":["score"]}"#;
+        let (mock_runner, _) = AgentRunner::with_mock(vec![Ok("not valid json".to_string())]);
+
+        let result = Pipeline::new("test prompt", schema)
+            .max_retries(0)
+            .run(&[], mock_runner);
+
+        assert!(
+            matches!(result, Err(PipelineError::ValidationFailed { .. })),
+            "expected ValidationFailed, got {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC15: max_retries(1), both attempts fail → MaxRetriesExceeded boxing ValidationFailed
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_max_retries_1_both_fail_returns_max_retries_exceeded() {
+        let schema =
+            r#"{"type":"object","properties":{"score":{"type":"integer"}},"required":["score"]}"#;
+        let (mock_runner, _) = AgentRunner::with_mock(vec![
+            Ok("bad output 1".to_string()),
+            Ok("bad output 2".to_string()),
+        ]);
+
+        let result = Pipeline::new("test prompt", schema)
+            .max_retries(1)
+            .run(&[], mock_runner);
+
+        match result {
+            Err(PipelineError::MaxRetriesExceeded { last_error }) => {
+                assert!(
+                    matches!(*last_error, PipelineError::ValidationFailed { .. }),
+                    "last_error should be ValidationFailed, got {:?}",
+                    last_error
+                );
+            }
+            other => panic!("expected MaxRetriesExceeded, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // AC16: max_retries(1), second attempt succeeds → attempts == 2
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_max_retries_1_second_attempt_succeeds_attempts_equals_2() {
+        let schema =
+            r#"{"type":"object","properties":{"score":{"type":"integer"}},"required":["score"]}"#;
+        let valid_response = "```json\n{\"score\": 7}\n```".to_string();
+        let (mock_runner, _) = AgentRunner::with_mock(vec![
+            Ok("not valid json at all".to_string()),
+            Ok(valid_response),
+        ]);
+
+        let result = Pipeline::new("test prompt", schema)
+            .max_retries(1)
+            .run(&[], mock_runner)
+            .expect("should succeed on second attempt");
+
+        assert_eq!(result.attempts, 2, "attempts should be 2 after one retry");
+    }
+
+    // -----------------------------------------------------------------------
+    // AC17: RunError from agent bypasses retry loop regardless of max_retries
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_agent_run_error_is_not_retried() {
         use crate::runner::RunError;
-        use std::error::Error;
-        let run_err = RunError::AgentNotRunnable("fake".to_string());
-        let err = PipelineError::AgentInvocation { source: run_err };
-        assert!(err.source().is_some());
+
+        let schema = r#"{"type":"object"}"#;
+        let (mock_runner, _) = AgentRunner::with_mock(vec![Err(PipelineError::AgentInvocation {
+            source: RunError::AgentNotRunnable("fake-agent".to_string()),
+        })]);
+
+        // Even with max_retries=5, a fatal RunError must surface immediately
+        let result = Pipeline::new("test prompt", schema)
+            .max_retries(5)
+            .run(&[], mock_runner);
+
+        assert!(
+            matches!(result, Err(PipelineError::AgentInvocation { .. })),
+            "expected AgentInvocation (fatal, no retry), got {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC18: Augmented retry prompt contains required content
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_retry_prompt_contains_required_content() {
+        let schema =
+            r#"{"type":"object","properties":{"score":{"type":"integer"}},"required":["score"]}"#;
+        let first_bad_output = "this is definitely not json";
+        let valid_response = "```json\n{\"score\": 1}\n```".to_string();
+
+        let (mock_runner, captured) =
+            AgentRunner::with_mock(vec![Ok(first_bad_output.to_string()), Ok(valid_response)]);
+
+        let _ = Pipeline::new("Original prompt text", schema)
+            .max_retries(1)
+            .run(&[], mock_runner)
+            .expect("should succeed on second attempt");
+
+        let prompts = captured.lock().unwrap();
+        assert_eq!(prompts.len(), 2, "expected 2 prompts (initial + retry)");
+
+        let retry_prompt = &prompts[1];
+        assert!(
+            retry_prompt.contains("Original prompt text"),
+            "retry prompt must contain the original prompt"
+        );
+        assert!(
+            retry_prompt.contains("## Previous response"),
+            "retry prompt must contain '## Previous response' header"
+        );
+        assert!(
+            retry_prompt.contains(first_bad_output),
+            "retry prompt must contain the previous raw output"
+        );
+        assert!(
+            retry_prompt.contains("## Validation errors"),
+            "retry prompt must contain '## Validation errors' header"
+        );
+        assert!(
+            retry_prompt.contains("Please respond again"),
+            "retry prompt must contain the instruction line"
+        );
+        assert!(
+            retry_prompt.contains("```json block"),
+            "retry prompt must mention the required json block format"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // AC24–AC26: Pipeline::run() happy path
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_run_success_json_format() {
+        let schema =
+            r#"{"type":"object","properties":{"score":{"type":"integer"}},"required":["score"]}"#;
+        let valid_response = "```json\n{\"score\": 42}\n```".to_string();
+        let (mock_runner, _) = AgentRunner::with_mock(vec![Ok(valid_response)]);
+
+        let result = Pipeline::new("test prompt", schema)
+            .max_retries(0)
+            .output_format(OutputFormat::Json)
+            .run(&[], mock_runner)
+            .expect("pipeline should succeed");
+
+        assert_eq!(result.attempts, 1);
+        assert!(result.report.contains("42"));
+        assert_eq!(result.data["score"], 42);
     }
 
     #[test]
-    fn test_pipeline_error_source_others_none() {
-        use std::error::Error;
-        let err = PipelineError::TemplateSlotMissing {
-            slot: "x".to_string(),
-        };
-        assert!(err.source().is_none());
+    fn test_pipeline_run_success_markdown_format() {
+        let schema =
+            r#"{"type":"object","properties":{"score":{"type":"integer"}},"required":["score"]}"#;
+        let valid_response = "```json\n{\"score\": 5}\n```".to_string();
+        let (mock_runner, _) = AgentRunner::with_mock(vec![Ok(valid_response)]);
+
+        let result = Pipeline::new("test prompt", schema)
+            .output_format(OutputFormat::Markdown)
+            .report_template("Score: {{score}}")
+            .run(&[], mock_runner)
+            .expect("pipeline should succeed");
+
+        assert_eq!(result.report, "Score: 5");
+    }
+
+    /// Integration test stub: full end-to-end pipeline with a real agent.
+    /// Requires a Claude agent binary installed. Run with: cargo test --ignored
+    #[test]
+    #[ignore]
+    fn integration_test_pipeline_run_end_to_end() {
+        let schema = r#"{
+            "type": "object",
+            "properties": { "greeting": { "type": "string" } },
+            "required": ["greeting"]
+        }"#;
+        let result = Pipeline::new(
+            "Reply with a JSON object containing a single key 'greeting' with value 'hello'.",
+            schema,
+        )
+        .max_retries(1)
+        .output_format(OutputFormat::Json)
+        .run(&[], AgentRunner::new().agent("claude"));
+
+        assert!(
+            result.is_ok(),
+            "integration pipeline should succeed: {:?}",
+            result.err()
+        );
     }
 }

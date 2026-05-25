@@ -7,6 +7,13 @@ use crate::runner::{
 };
 use std::path::PathBuf;
 
+#[cfg(test)]
+type MockQueue = std::sync::Arc<
+    std::sync::Mutex<std::collections::VecDeque<Result<String, crate::pipeline::PipelineError>>>,
+>;
+#[cfg(test)]
+type CapturedPrompts = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
 // ---------------------------------------------------------------------------
 // AgentRunner
 // ---------------------------------------------------------------------------
@@ -16,6 +23,10 @@ pub struct AgentRunner {
     agent_key: String,
     model: Option<String>,
     working_dir: Option<PathBuf>,
+    #[cfg(test)]
+    mock_responses: Option<MockQueue>,
+    #[cfg(test)]
+    captured_prompts: Option<CapturedPrompts>,
 }
 
 impl AgentRunner {
@@ -25,7 +36,32 @@ impl AgentRunner {
             agent_key: String::new(),
             model: None,
             working_dir: None,
+            #[cfg(test)]
+            mock_responses: None,
+            #[cfg(test)]
+            captured_prompts: None,
         }
+    }
+
+    /// Create a mock `AgentRunner` for testing.
+    ///
+    /// Returns the runner and a shared prompt capture buffer.
+    /// Each call to `run()` pops the next response from `responses`.
+    #[cfg(test)]
+    pub(crate) fn with_mock(
+        responses: Vec<Result<String, crate::pipeline::PipelineError>>,
+    ) -> (Self, CapturedPrompts) {
+        use std::collections::VecDeque;
+        use std::sync::{Arc, Mutex};
+        let captured: CapturedPrompts = Arc::new(Mutex::new(Vec::new()));
+        let runner = Self {
+            agent_key: String::new(),
+            model: None,
+            working_dir: None,
+            mock_responses: Some(Arc::new(Mutex::new(VecDeque::from(responses)))),
+            captured_prompts: Some(captured.clone()),
+        };
+        (runner, captured)
     }
 
     /// Set the agent key.
@@ -46,24 +82,28 @@ impl AgentRunner {
         self
     }
 
-    /// Decompose the runner into its configuration parts.
-    ///
-    /// Returns `(agent_key, model, working_dir)`. Used by `Pipeline::run` to
-    /// reconstruct the runner on each retry attempt.
-    pub fn into_parts(self) -> (String, Option<String>, Option<PathBuf>) {
-        (self.agent_key, self.model, self.working_dir)
-    }
-
     /// Invoke the agent with `prompt`; assemble assistant text from the event stream.
     ///
     /// Blocking. Returns `PipelineError::AgentInvocation` on any RunError.
-    pub fn run(self, prompt: &str) -> Result<String, PipelineError> {
-        let mut options = RunOptions::default();
-        if let Some(model) = self.model {
-            options.model = Some(model);
+    pub fn run(&self, prompt: &str) -> Result<String, PipelineError> {
+        // In tests: use mock response queue if populated.
+        #[cfg(test)]
+        if let Some(ref responses) = self.mock_responses {
+            let mut queue = responses.lock().unwrap();
+            if !queue.is_empty() {
+                if let Some(ref captured) = self.captured_prompts {
+                    captured.lock().unwrap().push(prompt.to_string());
+                }
+                return queue.pop_front().unwrap();
+            }
         }
-        if let Some(dir) = self.working_dir {
-            options.current_dir = Some(dir);
+
+        let mut options = RunOptions::default();
+        if let Some(ref model) = self.model {
+            options.model = Some(model.clone());
+        }
+        if let Some(ref dir) = self.working_dir {
+            options.current_dir = Some(dir.clone());
         }
 
         let mut events: Vec<AgentEvent> = Vec::new();
@@ -287,11 +327,29 @@ mod tests {
         assert_eq!(aikit_info.name, "aikit");
     }
 
+    /// AC8: Verify that AgentRunner::run() maps RunError to PipelineError::AgentInvocation.
+    ///
+    /// An unknown agent key causes run_agent_events to return RunError::AgentNotRunnable,
+    /// which must be mapped to PipelineError::AgentInvocation by the .map_err() call.
     #[test]
-    fn test_run_error_not_runnable_maps_to_pipeline_error() {
-        use crate::runner::RunError;
-        let run_err = RunError::AgentNotRunnable("fake".to_string());
-        let pipeline_err = crate::pipeline::PipelineError::AgentInvocation { source: run_err };
-        assert!(pipeline_err.to_string().contains("agent invocation failed"));
+    fn test_agent_runner_run_maps_run_error_to_agent_invocation() {
+        let runner = AgentRunner::new().agent("_not_a_real_agent_key_for_testing_xyz_");
+        let result = runner.run("test prompt");
+        assert!(
+            matches!(result, Err(PipelineError::AgentInvocation { .. })),
+            "expected AgentInvocation, got {:?}",
+            result
+        );
+    }
+
+    /// Integration test: verify AgentDetector::detect() works on a live system.
+    /// Requires at least one agent binary to be installed.
+    #[test]
+    #[ignore]
+    fn integration_test_agent_detector_detect_on_live_system() {
+        let infos = AgentDetector::detect();
+        assert!(!infos.is_empty(), "expected at least one agent entry");
+        let has_installed = infos.iter().any(|i| i.installed);
+        assert!(has_installed, "expected at least one installed agent");
     }
 }
