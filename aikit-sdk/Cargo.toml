@@ -21,6 +21,7 @@ zip = "2.3"
 tempfile = "3.12"
 uuid = { version = "1", features = ["v4"] }
 aikit-agent = { path = "../aikit-agent", version = "0.1.0" }
+jsonschema = "0.46"
 
 [dev-dependencies]
 insta = { version = "1.39", features = ["json"] }
