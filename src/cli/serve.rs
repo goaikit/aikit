@@ -928,6 +928,12 @@ fn build_router(state: AppState) -> Router {
         .fallback(not_found_handler)
         .with_state(state.clone());
 
+    #[cfg(feature = "tools")]
+    let router = {
+        let tools_state = aikit_tools::default_registry_state();
+        router.merge(aikit_tools::router(tools_state))
+    };
+
     if state.config.api_key.is_some() {
         router.layer(middleware::from_fn_with_state(state, auth_middleware))
     } else {

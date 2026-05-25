@@ -1,0 +1,22 @@
+[package]
+name = "aikit-tools"
+version = "0.1.0"
+edition = "2021"
+description = "Agent-backed magic-button tool framework for aikit serve"
+license = "Apache-2.0"
+repository = "https://github.com/goaikit/aikit"
+
+[dependencies]
+aikit-agent = { path = "../aikit-agent", version = "0.1.0" }
+axum = { version = "0.8", features = ["macros"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+jsonschema = "0.46"
+thiserror = "2.0"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
