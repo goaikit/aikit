@@ -441,6 +441,18 @@ pub mod install;
 pub mod manifest;
 pub mod mcp_deploy;
 
+pub mod agent_runner;
+pub mod pipeline;
+pub mod report;
+pub mod template;
+pub mod validation;
+
+pub use agent_runner::{AgentDetector, AgentInfo, AgentRunner};
+pub use pipeline::{OutputFormat, Pipeline, PipelineError, PipelineResult};
+pub use report::ReportRenderer;
+pub use template::TemplateRenderer;
+pub use validation::{ResponseValidator, ValidatedResponse};
+
 pub use fetch::TemplateSource;
 pub use install::{
     copy_artifacts, install_template_from_source, install_template_to_path, installed_package_root,
