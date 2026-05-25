@@ -26,3 +26,4 @@ optional = true
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
+jsonschema = "0.46"
