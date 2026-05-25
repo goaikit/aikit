@@ -1,6 +1,6 @@
 //! `aikit serve` — HTTP server for multi-turn agent sessions.
 //!
-//! Two response shapes share one endpoint, `POST /v1/messages`, selected by
+//! Two response shapes share one endpoint, `POST /api/v1/messages`, selected by
 //! the request's `Accept` header (HTTP content negotiation):
 //! - `Accept: text/event-stream` → SSE with `event: session`, `event: text`,
 //!   `event: tool_use`, `event: tool_result`, `event: error`, then
@@ -12,7 +12,7 @@
 //! - Any other explicit media type → `406 Not Acceptable`.
 //!
 //! Session model:
-//! - Sessions are created **implicitly** on the first `POST /v1/messages`
+//! - Sessions are created **implicitly** on the first `POST /api/v1/messages`
 //!   call that omits `session_id`.
 //! - In SSE mode the first frame is `event: session` carrying the new id; in
 //!   the JSON shape the id appears in the response body. Subsequent calls
@@ -21,15 +21,16 @@
 //!   `~/.aikit/sessions/...`). For other backends the id is treated as an
 //!   opaque token forwarded to the underlying CLI's `--resume` flag.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::middleware::{self, Next};
+use axum::middleware;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -44,6 +45,11 @@ use aikit_sdk::{
     get_agent_status, AgentEventPayload, MessageKind, MessagePhase, MessageRole, RunError,
     RunOptions,
 };
+
+use cli_framework::api::{
+    ApiServerBuilder, ApiVersion, ApiVersionName, DefaultVersion, ReadinessReport, Stability,
+};
+use cli_framework::tower::util::BoxCloneLayer;
 
 use crate::core::agent::get_agent_configs;
 
@@ -313,16 +319,6 @@ fn frame_to_sse(frame: &StreamFrame) -> Event {
 
 // ── handlers ─────────────────────────────────────────────────────────────────
 
-async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let _ = state;
-    let version = env!("CARGO_PKG_VERSION");
-    (
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "application/json")],
-        format!(r#"{{"status":"ok","version":"{}"}}"#, version),
-    )
-}
-
 /// Build the list of runnable agents (those `aikit run` would accept).
 fn build_runnable_agents() -> Vec<AgentInfo> {
     let status_map = get_agent_status();
@@ -487,7 +483,7 @@ fn validate_request(body: &SendMessageRequest, state: &AppState) -> Option<Respo
             StatusCode::NOT_FOUND,
             "agent_not_found",
             &format!(
-                "Agent '{}' is not available. Use GET /v1/agents to see available agents.",
+                "Agent '{}' is not available. Use GET /api/v1/agents to see available agents.",
                 body.agent
             ),
         ));
@@ -887,52 +883,14 @@ async fn sync_response(
         .into_response()
 }
 
-// ── auth middleware ───────────────────────────────────────────────────────────
-
-async fn auth_middleware(State(state): State<AppState>, request: Request, next: Next) -> Response {
-    let expected_key = match &state.config.api_key {
-        Some(k) => k.clone(),
-        None => return next.run(request).await,
-    };
-
-    let auth_header = request
-        .headers()
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-
-    let token = auth_header.and_then(|h| h.strip_prefix("Bearer "));
-
-    if token.map(|t| t == expected_key).unwrap_or(false) {
-        next.run(request).await
-    } else {
-        error_response(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Invalid or missing API key",
-        )
-    }
-}
-
-async fn not_found_handler() -> Response {
-    error_response(StatusCode::NOT_FOUND, "not_found", "Not Found")
-}
-
 fn build_router(state: AppState) -> Router {
-    let router = Router::new()
-        .route("/health", get(health_handler))
-        .route("/v1/agents", get(agents_handler))
-        .route("/v1/messages", post(messages_handler))
-        .route("/v1/sessions", get(list_runs_handler))
-        .route("/v1/sessions/{session_id}", get(get_run_handler))
-        .route("/v1/sessions/{session_id}", delete(delete_run_handler))
-        .fallback(not_found_handler)
-        .with_state(state.clone());
-
-    if state.config.api_key.is_some() {
-        router.layer(middleware::from_fn_with_state(state, auth_middleware))
-    } else {
-        router
-    }
+    Router::new()
+        .route("/agents", get(agents_handler))
+        .route("/messages", post(messages_handler))
+        .route("/sessions", get(list_runs_handler))
+        .route("/sessions/{session_id}", get(get_run_handler))
+        .route("/sessions/{session_id}", delete(delete_run_handler))
+        .with_state(state)
 }
 
 // ── production run_fn ─────────────────────────────────────────────────────────
@@ -1197,63 +1155,81 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
         .parse()
         .map_err(|e| anyhow::anyhow!("invalid address {}:{}: {}", config.host, config.port, e))?;
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|_e| {
-        anyhow::anyhow!(
-            "error: address already in use: {}:{}",
-            config.host,
-            config.port
-        )
-    })?;
+    let domain_router = build_router(state.clone());
 
-    let bound_addr = listener.local_addr()?;
+    let mut builder = ApiServerBuilder::new()
+        .version(ApiVersion {
+            name: ApiVersionName::new_unchecked("v1"),
+            router: domain_router,
+            stability: Stability::Stable,
+            deprecation: None,
+        })
+        .default_version(DefaultVersion::Pinned(ApiVersionName::new_unchecked("v1")))
+        .readiness_check(Arc::new(|| {
+            Box::pin(async {
+                ReadinessReport {
+                    ready: true,
+                    checks: BTreeMap::new(),
+                }
+            })
+        }));
 
-    eprintln!("Listening on http://{}", bound_addr);
+    if let Some(ref key) = config.api_key {
+        let key = key.clone();
+        let bearer_layer = BoxCloneLayer::new(middleware::from_fn(
+            move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+                let key = key.clone();
+                async move {
+                    let authorized = req
+                        .headers()
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|h| h.strip_prefix("Bearer "))
+                        .map(|t| t == key.as_str())
+                        .unwrap_or(false);
+                    if authorized {
+                        next.run(req).await
+                    } else {
+                        error_response(
+                            StatusCode::UNAUTHORIZED,
+                            "unauthorized",
+                            "Invalid or missing API key",
+                        )
+                    }
+                }
+            },
+        ));
+        builder = builder.auth(bearer_layer);
+    }
 
-    let is_loopback = addr.ip().is_loopback();
-    if !is_loopback {
+    let server = builder.build();
+
+    eprintln!("Listening on http://{}", addr);
+    if !addr.ip().is_loopback() {
         eprintln!(
             "Warning: server is bound to a non-loopback address. Set --api-key or restrict access via network ACLs."
         );
     }
 
-    let router = build_router(state.clone());
-
-    let shutdown_signal = async {
-        let ctrl_c = tokio::signal::ctrl_c();
-        #[cfg(unix)]
-        {
-            use tokio::signal::unix::{signal, SignalKind};
-            let mut sigterm =
-                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-            tokio::select! {
-                _ = ctrl_c => {},
-                _ = sigterm.recv() => {},
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = ctrl_c.await;
-        }
-        tracing::info!("Shutdown signal received; draining in-flight sessions...");
-    };
-
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal)
-        .await
-        .map_err(|e| anyhow::anyhow!("server error: {}", e))?;
-
-    {
-        let mut runs = state.runs.lock().unwrap();
+    // Spawn a task that aborts all in-flight RunFn handles when the framework
+    // signals shutdown. The token fires ~200 ms before axum's graceful-drain
+    // starts, giving SSE handlers time to observe the abort and close cleanly.
+    let token = server.shutdown_token();
+    let runs_ref = Arc::clone(&state.runs);
+    tokio::spawn(async move {
+        token.cancelled().await;
+        let mut runs = runs_ref.lock().unwrap();
         for r in runs.values_mut() {
             if let Some(handle) = r.abort_handle.take() {
                 handle.abort();
             }
         }
-    }
+    });
 
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    Ok(())
+    server
+        .serve(&addr.to_string())
+        .await
+        .map_err(|e| anyhow::anyhow!("server error: {}", e))
 }
 
 // ── test stub helpers ─────────────────────────────────────────────────────────

@@ -36,14 +36,16 @@ A warning is printed if you bind to a non-loopback interface without
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET`  | `/health` | Health check + server version |
-| `GET`  | `/v1/agents` | List runnable agents |
-| `POST` | `/v1/messages` | Send a turn; creates or resumes a session |
-| `GET`  | `/v1/sessions` | List active and recently completed runs |
-| `GET`  | `/v1/sessions/{id}` | Inspect one run by `session_id` |
-| `DELETE` | `/v1/sessions/{id}` | Abort and close a run |
+| `GET`  | `/healthz` | Liveness health check |
+| `GET`  | `/readyz` | Readiness health check |
+| `GET`  | `/api/` | Redirects `308` to `/api/v1` |
+| `GET`  | `/api/v1/agents` | List runnable agents |
+| `POST` | `/api/v1/messages` | Send a turn; creates or resumes a session |
+| `GET`  | `/api/v1/sessions` | List active and recently completed runs |
+| `GET`  | `/api/v1/sessions/{id}` | Inspect one run by `session_id` |
+| `DELETE` | `/api/v1/sessions/{id}` | Abort and close a run |
 
-### `GET /v1/agents`
+### `GET /api/v1/agents`
 
 Returns only the agents that `aikit agent run` would currently accept on this host —
 the same list `aikit check` reports. Dev-environment tools like `git` and
@@ -59,7 +61,7 @@ the same list `aikit check` reports. Dev-environment tools like `git` and
 }
 ```
 
-## `POST /v1/messages`
+## `POST /api/v1/messages`
 
 Request body:
 
@@ -90,7 +92,7 @@ Matching is case-insensitive substring; q-values are ignored.
 ### SSE response (`Accept: text/event-stream`)
 
 ```bash
-curl -sN -X POST http://127.0.0.1:8787/v1/messages \
+curl -sN -X POST http://127.0.0.1:8787/api/v1/messages \
   -H 'Accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{"agent":"aikit","content":"Say hello world."}'
@@ -129,7 +131,7 @@ otherwise frames may not surface until the run completes.
 ### Sync JSON response (`Accept: application/json`)
 
 ```bash
-curl -s -X POST http://127.0.0.1:8787/v1/messages \
+curl -s -X POST http://127.0.0.1:8787/api/v1/messages \
   -H 'Accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '{"agent":"aikit","content":"Say hello world."}' | jq .
@@ -161,23 +163,23 @@ if you need tool visibility, use SSE.
 
 ## Session lifecycle
 
-Sessions are created **implicitly** on the first `POST /v1/messages` that
+Sessions are created **implicitly** on the first `POST /api/v1/messages` that
 omits `session_id`. The server returns the new id (in the first SSE frame or
 the JSON body), and the client quotes it back on the next call to resume.
 
 ```bash
 # 1. First turn — server mints a session_id
-SID=$(curl -s -X POST http://127.0.0.1:8787/v1/messages \
+SID=$(curl -s -X POST http://127.0.0.1:8787/api/v1/messages \
   -H 'Accept: application/json' -H 'Content-Type: application/json' \
   -d '{"agent":"aikit","content":"Say hello."}' | jq -r .session_id)
 
 # 2. Resume — same session, more turns
-curl -s -X POST http://127.0.0.1:8787/v1/messages \
+curl -s -X POST http://127.0.0.1:8787/api/v1/messages \
   -H 'Accept: application/json' -H 'Content-Type: application/json' \
   -d "{\"agent\":\"aikit\",\"session_id\":\"$SID\",\"content\":\"And in French?\"}"
 
 # 3. New conversation — omit session_id again
-curl -s -X POST http://127.0.0.1:8787/v1/messages \
+curl -s -X POST http://127.0.0.1:8787/api/v1/messages \
   -H 'Accept: application/json' -H 'Content-Type: application/json' \
   -d '{"agent":"aikit","content":"Write a haiku."}'
 ```
@@ -187,15 +189,15 @@ For the `aikit` backend the id is assigned by the SDK and persisted to
 id is forwarded to the underlying CLI's `--resume` flag and managed by that
 CLI's own session store.
 
-`GET /v1/sessions` lists runs the server has seen this process; `DELETE
-/v1/sessions/{id}` aborts the run (if mid-flight) and closes the record.
+`GET /api/v1/sessions` lists runs the server has seen this process; `DELETE
+/api/v1/sessions/{id}` aborts the run (if mid-flight) and closes the record.
 
 ## Error codes
 
 | HTTP | `error.code` | When |
 |------|--------------|------|
 | `422` | `invalid_request` | `agent` or `content` missing / empty |
-| `404` | `agent_not_found` | `agent` is not in `GET /v1/agents` |
+| `404` | `agent_not_found` | `agent` is not in `GET /api/v1/agents` |
 | `404` | `session_not_found` | `session_id` doesn't exist (aikit pre-flight) |
 | `409` | `session_busy` | Another request is mid-run on this `session_id` |
 | `429` | `session_limit_reached` | `--max-sessions` exceeded |
@@ -215,7 +217,8 @@ Authorization: Bearer <key>
 ```
 
 Missing or wrong key → `401 unauthorized`. The check applies to all
-endpoints, including `/health`.
+domain endpoints under `/api/v1/`. Health endpoints (`/healthz`, `/readyz`)
+are publicly accessible by default.
 
 ## Logging
 

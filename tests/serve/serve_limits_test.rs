@@ -1,4 +1,4 @@
-//! Tests for capacity and concurrency limits on the new POST /v1/messages flow.
+//! Tests for capacity and concurrency limits on the new POST /api/v1/messages flow.
 
 use std::time::Duration;
 
@@ -38,7 +38,7 @@ async fn test_max_sessions_returns_429() {
     let client_a = client.clone();
     let first = tokio::spawn(async move {
         client_a
-            .post(format!("{}/v1/messages", base_a))
+            .post(format!("{}/api/v1/messages", base_a))
             .json(&serde_json::json!({"agent": "aikit", "content": "blocker"}))
             .send()
             .await
@@ -49,7 +49,7 @@ async fn test_max_sessions_returns_429() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let resp = client
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({"agent": "aikit", "content": "second"}))
         .send()
         .await
@@ -99,7 +99,7 @@ async fn test_concurrent_resume_returns_409() {
     let client_a = client.clone();
     let first = tokio::spawn(async move {
         client_a
-            .post(format!("{}/v1/messages", base_a))
+            .post(format!("{}/api/v1/messages", base_a))
             .json(&serde_json::json!({
                 "agent": "aikit",
                 "session_id": session_id,
@@ -114,7 +114,7 @@ async fn test_concurrent_resume_returns_409() {
 
     // Second resume for the same session_id → 409.
     let resp = client
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({
             "agent": "aikit",
             "session_id": session_id,
@@ -137,7 +137,7 @@ async fn test_invalid_request_returns_422() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
         .json(&serde_json::json!({"agent": "", "content": "x"}))
         .send()
         .await

@@ -33,7 +33,7 @@ async fn test_timeout_emits_sse_error_and_done() {
     let base = format!("http://127.0.0.1:{}", port);
 
     let resp = client
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({"agent": "aikit", "content": "trigger timeout"}))
         .send()
         .await

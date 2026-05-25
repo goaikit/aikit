@@ -17,7 +17,7 @@ Terms below reflect discussion of **AIKit**, **HTTP exposure for agent operation
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **Long-lived HTTP service** | A process that binds a port and handles concurrent requests until shutdown. | "Service" when you mean only a library or a one-shot CLI |
-| **Agent HTTP API** | Versioned REST-style routes (e.g. under `/agents/v1`) for run and catalog operations backed by aikit-sdk. | MCP, OpenAI API, "the proxy" |
+| **Agent HTTP API** | Versioned REST-style routes (e.g. under `/api/v1`) for run and catalog operations backed by aikit-sdk. | MCP, OpenAI API, "the proxy" |
 | **Streamable MCP endpoint** | An HTTP path serving the Model Context Protocol (JSON-RPC / SSE) for tools, optionally merged onto the same listener as other routes. | "MCP server" when you mean only config file editing |
 | **MCP config merge** | Writing MCP client entries into assistant config files; does not by itself start a listener. | "Adding MCP", deploying MCP |
 

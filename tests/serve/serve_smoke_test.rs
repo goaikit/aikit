@@ -1,9 +1,9 @@
 //! End-to-end test of the new implicit-session API:
-//!   1. POST /v1/messages with no session_id → server emits `event: session`
+//!   1. POST /api/v1/messages with no session_id → server emits `event: session`
 //!      then streams content and `event: done`.
-//!   2. POST /v1/messages with the returned session_id → resumes the same
+//!   2. POST /api/v1/messages with the returned session_id → resumes the same
 //!      conversation (session frame echoes the supplied id, no new id minted).
-//!   3. POST /v1/messages omitting session_id again → server mints a fresh,
+//!   3. POST /api/v1/messages omitting session_id again → server mints a fresh,
 //!      different id (a wholly new conversation).
 //!
 //! Agent execution is fully stubbed — no LLM credentials required.
@@ -68,7 +68,7 @@ async fn test_health_endpoint() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{}/health", port))
+        .get(format!("http://127.0.0.1:{}/healthz", port))
         .send()
         .await
         .unwrap();
@@ -83,12 +83,46 @@ async fn test_health_endpoint() {
 }
 
 #[tokio::test]
+async fn test_readyz_endpoint() {
+    let port = start_server_with(make_stub_run_fn_with_session(vec![], None)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/readyz", port))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ready");
+}
+
+#[tokio::test]
+async fn test_old_health_endpoint_not_served() {
+    let port = start_server_with(make_stub_run_fn_with_session(vec![], None)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/health", port))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        404,
+        "/health must not be served (use /healthz)"
+    );
+}
+
+#[tokio::test]
 async fn test_agents_endpoint_returns_runnable_only() {
     let port = start_server_with(make_stub_run_fn_with_session(vec![], None)).await;
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{}/v1/agents", port))
+        .get(format!("http://127.0.0.1:{}/api/v1/agents", port))
         .send()
         .await
         .unwrap();
@@ -119,6 +153,41 @@ async fn test_agents_endpoint_returns_runnable_only() {
 }
 
 #[tokio::test]
+async fn test_old_v1_prefix_not_served() {
+    let port = start_server_with(make_stub_run_fn_with_session(vec![], None)).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/v1/agents", port))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        404,
+        "/v1/* must not be served (use /api/v1/*)"
+    );
+}
+
+#[tokio::test]
+async fn test_api_root_redirect() {
+    let port = start_server_with(make_stub_run_fn_with_session(vec![], None)).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/api/", port))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 308, "GET /api/ must 308-redirect to /api/v1");
+}
+
+#[tokio::test]
 async fn test_new_then_resume_then_new_flow() {
     // The stub mints "stub-session-1" the first time options.session_id is
     // None; on resume it echoes whatever id the client supplied.
@@ -134,7 +203,7 @@ async fn test_new_then_resume_then_new_flow() {
 
     // ── 1. First turn: no session_id → server mints + returns it ──
     let resp = client
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
         .send()
         .await
@@ -165,7 +234,7 @@ async fn test_new_then_resume_then_new_flow() {
     // The session should now be listable under its id.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let resp = client
-        .get(format!("{}/v1/sessions/{}", base, sid1))
+        .get(format!("{}/api/v1/sessions/{}", base, sid1))
         .send()
         .await
         .unwrap();
@@ -177,7 +246,7 @@ async fn test_new_then_resume_then_new_flow() {
 
     // ── 2. Second turn: same session_id → stub echoes that id back ──
     let resp = client
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({
             "agent": "aikit",
             "session_id": sid1,
@@ -196,7 +265,7 @@ async fn test_new_then_resume_then_new_flow() {
     // restarting the server is overkill. The contract we check here is that
     // omitting session_id triggers a fresh `session` frame.)
     let resp = client
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({"agent": "aikit", "content": "new topic"}))
         .send()
         .await
@@ -226,7 +295,7 @@ async fn test_accept_application_json_returns_sync() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
         .header("Accept", "application/json")
         .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
         .send()
@@ -273,7 +342,7 @@ async fn test_accept_application_json_resume() {
     let base = format!("http://127.0.0.1:{}", port);
 
     let resp = client
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .header("Accept", "application/json")
         .json(&serde_json::json!({"agent": "aikit", "content": "first"}))
         .send()
@@ -284,7 +353,7 @@ async fn test_accept_application_json_resume() {
     assert_eq!(body["session_id"], "sync-resume-test");
 
     let resp = client
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .header("Accept", "application/json")
         .json(&serde_json::json!({
             "agent": "aikit",
@@ -312,7 +381,7 @@ async fn test_accept_event_stream_returns_sse() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
         .header("Accept", "text/event-stream")
         .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
         .send()
@@ -349,7 +418,7 @@ async fn test_default_accept_is_sse() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
         .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
         .send()
         .await
@@ -379,7 +448,7 @@ async fn test_sync_empty_content_with_nonzero_exit_surfaces_stderr() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
         .header("Accept", "application/json")
         .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
         .send()
@@ -405,7 +474,7 @@ async fn test_accept_unknown_returns_406() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
         .header("Accept", "text/html")
         .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
         .send()
@@ -422,7 +491,7 @@ async fn test_unknown_agent_returns_404_before_streaming() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
         .json(&serde_json::json!({"agent": "definitely-not-real", "content": "hi"}))
         .send()
         .await
@@ -438,7 +507,7 @@ async fn test_empty_agent_returns_422() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
         .json(&serde_json::json!({"agent": "", "content": "hi"}))
         .send()
         .await
@@ -454,7 +523,7 @@ async fn test_empty_content_returns_422() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
         .json(&serde_json::json!({"agent": "aikit", "content": ""}))
         .send()
         .await
@@ -476,7 +545,7 @@ async fn test_aikit_resume_with_unknown_id_returns_404() {
     std::env::set_var("AIKIT_SESSIONS_DIR", tmp.path());
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/messages", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
         .json(&serde_json::json!({
             "agent": "aikit",
             "session_id": "00000000-0000-0000-0000-000000000000",
@@ -505,7 +574,7 @@ async fn test_list_sessions_includes_completed_run() {
     let base = format!("http://127.0.0.1:{}", port);
 
     let resp = client
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
         .send()
         .await
@@ -515,7 +584,7 @@ async fn test_list_sessions_includes_completed_run() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let resp = client
-        .get(format!("{}/v1/sessions", base))
+        .get(format!("{}/api/v1/sessions", base))
         .send()
         .await
         .unwrap();
@@ -541,7 +610,7 @@ async fn test_delete_session() {
     let base = format!("http://127.0.0.1:{}", port);
 
     let resp = client
-        .post(format!("{}/v1/messages", base))
+        .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
         .send()
         .await
@@ -551,7 +620,7 @@ async fn test_delete_session() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let resp = client
-        .delete(format!("{}/v1/sessions/stub-delete-test", base))
+        .delete(format!("{}/api/v1/sessions/stub-delete-test", base))
         .send()
         .await
         .unwrap();
@@ -561,7 +630,7 @@ async fn test_delete_session() {
 
     // Subsequent GET is 404.
     let resp = client
-        .get(format!("{}/v1/sessions/stub-delete-test", base))
+        .get(format!("{}/api/v1/sessions/stub-delete-test", base))
         .send()
         .await
         .unwrap();
@@ -574,13 +643,11 @@ async fn test_not_found_route() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("http://127.0.0.1:{}/v1/nonexistent", port))
+        .get(format!("http://127.0.0.1:{}/api/v1/nonexistent", port))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "not_found");
 }
 
 #[tokio::test]
@@ -589,17 +656,17 @@ async fn test_legacy_create_session_endpoint_removed() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .post(format!("http://127.0.0.1:{}/v1/sessions", port))
+        .post(format!("http://127.0.0.1:{}/api/v1/sessions", port))
         .json(&serde_json::json!({"agent": "aikit"}))
         .send()
         .await
         .unwrap();
-    // POST /v1/sessions used to create a session; it must now be gone.
+    // POST /api/v1/sessions used to create a session; it must now be gone.
     // Either 404 (no route at all) or 405 (route exists for GET only) is OK.
     let s = resp.status().as_u16();
     assert!(
         s == 404 || s == 405,
-        "POST /v1/sessions must no longer create sessions (got {})",
+        "POST /api/v1/sessions must not create sessions (got {})",
         s
     );
 }

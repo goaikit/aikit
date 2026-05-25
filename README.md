@@ -160,24 +160,27 @@ aikit serve --host 0.0.0.0 --port 8787 \
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| `GET`  | `/health` | Health check + server version |
-| `GET`  | `/v1/agents` | List runnable agents |
-| `POST` | `/v1/messages` | Send a turn; creates or resumes a session |
-| `GET`  | `/v1/sessions` | List active and recently completed runs |
-| `GET`  | `/v1/sessions/{id}` | Inspect one run |
-| `DELETE` | `/v1/sessions/{id}` | Abort and close a run |
+| `GET`  | `/healthz` | Liveness health check |
+| `GET`  | `/readyz` | Readiness health check |
+| `GET`  | `/api/v1/agents` | List runnable agents |
+| `POST` | `/api/v1/messages` | Send a turn; creates or resumes a session |
+| `GET`  | `/api/v1/sessions` | List active and recently completed runs |
+| `GET`  | `/api/v1/sessions/{id}` | Inspect one run |
+| `DELETE` | `/api/v1/sessions/{id}` | Abort and close a run |
 
-**Two response shapes on `/v1/messages`, selected by the `Accept` header:**
+`GET /api/` redirects `308` to `/api/v1`.
+
+**Two response shapes on `/api/v1/messages`, selected by the `Accept` header:**
 
 ```bash
 # SSE (incremental — default when Accept is missing or */*)
-curl -sN -X POST http://127.0.0.1:8787/v1/messages \
+curl -sN -X POST http://127.0.0.1:8787/api/v1/messages \
   -H 'Accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{"agent":"aikit","content":"Say hello."}'
 
 # Single JSON body (runs to completion, returns assistant text + session_id)
-curl -s -X POST http://127.0.0.1:8787/v1/messages \
+curl -s -X POST http://127.0.0.1:8787/api/v1/messages \
   -H 'Accept: application/json' \
   -H 'Content-Type: application/json' \
   -d '{"agent":"aikit","content":"Say hello."}' | jq .
