@@ -9,7 +9,6 @@
 //! - Unused slots are silently ignored.
 
 use crate::pipeline::PipelineError;
-use std::collections::HashMap;
 
 /// Renders `{{slot}}` templates with a single-pass algorithm.
 pub struct TemplateRenderer;
@@ -19,10 +18,7 @@ impl TemplateRenderer {
     ///
     /// Returns the rendered string, or `PipelineError::TemplateSlotMissing`
     /// if a referenced slot is not present in `slots`.
-    pub fn render(
-        template: &str,
-        slots: &HashMap<String, String>,
-    ) -> Result<String, PipelineError> {
+    pub fn render(template: &str, slots: &[(&str, &str)]) -> Result<String, PipelineError> {
         let mut output = String::with_capacity(template.len());
         let bytes = template.as_bytes();
         let len = bytes.len();
@@ -57,13 +53,15 @@ impl TemplateRenderer {
                     j += 1;
                 }
                 if found_close {
-                    let slot_name = template[start..j].trim().to_string();
-                    match slots.get(&slot_name) {
-                        Some(value) => {
+                    let slot_name = template[start..j].trim();
+                    match slots.iter().find(|(k, _)| *k == slot_name) {
+                        Some((_, value)) => {
                             output.push_str(value);
                         }
                         None => {
-                            return Err(PipelineError::TemplateSlotMissing { slot: slot_name });
+                            return Err(PipelineError::TemplateSlotMissing {
+                                slot: slot_name.to_string(),
+                            });
                         }
                     }
                     i = j + 2;
@@ -107,17 +105,9 @@ fn utf8_char_len(b: u8) -> usize {
 mod tests {
     use super::*;
 
-    fn slots(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    }
-
     #[test]
     fn test_basic_substitution() {
-        let result =
-            TemplateRenderer::render("Hello, {{name}}!", &slots(&[("name", "world")])).unwrap();
+        let result = TemplateRenderer::render("Hello, {{name}}!", &[("name", "world")]).unwrap();
         assert_eq!(result, "Hello, world!");
     }
 
@@ -125,7 +115,7 @@ mod tests {
     fn test_multiple_slots() {
         let result = TemplateRenderer::render(
             "{{greeting}}, {{name}}!",
-            &slots(&[("greeting", "Hi"), ("name", "Alice")]),
+            &[("greeting", "Hi"), ("name", "Alice")],
         )
         .unwrap();
         assert_eq!(result, "Hi, Alice!");
@@ -133,7 +123,7 @@ mod tests {
 
     #[test]
     fn test_missing_slot_returns_error() {
-        let err = TemplateRenderer::render("Hello, {{name}}!", &slots(&[])).unwrap_err();
+        let err = TemplateRenderer::render("Hello, {{name}}!", &[]).unwrap_err();
         match err {
             PipelineError::TemplateSlotMissing { slot } => assert_eq!(slot, "name"),
             other => panic!("unexpected error: {:?}", other),
@@ -144,7 +134,7 @@ mod tests {
     fn test_unused_slot_ignored() {
         let result = TemplateRenderer::render(
             "Hello, {{name}}!",
-            &slots(&[("name", "world"), ("unused", "ignored")]),
+            &[("name", "world"), ("unused", "ignored")],
         )
         .unwrap();
         assert_eq!(result, "Hello, world!");
@@ -152,20 +142,20 @@ mod tests {
 
     #[test]
     fn test_escape_open_brace() {
-        let result = TemplateRenderer::render("literal \\{{ brace", &slots(&[])).unwrap();
+        let result = TemplateRenderer::render("literal \\{{ brace", &[]).unwrap();
         assert_eq!(result, "literal {{ brace");
     }
 
     #[test]
     fn test_escape_close_brace() {
-        let result = TemplateRenderer::render("literal \\}} brace", &slots(&[])).unwrap();
+        let result = TemplateRenderer::render("literal \\}} brace", &[]).unwrap();
         assert_eq!(result, "literal }} brace");
     }
 
     #[test]
     fn test_escape_sequences_not_interpolated() {
         // \{{ should not start an interpolation
-        let result = TemplateRenderer::render("\\{{name}}", &slots(&[("name", "world")])).unwrap();
+        let result = TemplateRenderer::render("\\{{name}}", &[("name", "world")]).unwrap();
         // \{{ emits {{ then "name}}" is literal
         assert_eq!(result, "{{name}}");
     }
@@ -173,24 +163,21 @@ mod tests {
     #[test]
     fn test_single_pass_invariant_value_not_rescanned() {
         // If a slot value itself contains `{{other}}`, it must NOT be processed.
-        let result = TemplateRenderer::render(
-            "{{a}}",
-            &slots(&[("a", "{{b}}"), ("b", "should-not-appear")]),
-        )
-        .unwrap();
+        let result =
+            TemplateRenderer::render("{{a}}", &[("a", "{{b}}"), ("b", "should-not-appear")])
+                .unwrap();
         assert_eq!(result, "{{b}}");
     }
 
     #[test]
     fn test_no_slots_in_template() {
-        let result = TemplateRenderer::render("plain text", &slots(&[])).unwrap();
+        let result = TemplateRenderer::render("plain text", &[]).unwrap();
         assert_eq!(result, "plain text");
     }
 
     #[test]
     fn test_slot_with_whitespace_trimmed() {
-        let result =
-            TemplateRenderer::render("{{ name }}", &slots(&[("name", "trimmed")])).unwrap();
+        let result = TemplateRenderer::render("{{ name }}", &[("name", "trimmed")]).unwrap();
         assert_eq!(result, "trimmed");
     }
 }

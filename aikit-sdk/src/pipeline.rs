@@ -6,7 +6,6 @@ use crate::report::ReportRenderer;
 use crate::runner::RunError;
 use crate::template::TemplateRenderer;
 use crate::validation::ResponseValidator;
-use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -83,8 +82,8 @@ pub enum OutputFormat {
 /// The successful result of a `Pipeline::run` call.
 #[derive(Debug)]
 pub struct PipelineResult {
-    /// The rendered output (JSON or Markdown depending on `OutputFormat`).
-    pub output: String,
+    /// The rendered report (JSON or Markdown depending on `OutputFormat`).
+    pub report: String,
     /// The parsed JSON data from the validated agent response.
     pub data: serde_json::Value,
     /// Number of attempts used (1 = no retries needed).
@@ -137,19 +136,19 @@ impl Pipeline {
     }
 
     /// Set the optional report template for Markdown output.
-    pub fn with_report_template(mut self, tmpl: impl Into<String>) -> Self {
-        self.report_template = Some(tmpl.into());
+    pub fn report_template(mut self, t: impl Into<String>) -> Self {
+        self.report_template = Some(t.into());
         self
     }
 
     /// Set the maximum number of retry attempts.
-    pub fn with_max_retries(mut self, n: u32) -> Self {
+    pub fn max_retries(mut self, n: u32) -> Self {
         self.max_retries = n;
         self
     }
 
     /// Set the output format.
-    pub fn with_output_format(mut self, fmt: OutputFormat) -> Self {
+    pub fn output_format(mut self, fmt: OutputFormat) -> Self {
         self.output_format = fmt;
         self
     }
@@ -158,12 +157,13 @@ impl Pipeline {
     ///
     /// # Arguments
     /// * `slots` - Values for template placeholders.
-    /// * `runner` - An `AgentRunner` (consumed; takes `self`). Its configuration
-    ///   is extracted before the retry loop so the agent key/model/dir can be
-    ///   reused across attempts.
+    /// * `runner` - An `AgentRunner` (consumed). Its configuration is extracted
+    ///   before the retry loop so the agent key/model/dir can be reused across attempts.
+    ///
+    /// Blocking. Callers needing concurrency MUST use spawn_blocking.
     pub fn run(
         &self,
-        slots: &HashMap<String, String>,
+        slots: &[(&str, &str)],
         runner: AgentRunner,
     ) -> Result<PipelineResult, PipelineError> {
         // Step 1: render the template — fatal if a slot is missing
@@ -177,24 +177,22 @@ impl Pipeline {
 
         loop {
             // Rebuild runner for this attempt
-            let mut attempt_runner = AgentRunner::new(agent_key.clone());
+            let mut attempt_runner = AgentRunner::new().agent(&agent_key);
             if let Some(ref m) = model {
-                attempt_runner = attempt_runner.with_model(m.clone());
+                attempt_runner = attempt_runner.model(m);
             }
             if let Some(ref d) = working_dir {
-                attempt_runner = attempt_runner.with_working_dir(d.clone());
+                attempt_runner = attempt_runner.working_dir(d.to_str().unwrap_or(""));
             }
 
-            // Step 2: call the agent
-            let raw_text = attempt_runner
-                .run_prompt(current_prompt.clone())
-                .map_err(|source| PipelineError::AgentInvocation { source })?;
+            // Step 2: call the agent — fatal on RunError (no retry)
+            let raw_text = attempt_runner.run(&current_prompt)?;
 
             // Step 3: validate
             match ResponseValidator::validate(&raw_text, &self.schema) {
                 Ok(validated) => {
                     // Validation passed — render output
-                    let output = match &self.output_format {
+                    let report = match &self.output_format {
                         OutputFormat::Json => ReportRenderer::render_json(&validated.data)?,
                         OutputFormat::Markdown => {
                             let tmpl = self.report_template.as_deref().unwrap_or("");
@@ -202,7 +200,7 @@ impl Pipeline {
                         }
                     };
                     return Ok(PipelineResult {
-                        output,
+                        report,
                         data: validated.data,
                         attempts: attempt,
                     });
@@ -288,8 +286,7 @@ mod tests {
 
     #[test]
     fn test_template_render_missing_slot_is_fatal() {
-        // TemplateRenderer errors flow through Pipeline's slot rendering step
-        let result = TemplateRenderer::render("Hello {{missing}}", &HashMap::new());
+        let result = TemplateRenderer::render("Hello {{missing}}", &[]);
         assert!(result.is_err());
     }
 
@@ -322,6 +319,7 @@ mod tests {
 
     #[test]
     fn test_pipeline_error_source_agent_invocation() {
+        use crate::runner::RunError;
         use std::error::Error;
         let run_err = RunError::AgentNotRunnable("fake".to_string());
         let err = PipelineError::AgentInvocation { source: run_err };

@@ -6,7 +6,7 @@
 use crate::pipeline::PipelineError;
 
 /// A successfully validated agent response.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ValidatedResponse {
     /// The parsed JSON data.
     pub data: serde_json::Value,

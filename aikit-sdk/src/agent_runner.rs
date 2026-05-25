@@ -1,8 +1,9 @@
 //! Agent runner builder and agent detection utilities.
 
+use crate::pipeline::PipelineError;
 use crate::runner::{
     get_agent_status, run_agent_events, runnable_agents, AgentEvent, AgentEventPayload,
-    MessagePhase, MessageRole, RunError, RunOptions,
+    AgentStatus, MessagePhase, MessageRole, RunOptions,
 };
 use std::path::PathBuf;
 
@@ -18,29 +19,30 @@ pub struct AgentRunner {
 }
 
 impl AgentRunner {
-    /// Create a new `AgentRunner` with the given agent key.
-    pub fn new(agent_key: impl Into<String>) -> Self {
+    /// Create a new `AgentRunner` with no agent key set.
+    pub fn new() -> Self {
         Self {
-            agent_key: agent_key.into(),
+            agent_key: String::new(),
             model: None,
             working_dir: None,
         }
     }
 
-    /// Alias for `new`.
-    pub fn agent(key: impl Into<String>) -> Self {
-        Self::new(key)
+    /// Set the agent key.
+    pub fn agent(mut self, key: &str) -> Self {
+        self.agent_key = key.to_string();
+        self
     }
 
     /// Set the model to use for this agent invocation.
-    pub fn with_model(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
+    pub fn model(mut self, model: &str) -> Self {
+        self.model = Some(model.to_string());
         self
     }
 
     /// Set the working directory for the agent child process.
-    pub fn with_working_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.working_dir = Some(path.into());
+    pub fn working_dir(mut self, path: &str) -> Self {
+        self.working_dir = Some(PathBuf::from(path));
         self
     }
 
@@ -52,13 +54,10 @@ impl AgentRunner {
         (self.agent_key, self.model, self.working_dir)
     }
 
-    /// Run the agent with the given prompt, returning the concatenated final
-    /// assistant text, or a `RunError` on failure.
+    /// Invoke the agent with `prompt`; assemble assistant text from the event stream.
     ///
-    /// Collects all events, filters to `AgentEventPayload::StreamMessage(msg)`
-    /// where `msg.role == MessageRole::Assistant` and `msg.phase == MessagePhase::Final`,
-    /// sorts by `seq`, and concatenates `msg.text`.
-    pub fn run_prompt(self, prompt: String) -> Result<String, RunError> {
+    /// Blocking. Returns `PipelineError::AgentInvocation` on any RunError.
+    pub fn run(self, prompt: &str) -> Result<String, PipelineError> {
         let mut options = RunOptions::default();
         if let Some(model) = self.model {
             options.model = Some(model);
@@ -68,9 +67,10 @@ impl AgentRunner {
         }
 
         let mut events: Vec<AgentEvent> = Vec::new();
-        run_agent_events(&self.agent_key, &prompt, options, |ev| {
+        run_agent_events(&self.agent_key, prompt, options, |ev| {
             events.push(ev);
-        })?;
+        })
+        .map_err(|source| PipelineError::AgentInvocation { source })?;
 
         // Filter: StreamMessage where role=Assistant and phase=Final
         let mut final_messages: Vec<(u64, String)> = events
@@ -91,6 +91,12 @@ impl AgentRunner {
         // Concatenate
         let text: String = final_messages.into_iter().map(|(_, t)| t).collect();
         Ok(text)
+    }
+}
+
+impl Default for AgentRunner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -132,10 +138,10 @@ impl AgentDetector {
             .iter()
             .map(|&key| {
                 let name = Self::resolve_name(key);
-                let status = status_map
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_else(crate::runner::AgentStatus::available);
+                let status = status_map.get(key).cloned().unwrap_or(AgentStatus {
+                    available: false,
+                    reason: None,
+                });
 
                 AgentInfo {
                     key: key.to_string(),
@@ -150,10 +156,14 @@ impl AgentDetector {
     /// Resolve the human-readable name for a runnable key.
     fn resolve_name(key: &str) -> String {
         match key {
-            "agent" => "Cursor".to_string(),
+            "agent" => {
+                // "agent" maps to catalog key "cursor-agent"
+                crate::agent("cursor-agent")
+                    .map(|c| c.name.to_string())
+                    .unwrap_or_else(|| "Cursor".to_string())
+            }
             "aikit" => "aikit".to_string(),
             other => {
-                // Look up in catalog
                 if let Some(config) = crate::agent(other) {
                     config.name.to_string()
                 } else {
@@ -195,7 +205,6 @@ mod tests {
 
     #[test]
     fn test_filter_and_sort_final_assistant_messages() {
-        // Simulate collecting events from run_agent_events
         let events: Vec<AgentEvent> = vec![
             // Delta (should be ignored)
             make_stream_message_event(1, MessageRole::Assistant, MessagePhase::Delta, "partial"),
@@ -209,7 +218,6 @@ mod tests {
             make_stream_message_event(5, MessageRole::Assistant, MessagePhase::Final, "world"),
         ];
 
-        // Test the filtering + sorting + concatenation logic directly
         let mut final_messages: Vec<(u64, String)> = events
             .into_iter()
             .filter_map(|ev| {
@@ -252,8 +260,6 @@ mod tests {
 
     #[test]
     fn test_agent_detector_returns_all_runnable_keys() {
-        // AgentDetector::detect calls real system probes, but we can at minimum
-        // verify the returned keys match runnable_agents()
         let infos = AgentDetector::detect();
         let returned_keys: std::collections::HashSet<String> =
             infos.iter().map(|i| i.key.clone()).collect();
@@ -283,6 +289,7 @@ mod tests {
 
     #[test]
     fn test_run_error_not_runnable_maps_to_pipeline_error() {
+        use crate::runner::RunError;
         let run_err = RunError::AgentNotRunnable("fake".to_string());
         let pipeline_err = crate::pipeline::PipelineError::AgentInvocation { source: run_err };
         assert!(pipeline_err.to_string().contains("agent invocation failed"));

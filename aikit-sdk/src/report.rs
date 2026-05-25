@@ -2,7 +2,6 @@
 
 use crate::pipeline::PipelineError;
 use crate::template::TemplateRenderer;
-use std::collections::HashMap;
 
 /// Renders agent results into Markdown or JSON reports.
 pub struct ReportRenderer;
@@ -20,7 +19,7 @@ impl ReportRenderer {
         template: &str,
         data: &serde_json::Value,
     ) -> Result<String, PipelineError> {
-        let mut slots: HashMap<String, String> = HashMap::new();
+        let mut slot_entries: Vec<(String, String)> = Vec::new();
 
         // Build slots from top-level keys
         if let Some(obj) = data.as_object() {
@@ -33,16 +32,22 @@ impl ReportRenderer {
                     // Arrays and objects → compact JSON
                     _ => serde_json::to_string(val).unwrap_or_else(|_| val.to_string()),
                 };
-                slots.insert(key.clone(), slot_value);
+                slot_entries.push((key.clone(), slot_value));
             }
         }
 
         // Always inject `report_body` as pretty-printed JSON
         let pretty = serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());
-        slots.insert("report_body".to_string(), pretty);
+        slot_entries.push(("report_body".to_string(), pretty));
+
+        // Build &[(&str, &str)] from owned entries
+        let slots_ref: Vec<(&str, &str)> = slot_entries
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
 
         // Render and map TemplateSlotMissing → ReportRender
-        TemplateRenderer::render(template, &slots).map_err(|e| match e {
+        TemplateRenderer::render(template, &slots_ref).map_err(|e| match e {
             PipelineError::TemplateSlotMissing { slot } => PipelineError::ReportRender { slot },
             other => other,
         })
@@ -63,7 +68,6 @@ mod tests {
     fn test_render_json_basic() {
         let data = json!({"name": "Alice", "score": 42});
         let result = ReportRenderer::render_json(&data).unwrap();
-        // Pretty-printed JSON should contain the key-value pairs
         assert!(result.contains("\"name\""));
         assert!(result.contains("\"Alice\""));
     }
@@ -81,7 +85,6 @@ mod tests {
         let data = json!({"x": 1});
         let tmpl = "{{report_body}}";
         let result = ReportRenderer::render_markdown(tmpl, &data).unwrap();
-        // Should be pretty-printed JSON
         assert!(result.contains("\"x\""));
         assert!(result.contains("1"));
     }
@@ -91,7 +94,6 @@ mod tests {
         let data = json!({"tags": ["a", "b"]});
         let tmpl = "Tags: {{tags}}";
         let result = ReportRenderer::render_markdown(tmpl, &data).unwrap();
-        // Non-scalar → compact JSON
         assert!(result.contains("[\"a\",\"b\"]") || result.contains("[\"a\", \"b\"]"));
     }
 
