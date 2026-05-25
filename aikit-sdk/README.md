@@ -160,6 +160,119 @@ For incremental output, use `run_agent_events(...)`. Event payloads include norm
 - `get_agent_status()`
 - `is_runnable(key)` and `runnable_agents()`
 
+## Structured pipeline
+
+`Pipeline` chains template rendering → agent invocation → JSON schema validation → report
+generation with optional automatic retry.
+
+```rust
+use aikit_sdk::pipeline::{Pipeline, OutputFormat};
+use aikit_sdk::agent_runner::AgentRunner;
+
+let result = Pipeline::new(
+    "Answer the question: {{question}}",
+    r#"{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}"#,
+)
+.max_retries(2)
+.output_format(OutputFormat::Json)
+.run(
+    &[("question", "What is 2+2?")],
+    AgentRunner::new().agent("claude"),
+)?;
+
+println!("{}", result.report);   // pretty-printed JSON
+println!("{}", result.attempts); // number of attempts used
+# Ok::<(), aikit_sdk::pipeline::PipelineError>(())
+```
+
+For Markdown output, set `.output_format(OutputFormat::Markdown)` and provide a
+`.report_template("Answer: {{answer}}")`. Top-level JSON keys become template slots;
+`{{report_body}}` is always available as the full pretty-printed data.
+
+**`PipelineError` variants:** `TemplateSlotMissing`, `AgentInvocation`, `ValidationFailed`,
+`MaxRetriesExceeded`, `ReportRender`.
+
+## AgentRunner
+
+`AgentRunner` is a builder for running a single agent invocation inside a pipeline.
+
+```rust
+use aikit_sdk::agent_runner::AgentRunner;
+
+let runner = AgentRunner::new()
+    .agent("claude")
+    .model("claude-sonnet-4-5")
+    .working_dir("/path/to/project");
+
+let text = runner.run("Summarize the project")?;
+# Ok::<(), aikit_sdk::pipeline::PipelineError>(())
+```
+
+## AgentDetector
+
+`AgentDetector::detect()` probes all runnable agent keys and returns availability status.
+
+```rust
+use aikit_sdk::agent_runner::AgentDetector;
+
+for info in AgentDetector::detect() {
+    println!("{}: installed={}", info.key, info.installed);
+}
+```
+
+## Template rendering
+
+`TemplateRenderer` renders `{{slot}}` templates in a single pass. Use `\{{` and `\}}` to
+emit literal braces. Missing slots return `PipelineError::TemplateSlotMissing`; unused
+slots are silently ignored.
+
+```rust
+use aikit_sdk::template::TemplateRenderer;
+use aikit_sdk::pipeline::PipelineError;
+
+let rendered = TemplateRenderer::render("Hello, {{name}}!", &[("name", "world")])?;
+# Ok::<(), PipelineError>(())
+```
+
+## JSON validation
+
+`ResponseValidator` extracts the first ` ```json ` fenced block from agent output (falling
+back to bare JSON) and validates it against a JSON Schema.
+
+```rust
+use aikit_sdk::validation::ResponseValidator;
+
+let schema = r#"{"type":"object","properties":{"score":{"type":"integer"}},"required":["score"]}"#;
+let validated = ResponseValidator::validate(r#"{"score": 9}"#, schema)?;
+println!("{}", validated.data["score"]);
+# Ok::<(), aikit_sdk::pipeline::PipelineError>(())
+```
+
+## Report rendering
+
+`ReportRenderer` produces Markdown or JSON output from validated agent data.
+
+```rust
+use aikit_sdk::report::ReportRenderer;
+use serde_json::json;
+
+let data = json!({"name": "Alice", "score": 42});
+let md = ReportRenderer::render_markdown("Name: {{name}}, Score: {{score}}", &data)?;
+let js = ReportRenderer::render_json(&data)?;
+# Ok::<(), aikit_sdk::pipeline::PipelineError>(())
+```
+
+## Session store
+
+`SessionStore` persists multi-turn sessions to `~/.aikit/sessions/` (or `$AIKIT_SESSIONS_DIR`).
+
+```rust
+use aikit_sdk::session_store::{SessionStore, SessionFile};
+
+let store = SessionStore::open();
+// load, save, update_index, last_for_cwd
+```
+
 ## Test
 
 From workspace root:

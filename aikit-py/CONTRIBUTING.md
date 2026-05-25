@@ -5,6 +5,16 @@ Keep behavior aligned with SDK semantics and avoid Python-only divergence.
 
 ## Local setup
 
+The repo includes a `uv.lock` file. Use `uv` for a reproducible environment:
+
+```bash
+cd aikit-py
+uv sync
+uv run maturin develop
+```
+
+Or with plain pip:
+
 ```bash
 cd aikit-py
 python -m venv .venv
@@ -26,7 +36,7 @@ cargo test -p aikit-py
 Python tests (`tests/test_aikit_py.py`, `tests/test_mcp_deploy.py`) require an editable install:
 
 ```bash
-cd aikit-py && maturin develop && pytest tests/
+cd aikit-py && uv run maturin develop && uv run pytest tests/
 ```
 
 ## Guidelines

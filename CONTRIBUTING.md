@@ -1,11 +1,12 @@
 # Contributing to AIKIT
 
-This repository is a Rust workspace with multiple crates:
+This repository is a Cargo workspace (`members = [".", "aikit-sdk", "aikit-py", "aikit-agent", "aikit-evals"]`):
 
-- `aikit` (root CLI): package install/init/build/publish, checks, release, run entry points
-- `aikit-sdk`: reusable Rust gateway for catalog, deploy, and agent run/event APIs
-- `aikit-py`: Python bindings and package
-- `aikit-agent`: in-process agent runtime used by `aikit run -a aikit`
+- `aikit` (root CLI, crate `aikit-cli`): package install/init/build/publish, checks, release, run, serve, spec entry points. Commands are registered with `cli-framework` (`CommandSpec`) in `src/cli/mod.rs`.
+- `aikit-sdk`: reusable Rust gateway for catalog, deploy, agent run/event APIs, the structured agent pipeline, and session store
+- `aikit-py`: Python bindings and package over the SDK
+- `aikit-agent`: in-process agent runtime used by `aikit agent run -a aikit`
+- `aikit-evals`: evaluation harness for agent runs
 
 ## Prerequisites
 
@@ -51,6 +52,17 @@ cargo test -p aikit-agent
 - Keep PRs small and reviewable.
 - Include a short test plan in the PR description (commands run + results).
 - Use Conventional Commit messages.
+
+## Serve subsystem
+
+`src/cli/serve.rs` implements the HTTP server for `aikit serve`. It uses `axum`
+for routing and relies on `aikit_sdk::session_store` for session persistence.
+Integration tests live under `tests/serve/` (smoke, auth, timeout, limits,
+disconnect). Run them with:
+
+```bash
+cargo test -p aikit -- serve
+```
 
 ## Additional references
 
