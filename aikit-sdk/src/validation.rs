@@ -59,7 +59,7 @@ impl ResponseValidator {
         if error_messages.is_empty() {
             Ok(ValidatedResponse {
                 data,
-                raw: json_text,
+                raw: text.to_string(),
             })
         } else {
             Err(PipelineError::ValidationFailed {
@@ -166,10 +166,28 @@ mod tests {
     }
 
     #[test]
-    fn test_fence_content_returned_in_raw() {
+    fn test_full_output_returned_in_raw() {
         let text = "```json\n{\"name\":\"Dave\"}\n```";
         let v = ResponseValidator::validate(text, SCHEMA_NAME_REQUIRED).unwrap();
-        assert_eq!(v.raw.trim(), r#"{"name":"Dave"}"#);
+        // raw must be the full assembled agent output, not just the extracted JSON
+        assert_eq!(v.raw, text);
+    }
+
+    #[test]
+    fn test_invalid_schema_string_returns_validation_failed() {
+        // AC13: invalid schema string must return ValidationFailed with non-empty errors
+        let valid_json = r#"{"name": "Alice"}"#;
+        let invalid_schema = "not-valid-json-schema";
+        let err = ResponseValidator::validate(valid_json, invalid_schema).unwrap_err();
+        match err {
+            PipelineError::ValidationFailed { errors, .. } => {
+                assert!(
+                    !errors.is_empty(),
+                    "expected non-empty errors for invalid schema"
+                );
+            }
+            other => panic!("expected ValidationFailed, got {:?}", other),
+        }
     }
 
     #[test]

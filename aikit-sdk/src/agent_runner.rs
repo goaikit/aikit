@@ -327,6 +327,14 @@ mod tests {
         assert_eq!(aikit_info.name, "aikit");
     }
 
+    /// AC30: The entry with key == "claude" MUST have name == "Claude Code".
+    #[test]
+    fn test_agent_detector_name_mapping_claude_key() {
+        let infos = AgentDetector::detect();
+        let claude_info = infos.iter().find(|i| i.key == "claude").unwrap();
+        assert_eq!(claude_info.name, "Claude Code");
+    }
+
     /// AC8: Verify that AgentRunner::run() maps RunError to PipelineError::AgentInvocation.
     ///
     /// An unknown agent key causes run_agent_events to return RunError::AgentNotRunnable,
