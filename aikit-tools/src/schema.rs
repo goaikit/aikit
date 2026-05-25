@@ -33,10 +33,8 @@ mod tests {
 
     #[test]
     fn compile_invalid_schema() {
-        let schema = json!({"type": "not-a-real-type-that-errors"});
-        let schema2 = json!({"required": "not-an-array"});
-        let _ = compile(&schema);
-        let _ = compile(&schema2);
+        let schema = json!({"required": "not-an-array"});
+        assert!(compile(&schema).is_err(), "expected Err for invalid schema");
     }
 
     #[test]

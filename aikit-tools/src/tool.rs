@@ -79,8 +79,7 @@ mod tests {
             json!({"type": "object"}),
             "prompt",
         );
-        let _ = result;
-        assert!(make_tool().key() == "ns/name");
+        assert!(result.is_err(), "expected Err for invalid input schema");
     }
 
     #[test]

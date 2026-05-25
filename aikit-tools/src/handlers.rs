@@ -251,4 +251,33 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["error"]["code"], "agent_failed");
     }
+
+    struct InternalErrorRunner;
+
+    impl AgentRunner for InternalErrorRunner {
+        fn run(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+            _output_schema: &Value,
+        ) -> Result<Vec<AgentInternalEvent>, crate::error::ToolsError> {
+            Err(crate::error::ToolsError::Internal(
+                "test internal error".to_string(),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_runner_internal_error_returns_500() {
+        let app = make_app(make_state(InternalErrorRunner));
+        let (status, body) = do_request(
+            app,
+            Method::POST,
+            "/aitools/crm/draft_contact",
+            Some(json!({"note": "test"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(body["error"]["code"], "internal");
+    }
 }
