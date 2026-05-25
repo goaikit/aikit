@@ -28,9 +28,23 @@ Terms below reflect discussion of **AIKit**, **HTTP exposure for agent operation
 | **Run coordinator** | A service that tracks run lifecycle, agents, and containers over HTTP (e.g. agentrt-style APIs). | "Monitor", orchestrator (unless defined) |
 | **Human-in-the-loop channel** | A bus for asks, approvals, and notifications between people and automation (e.g. ailoop). | Chat, "notifications" (when you mean gated authorization) |
 
+## Magic tools
+
+| Term | Definition | Aliases to avoid |
+| --- | --- | --- |
+| **Magic tool** | A registered, problem-agnostic structured agentic call defined by a prompt + input/output JSON Schemas (+ optional `agent_key`); takes form data and returns a schema-valid **Draft**. | Tool (alone — collides with MCP tools and aikit-agent host tools), action, command |
+| **Draft** | The proposed, schema-validated JSON a magic tool returns for a human to review and apply to a form; never persisted by the framework. | Result, output, answer (when you mean the reviewable proposal) |
+| **One-shot invocation** | A single magic-tool call: validated input → one **Agent run** → **Draft**. The "Magic Button" mode. | Magic tool (the tool ≠ a single call) |
+| **Magic tool session** | A multi-turn conversation that refines a **Draft**, implemented as successive **Agent runs** sharing one `session_id`. The "Copilot" mode. | "Session" unqualified — see flagged ambiguity below |
+
+## Flagged ambiguities
+
+- **"Session"** is overloaded. The glossary lists it as an alias to avoid for **Agent run**. The magic-tool feature uses it for the multi-turn case, so the canonical term is **Magic tool session** (a *sequence* of Agent runs sharing a `session_id`), never bare "session". A single Agent run is still an **Agent run**, not a session.
+
 ## Relationships
 
 - An **Agent run** uses exactly one **Runnable agent** key and is produced by the **AIKit CLI** or **aikit-sdk**, not by the **Hosted agent** runtime unless you explicitly bridge them.
+- A **Magic tool** is invoked either as a **One-shot invocation** or within a **Magic tool session**; both honor the tool's `agent_key` and produce a **Draft** validated against the tool's output schema.
 - A **Hosted agent** runs inside the **Base agent runtime** image; it is not the same artifact as **aikit-sdk** local spawns.
 - **Streamable MCP endpoint** and **Agent HTTP API** MAY share a **Long-lived HTTP service** listener but remain different protocol contracts.
 - **MCP config merge** does not create a **Long-lived HTTP service**; it points assistants at existing endpoints.
