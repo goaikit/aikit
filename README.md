@@ -295,7 +295,11 @@ Both crates expose the same capabilities as the CLI:
 
 - **Rust:** [`aikit-sdk`](aikit-sdk/README.md). Add it to `Cargo.toml` and
   call `run_agent`, `run_agent_events`, `add_mcp_server`, `agent`,
-  `all_agents`, etc.
+  `all_agents`, etc. The SDK also provides a structured agent pipeline
+  (`Pipeline`, `AgentRunner`, `ResponseValidator`, `ReportRenderer`,
+  `TemplateRenderer`) for template rendering → agent invocation → JSON schema
+  validation → report generation, plus `AgentDetector` for probing which
+  agents are installed, and `SessionStore` for session persistence.
 - **Python:** [`aikit-py`](aikit-py/README.md). `pip install aikit-py`;
   same surface area as the SDK (`run_agent`, `run_agent_events_py`,
   `add_mcp_server`, …).

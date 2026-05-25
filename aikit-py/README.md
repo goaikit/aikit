@@ -28,14 +28,21 @@ With **uv**:
 uv add aikit-py
 ```
 
-For local development from this workspace:
+For local development from this workspace (recommended — uses the checked-in `uv.lock`):
+
+```bash
+cd aikit-py
+uv sync
+uv run maturin develop
+```
+
+Or with plain pip:
 
 ```bash
 cd aikit-py
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip maturin
-# or: uv pip install maturin
 maturin develop
 ```
 
@@ -179,6 +186,12 @@ From workspace root:
 
 ```bash
 cargo test -p aikit-py
+cd aikit-py && uv run maturin develop && uv run pytest tests/
+```
+
+Or with plain pip:
+
+```bash
 cd aikit-py && maturin develop && pytest tests/
 ```
 
