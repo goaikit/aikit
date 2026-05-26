@@ -5,6 +5,8 @@ mod fs;
 mod git;
 mod github;
 mod models;
+#[cfg(feature = "tools")]
+mod tools;
 mod tui;
 
 #[tokio::main]

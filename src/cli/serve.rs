@@ -1159,7 +1159,11 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
 
     #[cfg(feature = "tools")]
     let domain_router = domain_router.merge(aikit_magictool::router(
-        aikit_magictool::default_registry_state(),
+        aikit_magictool::state_with_registry({
+            let mut reg = aikit_magictool::ToolRegistry::new();
+            reg.register(crate::tools::draft_agent_definition_tool());
+            reg
+        }),
     ));
 
     let mut builder = ApiServerBuilder::new()

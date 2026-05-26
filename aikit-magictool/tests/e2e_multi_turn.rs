@@ -1,13 +1,15 @@
+mod common;
+
 /// AC22 — Multi-turn E2E test, gated on OPENAI_API_KEY.
 ///
-/// Runs the full start → message → finalize flow for `crm/draft_lead` and
+/// Runs the full start → message → finalize flow for `test/form_fill` and
 /// asserts that `finalize` returns 200 with a `draft` that passes the tool's
 /// outputSchema validation.
 ///
 /// Skipped automatically when OPENAI_API_KEY is absent.
 #[cfg(feature = "agent")]
 mod e2e_multi_turn {
-    use aikit_magictool::{default_registry_state, router, validate_value};
+    use aikit_magictool::{router, validate_value};
     use axum::{body::Body, http::Request};
     use serde_json::json;
     use tower::ServiceExt;
@@ -24,11 +26,11 @@ mod e2e_multi_turn {
             return;
         }
 
-        let state = default_registry_state();
+        let state = super::common::fixture_state();
         let output_schema = state
             .registry
-            .get("crm", "draft_lead")
-            .expect("crm/draft_lead must be registered")
+            .get("test", "form_fill")
+            .expect("test/form_fill must be registered")
             .output_schema
             .clone();
         let output_validator =
@@ -37,14 +39,14 @@ mod e2e_multi_turn {
         // ── Step 1: start a session ────────────────────────────────────────────
 
         let start_payload = json!({
-            "raw_text": "John Smith, CTO at TechStart. Met at conf. \
-                         Interested in pro plan. Follow up needed."
+            "raw_text": "Low priority closed task about updating documentation. \
+                         Needs tags: docs. Mark as inactive."
         });
 
         let app1 = router(state.clone());
         let req1 = Request::builder()
             .method("POST")
-            .uri("/aitools/crm/draft_lead/sessions")
+            .uri("/aitools/test/form_fill/sessions")
             .header("content-type", "application/json")
             .header("accept", "application/json")
             .body(Body::from(start_payload.to_string()))
@@ -77,12 +79,12 @@ mod e2e_multi_turn {
         let req2 = Request::builder()
             .method("POST")
             .uri(format!(
-                "/aitools/crm/draft_lead/sessions/{session_id}/messages"
+                "/aitools/test/form_fill/sessions/{session_id}/messages"
             ))
             .header("content-type", "application/json")
             .header("accept", "application/json")
             .body(Body::from(
-                json!({"content": "Please also mark this lead as qualified and set score to 80."})
+                json!({"content": "Please also set priority to 2 and add the tag 'review'."})
                     .to_string(),
             ))
             .unwrap();
@@ -112,7 +114,7 @@ mod e2e_multi_turn {
         let req3 = Request::builder()
             .method("POST")
             .uri(format!(
-                "/aitools/crm/draft_lead/sessions/{session_id}/finalize"
+                "/aitools/test/form_fill/sessions/{session_id}/finalize"
             ))
             .body(Body::empty())
             .unwrap();
