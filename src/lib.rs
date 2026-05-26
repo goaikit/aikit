@@ -11,6 +11,8 @@ pub mod fs;
 pub mod git;
 pub mod github;
 pub mod models;
+#[cfg(feature = "tools")]
+pub mod tools;
 pub mod tui;
 
 pub use core::agent_definition::{

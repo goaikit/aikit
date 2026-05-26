@@ -1,14 +1,16 @@
+mod common;
+
 /// AC21 — One-shot E2E test, gated on OPENAI_API_KEY.
 ///
-/// Runs `POST /aitools/crm/draft_lead` with a realistic example payload and
+/// Runs `POST /aitools/test/form_fill` with a realistic example payload and
 /// asserts that the response is 200 with a `draft` object that passes the
-/// `crm/draft_lead` outputSchema (covers string, string+format:textarea,
+/// `test/form_fill` outputSchema (covers string, string+format:textarea,
 /// boolean, integer, oneOf/enum, and array field types).
 ///
 /// Skipped automatically when OPENAI_API_KEY is absent.
 #[cfg(feature = "agent")]
 mod e2e_one_shot {
-    use aikit_magictool::{default_registry_state, router, validate_value};
+    use aikit_magictool::{router, validate_value};
     use axum::{body::Body, http::Request};
     use serde_json::json;
     use tower::ServiceExt;
@@ -19,20 +21,20 @@ mod e2e_one_shot {
 
     #[tokio::test]
     #[ignore = "requires OPENAI_API_KEY and a reachable LLM; run with --include-ignored"]
-    async fn post_crm_draft_lead_returns_valid_draft() {
+    async fn post_test_form_fill_returns_valid_draft() {
         if skip_without_key() {
             eprintln!("SKIP: OPENAI_API_KEY not set");
             return;
         }
 
-        let state = default_registry_state();
+        let state = super::common::fixture_state();
 
         // Grab the compiled output validator from the registered tool so we can
         // validate the draft independently of the HTTP handler.
         let output_schema = state
             .registry
-            .get("crm", "draft_lead")
-            .expect("crm/draft_lead must be registered")
+            .get("test", "form_fill")
+            .expect("test/form_fill must be registered")
             .output_schema
             .clone();
         let output_validator =
@@ -41,14 +43,13 @@ mod e2e_one_shot {
         let app = router(state);
 
         let payload = json!({
-            "raw_text": "Jane Doe, VP of Engineering at Acme Corp. \
-                         Reached out via LinkedIn. Interested in our enterprise plan. \
-                         Budget approved, decision expected next quarter."
+            "raw_text": "High priority open task about migrating the database. \
+                         Needs tags: migration, urgent. Mark as active."
         });
 
         let req = Request::builder()
             .method("POST")
-            .uri("/aitools/crm/draft_lead")
+            .uri("/aitools/test/form_fill")
             .header("content-type", "application/json")
             .body(Body::from(payload.to_string()))
             .unwrap();
