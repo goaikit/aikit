@@ -447,6 +447,8 @@ pub mod report;
 pub mod template;
 pub mod validation;
 
+#[cfg(any(test, feature = "testing"))]
+pub use agent_runner::CapturedPrompts;
 pub use agent_runner::{AgentDetector, AgentInfo, AgentRunner};
 pub use pipeline::{OutputFormat, Pipeline, PipelineError, PipelineResult};
 pub use report::ReportRenderer;

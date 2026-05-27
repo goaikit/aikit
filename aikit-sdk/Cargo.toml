@@ -8,6 +8,9 @@ repository = "https://github.com/goaikit/aikit"
 keywords = ["ai", "agents", "deploy", "catalog", "capabilities"]
 categories = ["command-line-utilities"]
 
+[features]
+testing = []
+
 [dependencies]
 tracing = "0.1"
 glob = "0.3"
