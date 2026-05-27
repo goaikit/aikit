@@ -7,12 +7,12 @@ use crate::runner::{
 };
 use std::path::PathBuf;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "testing"))]
 type MockQueue = std::sync::Arc<
     std::sync::Mutex<std::collections::VecDeque<Result<String, crate::pipeline::PipelineError>>>,
 >;
-#[cfg(test)]
-type CapturedPrompts = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+#[cfg(any(test, feature = "testing"))]
+pub type CapturedPrompts = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
 
 // ---------------------------------------------------------------------------
 // AgentRunner
@@ -23,9 +23,9 @@ pub struct AgentRunner {
     agent_key: String,
     model: Option<String>,
     working_dir: Option<PathBuf>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     mock_responses: Option<MockQueue>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "testing"))]
     captured_prompts: Option<CapturedPrompts>,
 }
 
@@ -36,9 +36,9 @@ impl AgentRunner {
             agent_key: String::new(),
             model: None,
             working_dir: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             mock_responses: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "testing"))]
             captured_prompts: None,
         }
     }
@@ -47,8 +47,8 @@ impl AgentRunner {
     ///
     /// Returns the runner and a shared prompt capture buffer.
     /// Each call to `run()` pops the next response from `responses`.
-    #[cfg(test)]
-    pub(crate) fn with_mock(
+    #[cfg(any(test, feature = "testing"))]
+    pub fn with_mock(
         responses: Vec<Result<String, crate::pipeline::PipelineError>>,
     ) -> (Self, CapturedPrompts) {
         use std::collections::VecDeque;
@@ -87,7 +87,7 @@ impl AgentRunner {
     /// Blocking. Returns `PipelineError::AgentInvocation` on any RunError.
     pub fn run(&self, prompt: &str) -> Result<String, PipelineError> {
         // In tests: use mock response queue if populated.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "testing"))]
         if let Some(ref responses) = self.mock_responses {
             let mut queue = responses.lock().unwrap();
             if !queue.is_empty() {
