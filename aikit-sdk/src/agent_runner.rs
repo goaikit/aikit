@@ -23,6 +23,7 @@ pub struct AgentRunner {
     agent_key: String,
     model: Option<String>,
     working_dir: Option<PathBuf>,
+    timeout: Option<std::time::Duration>,
     #[cfg(any(test, feature = "testing"))]
     mock_responses: Option<MockQueue>,
     #[cfg(any(test, feature = "testing"))]
@@ -36,6 +37,7 @@ impl AgentRunner {
             agent_key: String::new(),
             model: None,
             working_dir: None,
+            timeout: None,
             #[cfg(any(test, feature = "testing"))]
             mock_responses: None,
             #[cfg(any(test, feature = "testing"))]
@@ -58,6 +60,7 @@ impl AgentRunner {
             agent_key: String::new(),
             model: None,
             working_dir: None,
+            timeout: None,
             mock_responses: Some(Arc::new(Mutex::new(VecDeque::from(responses)))),
             captured_prompts: Some(captured.clone()),
         };
@@ -79,6 +82,15 @@ impl AgentRunner {
     /// Set the working directory for the agent child process.
     pub fn working_dir(mut self, path: &str) -> Self {
         self.working_dir = Some(PathBuf::from(path));
+        self
+    }
+
+    /// Set a maximum wall-clock timeout for the agent child process.
+    ///
+    /// When elapsed, the child is killed and `PipelineError::AgentInvocation`
+    /// is returned with source `RunError::TimedOut`.
+    pub fn timeout(mut self, duration: std::time::Duration) -> Self {
+        self.timeout = Some(duration);
         self
     }
 
@@ -104,6 +116,9 @@ impl AgentRunner {
         }
         if let Some(ref dir) = self.working_dir {
             options.current_dir = Some(dir.clone());
+        }
+        if let Some(d) = self.timeout {
+            options.timeout = Some(d);
         }
 
         let mut events: Vec<AgentEvent> = Vec::new();
@@ -211,6 +226,13 @@ impl AgentDetector {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl AgentRunner {
+    fn timeout_duration(&self) -> Option<std::time::Duration> {
+        self.timeout
     }
 }
 
@@ -359,5 +381,38 @@ mod tests {
         assert!(!infos.is_empty(), "expected at least one agent entry");
         let has_installed = infos.iter().any(|i| i.installed);
         assert!(has_installed, "expected at least one installed agent");
+    }
+
+    #[test]
+    fn test_agent_runner_timeout_builder_stores_duration() {
+        let d = std::time::Duration::from_secs(30);
+        let runner = AgentRunner::new().agent("claude").timeout(d);
+        assert_eq!(runner.timeout_duration(), Some(d));
+    }
+
+    #[test]
+    fn test_agent_runner_no_timeout_by_default() {
+        let runner = AgentRunner::new();
+        assert_eq!(runner.timeout_duration(), None);
+    }
+
+    #[test]
+    #[ignore]
+    fn integration_test_agent_runner_timeout_fires() {
+        // Requires a real agent binary. Pass a 1ms timeout — should always time out.
+        let result = AgentRunner::new()
+            .agent("claude")
+            .timeout(std::time::Duration::from_millis(1))
+            .run("say hello");
+        assert!(
+            matches!(
+                result,
+                Err(PipelineError::AgentInvocation {
+                    source: crate::runner::RunError::TimedOut { .. }
+                })
+            ),
+            "expected TimedOut, got {:?}",
+            result
+        );
     }
 }
