@@ -207,6 +207,31 @@ CLI's own session store.
 | `200 (SSE error frame)` | `agent_not_runnable` | Backend reports the agent isn't runnable |
 | `200 (SSE error frame)` | `internal_error` | Anything else; check server logs |
 
+## Magic tools (`/api/v1/aitools`)
+
+When the server is built with the Cargo feature `tools`, domain routes include
+magic-tool endpoints (library: `aikit-magictool`). They accept the same
+`Authorization` rules as other `/api/v1` routes.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/v1/aitools` | List registered tools |
+| `GET` | `/api/v1/aitools/{ns}/{tool}/schema` | Input/output schemas; `modes`: `one_shot`, `multi_turn` |
+| `POST` | `/api/v1/aitools/{ns}/{tool}` | One-shot: body = tool input → `{ "draft": … }` |
+| `POST` | `/api/v1/aitools/{ns}/{tool}/sessions` | Start multi-turn session → `{ "session_id": … }` |
+| `POST` | `/api/v1/aitools/{ns}/{tool}/sessions/{id}/messages` | Turn; SSE (`text/event-stream`) or sync JSON |
+| `POST` | `/api/v1/aitools/{ns}/{tool}/sessions/{id}/finalize` | Final `{ "draft": … }` |
+
+Built-in tool on `aikit serve`: **`agents` / `draft_definition`** — draft an
+agent definition (name, description, prompt, tools) from plain English.
+
+From source, build with magic tools enabled:
+
+```bash
+cargo build --features tools
+./target/debug/aikit serve
+```
+
 ## Authentication
 
 If you start the server with `--api-key <key>` (or set `AIKIT_SERVE_API_KEY`),

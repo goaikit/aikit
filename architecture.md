@@ -4,10 +4,11 @@
 
 AIKIT is a Rust workspace centered on a CLI (`aikit`) plus reusable runtime libraries:
 
-- `aikit` (root crate): user-facing commands (`init`, `install`, `update`, `remove`, `list`, `check`, `package`, `release`, `run`)
+- `aikit` (root crate): user-facing commands (`init`, `install`, `update`, `remove`, `list`, `check`, `package`, `release`, `agent run`, `serve`)
 - `aikit-sdk`: Rust API for agent catalog/deploy/run/event flows
 - `aikit-py`: Python package and bindings around the same SDK behaviors
-- `aikit-agent`: in-process runtime used by `aikit run -a aikit`
+- `aikit-agent`: in-process runtime used by `aikit agent run --agent aikit`
+- `aikit-magictool`: magic-tool registry and HTTP router (one-shot + multi-turn drafts); optional on `aikit serve` via Cargo feature `tools`
 
 The design keeps command orchestration in the CLI crate and reusable execution logic in library crates.
 
@@ -32,6 +33,12 @@ aikit/
       validation.rs    # JSON extraction + jsonschema validation
   aikit-py/            # Python bindings/package
   aikit-agent/         # in-process agent runtime
+  aikit-magictool/     # magic-tool core + HTTP (feature-gated agent backend)
+    src/
+      core/            # ToolDef, registry, validation, executor traits
+      http/            # axum routes under /aitools/…
+      backend/         # aikit-sdk pipeline (feature `agent`)
+  src/tools/           # domain tools registered on serve (e.g. draft_agent)
   tests/               # integration tests
     serve/             # serve subsystem integration tests
   scripts/             # project automation scripts
@@ -43,8 +50,12 @@ aikit/
 2. `src/cli/mod.rs` registers commands with `cli-framework` (`CommandSpec`), initializes tracing, and dispatches commands.
 3. Command handlers call modules in `src/core`, `src/fs`, `src/github`, and `src/tui`.
 4. Agent execution paths (`run`) rely on SDK/runtime crates for provider-specific behavior.
-5. `src/cli/serve.rs` starts an `axum` HTTP server. Each request dispatches to `aikit-sdk`
-   run/event APIs; `aikit_sdk::session_store` persists session state to `~/.aikit/sessions/`.
+5. `src/cli/serve.rs` builds an `axum` router and hosts it with `cli-framework`'s
+   `ApiServerBuilder` (`/healthz`, `/readyz`, versioned `/api/v1`). Agent messages
+   dispatch to `aikit-sdk` run/event APIs; `aikit_sdk::session_store` persists
+   session state to `~/.aikit/sessions/`.
+6. When built with `--features tools`, the v1 router also merges `aikit-magictool`
+   (`/api/v1/aitools/…`) with tools from `src/tools/`.
 
 This split keeps parsing and UX concerns separated from domain logic and external integrations.
 
@@ -53,8 +64,8 @@ This split keeps parsing and UX concerns separated from domain logic and externa
 ### `src/cli`
 - Defines command/flag schemas and command dispatch.
 - Wraps async handlers with a Tokio runtime where needed.
-- `serve.rs`: HTTP server with SSE and JSON response modes, API-key auth middleware, session
-  management, and structured event mapping from SDK events to SSE frames.
+- `serve.rs`: HTTP server hosted by cli-framework; SSE and JSON on `/messages`, API-key
+  auth, session management, optional magic-tool routes (`tools` feature).
 
 ### `src/core`
 - Handles package lifecycle operations and template-aware behaviors.

@@ -15,6 +15,10 @@ built-in `aikit` agent, or anything else in the catalog.
 - **Multi-turn HTTP API** — `aikit serve` exposes the agent runtime over
   HTTP with both SSE streaming and single-shot JSON responses, selected by
   the standard `Accept` header. Implicit sessions, resume by id, the works.
+- **Magic tools (optional)** — build with `--features tools` to mount
+  schema-driven form-fill endpoints on `aikit serve` (`/api/v1/aitools/…`),
+  including `agents/draft_definition` to draft an agent definition from plain
+  English. See [`aikit-magictool`](aikit-magictool/README.md).
 - **Templates and package management** — `aikit init` scaffolds a
   Spec-Driven Development project; `aikit install/update/remove/list` manage
   packaged commands, skills, and agent definitions from GitHub or a local
@@ -198,6 +202,24 @@ output, the sync JSON body promotes the captured stderr tail into
 `error: { code: "agent_error", message: <stderr tail> }` — no more silent
 `{"content":"", "exit_code":0}`.
 
+### Magic tools (`--features tools`)
+
+Release binaries may omit this layer unless built with the `tools` Cargo
+feature. When enabled, `aikit serve` also exposes magic-tool routes under
+`/api/v1/aitools/`:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/v1/aitools` | List registered tools |
+| `GET` | `/api/v1/aitools/{ns}/{tool}/schema` | Input/output JSON Schemas and modes |
+| `POST` | `/api/v1/aitools/{ns}/{tool}` | One-shot: validated input → **Draft** JSON |
+| `POST` | `/api/v1/aitools/{ns}/{tool}/sessions` | Start a multi-turn refinement session |
+| `POST` | `/api/v1/aitools/{ns}/{tool}/sessions/{id}/messages` | Send a turn (SSE or sync JSON via `Accept`) |
+| `POST` | `/api/v1/aitools/{ns}/{tool}/sessions/{id}/finalize` | Produce the final **Draft** |
+
+Built-in tool: `agents/draft_definition` — draft an `AgentDefinition` from a
+description. Reusable library: [`aikit-magictool`](aikit-magictool/README.md).
+
 ## 4. Packages
 
 Distribute commands, skills, and agent definitions as `aikit.toml`
@@ -221,6 +243,9 @@ aikit remove my-tools            # uninstall
 ```bash
 # Create a package skeleton with aikit.toml
 aikit package init my-tools --description "My AI commands"
+
+# Validate aikit.toml and template files before build
+aikit package validate
 
 # Build distributable artifacts
 cd my-tools

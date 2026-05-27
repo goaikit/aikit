@@ -1,6 +1,6 @@
 # aikit-agent
 
-`aikit-agent` is the in-process runtime used by `aikit run -a aikit`.
+`aikit-agent` is the in-process runtime used by `aikit agent run --agent aikit`.
 It provides:
 
 - OpenAI-compatible LLM gateway plumbing
