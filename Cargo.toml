@@ -3,7 +3,7 @@ members = [".", "aikit-sdk", "aikit-py", "aikit-agent", "aikit-evals", "aikit-ma
 
 [package]
 name = "aikit-cli"
-version = "0.1.123"
+version = "0.1.124"
 edition = "2021"
 authors = ["@aroff"]
 description = "Multi-agent template package manager and CLI for aikit.toml packages; aikit-sdk provides the Rust gateway for catalog, deploy, and agent run APIs."
