@@ -383,6 +383,7 @@ mod tests {
     use super::*;
     use crate::runner::types::{AgentEventStream, MessageKind, MessagePhase, MessageRole};
 
+    #[test]
     fn test_normalize_gemini_delta_message_is_delta() {
         let line = serde_json::json!({
             "type": "message",

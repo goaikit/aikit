@@ -26,6 +26,16 @@ else
     exit 1
 fi
 
+# Run clippy with CI-equivalent flags (catches test code + all features)
+echo ""
+echo "🔧 Running clippy (workspace, all-targets, all-features)..."
+if cargo clippy --workspace --all-targets --all-features -- -D warnings; then
+    echo "✅ Clippy passed"
+else
+    echo "❌ Clippy failed. Fix the issues before pushing."
+    exit 1
+fi
+
 # Check documentation builds
 echo ""
 echo "📚 Building documentation..."
