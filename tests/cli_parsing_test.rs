@@ -304,52 +304,6 @@ mod tests {
         );
     }
 
-    /// deprecated aikit run still succeeds (deprecation warning goes to process stderr, not harness)
-    #[tokio::test]
-    async fn test_run_deprecated_succeeds() {
-        let mut h = harness();
-        let out = h
-            .run(&[
-                "aikit",
-                "run",
-                "--agent",
-                "codex",
-                "--dry-run",
-                "-p",
-                "hello",
-            ])
-            .await;
-        assert_eq!(
-            out.exit_code, 0,
-            "deprecated run should still succeed; stderr: {}",
-            out.stderr
-        );
-    }
-
-    /// deprecated aikit agents still succeeds
-    #[tokio::test]
-    async fn test_agents_deprecated_succeeds() {
-        let mut h = harness();
-        let out = h.run(&["aikit", "agents"]).await;
-        assert_eq!(
-            out.exit_code, 0,
-            "deprecated agents should still succeed; stderr: {}",
-            out.stderr
-        );
-    }
-
-    /// deprecated aikit mcp list still succeeds
-    #[tokio::test]
-    async fn test_mcp_list_deprecated_succeeds() {
-        let mut h = harness();
-        let out = h.run(&["aikit", "mcp", "list"]).await;
-        assert_eq!(
-            out.exit_code, 0,
-            "deprecated mcp list should still succeed; stderr: {}",
-            out.stderr
-        );
-    }
-
     /// aikit agent run without --agent reports an error
     #[tokio::test]
     async fn test_agent_run_requires_agent_flag() {

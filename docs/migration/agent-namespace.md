@@ -8,17 +8,17 @@ Agent-related commands have been consolidated under the `aikit agent` subcommand
 
 | Old command | New command | Status |
 |-------------|-------------|--------|
-| `aikit run --agent <KEY> ...` | `aikit agent run --agent <KEY> ...` | Deprecated alias |
-| `aikit agents` | `aikit agent list` | Deprecated alias |
-| `aikit mcp list` | `aikit agent mcp list` | Deprecated alias |
-| `aikit mcp add ...` | `aikit agent mcp add ...` | Deprecated alias |
+| `aikit run --agent <KEY> ...` | `aikit agent run --agent <KEY> ...` | Removed |
+| `aikit agents` | `aikit agent list` | Removed |
+| `aikit mcp list` | `aikit agent mcp list` | Removed |
+| `aikit mcp add ...` | `aikit agent mcp add ...` | Removed |
 | `aikit check` | `aikit check` (unchanged) | Not deprecated |
 | _(new)_ | `aikit agent check` | Agent CLIs only |
 
 ## Deprecation Timeline
 
 - **v0.1.110**: `aikit agent` group introduced; old top-level aliases emit deprecation warnings.
-- **Next major release**: Deprecated aliases (`aikit run`, `aikit agents`, `aikit mcp list`, `aikit mcp add`) will be removed.
+- **v0.2.0**: Deprecated aliases (`aikit run`, `aikit agents`, `aikit mcp list`, `aikit mcp add`) removed.
 
 ## Python SDK: `session_id` Parameter
 

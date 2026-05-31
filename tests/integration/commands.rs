@@ -219,10 +219,9 @@ fn test_aikit_version_command_displays_version() {
 #[test]
 fn test_aikit_run_help() {
     let output = Command::new("aikit")
-        .arg("run")
-        .arg("--help")
+        .args(["agent", "run", "--help"])
         .output()
-        .expect("Failed to execute aikit run --help");
+        .expect("Failed to execute aikit agent run --help");
 
     assert!(output.status.success());
     let output_str = String::from_utf8(output.stdout).unwrap();
@@ -247,12 +246,12 @@ fn test_aikit_run_stdin() {
 
     // Use dry-run mode to test without requiring API credentials
     let mut child = Command::new("aikit")
-        .args(["run", "--agent", "opencode", "--dry-run"])
+        .args(["agent", "run", "--agent", "opencode", "--dry-run"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("Failed to spawn aikit run");
+        .expect("Failed to spawn aikit agent run");
 
     // Write to stdin
     if let Some(mut stdin) = child.stdin.take() {
@@ -300,12 +299,12 @@ fn test_aikit_run_stdin_real() {
 
     // Spawn process with timeout
     let mut child = Command::new("aikit")
-        .args(["run", "--agent", "opencode"])
+        .args(["agent", "run", "--agent", "opencode"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("Failed to spawn aikit run");
+        .expect("Failed to spawn aikit agent run");
 
     // Write to stdin
     if let Some(mut stdin) = child.stdin.take() {
