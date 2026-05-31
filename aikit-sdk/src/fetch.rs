@@ -12,6 +12,8 @@ pub enum TemplateSource {
         owner: String,
         repo: String,
         version: Option<String>,
+        /// Optional sub-directory within the repo (e.g. "templates/default")
+        subdir: Option<String>,
     },
     /// Direct URL to a zip archive
     Url(String),
@@ -56,10 +58,10 @@ impl TemplateSource {
             return parse_github_url(s);
         }
 
-        // Check for owner/repo format (2 segments, optionally with @version)
+        // Check for owner/repo[/subdir] format (2+ segments, optionally with @version)
         // Split by '/' to check format, but ignore the version part for segment count
         let base_part = s.split('@').next().unwrap_or(s);
-        if base_part.split('/').count() == 2 && !path.exists() {
+        if base_part.split('/').count() >= 2 && !path.exists() {
             return parse_github_url(s);
         }
 
@@ -69,13 +71,22 @@ impl TemplateSource {
         }
 
         Err(InstallError::InvalidSource(format!(
-            "Invalid source '{}'. Expected:\n  - Local directory path (must exist and contain aikit.toml)\n  - GitHub URL: github.com/owner/repo or https://github.com/owner/repo\n  - Short format: owner/repo\n  - Direct zip URL: https://...",
+            "Invalid source '{}'. Expected:\n  - Local directory path (must exist and contain aikit.toml)\n  - GitHub URL: github.com/owner/repo or https://github.com/owner/repo\n  - Short format: owner/repo or owner/repo/subdir\n  - Direct zip URL: https://...",
             s
         )))
     }
 }
 
-/// Parse GitHub URL to extract owner, repo, and optional version
+/// Parse GitHub URL to extract owner, repo, optional version, and optional subdir.
+///
+/// Supported forms:
+/// - `owner/repo`
+/// - `owner/repo/subdir/path`
+/// - `owner/repo/subdir/path@ref`
+/// - `github.com/owner/repo`
+/// - `github.com/owner/repo/tree/<ref>/subdir`
+/// - `https://github.com/owner/repo`
+/// - `https://github.com/owner/repo/tree/<ref>/subdir`
 fn parse_github_url(s: &str) -> Result<TemplateSource, InstallError> {
     let url = s
         .trim_start_matches("https://")
@@ -87,28 +98,52 @@ fn parse_github_url(s: &str) -> Result<TemplateSource, InstallError> {
         url
     };
 
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() < 2 {
+    // Split off @version suffix from the whole spec (must be in the last segment)
+    let (path_no_ver, version_from_at) = match path.rsplit_once('@') {
+        Some((p, v)) if !v.contains('/') => (p, Some(v.to_string())),
+        _ => (path, None),
+    };
+
+    let parts: Vec<&str> = path_no_ver.split('/').collect();
+    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
         return Err(InstallError::InvalidSource(
-            "Invalid GitHub URL format. Expected: github.com/owner/repo or owner/repo".to_string(),
+            "Invalid GitHub source format. Expected: owner/repo, owner/repo/subdir, \
+             github.com/owner/repo, or github.com/owner/repo/tree/<ref>/subdir"
+                .to_string(),
         ));
     }
 
     let owner = parts[0].to_string();
     let repo = parts[1].to_string();
 
-    // Check if repo contains version (e.g., "repo@v1.0.0")
-    let (repo_clean, version) = if let Some(idx) = repo.find('@') {
-        let (r, v) = repo.split_at(idx);
-        (r.to_string(), Some(v[1..].to_string()))
+    // Handle github.com/owner/repo/tree/<ref>[/subdir] URL form
+    if parts.len() > 2 && parts[2] == "tree" {
+        let version = parts.get(3).map(|s| s.to_string()).or(version_from_at);
+        let subdir = if parts.len() > 4 {
+            Some(parts[4..].join("/"))
+        } else {
+            None
+        };
+        return Ok(TemplateSource::GitHub {
+            owner,
+            repo,
+            version,
+            subdir,
+        });
+    }
+
+    // Short form: owner/repo or owner/repo/subdir/path[@ref]
+    let subdir = if parts.len() > 2 {
+        Some(parts[2..].join("/"))
     } else {
-        (repo.clone(), None)
+        None
     };
 
     Ok(TemplateSource::GitHub {
         owner,
-        repo: repo_clean,
-        version,
+        repo,
+        version: version_from_at,
+        subdir,
     })
 }
 
@@ -127,7 +162,8 @@ pub fn fetch_package_to_dir(
             owner,
             repo,
             version,
-        } => fetch_from_github(owner, repo, version.as_deref(), dest_dir),
+            subdir,
+        } => fetch_from_github(owner, repo, version.as_deref(), subdir.as_deref(), dest_dir),
         TemplateSource::Url(url) => fetch_from_url(url, dest_dir),
     }
 }
@@ -183,15 +219,22 @@ fn fetch_from_github(
     owner: &str,
     repo: &str,
     version: Option<&str>,
+    subdir: Option<&str>,
     dest_dir: &Path,
 ) -> Result<(TemplateManifest, PathBuf), InstallError> {
     let ref_ = version.unwrap_or("main");
 
-    // Step 1: Fetch manifest from GitHub
-    let manifest_url = format!(
-        "https://raw.githubusercontent.com/{}/{}/{}/aikit.toml",
-        owner, repo, ref_
-    );
+    // Step 1: Fetch manifest from GitHub (at subdir if specified)
+    let manifest_url = match subdir {
+        Some(dir) => format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/{}/aikit.toml",
+            owner, repo, ref_, dir
+        ),
+        None => format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/aikit.toml",
+            owner, repo, ref_
+        ),
+    };
 
     let client = reqwest::blocking::Client::new();
     let mut request = client.get(&manifest_url);
@@ -258,7 +301,7 @@ fn fetch_from_github(
     extract_zip(&zip_bytes, dest_dir)?;
 
     // Step 4: Find package root (directory containing aikit.toml)
-    let package_root = find_package_root(dest_dir).ok_or_else(|| {
+    let package_root = find_package_root_with_subdir(dest_dir, subdir).ok_or_else(|| {
         InstallError::InvalidSource(
             "Could not find package root (directory containing aikit.toml) after extraction"
                 .to_string(),
@@ -435,9 +478,44 @@ fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
 /// Find package root: directory containing aikit.toml
 /// Handles GitHub zipball case (single top-level directory)
 fn find_package_root(dir: &Path) -> Option<PathBuf> {
+    find_package_root_with_subdir(dir, None)
+}
+
+/// Find package root, optionally navigating into a sub-directory first.
+///
+/// GitHub zipballs extract to a single top-level directory named
+/// `{owner}-{repo}-{sha}/`. When `subdir` is set this function looks for
+/// `aikit.toml` at `{top_level_dir}/{subdir}/aikit.toml`.
+fn find_package_root_with_subdir(dir: &Path, subdir: Option<&str>) -> Option<PathBuf> {
+    if let Some(sub) = subdir {
+        // Candidate 1: subdir directly inside dir (non-zipball case)
+        let direct = dir.join(sub);
+        if direct.join("aikit.toml").exists() {
+            return Some(direct);
+        }
+
+        // Candidate 2: subdir under the single top-level dir from a GitHub zipball
+        let children: Vec<PathBuf> = fs::read_dir(dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect();
+
+        if children.len() == 1 {
+            let candidate = children[0].join(sub);
+            if candidate.join("aikit.toml").exists() {
+                return Some(candidate);
+            }
+        }
+
+        return None;
+    }
+
+    // No subdir — original behavior
+
     // Check if aikit.toml is directly in dir
-    let direct = dir.join("aikit.toml");
-    if direct.exists() {
+    if dir.join("aikit.toml").exists() {
         return Some(dir.to_path_buf());
     }
 
@@ -501,10 +579,12 @@ mod tests {
                 owner,
                 repo,
                 version,
+                subdir,
             } => {
                 assert_eq!(owner, "owner");
                 assert_eq!(repo, "repo");
                 assert!(version.is_none());
+                assert!(subdir.is_none());
             }
             _ => panic!("Expected GitHub source"),
         }
@@ -518,10 +598,12 @@ mod tests {
                 owner,
                 repo,
                 version,
+                subdir,
             } => {
                 assert_eq!(owner, "owner");
                 assert_eq!(repo, "repo");
                 assert!(version.is_none());
+                assert!(subdir.is_none());
             }
             _ => panic!("Expected GitHub source"),
         }
@@ -535,10 +617,72 @@ mod tests {
                 owner,
                 repo,
                 version,
+                subdir,
             } => {
                 assert_eq!(owner, "owner");
                 assert_eq!(repo, "repo");
                 assert_eq!(version, Some("v1.0.0".to_string()));
+                assert!(subdir.is_none());
+            }
+            _ => panic!("Expected GitHub source"),
+        }
+    }
+
+    #[test]
+    fn test_template_source_parse_github_subdir() {
+        let source = TemplateSource::parse("aroff/designkeeper/templates/default").unwrap();
+        match source {
+            TemplateSource::GitHub {
+                owner,
+                repo,
+                version,
+                subdir,
+            } => {
+                assert_eq!(owner, "aroff");
+                assert_eq!(repo, "designkeeper");
+                assert!(version.is_none());
+                assert_eq!(subdir, Some("templates/default".to_string()));
+            }
+            _ => panic!("Expected GitHub source"),
+        }
+    }
+
+    #[test]
+    fn test_template_source_parse_github_subdir_with_version() {
+        let source = TemplateSource::parse("aroff/designkeeper/templates/default@v2.0.0").unwrap();
+        match source {
+            TemplateSource::GitHub {
+                owner,
+                repo,
+                version,
+                subdir,
+            } => {
+                assert_eq!(owner, "aroff");
+                assert_eq!(repo, "designkeeper");
+                assert_eq!(version, Some("v2.0.0".to_string()));
+                assert_eq!(subdir, Some("templates/default".to_string()));
+            }
+            _ => panic!("Expected GitHub source"),
+        }
+    }
+
+    #[test]
+    fn test_template_source_parse_github_tree_url() {
+        let source = TemplateSource::parse(
+            "https://github.com/aroff/designkeeper/tree/main/templates/default",
+        )
+        .unwrap();
+        match source {
+            TemplateSource::GitHub {
+                owner,
+                repo,
+                version,
+                subdir,
+            } => {
+                assert_eq!(owner, "aroff");
+                assert_eq!(repo, "designkeeper");
+                assert_eq!(version, Some("main".to_string()));
+                assert_eq!(subdir, Some("templates/default".to_string()));
             }
             _ => panic!("Expected GitHub source"),
         }
@@ -630,6 +774,32 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let result = find_package_root(temp_dir.path());
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_package_root_with_subdir_direct() {
+        let temp_dir = TempDir::new().unwrap();
+        let sub = temp_dir.path().join("templates").join("default");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("aikit.toml"), "[package]\nname = \"test\"").unwrap();
+
+        let result = find_package_root_with_subdir(temp_dir.path(), Some("templates/default"));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), sub);
+    }
+
+    #[test]
+    fn test_find_package_root_with_subdir_inside_zipball_toplevel() {
+        // Simulate GitHub zipball: dest_dir contains one top-level dir (owner-repo-sha)
+        let temp_dir = TempDir::new().unwrap();
+        let top = temp_dir.path().join("owner-repo-abc123");
+        let sub = top.join("templates").join("default");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("aikit.toml"), "[package]\nname = \"test\"").unwrap();
+
+        let result = find_package_root_with_subdir(temp_dir.path(), Some("templates/default"));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), sub);
     }
 
     #[test]
