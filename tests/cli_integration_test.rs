@@ -990,7 +990,7 @@ description = "Test package with invalid name"
     #[test]
     fn test_aikit_run_help() -> Result<(), Box<dyn std::error::Error>> {
         cargo_bin_cmd!("aikit")
-            .args(["run", "--help"])
+            .args(["agent", "run", "--help"])
             .assert()
             .success()
             .stdout(predicate::str::contains("Run a coding agent with a prompt"))
@@ -1009,7 +1009,7 @@ description = "Test package with invalid name"
     #[test]
     fn test_aikit_run_requires_agent_flag() -> Result<(), Box<dyn std::error::Error>> {
         cargo_bin_cmd!("aikit")
-            .args(["run", "-p", "hello"])
+            .args(["agent", "run", "-p", "hello"])
             .assert()
             .failure()
             .stderr(predicate::str::contains("--agent"));
@@ -1201,12 +1201,12 @@ description = "Test package with invalid name"
 
         // Use dry-run mode to test without requiring API credentials
         let mut child = Command::new(cargo_bin_cmd!("aikit").get_program())
-            .args(["run", "--agent", "opencode", "--dry-run"])
+            .args(["agent", "run", "--agent", "opencode", "--dry-run"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("Failed to spawn aikit run");
+            .expect("Failed to spawn aikit agent run");
 
         // Write to stdin (handle error without early return to avoid zombie process)
         let write_result = if let Some(mut stdin) = child.stdin.take() {
@@ -1261,12 +1261,12 @@ description = "Test package with invalid name"
 
         // Spawn process with timeout
         let mut child = Command::new(cargo_bin_cmd!("aikit").get_program())
-            .args(["run", "--agent", "opencode"])
+            .args(["agent", "run", "--agent", "opencode"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .expect("Failed to spawn aikit run");
+            .expect("Failed to spawn aikit agent run");
 
         // Write to stdin
         if let Some(mut stdin) = child.stdin.take() {
@@ -1324,7 +1324,7 @@ description = "Test package with invalid name"
         let temp = tempdir()?;
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
-            .args(["agents"])
+            .args(["agent", "list"])
             .assert()
             .success();
         Ok(())
@@ -1343,7 +1343,7 @@ description = "Test package with invalid name"
 
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
-            .args(["agents"])
+            .args(["agent", "list"])
             .assert()
             .success()
             .stdout(predicate::str::contains("NAME"))
@@ -1367,7 +1367,7 @@ description = "Test package with invalid name"
 
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
-            .args(["agents"])
+            .args(["agent", "list"])
             .assert()
             .success()
             .stdout(predicate::str::contains("project"));
@@ -1387,7 +1387,7 @@ description = "Test package with invalid name"
 
         let output = cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
-            .args(["agents", "--json"])
+            .args(["agent", "list", "--json"])
             .assert()
             .success()
             .get_output()
@@ -1415,7 +1415,7 @@ description = "Test package with invalid name"
         let temp = tempdir()?;
         let output = cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
-            .args(["agents", "--json"])
+            .args(["agent", "list", "--json"])
             .assert()
             .success()
             .get_output()
@@ -1436,6 +1436,7 @@ description = "Test package with invalid name"
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
             .args([
+                "agent",
                 "run",
                 "-a",
                 "aikit",
@@ -1458,6 +1459,7 @@ description = "Test package with invalid name"
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
             .args([
+                "agent",
                 "run",
                 "-a",
                 "aikit",
@@ -1479,6 +1481,7 @@ description = "Test package with invalid name"
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
             .args([
+                "agent",
                 "run",
                 "-a",
                 "aikit",
@@ -1507,6 +1510,7 @@ description = "Test package with invalid name"
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
             .args([
+                "agent",
                 "run",
                 "-a",
                 "aikit",
@@ -1528,6 +1532,7 @@ description = "Test package with invalid name"
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
             .args([
+                "agent",
                 "run",
                 "-a",
                 "aikit",
@@ -1555,6 +1560,7 @@ description = "Test package with invalid name"
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
             .args([
+                "agent",
                 "run",
                 "-a",
                 "aikit",
@@ -1578,6 +1584,7 @@ description = "Test package with invalid name"
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
             .args([
+                "agent",
                 "run",
                 "-a",
                 "aikit",
@@ -1600,6 +1607,7 @@ description = "Test package with invalid name"
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
             .args([
+                "agent",
                 "run",
                 "-a",
                 "aikit",
@@ -1631,6 +1639,7 @@ description = "Test package with invalid name"
         cargo_bin_cmd!("aikit")
             .current_dir(temp.path())
             .args([
+                "agent",
                 "run",
                 "-a",
                 "aikit",
