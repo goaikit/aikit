@@ -30,6 +30,7 @@ printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
 
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_aikit"));
         cmd.env("PATH", path)
+            .arg("agent")
             .arg("run")
             .arg("-a")
             .arg("claude")
