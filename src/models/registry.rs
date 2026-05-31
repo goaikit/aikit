@@ -215,6 +215,31 @@ impl Default for RegistryConfig {
     }
 }
 
+impl RegistryConfig {
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        if self.cache_dir.is_empty() {
+            errors.push("cache_dir must be specified".to_string());
+        }
+
+        for url in &self.remotes {
+            if !url.starts_with("http://") && !url.starts_with("https://") {
+                errors.push(format!(
+                    "remote registry URL must be valid HTTP(S): {}",
+                    url
+                ));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+}
+
 /// Package installation request
 #[derive(Debug, Clone)]
 pub struct InstallRequest {

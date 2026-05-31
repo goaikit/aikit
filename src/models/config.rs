@@ -52,6 +52,24 @@ impl AikConfig {
         Ok(())
     }
 
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+
+        if self.version.is_empty() {
+            errors.push("version must be specified".to_string());
+        }
+
+        if let Err(registry_errors) = self.registry.validate() {
+            errors.extend(registry_errors);
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
     /// Get default agent configurations
     fn default_agents() -> HashMap<String, AgentConfig> {
         let mut agents = HashMap::new();
@@ -294,20 +312,31 @@ impl ConfigPaths {
 /// 2. Global user config (~/.aikit/config.toml)
 /// 3. Default configuration
 pub fn load_config() -> Result<AikConfig, Box<dyn std::error::Error>> {
-    // Try local config first
     let local_config = ConfigPaths::local_config();
-    if local_config.exists() {
-        return AikConfig::load(&local_config);
-    }
+    let config = if local_config.exists() {
+        AikConfig::load(&local_config)?
+    } else {
+        let global_config = ConfigPaths::global_config();
+        if global_config.exists() {
+            AikConfig::load(&global_config)?
+        } else {
+            AikConfig::default()
+        }
+    };
 
-    // Try global config
-    let global_config = ConfigPaths::global_config();
-    if global_config.exists() {
-        return AikConfig::load(&global_config);
-    }
+    config.validate().map_err(|errors| {
+        let msg = format!(
+            "Configuration validation failed:\n{}",
+            errors
+                .iter()
+                .map(|e| format!("  - {}", e))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        Box::<dyn std::error::Error>::from(msg)
+    })?;
 
-    // Fall back to defaults
-    Ok(AikConfig::default())
+    Ok(config)
 }
 
 /// Save configuration to appropriate location
