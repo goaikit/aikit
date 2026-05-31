@@ -50,7 +50,14 @@ where
     let gateway = OpenAiCompatProvider::new(config.timeout_secs, config.connect_timeout_secs)
         .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
 
-    run_with_config_and_gateway(prompt, options, config, Box::new(gateway), &mut on_event)
+    run_with_config_and_gateway(
+        prompt,
+        options,
+        config,
+        Box::new(gateway),
+        SessionStore::open(),
+        &mut on_event,
+    )
 }
 
 /// Run the builtin aikit agent with an externally-supplied LLM gateway.
@@ -62,6 +69,7 @@ pub fn run_aikit_agent_with_gateway<F>(
     prompt: &str,
     options: &RunOptions,
     gateway: Box<dyn LlmGateway>,
+    store: Option<SessionStore>,
     mut on_event: F,
 ) -> Result<RunResult, RunError>
 where
@@ -76,7 +84,15 @@ where
 
     apply_session_options(options, &mut config);
 
-    run_with_config_and_gateway(prompt, options, config, gateway, &mut on_event)
+    let resolved_store = store.unwrap_or_else(SessionStore::open);
+    run_with_config_and_gateway(
+        prompt,
+        options,
+        config,
+        gateway,
+        resolved_store,
+        &mut on_event,
+    )
 }
 
 fn apply_session_options(options: &RunOptions, config: &mut AgentConfig) {
@@ -116,12 +132,12 @@ fn run_with_config_and_gateway<F>(
     options: &RunOptions,
     config: AgentConfig,
     gateway: Box<dyn LlmGateway>,
+    store: SessionStore,
     on_event: &mut F,
 ) -> Result<RunResult, RunError>
 where
     F: FnMut(AgentEvent) + Send,
 {
-    let store = SessionStore::open();
     let cwd = options
         .current_dir
         .clone()

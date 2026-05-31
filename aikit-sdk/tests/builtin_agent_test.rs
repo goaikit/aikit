@@ -162,24 +162,17 @@ fn test_embed_wrong_key_error() {
 #[test]
 fn test_resume_missing_session_returns_not_found() {
     let tmp = tempfile::TempDir::new().unwrap();
-    std::env::set_var("AIKIT_SESSIONS_DIR", tmp.path().to_str().unwrap());
     std::env::set_var("AIKIT_API_KEY", "test-key-unused");
+    let store = SessionStore {
+        sessions_dir: tmp.path().to_path_buf(),
+    };
 
     let options = RunOptions::new().with_session_id("nonexistent-session-id-xyz");
-    let mut writer = Vec::new();
-    let mut err_writer = Vec::new();
+    let gw = MockGateway::new(vec![]);
 
-    let result = run_builtin_agent(
-        "aikit",
-        "test prompt",
-        options,
-        OutputMode::Plain,
-        &mut writer,
-        &mut err_writer,
-        None,
-    );
+    let result =
+        run_aikit_agent_with_gateway("test prompt", &options, Box::new(gw), Some(store), |_| {});
 
-    std::env::remove_var("AIKIT_SESSIONS_DIR");
     std::env::remove_var("AIKIT_API_KEY");
 
     match result.unwrap_err() {
@@ -194,28 +187,21 @@ fn test_resume_missing_session_returns_not_found() {
 #[test]
 fn test_resume_corrupt_session_returns_load_failed() {
     let tmp = tempfile::TempDir::new().unwrap();
-    std::env::set_var("AIKIT_SESSIONS_DIR", tmp.path().to_str().unwrap());
     std::env::set_var("AIKIT_API_KEY", "test-key-unused");
+    let store = SessionStore {
+        sessions_dir: tmp.path().to_path_buf(),
+    };
 
     let corrupt_id = "corrupt-session-id-abc";
     let session_path = tmp.path().join(format!("{}.json", corrupt_id));
     std::fs::write(&session_path, "not valid json at all {{{{").unwrap();
 
     let options = RunOptions::new().with_session_id(corrupt_id);
-    let mut writer = Vec::new();
-    let mut err_writer = Vec::new();
+    let gw = MockGateway::new(vec![]);
 
-    let result = run_builtin_agent(
-        "aikit",
-        "test prompt",
-        options,
-        OutputMode::Plain,
-        &mut writer,
-        &mut err_writer,
-        None,
-    );
+    let result =
+        run_aikit_agent_with_gateway("test prompt", &options, Box::new(gw), Some(store), |_| {});
 
-    std::env::remove_var("AIKIT_SESSIONS_DIR");
     std::env::remove_var("AIKIT_API_KEY");
 
     match result.unwrap_err() {
@@ -270,17 +256,19 @@ fn test_session_store_default_is_accessible() {
 #[test]
 fn test_new_session_creates_file_and_prints_to_stderr() {
     let tmp = tempfile::TempDir::new().unwrap();
-    std::env::set_var("AIKIT_SESSIONS_DIR", tmp.path().to_str().unwrap());
     std::env::set_var("AIKIT_API_KEY", "test-key-unused");
+    let store = SessionStore {
+        sessions_dir: tmp.path().to_path_buf(),
+    };
 
     let options = RunOptions::new();
     let gw = MockGateway::new(vec![MockResponse::text("Hello from mock agent!")]);
     let mut on_event_called = false;
-    let result = run_aikit_agent_with_gateway("Say hello", &options, Box::new(gw), |_event| {
-        on_event_called = true;
-    });
+    let result =
+        run_aikit_agent_with_gateway("Say hello", &options, Box::new(gw), Some(store), |_event| {
+            on_event_called = true;
+        });
 
-    std::env::remove_var("AIKIT_SESSIONS_DIR");
     std::env::remove_var("AIKIT_API_KEY");
 
     let result = result.expect("run should succeed");
@@ -335,8 +323,10 @@ fn test_new_session_creates_file_and_prints_to_stderr() {
 #[test]
 fn test_resume_passes_prior_turns_to_llm() {
     let tmp = tempfile::TempDir::new().unwrap();
-    std::env::set_var("AIKIT_SESSIONS_DIR", tmp.path().to_str().unwrap());
     std::env::set_var("AIKIT_API_KEY", "test-key-unused");
+    let store = SessionStore {
+        sessions_dir: tmp.path().to_path_buf(),
+    };
 
     // First, create a session file with prior turns.
     let session_id = "prior-turns-test-session-id-1111";
@@ -358,9 +348,9 @@ fn test_resume_passes_prior_turns_to_llm() {
     let gw = CapturingGateway::new(vec![MockResponse::text("Based on prior context...")]);
     let captured = std::sync::Arc::clone(&gw.captured);
 
-    let result = run_aikit_agent_with_gateway("What is 3+3?", &options, Box::new(gw), |_| {});
+    let result =
+        run_aikit_agent_with_gateway("What is 3+3?", &options, Box::new(gw), Some(store), |_| {});
 
-    std::env::remove_var("AIKIT_SESSIONS_DIR");
     std::env::remove_var("AIKIT_API_KEY");
 
     result.expect("resume should succeed");
@@ -409,13 +399,21 @@ fn test_resume_passes_prior_turns_to_llm() {
 #[test]
 fn test_two_run_integration_with_resume() {
     let tmp = tempfile::TempDir::new().unwrap();
-    std::env::set_var("AIKIT_SESSIONS_DIR", tmp.path().to_str().unwrap());
     std::env::set_var("AIKIT_API_KEY", "test-key-unused");
 
     // --- First run: no session_id, creates a new session ---
     let options1 = RunOptions::new();
     let gw1 = MockGateway::new(vec![MockResponse::text("First run response")]);
-    let result1 = run_aikit_agent_with_gateway("First prompt", &options1, Box::new(gw1), |_| {});
+    let store1 = SessionStore {
+        sessions_dir: tmp.path().to_path_buf(),
+    };
+    let result1 = run_aikit_agent_with_gateway(
+        "First prompt",
+        &options1,
+        Box::new(gw1),
+        Some(store1),
+        |_| {},
+    );
     let result1 = result1.expect("first run should succeed");
 
     // Extract session ID from stderr
@@ -438,10 +436,18 @@ fn test_two_run_integration_with_resume() {
     let options2 = RunOptions::new().with_session_id(&session_id);
     let gw2 = CapturingGateway::new(vec![MockResponse::text("Second run response")]);
     let captured = std::sync::Arc::clone(&gw2.captured);
+    let store2 = SessionStore {
+        sessions_dir: tmp.path().to_path_buf(),
+    };
 
-    let result2 = run_aikit_agent_with_gateway("Second prompt", &options2, Box::new(gw2), |_| {});
+    let result2 = run_aikit_agent_with_gateway(
+        "Second prompt",
+        &options2,
+        Box::new(gw2),
+        Some(store2),
+        |_| {},
+    );
 
-    std::env::remove_var("AIKIT_SESSIONS_DIR");
     std::env::remove_var("AIKIT_API_KEY");
 
     result2.expect("second run should succeed");
