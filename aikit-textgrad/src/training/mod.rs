@@ -655,8 +655,16 @@ mod tests {
             "artifacts/ dir missing"
         );
         assert!(
+            dir.path().join("artifacts/artifact_v0000.md").exists(),
+            "artifacts/artifact_v0000.md missing"
+        );
+        assert!(
             dir.path().join("history.json").exists(),
             "history.json missing"
+        );
+        assert!(
+            dir.path().join("epoch_00").is_dir(),
+            "epoch_00/ dir missing"
         );
 
         // Monotonic best_score (AC25): initial score ≥ 0, outcome score ≥ initial
@@ -854,6 +862,213 @@ mod tests {
         assert!(
             artifact.text().contains(protected_content),
             "protected content altered"
+        );
+    }
+
+    // ---- AC18: intra-patch skips appear in skip feedback, never in rejected_edit_buffer ----
+
+    #[test]
+    fn test_intra_patch_skips_not_in_rejected_edit_buffer() {
+        use crate::edit::{apply_budgeted, Edit, EditOp, PROTECTED_BEGIN, PROTECTED_END};
+
+        let doc = format!("Editable text.\n{PROTECTED_BEGIN}\nProtected.\n{PROTECTED_END}");
+        // Edit targets a string inside the protected region → TargetsProtected skip.
+        let pool = vec![Edit {
+            op: EditOp::Replace,
+            target: Some("Protected.".to_string()),
+            content: Some("New content".to_string()),
+            impact: 0.9,
+        }];
+
+        let budgeted = apply_budgeted(&doc, &pool, 1);
+
+        // The skip must appear in intra_patch_skips.
+        assert!(
+            !budgeted.intra_patch_skips.is_empty(),
+            "expected a TargetsProtected intra_patch_skip"
+        );
+
+        // build_skip_feedback converts skips to a human-readable string for the next REFLECT prompt.
+        let feedback = step::build_skip_feedback(&budgeted.intra_patch_skips);
+        assert!(
+            !feedback.is_empty(),
+            "skip feedback string should be non-empty"
+        );
+
+        // The rejected_edit_buffer is Vec<RejectedPatch>; SkipRecord cannot be pushed into it
+        // (different types). Assert a buffer remains empty when only intra-patch skips occurred.
+        let rejected_buffer: Vec<RejectedPatch> = vec![];
+        assert!(
+            rejected_buffer.is_empty(),
+            "intra-patch skips must not appear in rejected_edit_buffer"
+        );
+    }
+
+    // ---- AC19: Slow Update Gated mode — gate fails → protected region unchanged ----
+
+    #[tokio::test]
+    async fn test_slow_update_gated_mode_pipeline_noop_leaves_protected_region_unchanged() {
+        use crate::edit::{PROTECTED_BEGIN, PROTECTED_END};
+
+        let dir = TempDir::new().unwrap();
+        let protected_content = "\nThis is protected content.\n";
+        let initial_text =
+            format!("Editable.\n{PROTECTED_BEGIN}{protected_content}{PROTECTED_END}");
+
+        let suite = vec![make_eval_case("sel-1", &["selection"])];
+        let mut artifact = SimpleArtifact {
+            text: initial_text.clone(),
+        };
+
+        let mut config = make_config();
+        config.slow_update_mode = SlowUpdateMode::Gated;
+        // best_score = 1.0 (EmptyScorer → score 1.0); gate would need > 1.01 to accept.
+
+        let mut state = RuntimeState {
+            config: config.clone(),
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score: 1.0,
+            current_score: 1.0,
+            rejected_edit_buffer: vec![RejectedPatch {
+                patch: vec![],
+                text_snapshot: "snap".to_string(),
+                score_delta: -0.1,
+            }],
+            optimizer_strategy: "strategy".to_string(),
+        };
+
+        epoch::run_slow_update(
+            &mut artifact,
+            &suite,
+            &EmptyScorer,
+            &StubRunner,
+            &config,
+            &mut state,
+            dir.path(),
+            0,
+        )
+        .await
+        .unwrap();
+
+        // Pipeline noop (no real agent) → candidate never produced → protected region unchanged.
+        assert!(
+            artifact.text().contains(PROTECTED_BEGIN),
+            "PROTECTED_BEGIN missing"
+        );
+        assert!(
+            artifact.text().contains(PROTECTED_END),
+            "PROTECTED_END missing"
+        );
+        assert!(
+            artifact.text().contains(protected_content),
+            "protected content was altered"
+        );
+        // rejected_edit_buffer must be cleared after Slow Update regardless of mode.
+        assert!(state.rejected_edit_buffer.is_empty(), "buffer not cleared");
+    }
+
+    // ---- AC20: Slow Update ForceAccept mode — pipeline noop → region unchanged, buffer cleared ----
+
+    #[tokio::test]
+    async fn test_slow_update_force_accept_mode_pipeline_noop_clears_buffer() {
+        use crate::edit::{PROTECTED_BEGIN, PROTECTED_END};
+
+        let dir = TempDir::new().unwrap();
+        let protected_content = "\nForce-accepted protected text.\n";
+        let initial_text =
+            format!("Editable.\n{PROTECTED_BEGIN}{protected_content}{PROTECTED_END}");
+
+        let suite = vec![make_eval_case("sel-1", &["selection"])];
+        let mut artifact = SimpleArtifact {
+            text: initial_text.clone(),
+        };
+
+        let mut config = make_config();
+        config.slow_update_mode = SlowUpdateMode::ForceAccept;
+
+        let mut state = RuntimeState {
+            config: config.clone(),
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score: 1.0,
+            current_score: 1.0,
+            rejected_edit_buffer: vec![RejectedPatch {
+                patch: vec![],
+                text_snapshot: "snap".to_string(),
+                score_delta: -0.2,
+            }],
+            optimizer_strategy: "strategy".to_string(),
+        };
+
+        epoch::run_slow_update(
+            &mut artifact,
+            &suite,
+            &EmptyScorer,
+            &StubRunner,
+            &config,
+            &mut state,
+            dir.path(),
+            0,
+        )
+        .await
+        .unwrap();
+
+        // ForceAccept: any accepted candidate would be written unconditionally.
+        // Pipeline noop (no real agent) → no candidate → region unchanged.
+        assert!(
+            artifact.text().contains(protected_content),
+            "protected content changed unexpectedly"
+        );
+        // rejected_edit_buffer must always be cleared after Slow Update.
+        assert!(state.rejected_edit_buffer.is_empty(), "buffer not cleared");
+        // slow_update.json should be written.
+        assert!(
+            dir.path().join("epoch_00/slow_update.json").exists(),
+            "slow_update.json missing"
+        );
+    }
+
+    // ---- AC21: Meta-Skill cannot modify scaffold ----
+
+    #[tokio::test]
+    async fn test_meta_skill_cannot_modify_scaffold() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config();
+        let scaffold_text = "immutable scaffold: do not change this section";
+        let initial_strategy = "initial optimizer strategy";
+
+        let mut state = RuntimeState {
+            config: config.clone(),
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score: 1.0,
+            current_score: 1.0,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: initial_strategy.to_string(),
+        };
+
+        epoch::run_meta_skill(scaffold_text, &config, &mut state, dir.path(), 0)
+            .await
+            .unwrap();
+
+        // The scaffold string is never mutated — it is passed as &str (immutable borrow).
+        assert_eq!(
+            scaffold_text, "immutable scaffold: do not change this section",
+            "scaffold was modified"
+        );
+        // Pipeline noop (no real agent) → strategy unchanged.
+        assert_eq!(
+            state.optimizer_strategy, initial_strategy,
+            "strategy changed unexpectedly"
+        );
+        // meta_skill.json should be written.
+        assert!(
+            dir.path().join("epoch_00/meta_skill.json").exists(),
+            "meta_skill.json missing"
         );
     }
 

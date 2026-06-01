@@ -9,6 +9,8 @@ AIKIT is a Rust workspace centered on a CLI (`aikit`) plus reusable runtime libr
 - `aikit-py`: Python package and bindings around the same SDK behaviors
 - `aikit-agent`: in-process runtime used by `aikit agent run --agent aikit`
 - `aikit-magictool`: magic-tool registry and HTTP router (one-shot + multi-turn drafts); optional on `aikit serve` via Cargo feature `tools`
+- `aikit-evals`: evaluation infrastructure; runs eval suites against live agents and scores trajectories
+- `aikit-textgrad`: artifact-agnostic text-gradient optimization; two-layer architecture — edit substrate (Layer 1, deterministic) and async optimization loop (Layer 2) driven by `aikit-evals` and `aikit-sdk`
 
 The design keeps command orchestration in the CLI crate and reusable execution logic in library crates.
 
