@@ -1,0 +1,21 @@
+[package]
+name = "aikit-textgrad"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Artifact-agnostic text-gradient optimization loop for aikit"
+repository = "https://github.com/goaikit/aikit"
+
+[dependencies]
+aikit-evals = { path = "../aikit-evals", version = "0.1.0" }
+aikit-sdk = { path = "../aikit-sdk", version = "0.3.0" }
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "macros", "process"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "2.0"
+sha2 = "0.10"
+tempfile = "3"
+
+[dev-dependencies]

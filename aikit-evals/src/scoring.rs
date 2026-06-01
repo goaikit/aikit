@@ -32,7 +32,7 @@ impl Scorer for ChecksScorer {
 ///
 /// All three variants treat every element in the input `Vec<CheckResult>` as a required check.
 /// An empty input slice always yields `1.0` for all variants (vacuously successful).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GateMetric {
     /// Per item: 1.0 iff all checks pass, else 0.0. Split score = accuracy.
     Hard,
