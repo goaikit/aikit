@@ -10,6 +10,7 @@ pub mod artifacts;
 pub mod checks;
 pub mod config;
 pub mod runner;
+pub mod scoring;
 pub mod suite;
 pub mod trace;
 
@@ -26,5 +27,6 @@ pub use config::{resolve_from_input, EvalConfig, EvalConfigError, EvalConfigInpu
 pub use runner::{
     run_eval_case, AikitEvalRunner, CaseRunOptions, CaseRunOutput, EvalRunner, RunnerError,
 };
+pub use scoring::{item_score, score_cases, split_score, ChecksScorer, GateMetric, Scorer};
 pub use suite::{load_suite, EvalCase, EvalSuite, SuiteError};
 pub use trace::{agent_events_to_trace, stdout_to_trace, trace_to_jsonl, TraceEvent, TracePayload};
