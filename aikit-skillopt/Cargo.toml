@@ -1,0 +1,21 @@
+[package]
+name = "aikit-skillopt"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Skill-document application of the aikit-textgrad optimization loop"
+repository = "https://github.com/goaikit/aikit"
+
+[dependencies]
+aikit-textgrad = { path = "../aikit-textgrad", version = "0.1.0" }
+aikit-evals    = { path = "../aikit-evals",    version = "0.1.0" }
+aikit-sdk      = { path = "../aikit-sdk",      version = "0.3.0" }
+async-trait    = "0.1"
+tokio          = { version = "1", features = ["rt-multi-thread", "fs", "macros"] }
+anyhow         = "1.0"
+
+[dev-dependencies]
+tempfile    = "3"
+tokio       = { version = "1", features = ["rt-multi-thread", "macros"] }
+serde_json  = "1.0"
+serde       = { version = "1.0", features = ["derive"] }
