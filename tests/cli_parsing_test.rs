@@ -54,6 +54,7 @@ mod tests {
         let out = h
             .run(&[
                 "aikit",
+                "agent",
                 "run",
                 "--agent",
                 "codex",
@@ -74,7 +75,7 @@ mod tests {
     #[tokio::test]
     async fn test_agents_command() {
         let mut h = harness();
-        let out = h.run(&["aikit", "agents"]).await;
+        let out = h.run(&["aikit", "agent", "list"]).await;
         assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     }
 
@@ -82,7 +83,7 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_list() {
         let mut h = harness();
-        let out = h.run(&["aikit", "mcp", "list"]).await;
+        let out = h.run(&["aikit", "agent", "mcp", "list"]).await;
         // Note: println! output is not captured by testkit stdout_capture; only check exit code
         assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
     }
@@ -156,6 +157,7 @@ mod tests {
         let out = h
             .run(&[
                 "aikit",
+                "agent",
                 "run",
                 "--agent",
                 "codex",
@@ -180,6 +182,7 @@ mod tests {
         let out = h
             .run(&[
                 "aikit",
+                "agent",
                 "run",
                 "--agent",
                 "codex",
@@ -204,6 +207,7 @@ mod tests {
         let out = h
             .run(&[
                 "aikit",
+                "agent",
                 "run",
                 "--agent",
                 "codex",
@@ -333,5 +337,45 @@ mod tests {
             "expected E_MCP_TRANSPORT_REQUIRED; stdout: {}",
             out.stdout
         );
+    }
+
+    /// completion without <shell> must produce E003, not E001
+    #[tokio::test]
+    async fn test_completion_missing_shell_arg_is_e003() {
+        let mut h = harness();
+        let out = h.run(&["aikit", "completion"]).await;
+
+        // Non-zero exit code required
+        assert!(
+            out.exit_code != 0 || !out.stderr.is_empty(),
+            "expected error when shell is missing; stdout: {}",
+            out.stdout
+        );
+
+        // Must mention E003 (missing-argument category), NOT E001 (unrecognized command)
+        assert!(
+            out.stderr.contains("E003"),
+            "expected E003 in stderr, got: {}",
+            out.stderr
+        );
+        assert!(
+            !out.stderr.contains("E001"),
+            "must not emit E001 for missing arg; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// completion with valid shell arg must succeed
+    #[tokio::test]
+    async fn test_completion_with_shell_arg_succeeds() {
+        let mut h = harness();
+        for shell in &["bash", "zsh", "fish", "powershell", "pwsh"] {
+            let out = h.run(&["aikit", "completion", shell]).await;
+            assert_eq!(
+                out.exit_code, 0,
+                "aikit completion {} failed; stderr: {}",
+                shell, out.stderr
+            );
+        }
     }
 }
