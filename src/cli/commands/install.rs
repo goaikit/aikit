@@ -7,8 +7,13 @@
 //! - list: List installed packages
 
 use crate::error::AikError;
-use crate::github::api::GitHubClient as GitHubApiClient;
+use crate::github::api::GitHubClient;
 use atty;
+use cli_framework::command::{FromArgValueMap, IntoCommandSpec};
+use cli_framework::spec::arg_spec::{ArgKind, ArgSpec, ArgValueType, Cardinality};
+use cli_framework::spec::command_tree::CommandSpec;
+use cli_framework::spec::value::ArgValue;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use toml;
 
@@ -111,10 +116,145 @@ pub struct ListArgs {
     pub detailed: bool,
 }
 
+impl IntoCommandSpec for InstallArgs {
+    fn command_spec() -> CommandSpec {
+        use crate::cli::{flag_spec, opt_spec, pos_req_spec};
+        CommandSpec {
+            summary: "Install package from GitHub URL or local path",
+            syntax: Some("install <SOURCE>"),
+            category: Some("packages"),
+            args: vec![
+                pos_req_spec("source", "Package source (GitHub URL or local directory)"),
+                ArgSpec {
+                    name: "install-version",
+                    short: Some('i'),
+                    long: Some("install-version"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Specific version to install",
+                    ..Default::default()
+                },
+                opt_spec("token", "GitHub token (or set GITHUB_TOKEN env var)"),
+                flag_spec("force", "Force reinstall if already installed"),
+                flag_spec("yes", "Skip .gitignore modification prompt"),
+                ArgSpec {
+                    name: "ai",
+                    short: None,
+                    long: Some("ai"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "AI agent to install for (e.g., claude, copilot)",
+                    ..Default::default()
+                },
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for InstallArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        use crate::cli::{get_bool_val, get_opt_val, get_str_val};
+        InstallArgs {
+            source: get_str_val(map, "source"),
+            install_version: get_opt_val(map, "install-version"),
+            token: get_opt_val(map, "token"),
+            force: get_bool_val(map, "force"),
+            yes: get_bool_val(map, "yes"),
+            ai: get_opt_val(map, "ai"),
+        }
+    }
+}
+
+impl IntoCommandSpec for UpdateArgs {
+    fn command_spec() -> CommandSpec {
+        use crate::cli::{flag_spec, pos_req_spec};
+        CommandSpec {
+            summary: "Update installed package",
+            syntax: Some("update <PACKAGE>"),
+            category: Some("packages"),
+            args: vec![
+                pos_req_spec("package", "Package name to update"),
+                flag_spec("breaking", "Allow breaking changes"),
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for UpdateArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        use crate::cli::{get_bool_val, get_str_val};
+        UpdateArgs {
+            package: get_str_val(map, "package"),
+            breaking: get_bool_val(map, "breaking"),
+        }
+    }
+}
+
+impl IntoCommandSpec for RemoveArgs {
+    fn command_spec() -> CommandSpec {
+        use crate::cli::{flag_spec, pos_req_spec};
+        CommandSpec {
+            summary: "Remove installed package",
+            syntax: Some("remove <PACKAGE>"),
+            category: Some("packages"),
+            args: vec![
+                pos_req_spec("package", "Package name to remove"),
+                flag_spec("force", "Force removal without confirmation"),
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for RemoveArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        use crate::cli::{get_bool_val, get_str_val};
+        RemoveArgs {
+            package: get_str_val(map, "package"),
+            force: get_bool_val(map, "force"),
+        }
+    }
+}
+
+impl IntoCommandSpec for ListArgs {
+    fn command_spec() -> CommandSpec {
+        use crate::cli::{flag_spec, opt_spec};
+        CommandSpec {
+            summary: "List installed packages",
+            syntax: Some("list"),
+            category: Some("packages"),
+            args: vec![
+                opt_spec("author", "Filter by author"),
+                flag_spec("detailed", "Show detailed information"),
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for ListArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        use crate::cli::{get_bool_val, get_opt_val};
+        ListArgs {
+            author: get_opt_val(map, "author"),
+            detailed: get_bool_val(map, "detailed"),
+        }
+    }
+}
+
 /// Execute install command
 pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     use crate::core::filesystem::AikDirectory;
-    use crate::core::git::GitHubClient;
     use crate::core::ux::{create_spinner, show_info, show_success, show_warning};
     use crate::models::registry::LocalRegistry;
 
@@ -139,7 +279,9 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
             })?;
             let aik_dir = AikDirectory::new(cwd.join(".aikit"));
             println!("Creating .aikit directory...");
-            aik_dir.create()?;
+            aik_dir
+                .create()
+                .map_err(|e| AikError::Generic(e.to_string()))?;
             aik_dir
         }
     };
@@ -181,7 +323,8 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
             ));
 
             // Initialize GitHub client with token resolution
-            let github = GitHubClient::new(GitHubApiClient::resolve_token(args.token.clone()));
+            let github = GitHubClient::new(GitHubClient::resolve_token(args.token.clone()))
+                .map_err(|e| AikError::Generic(e.to_string()))?;
 
             // Get package manifest
             let manifest_spinner = create_spinner(&format!(
@@ -190,7 +333,8 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
             ));
             let manifest = github
                 .get_package_manifest(&owner, &repo, Some(&version))
-                .await?;
+                .await
+                .map_err(|e| AikError::Generic(e.to_string()))?;
             manifest_spinner.finish_with_message("Package manifest fetched");
 
             // Convert PackageManifest to TOML string for parsing
@@ -214,7 +358,8 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
 
             github
                 .download_archive(&owner, &repo, Some(&version), &archive_path)
-                .await?;
+                .await
+                .map_err(|e| AikError::Generic(e.to_string()))?;
             download_spinner.finish_with_message("Package downloaded");
 
             (Some(temp_dir), package, Some(archive_path))
@@ -269,7 +414,9 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     };
 
     registry.add_package(installed);
-    registry.save_to_file(&registry_path)?;
+    registry
+        .save_to_file(&registry_path)
+        .map_err(|e| AikError::Generic(e.to_string()))?;
 
     // Handle .gitignore
     // Note: skip_gitignore field doesn't exist in InstallArgs, always prompt
@@ -277,7 +424,9 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
         use crate::core::filesystem::GitIgnoreManager;
         let gitignore = GitIgnoreManager::new(std::path::Path::new("."));
         if gitignore.prompt_user() {
-            gitignore.add_aikit()?;
+            gitignore
+                .add_aikit()
+                .map_err(|e| AikError::Generic(e.to_string()))?;
             show_info("Added .aikit/ to .gitignore");
         }
     }
@@ -288,31 +437,10 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     ));
 
     // Determine which agent(s) to generate commands for
-    let selected_agents = if let Some(ai_arg) = &args.ai {
-        // Validate agent key
-        crate::core::agent::validate_agent_key(ai_arg)
-            .map_err(|e| AikError::InvalidSource(format!("Invalid agent '{}': {}", ai_arg, e)))?;
-        vec![ai_arg.clone()]
-    } else if atty::is(atty::Stream::Stdin) {
-        // Interactive selection
-        match crate::tui::agent_select::select_agent_interactive()
-            .map_err(|e| AikError::Generic(format!("Interactive agent selection failed: {}", e)))?
-        {
-            crate::tui::agent_select::SelectionResult::Selected(key) => {
-                vec![key]
-            }
-            crate::tui::agent_select::SelectionResult::Cancelled => {
-                println!("Installation cancelled.");
-                return Ok(());
-            }
-        }
-    } else {
-        // Non-interactive: require --ai flag
-        return Err(AikError::InvalidSource(
-            "AI agent not specified. Use --ai <agent> to specify an agent, or run in interactive mode.\n\
-             Available agents: claude, copilot, cursor-agent, gemini, qwen, opencode, codex, windsurf, kilocode, auggie, roo, codebuddy, qoder, amp, shai, q, bob".to_string(),
-        ));
-    };
+    let selected_agents = resolve_agent_selection(args.ai.as_deref())?;
+    if selected_agents.is_empty() {
+        return Ok(());
+    }
 
     // Generate agent commands
     println!(
@@ -380,6 +508,39 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     );
 
     Ok(())
+}
+
+/// Resolve which agent(s) to use for installation
+///
+/// - If `ai` is Some, validate and return that agent key.
+/// - If a TTY is available, run interactive selection. Returns Ok(vec![]) on Cancelled.
+/// - Otherwise (non-interactive, no --ai), return an error.
+fn resolve_agent_selection(ai: Option<&str>) -> Result<Vec<String>, AikError> {
+    if let Some(ai_arg) = ai {
+        crate::core::agent::validate_agent_key(ai_arg)
+            .map_err(|e| AikError::InvalidSource(format!("Invalid agent '{}': {}", ai_arg, e)))?;
+        return Ok(vec![ai_arg.to_string()]);
+    }
+
+    if atty::is(atty::Stream::Stdin) {
+        match crate::tui::agent_select::select_agent_interactive()
+            .map_err(|e| AikError::Generic(format!("Interactive agent selection failed: {}", e)))?
+        {
+            crate::tui::agent_select::SelectionResult::Selected(key) => {
+                return Ok(vec![key]);
+            }
+            crate::tui::agent_select::SelectionResult::Cancelled => {
+                println!("Installation cancelled.");
+                return Ok(vec![]);
+            }
+        }
+    }
+
+    // Non-interactive: require --ai flag
+    Err(AikError::InvalidSource(
+        "AI agent not specified. Use --ai <agent> to specify an agent, or run in interactive mode.\n\
+         Available agents: claude, copilot, cursor-agent, gemini, qwen, opencode, codex, windsurf, kilocode, auggie, roo, codebuddy, qoder, amp, shai, q, bob".to_string(),
+    ))
 }
 
 /// Install package from local directory
@@ -512,11 +673,13 @@ fn install_package_from_archive(
         .map_err(|e| crate::error::io_context("Failed to open archive", archive_path, e))?;
     let mut archive = ZipArchive::new(file)?;
 
-    let install_path = aik_dir.install_package(
-        &package.package.name,
-        &package.package.version,
-        archive_path.parent().unwrap_or(std::path::Path::new(".")),
-    )?;
+    let install_path = aik_dir
+        .install_package(
+            &package.package.name,
+            &package.package.version,
+            archive_path.parent().unwrap_or(std::path::Path::new(".")),
+        )
+        .map_err(|e| AikError::Generic(e.to_string()))?;
 
     // Canonicalize install_path once for comparison
     let install_canonical = install_path
@@ -607,7 +770,7 @@ fn install_package_from_directory(
     fs::create_dir_all(&install_path)?;
 
     // Copy only relevant files, excluding version control and build artifacts
-    copy_package_files(source_path, &install_path)?;
+    copy_package_files(source_path, &install_path).map_err(|e| AikError::Generic(e.to_string()))?;
 
     Ok(())
 }
@@ -905,14 +1068,18 @@ pub async fn execute_remove(args: RemoveArgs) -> Result<(), AikError> {
         .ok_or_else(|| AikError::PackageNotFound(args.package.clone()))?;
 
     // Remove package files
-    aik_dir.remove_package(&args.package, &installed_package.package.version)?;
+    aik_dir
+        .remove_package(&args.package, &installed_package.package.version)
+        .map_err(|e| AikError::Generic(e.to_string()))?;
 
     // Remove from registry
     registry.remove_package(&args.package);
-    registry.save_to_file(&registry_path)?;
+    registry
+        .save_to_file(&registry_path)
+        .map_err(|e| AikError::Generic(e.to_string()))?;
 
     // Remove agent commands
-    remove_agent_commands(&args.package)?;
+    remove_agent_commands(&args.package).map_err(|e| AikError::Generic(e.to_string()))?;
 
     println!("✅ Package '{}' removed successfully!", args.package);
 

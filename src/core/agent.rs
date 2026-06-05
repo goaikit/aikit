@@ -63,99 +63,173 @@ pub struct AgentConfig {
     pub arg_placeholder: String,
 }
 
+struct AgentExtra {
+    install_url: Option<&'static str>,
+    requires_cli: bool,
+    arg_placeholder: &'static str,
+    folder: &'static str,
+}
+
 /// Extras table for agent-specific configuration
-/// Maps agent keys to (install_url, requires_cli, output_format, arg_placeholder, folder)
-static EXTRAS: &[(&str, Option<&str>, bool, &str, &str)] = &[
+static EXTRAS: &[(&str, AgentExtra)] = &[
     (
         "claude",
-        Some("https://claude.ai/code"),
-        true,
-        "$ARGUMENTS",
-        ".claude",
+        AgentExtra {
+            install_url: Some("https://claude.ai/code"),
+            requires_cli: true,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".claude",
+        },
     ),
     (
         "gemini",
-        Some("https://ai.google.dev/"),
-        true,
-        "{{args}}",
-        ".gemini",
+        AgentExtra {
+            install_url: Some("https://ai.google.dev/"),
+            requires_cli: true,
+            arg_placeholder: "{{args}}",
+            folder: ".gemini",
+        },
     ),
-    ("copilot", None, false, "$ARGUMENTS", ".github"),
+    (
+        "copilot",
+        AgentExtra {
+            install_url: None,
+            requires_cli: false,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".github",
+        },
+    ),
     (
         "cursor-agent",
-        Some("https://cursor.sh/"),
-        true,
-        "$ARGUMENTS",
-        ".cursor",
+        AgentExtra {
+            install_url: Some("https://cursor.sh/"),
+            requires_cli: true,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".cursor",
+        },
     ),
     (
         "qwen",
-        Some("https://qwenlm.github.io/"),
-        true,
-        "{{args}}",
-        ".qwen",
+        AgentExtra {
+            install_url: Some("https://qwenlm.github.io/"),
+            requires_cli: true,
+            arg_placeholder: "{{args}}",
+            folder: ".qwen",
+        },
     ),
     (
         "opencode",
-        Some("https://opencode.dev/"),
-        true,
-        "$ARGUMENTS",
-        ".opencode",
+        AgentExtra {
+            install_url: Some("https://opencode.dev/"),
+            requires_cli: true,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".opencode",
+        },
     ),
     (
         "codex",
-        Some("https://codex.ai/"),
-        true,
-        "$ARGUMENTS",
-        ".codex",
+        AgentExtra {
+            install_url: Some("https://codex.ai/"),
+            requires_cli: true,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".codex",
+        },
     ),
-    ("windsurf", None, false, "$ARGUMENTS", ".windsurf"),
-    ("kilocode", None, false, "$ARGUMENTS", ".kilocode"),
+    (
+        "windsurf",
+        AgentExtra {
+            install_url: None,
+            requires_cli: false,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".windsurf",
+        },
+    ),
+    (
+        "kilocode",
+        AgentExtra {
+            install_url: None,
+            requires_cli: false,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".kilocode",
+        },
+    ),
     (
         "auggie",
-        Some("https://auggie.ai/"),
-        true,
-        "$ARGUMENTS",
-        ".augment",
+        AgentExtra {
+            install_url: Some("https://auggie.ai/"),
+            requires_cli: true,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".augment",
+        },
     ),
-    ("roo", None, false, "$ARGUMENTS", ".roo"),
+    (
+        "roo",
+        AgentExtra {
+            install_url: None,
+            requires_cli: false,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".roo",
+        },
+    ),
     (
         "codebuddy",
-        Some("https://codebuddy.ai/"),
-        true,
-        "$ARGUMENTS",
-        ".codebuddy",
+        AgentExtra {
+            install_url: Some("https://codebuddy.ai/"),
+            requires_cli: true,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".codebuddy",
+        },
     ),
     (
         "qoder",
-        Some("https://qoder.ai/"),
-        true,
-        "$ARGUMENTS",
-        ".qoder",
+        AgentExtra {
+            install_url: Some("https://qoder.ai/"),
+            requires_cli: true,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".qoder",
+        },
     ),
     (
         "amp",
-        Some("https://amp.dev/"),
-        true,
-        "$ARGUMENTS",
-        ".agents",
+        AgentExtra {
+            install_url: Some("https://amp.dev/"),
+            requires_cli: true,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".agents",
+        },
     ),
     (
         "shai",
-        Some("https://shai.ai/"),
-        true,
-        "$ARGUMENTS",
-        ".shai",
+        AgentExtra {
+            install_url: Some("https://shai.ai/"),
+            requires_cli: true,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".shai",
+        },
     ),
     (
         "q",
-        Some("https://aws.amazon.com/q/"),
-        true,
-        "$ARGUMENTS",
-        ".amazonq",
+        AgentExtra {
+            install_url: Some("https://aws.amazon.com/q/"),
+            requires_cli: true,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".amazonq",
+        },
     ),
-    ("bob", None, false, "$ARGUMENTS", ".bob"),
+    (
+        "bob",
+        AgentExtra {
+            install_url: None,
+            requires_cli: false,
+            arg_placeholder: "$ARGUMENTS",
+            folder: ".bob",
+        },
+    ),
 ];
+
+fn find_extra(key: &str) -> Option<&'static AgentExtra> {
+    EXTRAS.iter().find(|(k, _)| *k == key).map(|(_, e)| e)
+}
 
 /// Get the agent configuration list
 ///
@@ -167,22 +241,18 @@ pub fn get_agent_configs() -> Vec<AgentConfig> {
     all_agents()
         .into_iter()
         .map(|deploy_config| {
-            let extras = EXTRAS
-                .iter()
-                .find(|(key, _, _, _, _)| *key == deploy_config.key());
+            let extra = find_extra(&deploy_config.key());
 
-            let (install_url, requires_cli, output_format, arg_placeholder, folder) = match extras {
-                Some((_, url, req_cli, placeholder, folder_str)) => (
-                    url.map(|s| s.to_string()),
-                    *req_cli,
-                    OutputFormat::Markdown,
-                    placeholder.to_string(),
-                    folder_str.to_string(),
+            let (install_url, requires_cli, arg_placeholder, folder) = match extra {
+                Some(e) => (
+                    e.install_url.map(|s| s.to_string()),
+                    e.requires_cli,
+                    e.arg_placeholder.to_string(),
+                    e.folder.to_string(),
                 ),
                 None => (
                     None,
                     true,
-                    OutputFormat::Markdown,
                     "$ARGUMENTS".to_string(),
                     deploy_config.key().clone(),
                 ),
@@ -194,7 +264,7 @@ pub fn get_agent_configs() -> Vec<AgentConfig> {
                 folder,
                 install_url,
                 requires_cli,
-                output_format,
+                output_format: OutputFormat::Markdown,
                 output_dir: deploy_config.commands_dir.clone(),
                 skills_dir: deploy_config.skills_dir.clone(),
                 agents_dir: deploy_config.agents_dir.clone(),
@@ -211,23 +281,16 @@ pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
     use aikit_sdk::agent;
 
     let deploy_config = agent(key)?;
-    let extras = EXTRAS.iter().find(|(k, _, _, _, _)| *k == key);
+    let extra = find_extra(key);
 
-    let (install_url, requires_cli, output_format, arg_placeholder, folder) = match extras {
-        Some((_, url, req_cli, placeholder, folder_str)) => (
-            url.map(|s| s.to_string()),
-            *req_cli,
-            OutputFormat::Markdown,
-            placeholder.to_string(),
-            folder_str.to_string(),
+    let (install_url, requires_cli, arg_placeholder, folder) = match extra {
+        Some(e) => (
+            e.install_url.map(|s| s.to_string()),
+            e.requires_cli,
+            e.arg_placeholder.to_string(),
+            e.folder.to_string(),
         ),
-        None => (
-            None,
-            true,
-            OutputFormat::Markdown,
-            "$ARGUMENTS".to_string(),
-            key.to_string(),
-        ),
+        None => (None, true, "$ARGUMENTS".to_string(), key.to_string()),
     };
 
     Some(AgentConfig {
@@ -236,7 +299,7 @@ pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
         folder,
         install_url,
         requires_cli,
-        output_format,
+        output_format: OutputFormat::Markdown,
         output_dir: deploy_config.commands_dir.clone(),
         skills_dir: deploy_config.skills_dir.clone(),
         agents_dir: deploy_config.agents_dir.clone(),

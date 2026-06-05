@@ -5,6 +5,12 @@
 //! - package build: Build distributable package
 //! - package publish: Publish package to registry
 
+use cli_framework::command::{FromArgValueMap, IntoCommandSpec};
+use cli_framework::spec::arg_spec::{ArgKind, ArgSpec, ArgValueType, Cardinality};
+use cli_framework::spec::command_tree::CommandSpec;
+use cli_framework::spec::value::ArgValue;
+use std::collections::HashMap;
+
 /// Arguments for package validate command
 #[derive(Debug)]
 pub struct PackageValidateArgs {
@@ -41,6 +47,231 @@ pub struct PackagePublishArgs {
     pub notes: Option<String>,
     pub token: Option<String>,
     pub no_release: bool,
+}
+
+impl IntoCommandSpec for PackageInitArgs {
+    fn command_spec() -> CommandSpec {
+        use crate::cli::{flag_spec, pos_req_spec};
+        CommandSpec {
+            summary: "Initialize a new package with aikit.toml",
+            syntax: Some("package init <NAME>"),
+            category: Some("packages"),
+            args: vec![
+                pos_req_spec("name", "Package name (required)"),
+                ArgSpec {
+                    name: "description",
+                    short: Some('d'),
+                    long: Some("description"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Package description",
+                    ..Default::default()
+                },
+                ArgSpec {
+                    name: "package-version",
+                    short: Some('v'),
+                    long: Some("package-version"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Optional,
+                    default: Some(ArgValue::Str("0.1.0".to_string())),
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Package version (default: 0.1.0)",
+                    ..Default::default()
+                },
+                ArgSpec {
+                    name: "author",
+                    short: Some('a'),
+                    long: Some("author"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Author name",
+                    ..Default::default()
+                },
+                flag_spec("yes", "Skip interactive prompts"),
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for PackageInitArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        use crate::cli::{get_bool_val, get_opt_val, get_str_default, get_str_val};
+        PackageInitArgs {
+            name: get_str_val(map, "name"),
+            description: get_opt_val(map, "description"),
+            package_version: get_str_default(map, "package-version", "0.1.0"),
+            author: get_opt_val(map, "author"),
+            yes: get_bool_val(map, "yes"),
+        }
+    }
+}
+
+impl IntoCommandSpec for PackageValidateArgs {
+    fn command_spec() -> CommandSpec {
+        CommandSpec {
+            summary: "Validate package structure and that templates exist (install-ready)",
+            syntax: Some("package validate [--path <DIR>]"),
+            category: Some("packages"),
+            args: vec![ArgSpec {
+                name: "path",
+                short: Some('p'),
+                long: Some("path"),
+                kind: ArgKind::Option,
+                value_type: ArgValueType::String,
+                cardinality: Cardinality::Optional,
+                default: Some(ArgValue::Str(".".to_string())),
+                conflicts_with: vec![],
+                requires: vec![],
+                help: "Package directory (default: current directory)",
+                ..Default::default()
+            }],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for PackageValidateArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        use crate::cli::get_str_default;
+        PackageValidateArgs {
+            path: get_str_default(map, "path", "."),
+        }
+    }
+}
+
+impl IntoCommandSpec for PackageBuildArgs {
+    fn command_spec() -> CommandSpec {
+        use crate::cli::opt_spec;
+        CommandSpec {
+            summary: "Build package for distribution",
+            syntax: Some("package build [--output <DIR>]"),
+            category: Some("packages"),
+            args: vec![
+                ArgSpec {
+                    name: "output",
+                    short: Some('o'),
+                    long: Some("output"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Optional,
+                    default: Some(ArgValue::Str("dist".to_string())),
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Output directory (default: dist/)",
+                    ..Default::default()
+                },
+                opt_spec("agents", "Target agents (comma-separated, default: all)"),
+                ArgSpec {
+                    name: "include-sources",
+                    short: None,
+                    long: Some("include-sources"),
+                    kind: ArgKind::Flag,
+                    value_type: ArgValueType::Bool,
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Include source files",
+                    ..Default::default()
+                },
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for PackageBuildArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        use crate::cli::{get_bool_val, get_opt_val, get_str_default};
+        PackageBuildArgs {
+            output: get_str_default(map, "output", "dist"),
+            agents: get_opt_val(map, "agents"),
+            include_sources: get_bool_val(map, "include-sources"),
+        }
+    }
+}
+
+impl IntoCommandSpec for PackagePublishArgs {
+    fn command_spec() -> CommandSpec {
+        use crate::cli::{opt_spec, pos_req_spec};
+        CommandSpec {
+            summary: "Publish package to registry",
+            syntax: Some("package publish <REPO>"),
+            category: Some("packages"),
+            args: vec![
+                pos_req_spec("repo", "Repository in format owner/repo (required)"),
+                ArgSpec {
+                    name: "package",
+                    short: Some('p'),
+                    long: Some("package"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Path to package ZIP file",
+                    ..Default::default()
+                },
+                ArgSpec {
+                    name: "tag",
+                    short: Some('t'),
+                    long: Some("tag"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Version tag for the release",
+                    ..Default::default()
+                },
+                opt_spec("title", "Release title"),
+                opt_spec("notes", "Release notes"),
+                opt_spec("token", "GitHub token (or set GITHUB_TOKEN env var)"),
+                ArgSpec {
+                    name: "no-release",
+                    short: None,
+                    long: Some("no-release"),
+                    kind: ArgKind::Flag,
+                    value_type: ArgValueType::Bool,
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Don't create a release, just upload to existing release",
+                    ..Default::default()
+                },
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for PackagePublishArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        use crate::cli::{get_bool_val, get_opt_val, get_str_val};
+        PackagePublishArgs {
+            repo: get_str_val(map, "repo"),
+            package: get_opt_val(map, "package"),
+            tag: get_opt_val(map, "tag"),
+            title: get_opt_val(map, "title"),
+            notes: get_opt_val(map, "notes"),
+            token: get_opt_val(map, "token"),
+            no_release: get_bool_val(map, "no-release"),
+        }
+    }
 }
 
 /// Execute package init command
@@ -492,7 +723,8 @@ pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std
         })?;
 
     // Initialize GitHub client
-    let github = GitHubClient::new(Some(token.clone()));
+    let github = GitHubClient::new(Some(token.clone()))
+        .map_err(|e| format!("Failed to create GitHub client: {}", e))?;
 
     // Parse repo argument
     let repo_parts: Vec<&str> = args.repo.split('/').collect();
@@ -541,38 +773,10 @@ pub async fn execute_publish(args: PackagePublishArgs) -> Result<(), Box<dyn std
         println!("   If no release exists with this tag, the upload will fail.");
         println!("   Use 'aikit package publish --no-release' with an existing release.");
 
-        // Try to find the release by tag using a public API call
-        let releases_url = format!(
-            "https://api.github.com/repos/{}/{}/releases/tags/{}",
-            owner, repo, tag
-        );
-
-        // Create a temporary client for this API call
-        let temp_client = reqwest::Client::new();
-        let response = temp_client
-            .get(&releases_url)
-            .header("Authorization", format!("token {}", token.clone()))
-            .header("User-Agent", "AIKIT-Package-Manager/1.0")
-            .send()
+        github
+            .get_release_by_tag(owner, repo, &tag)
             .await
-            .map_err(|e| format!("Failed to find release: {}", e))?;
-
-        if !response.status().is_success() {
-            return Err(format!(
-                "No release found with tag '{}'. Use --no-release only with an existing release.",
-                tag
-            )
-            .into());
-        }
-
-        let release: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse release response: {}", e))?;
-
-        release["id"]
-            .as_u64()
-            .ok_or_else(|| "Invalid release data: missing ID".to_string())?
+            .map_err(|e| format!("{}", e))?
     };
 
     // Upload package to release
@@ -778,7 +982,7 @@ mod tests {
     async fn test_github_client_upload_release_asset_without_token() {
         use crate::core::git::GitHubClient;
 
-        let client = GitHubClient::new(None);
+        let client = GitHubClient::new(None).unwrap();
 
         let temp_dir = TempDir::new().unwrap();
         let test_file = temp_dir.path().join("test-upload.zip");
@@ -796,7 +1000,7 @@ mod tests {
     async fn test_github_client_upload_release_asset_file_not_found() {
         use crate::core::git::GitHubClient;
 
-        let client = GitHubClient::new(Some("test_token".to_string()));
+        let client = GitHubClient::new(Some("test_token".to_string())).unwrap();
 
         let nonexistent_file = PathBuf::from("/nonexistent/path/file.zip");
 

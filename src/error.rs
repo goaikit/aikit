@@ -8,10 +8,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AikError {
-    #[error("Configuration error: {0}")]
-    #[allow(dead_code)]
-    Config(String),
-
     #[error("Invalid source: {0}")]
     InvalidSource(String),
 
@@ -47,34 +43,6 @@ pub enum AikError {
 
     #[error("Generic error: {0}")]
     Generic(String),
-
-    #[error("command not found in registry: {0}")]
-    #[allow(dead_code)]
-    CommandNotFound(String),
-
-    #[error("argument validation failed: {0}")]
-    #[allow(dead_code)]
-    ValidationError(String),
-
-    #[error("risk policy blocked command '{0}': set ALLOW_DESTRUCTIVE_COMMANDS=1 to proceed")]
-    #[allow(dead_code)]
-    RiskPolicyBlocked(String),
-
-    #[error(
-        "ailoop server unreachable at {0}: verify AILOOP_SERVER is set and the server is running"
-    )]
-    #[allow(dead_code)]
-    AiloopUnreachable(String),
-
-    #[error("MCP serve startup failed: {0}")]
-    #[allow(dead_code)]
-    McpServeError(String),
-}
-
-impl From<Box<dyn std::error::Error>> for AikError {
-    fn from(err: Box<dyn std::error::Error>) -> Self {
-        AikError::Generic(err.to_string())
-    }
 }
 
 /// Attach path and operation context to an I/O error for clearer diagnostics.

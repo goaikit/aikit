@@ -32,6 +32,12 @@ use context::AikitContext;
 
 pub type AikitApp = cli_framework::app::App<AikitContext>;
 
+fn parse_arg<T: std::str::FromStr>(value: &str, flag: &str, error_msg: &str) -> Result<T> {
+    value
+        .parse::<T>()
+        .map_err(|_| anyhow::anyhow!("{} must be {}", flag, error_msg))
+}
+
 pub fn build_app() -> Result<AikitApp> {
     let mut builder = AppBuilder::new()
         .with_version("aikit", env!("CARGO_PKG_VERSION"))
@@ -64,49 +70,41 @@ pub fn build_app() -> Result<AikitApp> {
             .map_err(|e| anyhow::anyhow!("{}", e))
     })?;
 
-    builder = builder.register(path!["install"], |_ctx, args: InstallArgs| async move {
-        let install_args = commands::install::InstallArgs {
-            source: args.source,
-            install_version: args.install_version,
-            token: args.token,
-            force: args.force,
-            yes: args.yes,
-            ai: args.ai,
-        };
-        commands::install::execute_install(install_args)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
-    })?;
+    builder = builder.register(
+        path!["install"],
+        |_ctx, args: commands::install::InstallArgs| async move {
+            commands::install::execute_install(args)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        },
+    )?;
 
-    builder = builder.register(path!["update"], |_ctx, args: UpdateArgs| async move {
-        let update_args = commands::install::UpdateArgs {
-            package: args.package,
-            breaking: args.breaking,
-        };
-        commands::install::execute_update(update_args)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
-    })?;
+    builder = builder.register(
+        path!["update"],
+        |_ctx, args: commands::install::UpdateArgs| async move {
+            commands::install::execute_update(args)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        },
+    )?;
 
-    builder = builder.register(path!["remove"], |_ctx, args: RemoveArgs| async move {
-        let remove_args = commands::install::RemoveArgs {
-            package: args.package,
-            force: args.force,
-        };
-        commands::install::execute_remove(remove_args)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
-    })?;
+    builder = builder.register(
+        path!["remove"],
+        |_ctx, args: commands::install::RemoveArgs| async move {
+            commands::install::execute_remove(args)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        },
+    )?;
 
-    builder = builder.register(path!["list"], |_ctx, args: ListArgs| async move {
-        let list_args = commands::install::ListArgs {
-            author: args.author,
-            detailed: args.detailed,
-        };
-        commands::install::execute_list(list_args)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
-    })?;
+    builder = builder.register(
+        path!["list"],
+        |_ctx, args: commands::install::ListArgs| async move {
+            commands::install::execute_list(args)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))
+        },
+    )?;
 
     builder = builder.register(path!["release"], |_ctx, args: ReleaseArgs| async move {
         let release_args = release::ReleaseArgs {
@@ -122,18 +120,17 @@ pub fn build_app() -> Result<AikitApp> {
     builder = builder.register(path!["serve"], |_ctx, args: ServeArgs| async move {
         let serve_args = serve::ServeArgs {
             host: args.host,
-            port: args
-                .port
-                .parse::<u16>()
-                .map_err(|_| anyhow::anyhow!("--port must be a valid port number"))?,
-            run_timeout_secs: args
-                .run_timeout_secs
-                .parse::<u64>()
-                .map_err(|_| anyhow::anyhow!("--run-timeout-secs must be a positive integer"))?,
-            max_sessions: args
-                .max_sessions
-                .parse::<usize>()
-                .map_err(|_| anyhow::anyhow!("--max-sessions must be a positive integer"))?,
+            port: parse_arg::<u16>(&args.port, "--port", "a valid port number")?,
+            run_timeout_secs: parse_arg::<u64>(
+                &args.run_timeout_secs,
+                "--run-timeout-secs",
+                "a positive integer",
+            )?,
+            max_sessions: parse_arg::<usize>(
+                &args.max_sessions,
+                "--max-sessions",
+                "a positive integer",
+            )?,
             api_key: args
                 .api_key
                 .or_else(|| std::env::var("AIKIT_SERVE_API_KEY").ok()),
@@ -270,15 +267,8 @@ pub fn build_app() -> Result<AikitApp> {
 
     builder = builder.register(
         path!["package", "init"],
-        |_ctx, args: PackageInitArgs| async move {
-            let pkg_args = commands::package::PackageInitArgs {
-                name: args.name,
-                description: args.description,
-                package_version: args.package_version,
-                author: args.author,
-                yes: args.yes,
-            };
-            commands::package::execute_init(pkg_args)
+        |_ctx, args: commands::package::PackageInitArgs| async move {
+            commands::package::execute_init(args)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))
         },
@@ -286,9 +276,8 @@ pub fn build_app() -> Result<AikitApp> {
 
     builder = builder.register(
         path!["package", "validate"],
-        |_ctx, args: PackageValidateArgs| async move {
-            let pkg_args = commands::package::PackageValidateArgs { path: args.path };
-            commands::package::execute_validate(pkg_args)
+        |_ctx, args: commands::package::PackageValidateArgs| async move {
+            commands::package::execute_validate(args)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))
         },
@@ -296,13 +285,8 @@ pub fn build_app() -> Result<AikitApp> {
 
     builder = builder.register(
         path!["package", "build"],
-        |_ctx, args: PackageBuildArgs| async move {
-            let pkg_args = commands::package::PackageBuildArgs {
-                output: args.output,
-                agents: args.agents,
-                include_sources: args.include_sources,
-            };
-            commands::package::execute_build(pkg_args)
+        |_ctx, args: commands::package::PackageBuildArgs| async move {
+            commands::package::execute_build(args)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))
         },
@@ -310,17 +294,8 @@ pub fn build_app() -> Result<AikitApp> {
 
     builder = builder.register(
         path!["package", "publish"],
-        |_ctx, args: PackagePublishArgs| async move {
-            let pkg_args = commands::package::PackagePublishArgs {
-                repo: args.repo,
-                package: args.package,
-                tag: args.tag,
-                title: args.title,
-                notes: args.notes,
-                token: args.token,
-                no_release: args.no_release,
-            };
-            commands::package::execute_publish(pkg_args)
+        |_ctx, args: commands::package::PackagePublishArgs| async move {
+            commands::package::execute_publish(args)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))
         },
@@ -331,7 +306,7 @@ pub fn build_app() -> Result<AikitApp> {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn flag_spec(name: &'static str, help: &'static str) -> ArgSpec {
+pub(crate) fn flag_spec(name: &'static str, help: &'static str) -> ArgSpec {
     ArgSpec {
         name,
         kind: ArgKind::Flag,
@@ -347,7 +322,7 @@ fn flag_spec(name: &'static str, help: &'static str) -> ArgSpec {
     }
 }
 
-fn opt_spec(name: &'static str, help: &'static str) -> ArgSpec {
+pub(crate) fn opt_spec(name: &'static str, help: &'static str) -> ArgSpec {
     ArgSpec {
         name,
         kind: ArgKind::Option,
@@ -395,7 +370,7 @@ fn pos_opt_spec(name: &'static str, help: &'static str) -> ArgSpec {
     }
 }
 
-fn pos_req_spec(name: &'static str, help: &'static str) -> ArgSpec {
+pub(crate) fn pos_req_spec(name: &'static str, help: &'static str) -> ArgSpec {
     ArgSpec {
         name,
         kind: ArgKind::Positional,
@@ -411,7 +386,7 @@ fn pos_req_spec(name: &'static str, help: &'static str) -> ArgSpec {
     }
 }
 
-fn opt_str(v: &ArgValue) -> Option<String> {
+pub(crate) fn opt_str(v: &ArgValue) -> Option<String> {
     if let ArgValue::Str(s) = v {
         Some(s.clone())
     } else {
@@ -419,21 +394,25 @@ fn opt_str(v: &ArgValue) -> Option<String> {
     }
 }
 
-fn get_bool_val(map: &HashMap<String, ArgValue>, name: &str) -> bool {
+pub(crate) fn get_bool_val(map: &HashMap<String, ArgValue>, name: &str) -> bool {
     matches!(map.get(name), Some(ArgValue::Bool(true)))
 }
 
-fn get_opt_val(map: &HashMap<String, ArgValue>, name: &str) -> Option<String> {
+pub(crate) fn get_opt_val(map: &HashMap<String, ArgValue>, name: &str) -> Option<String> {
     map.get(name).and_then(opt_str)
 }
 
-fn get_str_val(map: &HashMap<String, ArgValue>, name: &str) -> String {
+pub(crate) fn get_str_val(map: &HashMap<String, ArgValue>, name: &str) -> String {
     map.get(name)
         .and_then(opt_str)
         .unwrap_or_else(|| panic!("fw bug: missing required key '{}'", name))
 }
 
-fn get_str_default(map: &HashMap<String, ArgValue>, name: &str, default: &str) -> String {
+pub(crate) fn get_str_default(
+    map: &HashMap<String, ArgValue>,
+    name: &str,
+    default: &str,
+) -> String {
     map.get(name)
         .and_then(opt_str)
         .unwrap_or_else(|| default.to_string())
@@ -605,166 +584,6 @@ impl FromArgValueMap for InitArgs {
             github_token: get_opt_val(map, "github-token"),
             skip_tls: get_bool_val(map, "skip-tls"),
             ignore_agent_tools: get_bool_val(map, "ignore-agent-tools"),
-        }
-    }
-}
-
-// ── install ───────────────────────────────────────────────────────────────────
-
-struct InstallArgs {
-    source: String,
-    install_version: Option<String>,
-    token: Option<String>,
-    force: bool,
-    yes: bool,
-    ai: Option<String>,
-}
-
-impl IntoCommandSpec for InstallArgs {
-    fn command_spec() -> CommandSpec {
-        CommandSpec {
-            summary: "Install package from GitHub URL or local path",
-            syntax: Some("install <SOURCE>"),
-            category: Some("packages"),
-            args: vec![
-                pos_req_spec("source", "Package source (GitHub URL or local directory)"),
-                ArgSpec {
-                    name: "install-version",
-                    short: Some('i'),
-                    long: Some("install-version"),
-                    kind: ArgKind::Option,
-                    value_type: ArgValueType::String,
-                    cardinality: Cardinality::Optional,
-                    default: None,
-                    conflicts_with: vec![],
-                    requires: vec![],
-                    help: "Specific version to install",
-                    ..Default::default()
-                },
-                opt_spec("token", "GitHub token (or set GITHUB_TOKEN env var)"),
-                flag_spec("force", "Force reinstall if already installed"),
-                flag_spec("yes", "Skip .gitignore modification prompt"),
-                ArgSpec {
-                    name: "ai",
-                    short: None,
-                    long: Some("ai"),
-                    kind: ArgKind::Option,
-                    value_type: ArgValueType::String,
-                    cardinality: Cardinality::Optional,
-                    default: None,
-                    conflicts_with: vec![],
-                    requires: vec![],
-                    help: "AI agent to install for (e.g., claude, copilot)",
-                    ..Default::default()
-                },
-            ],
-            ..CommandSpec::default()
-        }
-    }
-}
-
-impl FromArgValueMap for InstallArgs {
-    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
-        InstallArgs {
-            source: get_str_val(map, "source"),
-            install_version: get_opt_val(map, "install-version"),
-            token: get_opt_val(map, "token"),
-            force: get_bool_val(map, "force"),
-            yes: get_bool_val(map, "yes"),
-            ai: get_opt_val(map, "ai"),
-        }
-    }
-}
-
-// ── update ────────────────────────────────────────────────────────────────────
-
-struct UpdateArgs {
-    package: String,
-    breaking: bool,
-}
-
-impl IntoCommandSpec for UpdateArgs {
-    fn command_spec() -> CommandSpec {
-        CommandSpec {
-            summary: "Update installed package",
-            syntax: Some("update <PACKAGE>"),
-            category: Some("packages"),
-            args: vec![
-                pos_req_spec("package", "Package name to update"),
-                flag_spec("breaking", "Allow breaking changes"),
-            ],
-            ..CommandSpec::default()
-        }
-    }
-}
-
-impl FromArgValueMap for UpdateArgs {
-    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
-        UpdateArgs {
-            package: get_str_val(map, "package"),
-            breaking: get_bool_val(map, "breaking"),
-        }
-    }
-}
-
-// ── remove ────────────────────────────────────────────────────────────────────
-
-struct RemoveArgs {
-    package: String,
-    force: bool,
-}
-
-impl IntoCommandSpec for RemoveArgs {
-    fn command_spec() -> CommandSpec {
-        CommandSpec {
-            summary: "Remove installed package",
-            syntax: Some("remove <PACKAGE>"),
-            category: Some("packages"),
-            args: vec![
-                pos_req_spec("package", "Package name to remove"),
-                flag_spec("force", "Force removal without confirmation"),
-            ],
-            ..CommandSpec::default()
-        }
-    }
-}
-
-impl FromArgValueMap for RemoveArgs {
-    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
-        RemoveArgs {
-            package: get_str_val(map, "package"),
-            force: get_bool_val(map, "force"),
-        }
-    }
-}
-
-// ── list ──────────────────────────────────────────────────────────────────────
-
-struct ListArgs {
-    author: Option<String>,
-    detailed: bool,
-}
-
-impl IntoCommandSpec for ListArgs {
-    fn command_spec() -> CommandSpec {
-        CommandSpec {
-            summary: "List installed packages",
-            syntax: Some("list"),
-            category: Some("packages"),
-            args: vec![
-                opt_spec("author", "Filter by author"),
-                flag_spec("detailed", "Show detailed information"),
-            ],
-            ..CommandSpec::default()
-        }
-    }
-}
-
-impl FromArgValueMap for ListArgs {
-    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
-        ListArgs {
-            author: get_opt_val(map, "author"),
-            detailed: get_bool_val(map, "detailed"),
         }
     }
 }
@@ -1245,260 +1064,6 @@ impl FromArgValueMap for McpAddArgs {
             env: get_repeated_val(map, "env"),
             header: get_repeated_val(map, "header"),
             overwrite: get_bool_val(map, "overwrite"),
-        }
-    }
-}
-
-// ── package init ──────────────────────────────────────────────────────────────
-
-struct PackageInitArgs {
-    name: String,
-    description: Option<String>,
-    package_version: String,
-    author: Option<String>,
-    yes: bool,
-}
-
-impl IntoCommandSpec for PackageInitArgs {
-    fn command_spec() -> CommandSpec {
-        CommandSpec {
-            summary: "Initialize a new package with aikit.toml",
-            syntax: Some("package init <NAME>"),
-            category: Some("packages"),
-            args: vec![
-                pos_req_spec("name", "Package name (required)"),
-                ArgSpec {
-                    name: "description",
-                    short: Some('d'),
-                    long: Some("description"),
-                    kind: ArgKind::Option,
-                    value_type: ArgValueType::String,
-                    cardinality: Cardinality::Optional,
-                    default: None,
-                    conflicts_with: vec![],
-                    requires: vec![],
-                    help: "Package description",
-                    ..Default::default()
-                },
-                ArgSpec {
-                    name: "package-version",
-                    short: Some('v'),
-                    long: Some("package-version"),
-                    kind: ArgKind::Option,
-                    value_type: ArgValueType::String,
-                    cardinality: Cardinality::Optional,
-                    default: Some(ArgValue::Str("0.1.0".to_string())),
-                    conflicts_with: vec![],
-                    requires: vec![],
-                    help: "Package version (default: 0.1.0)",
-                    ..Default::default()
-                },
-                ArgSpec {
-                    name: "author",
-                    short: Some('a'),
-                    long: Some("author"),
-                    kind: ArgKind::Option,
-                    value_type: ArgValueType::String,
-                    cardinality: Cardinality::Optional,
-                    default: None,
-                    conflicts_with: vec![],
-                    requires: vec![],
-                    help: "Author name",
-                    ..Default::default()
-                },
-                flag_spec("yes", "Skip interactive prompts"),
-            ],
-            ..CommandSpec::default()
-        }
-    }
-}
-
-impl FromArgValueMap for PackageInitArgs {
-    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
-        PackageInitArgs {
-            name: get_str_val(map, "name"),
-            description: get_opt_val(map, "description"),
-            package_version: get_str_default(map, "package-version", "0.1.0"),
-            author: get_opt_val(map, "author"),
-            yes: get_bool_val(map, "yes"),
-        }
-    }
-}
-
-// ── package validate ──────────────────────────────────────────────────────────
-
-struct PackageValidateArgs {
-    path: String,
-}
-
-impl IntoCommandSpec for PackageValidateArgs {
-    fn command_spec() -> CommandSpec {
-        CommandSpec {
-            summary: "Validate package structure and that templates exist (install-ready)",
-            syntax: Some("package validate [--path <DIR>]"),
-            category: Some("packages"),
-            args: vec![ArgSpec {
-                name: "path",
-                short: Some('p'),
-                long: Some("path"),
-                kind: ArgKind::Option,
-                value_type: ArgValueType::String,
-                cardinality: Cardinality::Optional,
-                default: Some(ArgValue::Str(".".to_string())),
-                conflicts_with: vec![],
-                requires: vec![],
-                help: "Package directory (default: current directory)",
-                ..Default::default()
-            }],
-            ..CommandSpec::default()
-        }
-    }
-}
-
-impl FromArgValueMap for PackageValidateArgs {
-    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
-        PackageValidateArgs {
-            path: get_str_default(map, "path", "."),
-        }
-    }
-}
-
-// ── package build ─────────────────────────────────────────────────────────────
-
-struct PackageBuildArgs {
-    output: String,
-    agents: Option<String>,
-    include_sources: bool,
-}
-
-impl IntoCommandSpec for PackageBuildArgs {
-    fn command_spec() -> CommandSpec {
-        CommandSpec {
-            summary: "Build package for distribution",
-            syntax: Some("package build [--output <DIR>]"),
-            category: Some("packages"),
-            args: vec![
-                ArgSpec {
-                    name: "output",
-                    short: Some('o'),
-                    long: Some("output"),
-                    kind: ArgKind::Option,
-                    value_type: ArgValueType::String,
-                    cardinality: Cardinality::Optional,
-                    default: Some(ArgValue::Str("dist".to_string())),
-                    conflicts_with: vec![],
-                    requires: vec![],
-                    help: "Output directory (default: dist/)",
-                    ..Default::default()
-                },
-                opt_spec("agents", "Target agents (comma-separated, default: all)"),
-                ArgSpec {
-                    name: "include-sources",
-                    short: None,
-                    long: Some("include-sources"),
-                    kind: ArgKind::Flag,
-                    value_type: ArgValueType::Bool,
-                    cardinality: Cardinality::Optional,
-                    default: None,
-                    conflicts_with: vec![],
-                    requires: vec![],
-                    help: "Include source files",
-                    ..Default::default()
-                },
-            ],
-            ..CommandSpec::default()
-        }
-    }
-}
-
-impl FromArgValueMap for PackageBuildArgs {
-    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
-        PackageBuildArgs {
-            output: get_str_default(map, "output", "dist"),
-            agents: get_opt_val(map, "agents"),
-            include_sources: get_bool_val(map, "include-sources"),
-        }
-    }
-}
-
-// ── package publish ───────────────────────────────────────────────────────────
-
-struct PackagePublishArgs {
-    repo: String,
-    package: Option<String>,
-    tag: Option<String>,
-    title: Option<String>,
-    notes: Option<String>,
-    token: Option<String>,
-    no_release: bool,
-}
-
-impl IntoCommandSpec for PackagePublishArgs {
-    fn command_spec() -> CommandSpec {
-        CommandSpec {
-            summary: "Publish package to registry",
-            syntax: Some("package publish <REPO>"),
-            category: Some("packages"),
-            args: vec![
-                pos_req_spec("repo", "Repository in format owner/repo (required)"),
-                ArgSpec {
-                    name: "package",
-                    short: Some('p'),
-                    long: Some("package"),
-                    kind: ArgKind::Option,
-                    value_type: ArgValueType::String,
-                    cardinality: Cardinality::Optional,
-                    default: None,
-                    conflicts_with: vec![],
-                    requires: vec![],
-                    help: "Path to package ZIP file",
-                    ..Default::default()
-                },
-                ArgSpec {
-                    name: "tag",
-                    short: Some('t'),
-                    long: Some("tag"),
-                    kind: ArgKind::Option,
-                    value_type: ArgValueType::String,
-                    cardinality: Cardinality::Optional,
-                    default: None,
-                    conflicts_with: vec![],
-                    requires: vec![],
-                    help: "Version tag for the release",
-                    ..Default::default()
-                },
-                opt_spec("title", "Release title"),
-                opt_spec("notes", "Release notes"),
-                opt_spec("token", "GitHub token (or set GITHUB_TOKEN env var)"),
-                ArgSpec {
-                    name: "no-release",
-                    short: None,
-                    long: Some("no-release"),
-                    kind: ArgKind::Flag,
-                    value_type: ArgValueType::Bool,
-                    cardinality: Cardinality::Optional,
-                    default: None,
-                    conflicts_with: vec![],
-                    requires: vec![],
-                    help: "Don't create a release, just upload to existing release",
-                    ..Default::default()
-                },
-            ],
-            ..CommandSpec::default()
-        }
-    }
-}
-
-impl FromArgValueMap for PackagePublishArgs {
-    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
-        PackagePublishArgs {
-            repo: get_str_val(map, "repo"),
-            package: get_opt_val(map, "package"),
-            tag: get_opt_val(map, "tag"),
-            title: get_opt_val(map, "title"),
-            notes: get_opt_val(map, "notes"),
-            token: get_opt_val(map, "token"),
-            no_release: get_bool_val(map, "no-release"),
         }
     }
 }

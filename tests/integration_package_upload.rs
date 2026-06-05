@@ -162,7 +162,7 @@ async fn test_package_upload_asset_without_token_integration() {
     let test_file = temp_dir.path().join("test-upload.zip");
     create_test_zip_file(&test_file);
 
-    let client = GitHubClient::new(None);
+    let client = GitHubClient::new(None).unwrap();
 
     let result = client
         .upload_release_asset("test-owner", "test-repo", 123, &test_file)
@@ -174,7 +174,7 @@ async fn test_package_upload_asset_without_token_integration() {
 
 #[tokio::test]
 async fn test_package_upload_file_not_found_integration() {
-    let client = GitHubClient::new(Some("test_token".to_string()));
+    let client = GitHubClient::new(Some("test_token".to_string())).unwrap();
     let nonexistent_file = PathBuf::from("/nonexistent/path/file.zip");
 
     let result = client
