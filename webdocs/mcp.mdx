@@ -18,9 +18,48 @@ AIKit can **merge** one MCP server entry at a time into the JSON or TOML file ea
 | `opencode` | | `opencode.json` |
 | `codex` | | `.codex/config.toml` |
 
-Run `aikit agent mcp list` for paths and aliases. Six keys are implemented; the full agent catalog is larger.
+Run `aikit mcp list` (or `aikit agent mcp list`) for paths and aliases. Six keys are implemented; the full agent catalog is larger.
+
+## Self-registration (recommended)
+
+Use `aikit mcp install` to register the `aikit` binary itself into any supported agent's config file with a single command. The binary path is auto-detected from `current_exe()`.
+
+```bash
+# Preview the config entry without writing any file
+aikit mcp install --agent cursor --stdio --dry-run
+
+# Register under the current project (writes .cursor/mcp.json)
+aikit mcp install --agent cursor --stdio --scope project --overwrite
+
+# Register globally (writes ~/.claude.json)
+aikit mcp install --agent claude --stdio --scope global --overwrite
+
+# Custom server name
+aikit mcp install --agent cursor --stdio --scope project --name my-aikit --overwrite
+
+# Discover supported agents and their config paths
+aikit mcp list
+```
+
+**Flags for `mcp install` / `mcp register`:**
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--agent` | Yes | — | Agent key or alias (e.g. `cursor`, `claude`) |
+| `--stdio` | Yes (or `--url`) | `false` | Use stdio transport; auto-generates command from `current_exe()` |
+| `--url` | Yes (or `--stdio`) | — | Use HTTP transport with this URL |
+| `--scope` | No | `project` | `project` (CWD) or `global` (home dir) |
+| `--name` | No | `aikit` | Server entry name in the config file |
+| `--overwrite` | No | `false` | Replace an existing entry with the same name |
+| `--dry-run` | No | `false` | Print intended config to stdout; do not write any file |
+| `--arg` | No | — | Override argv tokens (repeatable) |
+| `--env` | No | — | `KEY=value` env vars for stdio transport (repeatable) |
+
+`mcp register` is an alias for `mcp install`.
 
 ## CLI
+
+> **Deprecated for `aikit` self-registration:** The `aikit agent mcp add` path below requires you to supply the full binary path and construct the argument list manually. Use `aikit mcp install --stdio` instead — it auto-detects the binary and is less error-prone.
 
 ```bash
 # Table of agents, project vs global paths
