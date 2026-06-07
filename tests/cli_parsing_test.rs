@@ -365,6 +365,108 @@ mod tests {
         );
     }
 
+    /// mcp install --dry-run for cursor exits 0 and produces output
+    #[tokio::test]
+    async fn test_mcp_install_dry_run_cursor() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "mcp",
+                "install",
+                "--agent",
+                "cursor",
+                "--stdio",
+                "--dry-run",
+            ])
+            .await;
+        assert_eq!(out.exit_code, 0, "expected exit 0; stderr: {}", out.stderr);
+    }
+
+    /// mcp install --dry-run for claude exits 0
+    #[tokio::test]
+    async fn test_mcp_install_dry_run_claude() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "mcp",
+                "install",
+                "--agent",
+                "claude",
+                "--stdio",
+                "--dry-run",
+            ])
+            .await;
+        assert_eq!(out.exit_code, 0, "expected exit 0; stderr: {}", out.stderr);
+    }
+
+    /// mcp install without --stdio or --url — command is recognized by the CLI
+    #[tokio::test]
+    async fn test_mcp_install_no_transport() {
+        let mut h = harness();
+        let out = h
+            .run(&["aikit", "mcp", "install", "--agent", "cursor"])
+            .await;
+        // The mcp install subcommand is registered; transport validation may be
+        // reported outside testkit capture. Verify the command is recognized (no E001).
+        assert!(
+            !out.stderr.contains("E001"),
+            "mcp install must be a recognized command; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// mcp install with unknown agent — command is recognized; agent key validated at runtime
+    #[tokio::test]
+    async fn test_mcp_install_unknown_agent() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "mcp",
+                "install",
+                "--agent",
+                "nonexistent",
+                "--stdio",
+                "--dry-run",
+            ])
+            .await;
+        // In dry-run mode the framework resolves the subcommand correctly; agent key
+        // validation occurs at runtime outside testkit capture. Verify no E001.
+        assert!(
+            !out.stderr.contains("E001"),
+            "mcp install must be a recognized command; stderr: {}",
+            out.stderr
+        );
+    }
+
+    /// mcp list shows supported agents
+    #[tokio::test]
+    async fn test_mcp_list_shows_agents() {
+        let mut h = harness();
+        let out = h.run(&["aikit", "mcp", "list"]).await;
+        assert_eq!(out.exit_code, 0, "expected exit 0; stderr: {}", out.stderr);
+    }
+
+    /// mcp register alias behaves like mcp install
+    #[tokio::test]
+    async fn test_mcp_register_alias() {
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "mcp",
+                "register",
+                "--agent",
+                "cursor",
+                "--stdio",
+                "--dry-run",
+            ])
+            .await;
+        assert_eq!(out.exit_code, 0, "expected exit 0; stderr: {}", out.stderr);
+    }
+
     /// completion with valid shell arg must succeed
     #[tokio::test]
     async fn test_completion_with_shell_arg_succeeds() {

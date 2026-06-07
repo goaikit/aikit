@@ -15,6 +15,8 @@ AIKit organizes functionality into logical command groups:
 - **`init`** - Initialize new Spec-Driven Development projects
 - **`agent run`** - Run a coding agent with a prompt (supports streaming events)
 - **`agent list`** - List project-scoped agent definitions
+- **`mcp install`** / **`mcp register`** - Self-register the `aikit` binary into an agent's MCP config file
+- **`mcp list`** - List supported agents and their project/global config paths
 - **`agent mcp`** - List supported agents or merge one MCP server into agent config files
 - **`serve`** - Start an HTTP server for multi-turn agent sessions ([dedicated page](/serve))
 - **`llm`** - Invoke an LLM via OpenAI-compatible API (supports streaming and JSON output)
@@ -58,6 +60,9 @@ aikit <command> --help
 |---------|---------|---------|
 | `init` | Create new project | `aikit init my-project` |
 | `agent run` | Run a coding agent | `aikit agent run --agent claude -p "Task"` |
+| `mcp install` | Self-register aikit binary | `aikit mcp install --agent cursor --stdio --dry-run` |
+| `mcp register` | Alias for `mcp install` | `aikit mcp register --agent claude --stdio --scope global` |
+| `mcp list` | List agents + config paths | `aikit mcp list` |
 | `agent mcp` | MCP config merge | `aikit agent mcp list` / `aikit agent mcp add --agent claude ...` |
 | `serve` | Multi-turn HTTP API | `aikit serve --port 8787` |
 | `llm` | Invoke an LLM | `aikit llm -m gpt-4o -p "Hello"` |
@@ -319,6 +324,44 @@ aikit agent mcp add --agent gemini --scope project --project . --name api \
 | `--env` | `KEY=value` for stdio env (repeat) |
 | `--header` | `KEY=value` for HTTP headers (repeat) |
 | `--overwrite` | Replace existing entry with the same name |
+
+### mcp install / mcp register
+
+Self-register the `aikit` binary into any supported agent's MCP config file. The binary path is resolved automatically from `current_exe()`. `mcp register` is an alias for `mcp install`.
+
+```bash
+# Preview without writing (dry-run)
+aikit mcp install --agent cursor --stdio --dry-run
+
+# Write .cursor/mcp.json in the current directory
+aikit mcp install --agent cursor --stdio --scope project --overwrite
+
+# Write ~/.claude.json (global scope)
+aikit mcp install --agent claude --stdio --scope global --overwrite
+
+# Use alias
+aikit mcp register --agent cursor --stdio --dry-run
+```
+
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--agent` | Yes | — | Agent key or alias (`cursor`, `claude`, `gemini`, `copilot`/`vscode`, `opencode`, `codex`) |
+| `--stdio` | Yes (or `--url`) | `false` | Stdio transport; auto-generates command from `current_exe()` |
+| `--url` | Yes (or `--stdio`) | — | HTTP transport URL |
+| `--scope` | No | `project` | `project` (CWD) or `global` (home dir) |
+| `--name` | No | `aikit` | Server entry name |
+| `--overwrite` | No | `false` | Replace an existing entry with the same name |
+| `--dry-run` | No | `false` | Print intended config; do not write any file |
+| `--arg` | No | — | Override argv tokens (repeatable) |
+| `--env` | No | — | `KEY=value` env vars for stdio (repeatable) |
+
+### mcp list
+
+List all supported agents with their project and global config file paths.
+
+```bash
+aikit mcp list
+```
 
 ### llm
 
