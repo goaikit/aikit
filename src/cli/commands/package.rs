@@ -883,7 +883,10 @@ mod tests {
 
     fn stable_no_release_lookup_error_snapshot(msg: &str) -> &'static str {
         assert!(
-            msg.contains("Failed to find release:") || msg.contains("No release found with tag"),
+            msg.contains("Failed to find release:")
+                || msg.contains("No release found with tag")
+                || msg.contains("error sending request")
+                || msg.contains("connection"),
             "unexpected error: {msg}"
         );
         "Could not use existing release for tag (API unreachable or tag missing)"

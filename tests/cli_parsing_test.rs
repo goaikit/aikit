@@ -381,6 +381,10 @@ mod tests {
             ])
             .await;
         assert_eq!(out.exit_code, 0, "expected exit 0; stderr: {}", out.stderr);
+        assert!(
+            !out.stdout.is_empty(),
+            "dry-run must emit config block to stdout; stdout was empty"
+        );
     }
 
     /// mcp install --dry-run for claude exits 0
@@ -409,11 +413,17 @@ mod tests {
             .run(&["aikit", "mcp", "install", "--agent", "cursor"])
             .await;
         // The mcp install subcommand is registered; transport validation may be
-        // reported outside testkit capture. Verify the command is recognized (no E001).
+        // reported outside testkit capture. Verify the command is recognized (no E001)
+        // and that either a non-zero exit or non-empty stderr indicates validation fired.
         assert!(
             !out.stderr.contains("E001"),
             "mcp install must be a recognized command; stderr: {}",
             out.stderr
+        );
+        assert!(
+            out.exit_code != 0 || !out.stderr.is_empty(),
+            "expected non-zero exit or stderr when transport flag is missing; stdout: {}",
+            out.stdout
         );
     }
 
@@ -432,11 +442,10 @@ mod tests {
                 "--dry-run",
             ])
             .await;
-        // In dry-run mode the framework resolves the subcommand correctly; agent key
-        // validation occurs at runtime outside testkit capture. Verify no E001.
-        assert!(
-            !out.stderr.contains("E001"),
-            "mcp install must be a recognized command; stderr: {}",
+        // Agent key validation must reject unknown keys with a non-zero exit.
+        assert_ne!(
+            out.exit_code, 0,
+            "expected non-zero exit for unknown agent; stderr: {}",
             out.stderr
         );
     }
@@ -447,6 +456,11 @@ mod tests {
         let mut h = harness();
         let out = h.run(&["aikit", "mcp", "list"]).await;
         assert_eq!(out.exit_code, 0, "expected exit 0; stderr: {}", out.stderr);
+        assert!(
+            out.stdout.contains("cursor-agent"),
+            "mcp list must list cursor-agent; stdout: {}",
+            out.stdout
+        );
     }
 
     /// mcp register alias behaves like mcp install
