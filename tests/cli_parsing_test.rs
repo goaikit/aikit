@@ -405,24 +405,31 @@ mod tests {
         assert_eq!(out.exit_code, 0, "expected exit 0; stderr: {}", out.stderr);
     }
 
-    /// mcp install without --stdio or --url — command is recognized by the CLI
+    /// mcp install without --stdio or --url defaults to HTTP transport.
+    ///
+    /// HTTP is the default transport (--host/--port/--path supply the URL when
+    /// --url is omitted); --stdio is the opt-out. So no transport flag is valid,
+    /// not an error. Run with --dry-run so the assertion is hermetic — no real
+    /// config write, whose success would otherwise depend on pre-existing state.
     #[tokio::test]
-    async fn test_mcp_install_no_transport() {
+    async fn test_mcp_install_no_transport_defaults_to_http() {
         let mut h = harness();
         let out = h
-            .run(&["aikit", "mcp", "install", "--agent", "cursor"])
+            .run(&["aikit", "mcp", "install", "--agent", "cursor", "--dry-run"])
             .await;
-        // The mcp install subcommand is registered; transport validation may be
-        // reported outside testkit capture. Verify the command is recognized (no E001)
-        // and that either a non-zero exit or non-empty stderr indicates validation fired.
         assert!(
             !out.stderr.contains("E001"),
             "mcp install must be a recognized command; stderr: {}",
             out.stderr
         );
+        assert_eq!(
+            out.exit_code, 0,
+            "no transport flag is valid (defaults to HTTP); stderr: {}",
+            out.stderr
+        );
         assert!(
-            out.exit_code != 0 || !out.stderr.is_empty(),
-            "expected non-zero exit or stderr when transport flag is missing; stdout: {}",
+            out.stdout.contains("HTTP"),
+            "dry-run should report the defaulted HTTP transport; stdout: {}",
             out.stdout
         );
     }
