@@ -31,7 +31,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # CLI framework (replaces direct clap usage)
-cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "ce5376c50513e76768812bdc010eb26bc0985c21", features = ["testkit", "mcp-server", "mcp-install", "api-server"] }
+cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "f6df9bee934657b3cb8e689e16a6d02556b88176", features = ["testkit", "mcp-server", "mcp-install", "api-server"] }
 # HTTP server for aikit serve
 axum = { version = "0.8", features = ["macros"] }
 tokio-stream = "0.1"
