@@ -281,7 +281,7 @@ pub(super) fn normalize_opencode(
         {
             results.push(StreamMessage {
                 text: text.to_string(),
-                phase: MessagePhase::Delta,
+                phase: MessagePhase::Final,
                 role: MessageRole::Assistant,
                 kind: MessageKind::Message,
                 source: stream,
@@ -321,7 +321,7 @@ pub(super) fn normalize_opencode(
             };
             results.push(StreamMessage {
                 text: content.to_string(),
-                phase: MessagePhase::Delta,
+                phase: MessagePhase::Final,
                 role,
                 kind: MessageKind::Message,
                 source: stream,
