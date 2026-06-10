@@ -141,6 +141,19 @@ async fn test_agents_endpoint_returns_runnable_only() {
             "only available agents should be listed; got {}",
             a
         );
+        // E2: every agent carries an `auth` field, one of the three valid
+        // values. In the test env it'll be `ok`/`unknown`/`unauthenticated`
+        // depending on local credentials — assert presence + validity, not a
+        // specific value.
+        let auth = a["auth"]
+            .as_str()
+            .unwrap_or_else(|| panic!("agent must carry an auth field; got {}", a));
+        assert!(
+            matches!(auth, "ok" | "unauthenticated" | "unknown"),
+            "auth must be one of ok/unauthenticated/unknown; got {} in {}",
+            auth,
+            a
+        );
     }
 
     // `aikit` is always runnable (no external binary required) so it must
@@ -648,6 +661,120 @@ async fn test_not_found_route() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn test_sse_emits_token_usage_and_reasoning_frames() {
+    // E1/B13: new frames reach the SSE stream as their own event names.
+    let run_fn = make_stub_run_fn_with_session(
+        vec![
+            StreamFrame::Reasoning {
+                content: "let me think".to_string(),
+            },
+            StreamFrame::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+                cache_read_tokens: Some(3),
+                source: "aikit".to_string(),
+            },
+            StreamFrame::Text {
+                content: "answer".to_string(),
+            },
+        ],
+        Some("usage-sse-1".to_string()),
+    );
+    let port = start_server_with(run_fn).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
+        .header("Accept", "text/event-stream")
+        .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+
+    assert!(
+        text.contains("event: reasoning"),
+        "stream must contain a reasoning event; got:\n{text}"
+    );
+    assert!(
+        text.contains("event: token_usage"),
+        "stream must contain a token_usage event; got:\n{text}"
+    );
+    assert!(
+        text.contains("\"input_tokens\":10") && text.contains("\"output_tokens\":20"),
+        "token_usage frame must carry the token counts; got:\n{text}"
+    );
+}
+
+#[tokio::test]
+async fn test_sync_aggregates_token_usage() {
+    // E1/B13: sync body sums TokenUsage frames into a `usage` object.
+    let run_fn = make_stub_run_fn_with_session(
+        vec![
+            StreamFrame::TokenUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: Some(2),
+                source: "aikit".to_string(),
+            },
+            StreamFrame::TokenUsage {
+                input_tokens: 4,
+                output_tokens: 6,
+                cache_read_tokens: Some(1),
+                source: "aikit".to_string(),
+            },
+            StreamFrame::Text {
+                content: "done".to_string(),
+            },
+        ],
+        Some("usage-sync-1".to_string()),
+    );
+    let port = start_server_with(run_fn).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["content"], "done");
+    assert_eq!(body["usage"]["input_tokens"], 14);
+    assert_eq!(body["usage"]["output_tokens"], 11);
+    assert_eq!(body["usage"]["cache_read_tokens"], 3);
+}
+
+#[tokio::test]
+async fn test_sync_without_usage_omits_field() {
+    // Backward-compat: runs with no TokenUsage frames omit `usage` entirely.
+    let run_fn = make_stub_run_fn_with_session(
+        vec![StreamFrame::Text {
+            content: "hi".to_string(),
+        }],
+        Some("no-usage-1".to_string()),
+    );
+    let port = start_server_with(run_fn).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/api/v1/messages", port))
+        .header("Accept", "application/json")
+        .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body.get("usage").is_none(),
+        "usage must be omitted when no token frames seen; got: {body}"
+    );
 }
 
 #[tokio::test]
