@@ -534,58 +534,43 @@ fn validate_request(body: &SendMessageRequest, state: &AppState) -> Option<Respo
     if let Some(ref sid) = body.session_id {
         let in_memory = {
             let runs = state.runs.lock().unwrap();
-            let busy = runs
-                .values()
-                .any(|r| r.session_id.as_deref() == Some(sid) && r.status == RunStatus::Running);
-            if busy {
-                return Some(error_response(
-                    StatusCode::CONFLICT,
-                    "session_busy",
-                    "Session is currently processing a message",
-                ));
-            }
             runs.values().any(|r| r.session_id.as_deref() == Some(sid))
         };
 
-        if body.agent == "aikit" && !in_memory {
-            let store = SessionStore::open();
-            match store.load(sid) {
-                Ok(_) => {}
-                Err(SessionStoreError::NotFound(id)) => {
-                    return Some(error_response(
-                        StatusCode::NOT_FOUND,
-                        "session_not_found",
-                        &format!("Session '{}' not found", id),
-                    ));
+        if !in_memory {
+            if body.agent == "aikit" {
+                let store = SessionStore::open();
+                match store.load(sid) {
+                    Ok(_) => {}
+                    Err(SessionStoreError::NotFound(id)) => {
+                        return Some(error_response(
+                            StatusCode::NOT_FOUND,
+                            "session_not_found",
+                            &format!("Session '{}' not found", id),
+                        ));
+                    }
+                    Err(e) => {
+                        tracing::warn!("session store error: {:?}", e);
+                        return Some(error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "internal_error",
+                            "Failed to load session",
+                        ));
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!("session store error: {:?}", e);
-                    return Some(error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "internal_error",
-                        "Failed to load session",
-                    ));
-                }
+            } else {
+                // B6: CLI backends have no persistent store; an unknown
+                // session_id cannot be resumed.
+                return Some(error_response(
+                    StatusCode::NOT_FOUND,
+                    "session_not_found",
+                    &format!("Session '{}' not found", sid),
+                ));
             }
         }
     }
 
-    let runs = state.runs.lock().unwrap();
-    let active = runs
-        .values()
-        .filter(|r| r.status == RunStatus::Running)
-        .count();
-    if active >= state.config.max_sessions {
-        return Some(error_response(
-            StatusCode::TOO_MANY_REQUESTS,
-            "session_limit_reached",
-            &format!(
-                "Maximum of {} concurrent sessions reached",
-                state.config.max_sessions
-            ),
-        ));
-    }
-
+    // session_busy and max_sessions are checked atomically inside spawn_run (B9).
     None
 }
 
@@ -618,14 +603,44 @@ fn run_error_to_frame(err: RunError) -> (StreamFrame, i32) {
 
 /// Drive the run. Returns the channel receiver, the spawned task handle, and
 /// the in-memory request id assigned to this run.
+#[allow(clippy::result_large_err)]
 fn spawn_run(
     state: &AppState,
     body: &SendMessageRequest,
-) -> (tokio::sync::mpsc::Receiver<StreamFrame>, String) {
+) -> Result<(tokio::sync::mpsc::Receiver<StreamFrame>, String), Response> {
     let request_id = Uuid::new_v4().to_string();
     let now = Utc::now();
     {
         let mut runs = state.runs.lock().unwrap();
+        // B9: atomic busy-check + capacity-check + insert under one lock,
+        // closing the TOCTOU window that existed when validate_request and
+        // spawn_run held separate locks.
+        if let Some(ref sid) = body.session_id {
+            let busy = runs.values().any(|r| {
+                r.session_id.as_deref() == Some(sid.as_str()) && r.status == RunStatus::Running
+            });
+            if busy {
+                return Err(error_response(
+                    StatusCode::CONFLICT,
+                    "session_busy",
+                    "Session is currently processing a message",
+                ));
+            }
+        }
+        let active = runs
+            .values()
+            .filter(|r| r.status == RunStatus::Running)
+            .count();
+        if active >= state.config.max_sessions {
+            return Err(error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "session_limit_reached",
+                &format!(
+                    "Maximum of {} concurrent sessions reached",
+                    state.config.max_sessions
+                ),
+            ));
+        }
         runs.insert(
             request_id.clone(),
             RunRecord {
@@ -810,7 +825,7 @@ fn spawn_run(
 
     drop(task);
 
-    (rx, request_id)
+    Ok((rx, request_id))
 }
 
 async fn messages_handler(
@@ -831,7 +846,10 @@ async fn messages_handler(
         return err;
     }
 
-    let (rx, request_id) = spawn_run(&state, &body);
+    let (rx, request_id) = match spawn_run(&state, &body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
     match mode {
         ResponseMode::Sse => sse_response(rx, Arc::clone(&state.runs), request_id),
@@ -1042,8 +1060,21 @@ pub fn make_production_run_fn() -> RunFn {
             let agent_for_cb = agent.clone();
             let result = run_agent_events(&agent, &prompt, options, move |event| {
                 let payload_kind = payload_kind_name(&event.payload);
-                // Dedup Final-after-Delta for non-aikit assistant messages.
                 if let AgentEventPayload::StreamMessage(msg) = &event.payload {
+                    // B5: CLI backends (claude, gemini) embed session_id in
+                    // StreamMessage.turn_id. Capture the first non-None value
+                    // and emit a Session frame so callers can resume.
+                    if let Some(ref tid) = msg.turn_id {
+                        let mut cap = captured_for_cb.lock().unwrap();
+                        if cap.is_none() {
+                            *cap = Some(tid.clone());
+                            drop(cap);
+                            let _ = tx_cb.blocking_send(StreamFrame::Session {
+                                session_id: tid.clone(),
+                            });
+                        }
+                    }
+                    // Dedup Final-after-Delta for non-aikit assistant messages.
                     if msg.role == MessageRole::Assistant && msg.kind == MessageKind::Message {
                         if msg.phase == MessagePhase::Delta {
                             *saw_delta_for_cb.lock().unwrap() = true;
