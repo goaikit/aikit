@@ -28,7 +28,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::extract::{Path, State};
+use axum::extract::{FromRequest, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::middleware;
 use axum::response::sse::{Event, Sse};
@@ -172,7 +172,41 @@ struct AppState {
 
 // ── HTTP body types ───────────────────────────────────────────────────────────
 
+/// B4: Custom extractor that wraps `Json<SendMessageRequest>` and maps
+/// `JsonRejection` errors into the standard `{"error":{"code","message"}}`
+/// envelope instead of the plain-text axum default.
+struct JsonBody(SendMessageRequest);
+
+impl<S> FromRequest<S> for JsonBody
+where
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Json::<SendMessageRequest>::from_request(req, state)
+            .await
+            .map(|Json(body)| JsonBody(body))
+            .map_err(|rejection| {
+                use axum::extract::rejection::JsonRejection;
+                let (status, message) = match &rejection {
+                    JsonRejection::JsonDataError(e) => {
+                        (StatusCode::UNPROCESSABLE_ENTITY, e.body_text())
+                    }
+                    JsonRejection::JsonSyntaxError(e) => (StatusCode::BAD_REQUEST, e.body_text()),
+                    JsonRejection::MissingJsonContentType(e) => {
+                        (StatusCode::UNSUPPORTED_MEDIA_TYPE, e.body_text())
+                    }
+                    _ => (rejection.status(), rejection.body_text()),
+                };
+                error_response(status, "invalid_request", &message)
+            })
+    }
+}
+
+// B8: deny_unknown_fields so unrecognised keys are rejected at parse time.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SendMessageRequest {
     agent: String,
     #[serde(default)]
@@ -416,32 +450,40 @@ async fn delete_run_handler(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    let abort_handle = {
+    // B3: find and close ALL non-closed records matching this session_id, not
+    // just the first one (a multi-turn session has one record per turn).
+    let abort_handles: Vec<tokio::task::AbortHandle> = {
         let mut runs = state.runs.lock().unwrap();
-        let key = runs.iter().find_map(|(k, r)| {
-            if r.session_id.as_deref() == Some(&session_id) && r.status != RunStatus::Closed {
-                Some(k.clone())
-            } else {
-                None
-            }
-        });
-        match key {
-            Some(k) => {
+        let matching_keys: Vec<String> = runs
+            .iter()
+            .filter_map(|(k, r)| {
+                if r.session_id.as_deref() == Some(&session_id) && r.status != RunStatus::Closed {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if matching_keys.is_empty() {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "session_not_found",
+                "Session not found",
+            );
+        }
+
+        matching_keys
+            .into_iter()
+            .filter_map(|k| {
                 let r = runs.get_mut(&k).unwrap();
                 r.status = RunStatus::Closed;
                 r.abort_handle.take()
-            }
-            None => {
-                return error_response(
-                    StatusCode::NOT_FOUND,
-                    "session_not_found",
-                    "Session not found",
-                );
-            }
-        }
+            })
+            .collect()
     };
 
-    if let Some(handle) = abort_handle {
+    for handle in abort_handles {
         handle.abort();
     }
 
@@ -608,7 +650,34 @@ fn spawn_run(
     let run_fn = state.run_fn.clone();
     let runs_ref = Arc::clone(&state.runs);
 
-    let (tx, rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
+    // B11: Use a relay channel. The run_fn sends to `inner_tx`; a relay task
+    // intercepts Session frames to update the record immediately (so concurrent
+    // requests can find the session_id before the run completes), then forwards
+    // all frames to `outer_tx` → `rx` (which goes to the response handlers).
+    let (inner_tx, mut inner_rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
+    let (outer_tx, rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
+    let relay_runs = Arc::clone(&runs_ref);
+    let relay_request_id = request_id.clone();
+    let relay_outer_tx = outer_tx.clone();
+    tokio::spawn(async move {
+        while let Some(frame) = inner_rx.recv().await {
+            // Immediately write session_id into the record when first seen so
+            // that concurrent requests can find it before the run finishes.
+            if let StreamFrame::Session { ref session_id } = frame {
+                let mut runs = relay_runs.lock().unwrap();
+                if let Some(r) = runs.get_mut(&relay_request_id) {
+                    if r.session_id.is_none() {
+                        r.session_id = Some(session_id.clone());
+                    }
+                }
+            }
+            if relay_outer_tx.send(frame).await.is_err() {
+                break; // client disconnected
+            }
+        }
+    });
+    // `tx` is the sender the async task uses to detect client-disconnect.
+    let tx = outer_tx;
     let request_id_clone = request_id.clone();
 
     let task = tokio::task::spawn(async move {
@@ -623,29 +692,58 @@ fn spawn_run(
             options = options.with_model(m);
         }
 
-        let tx_inner = tx.clone();
+        let tx_inner = inner_tx.clone();
         let blocking_handle =
             tokio::task::spawn_blocking(move || run_fn(agent, content, options, tx_inner));
 
+        // B12: wrap blocking_handle in a server-level wall-clock timeout so the
+        // native aikit in-process path is bounded even if the SDK doesn't cancel
+        // internally. The subprocess path also benefits from the extra guarantee.
         let outcome: Result<RunFnOutcome, RunError> = tokio::select! {
-            result = blocking_handle => {
-                match result {
-                    Ok(r) => r,
-                    Err(join_err) => {
-                        if !join_err.is_cancelled() {
-                            tracing::error!(
-                                "messages_handler: spawn_blocking join error: {}",
-                                join_err
-                            );
-                        }
+            timed_out = tokio::time::timeout(timeout, blocking_handle) => {
+                match timed_out {
+                    // Wall-clock timeout elapsed before the blocking task finished.
+                    Err(_elapsed) => {
+                        // Abort the blocking task so it doesn't keep running.
+                        // (The JoinHandle was consumed by timeout; we already have
+                        // the abort_handle stored on the record via the outer
+                        // task's AbortHandle — but aborting spawn_blocking is
+                        // best-effort. We still signal the error to the client.)
+                        let _ = tx
+                            .send(StreamFrame::Error {
+                                code: "run_timeout".to_string(),
+                                message: "Run exceeded timeout".to_string(),
+                            })
+                            .await;
                         let mut runs = runs_ref.lock().unwrap();
                         if let Some(r) = runs.get_mut(&request_id_clone) {
                             r.status = RunStatus::Idle;
                             r.last_active_at = Utc::now();
                             r.abort_handle = None;
+                            r.last_exit_code = Some(1);
                         }
+                        drop(tx);
                         return;
                     }
+                    // Blocking task finished within the timeout.
+                    Ok(join_result) => match join_result {
+                        Ok(r) => r,
+                        Err(join_err) => {
+                            if !join_err.is_cancelled() {
+                                tracing::error!(
+                                    "messages_handler: spawn_blocking join error: {}",
+                                    join_err
+                                );
+                            }
+                            let mut runs = runs_ref.lock().unwrap();
+                            if let Some(r) = runs.get_mut(&request_id_clone) {
+                                r.status = RunStatus::Idle;
+                                r.last_active_at = Utc::now();
+                                r.abort_handle = None;
+                            }
+                            return;
+                        }
+                    },
                 }
             }
             _ = tx.closed() => {
@@ -662,21 +760,15 @@ fn spawn_run(
 
         let _exit_code = match outcome {
             Ok(out) => {
-                if out.session_id.is_some() {
-                    let mut runs = runs_ref.lock().unwrap();
-                    if let Some(r) = runs.get_mut(&request_id_clone) {
-                        if r.session_id.is_none() {
-                            r.session_id = out.session_id.clone();
-                        }
-                        r.stderr_tail = out.stderr_tail.clone();
-                        r.last_exit_code = Some(out.exit_code);
+                let mut runs = runs_ref.lock().unwrap();
+                if let Some(r) = runs.get_mut(&request_id_clone) {
+                    // B11: backfill session_id from the outcome if we don't have
+                    // one yet (fresh session whose id was assigned by the SDK).
+                    if r.session_id.is_none() {
+                        r.session_id = out.session_id.clone();
                     }
-                } else {
-                    let mut runs = runs_ref.lock().unwrap();
-                    if let Some(r) = runs.get_mut(&request_id_clone) {
-                        r.stderr_tail = out.stderr_tail.clone();
-                        r.last_exit_code = Some(out.exit_code);
-                    }
+                    r.stderr_tail = out.stderr_tail.clone();
+                    r.last_exit_code = Some(out.exit_code);
                 }
                 out.exit_code
             }
@@ -694,6 +786,14 @@ fn spawn_run(
                 r.last_active_at = Utc::now();
                 r.abort_handle = None;
             }
+
+            // B2: after each run completes, prune stale records: remove all
+            // `Closed` records and any `Idle` records older than 1 hour.
+            let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
+            runs.retain(|_, r| {
+                r.status != RunStatus::Closed
+                    && !(r.status == RunStatus::Idle && r.last_active_at < one_hour_ago)
+            });
         }
 
         // tx drops here, closing the channel and signalling completion.
@@ -716,7 +816,7 @@ fn spawn_run(
 async fn messages_handler(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
-    Json(body): Json<SendMessageRequest>,
+    JsonBody(body): JsonBody,
 ) -> Response {
     let mode = resolve_response_mode(&headers);
     if mode == ResponseMode::NotAcceptable {
@@ -746,8 +846,8 @@ async fn messages_handler(
 /// without depending on stream combinators outside `tokio_stream`.
 fn sse_response(
     mut rx: tokio::sync::mpsc::Receiver<StreamFrame>,
-    _runs: Arc<Mutex<HashMap<String, RunRecord>>>,
-    _request_id: String,
+    runs: Arc<Mutex<HashMap<String, RunRecord>>>,
+    request_id: String,
 ) -> Response {
     let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
 
@@ -775,7 +875,15 @@ fn sse_response(
                 }
             }
         }
-        let exit_code = if saw_error { 1 } else { 0 };
+        // B1: read the real exit code from the record; fall back to saw_error
+        // only when no code was recorded (e.g. run aborted before completion).
+        let exit_code = {
+            let runs_guard = runs.lock().unwrap();
+            runs_guard
+                .get(&request_id)
+                .and_then(|r| r.last_exit_code)
+                .unwrap_or(if saw_error { 1 } else { 0 })
+        };
         let data = serde_json::json!({ "exit_code": exit_code }).to_string();
         let _ = out_tx
             .send(Ok(Event::default().event("done").data(data)))
@@ -844,18 +952,22 @@ async fn sync_response(
     // Determine exit code & error:
     //   - If an explicit Error frame arrived → exit_code 1 with that error.
     //   - Else use the recorded exit code (0 if missing).
-    //   - If the run exited non-zero with NO mapped content, synthesize an
-    //     `agent_error` error containing the stderr tail so the client gets
-    //     a useful diagnosis instead of `content:""` and `exit_code:0`.
+    //   - B7: when exit_code != 0, ALWAYS populate `error` (using the explicit
+    //     error frame if one arrived, otherwise synthesize from stderr/exit
+    //     code). `content` is left as-is — error info must not be non-
+    //     deterministically placed in either `content` or `error`.
     let (exit_code, error) = if let Some(e) = error {
         (1, Some(e))
     } else {
         let code = record_exit.unwrap_or(0);
-        if code != 0 && content.is_empty() {
-            let message = if record_stderr.is_empty() {
+        if code != 0 {
+            let message = if !record_stderr.is_empty() {
+                record_stderr.clone()
+            } else if !content.is_empty() {
+                // There was text content but no stderr — surface the exit code.
                 format!("Agent exited with code {}", code)
             } else {
-                record_stderr.clone()
+                format!("Agent exited with code {}", code)
             };
             (
                 code,
@@ -1106,6 +1218,14 @@ fn agent_event_to_frame(event: &aikit_sdk::AgentEvent, agent_key: &str) -> Optio
         } => Some(StreamFrame::ToolUse {
             name: tool_name.clone(),
             input: tool_input.clone(),
+        }),
+        // B10: map AikitToolResult → tool_result frame. The variant has
+        // `call_id` (not tool_name) and `output`.
+        AgentEventPayload::AikitToolResult {
+            call_id, output, ..
+        } => Some(StreamFrame::ToolResult {
+            name: call_id.clone(),
+            output: output.clone(),
         }),
         _ => None,
     }
