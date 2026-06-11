@@ -54,12 +54,73 @@ the same list `aikit check` reports. Dev-environment tools like `git` and
 ```json
 {
   "agents": [
-    { "key": "aikit",  "name": "aikit",  "available": true },
-    { "key": "claude", "name": "claude", "available": true },
-    { "key": "codex",  "name": "codex",  "available": true }
+    { "key": "aikit",  "name": "aikit",  "available": true, "auth": "ok" },
+    { "key": "claude", "name": "claude", "available": true, "auth": "ok" },
+    { "key": "codex",  "name": "codex",  "available": true, "auth": "unauthenticated" },
+    { "key": "gemini", "name": "gemini", "available": true, "auth": "unknown" }
   ]
 }
 ```
+
+<Warning>
+`available: true` means the agent's **binary is on `PATH`** (or, for the
+built-in `aikit` agent, that the SDK is compiled in). It does **not** verify
+credentials. A backend can be `available` yet fail at run time with an auth
+error. See [Backends and credentials](#backends-and-credentials).
+</Warning>
+
+#### The `auth` field
+
+`auth` reports whether each backend is actually **authenticated and ready** —
+the visibility that `available` alone can't give you. It is one of:
+
+| value | meaning |
+|---|---|
+| `"ok"` | credentials present (env var set, or the backend's status command exited 0) |
+| `"unauthenticated"` | the backend's status command exited cleanly logged-out / with invalid credentials |
+| `"unknown"` | no reliable non-interactive probe, the probe timed out or failed, or an env-only backend's variable was unset |
+
+Detection is **per backend** (each is the most reliable non-interactive check
+available), and results are **cached for 60 s** so repeat calls are cheap. Probes
+run concurrently with a hard 5 s timeout, so the endpoint never hangs.
+
+| backend | how `auth` is detected |
+|---|---|
+| `aikit` | env var only — `OPENAI_API_KEY` **or** `AIKIT_API_KEY` set & non-empty (no subprocess) |
+| `codex` | `codex login status` exit 0 |
+| `agent` (Cursor) | `agent status` exit 0, **or** `CURSOR_API_KEY` set & non-empty |
+| `claude` | `claude auth status` exit 0 |
+| `gemini` | **env var only** — `GEMINI_API_KEY` **or** `GOOGLE_API_KEY` set & non-empty, else `unknown`. The `gemini` status command is **never** spawned (it hangs in non-interactive mode). |
+| `opencode` | no reliable probe → always `unknown` |
+
+<Warning>
+**`claude` caveat:** `auth` can read `"ok"` while a headless `claude -p` run still
+fails. `claude auth status` reports valid OAuth login, but an **invalid
+`ANTHROPIC_API_KEY` in the environment can override** that OAuth at run time. Treat
+`claude`'s `ok` as "logged in", not a guarantee the next turn succeeds.
+</Warning>
+
+When a run does fail on authentication, the error envelope's `code` is normalized
+to `"unauthenticated"` (instead of the generic `"agent_error"`) — see
+[Error codes](#error-codes).
+
+### Backends and credentials
+
+The `agent` field selects one of two fundamentally different execution paths,
+each with its **own, independent** credential source:
+
+- **`aikit`** is the SDK's *built-in* agent. It talks to an LLM directly over an
+  OpenAI-compatible API, configured from environment variables (`OPENAI_API_KEY`
+  and the matching base URL). It never shells out to another CLI.
+- **`claude`, `codex`, `gemini`, `opencode`, `agent`** are thin wrappers that
+  **shell out to the corresponding external CLI**. Each of those CLIs has its
+  *own* authentication (e.g. `claude login`, the Codex/Gemini credential stores).
+  `aikit serve` inherits whatever auth that CLI already has.
+
+The two paths share **no** credentials. The `aikit` backend working tells you
+nothing about whether `claude`/`codex`/`gemini`/`agent` are authenticated, and
+vice versa. A failing CLI backend surfaces its error through the `error` field
+(sync) / `error` event (SSE), not in `content`.
 
 ## `POST /api/v1/messages`
 
@@ -120,10 +181,22 @@ Event types:
 |-------|------------|---------|
 | `session` | `{ "session_id": "..." }` | Always the first frame. New runs receive the freshly assigned id; resumes echo the supplied id. |
 | `text` | `{ "content": "..." }` | One assistant text fragment. May be emitted many times. |
+| `reasoning` | `{ "content": "..." }` | A fragment of the model's reasoning / "thinking". |
 | `tool_use` | `{ "name": "...", "input": ... }` | The agent invoked a tool. |
-| `tool_result` | `{ "name": "...", "output": "..." }` | Tool output returned to the agent. |
+| `tool_result` | `{ "name": "...", "output": "...", "is_error": false }` | Tool output returned to the agent. `is_error` is `true` when the tool reported a failure. |
+| `token_usage` | `{ "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": null, "source": "aikit" }` | Token accounting for the run. `source` identifies the backend (`aikit`, `claude`, `codex`, `gemini`, `opencode`, `cursor`). |
+| `subagent_spawn` | `{ "subagent_id": "...", "workdir": "..." }` | The built-in `aikit` agent spawned a sub-agent. |
+| `subagent_result` | `{ "subagent_id": "...", "status": "...", "changed_files": [], "key_findings": "..." }` | A sub-agent finished. |
+| `context_compressed` | `{ "original_tokens": 0, "compressed_tokens": 0, "turns_summarized": 0 }` | The conversation history was summarized to reclaim context. |
+| `step_finish` | `{ "iteration": 0, "finish_reason": "..." }` | One agent-loop iteration finished. |
 | `error` | `{ "code": "...", "message": "..." }` | A run-time error happened mid-stream. `done` still follows. |
-| `done` | `{ "exit_code": 0\|1 }` | Always the last frame. `1` if any `error` frame was emitted. |
+| `done` | `{ "exit_code": 0\|1 }` | Always the last frame. Reflects the real process exit code. |
+
+The `reasoning`, `token_usage`, `subagent_*`, `context_compressed`, and
+`step_finish` events bring the SSE stream to parity with the NDJSON event
+stream emitted by `aikit agent run --events`. They are additive: clients that
+only read `session`/`text`/`tool_*`/`error`/`done` ignore the extra event names
+and behave exactly as before.
 
 Use `-N` (curl) or the equivalent in your HTTP client to disable buffering —
 otherwise frames may not surface until the run completes.
@@ -143,9 +216,19 @@ Response body:
 {
   "session_id": "f261e7a6-...",
   "content": "Hello, world!",
-  "exit_code": 0
+  "exit_code": 0,
+  "usage": {
+    "input_tokens": 142,
+    "output_tokens": 17,
+    "cache_read_tokens": 0
+  }
 }
 ```
+
+`usage` aggregates every `token_usage` frame produced during the run (summed
+across iterations and sub-agents). It is **omitted entirely** when the backend
+emitted no usage events, so responses without token accounting are unchanged.
+`cache_read_tokens` is omitted when the backend reports no cache reads.
 
 On error, the body gains an `error` object and `exit_code: 1`:
 
@@ -158,8 +241,9 @@ On error, the body gains an `error` object and `exit_code: 1`:
 }
 ```
 
-`tool_use` and `tool_result` events are intentionally dropped in sync mode —
-if you need tool visibility, use SSE.
+The `reasoning`, `tool_use`, `tool_result`, `subagent_*`, `context_compressed`,
+and `step_finish` events are intentionally dropped in sync mode — only the
+aggregated `usage` is retained. If you need that per-event visibility, use SSE.
 
 ## Session lifecycle
 
@@ -203,6 +287,8 @@ CLI's own session store.
 | `429` | `session_limit_reached` | `--max-sessions` exceeded |
 | `406` | `not_acceptable` | `Accept` doesn't allow JSON or SSE |
 | `401` | `unauthorized` | `--api-key` set and bearer token missing/invalid |
+| `200` (sync `error` / SSE error frame) | `unauthenticated` | Run failed on a recognized auth-failure signature (invalid/missing API key, not logged in, etc.) |
+| `200` (sync `error` / SSE error frame) | `agent_error` | Backend exited non-zero for a non-auth reason |
 | `200 (SSE error frame)` | `run_timeout` | Agent exceeded `--run-timeout-secs` |
 | `200 (SSE error frame)` | `agent_not_runnable` | Backend reports the agent isn't runnable |
 | `200 (SSE error frame)` | `internal_error` | Anything else; check server logs |

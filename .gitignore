@@ -89,7 +89,7 @@ specs
 .specify
 .cursor
 .newton
-.newton.newton
 AGENTS.md
 tmp/
 .codex
+.claude

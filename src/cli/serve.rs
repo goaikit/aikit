@@ -2,12 +2,18 @@
 //!
 //! Two response shapes share one endpoint, `POST /api/v1/messages`, selected by
 //! the request's `Accept` header (HTTP content negotiation):
-//! - `Accept: text/event-stream` → SSE with `event: session`, `event: text`,
-//!   `event: tool_use`, `event: tool_result`, `event: error`, then
-//!   `event: done`.
+//! - `Accept: text/event-stream` → SSE. Event names: `session`, `text`,
+//!   `reasoning`, `tool_use`, `tool_result`, `token_usage`, `subagent_spawn`,
+//!   `subagent_result`, `context_compressed`, `step_finish`, `error`, then a
+//!   terminal `done`. The reasoning/usage/sub-agent/compression/step-finish
+//!   events bring the stream to parity with `aikit agent run --events`
+//!   (NDJSON). Clients that only read the original `session/text/tool_*/error/
+//!   done` set are unaffected — unknown event names are ignored.
 //! - `Accept: application/json` → server runs to completion, accumulates the
-//!   assistant text frames, and returns a single JSON body
-//!   `{session_id, content, exit_code, error?}`.
+//!   assistant text frames, sums any `token_usage` frames, and returns a single
+//!   JSON body `{session_id, content, exit_code, error?, usage?}` where
+//!   `usage = {input_tokens, output_tokens, cache_read_tokens?}` (omitted when
+//!   the backend emitted no usage events).
 //! - `Accept: */*`, missing, or both types present → SSE (default).
 //! - Any other explicit media type → `406 Not Acceptable`.
 //!
@@ -26,7 +32,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{FromRequest, Path, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
@@ -43,7 +49,7 @@ use uuid::Uuid;
 use aikit_sdk::session_store::{SessionStore, SessionStoreError};
 use aikit_sdk::{
     get_agent_status, AgentEventPayload, MessageKind, MessagePhase, MessageRole, RunError,
-    RunOptions,
+    RunOptions, UsageSource,
 };
 
 use cli_framework::api::{
@@ -113,6 +119,9 @@ pub enum StreamFrame {
     Text {
         content: String,
     },
+    Reasoning {
+        content: String,
+    },
     ToolUse {
         name: String,
         input: serde_json::Value,
@@ -120,6 +129,32 @@ pub enum StreamFrame {
     ToolResult {
         name: String,
         output: String,
+        is_error: bool,
+    },
+    TokenUsage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: Option<u64>,
+        source: String,
+    },
+    SubagentSpawn {
+        subagent_id: String,
+        workdir: String,
+    },
+    SubagentResult {
+        subagent_id: String,
+        status: String,
+        changed_files: Vec<String>,
+        key_findings: String,
+    },
+    ContextCompressed {
+        original_tokens: u64,
+        compressed_tokens: u64,
+        turns_summarized: u64,
+    },
+    StepFinish {
+        iteration: u32,
+        finish_reason: String,
     },
     Error {
         code: String,
@@ -163,11 +198,17 @@ pub type RunFn = Arc<
 
 // ── app state ─────────────────────────────────────────────────────────────────
 
+/// Cached auth-probe results with their capture time. Probing spawns
+/// subprocesses (one per CLI backend), so results are cached for
+/// [`AUTH_CACHE_TTL`] to keep `GET /api/v1/agents` cheap on repeat calls.
+type AuthCache = Arc<Mutex<Option<(Instant, HashMap<String, AuthStatus>)>>>;
+
 #[derive(Clone)]
 struct AppState {
     runs: Arc<Mutex<HashMap<String, RunRecord>>>,
     config: ServeConfig,
     run_fn: RunFn,
+    auth_cache: AuthCache,
 }
 
 // ── HTTP body types ───────────────────────────────────────────────────────────
@@ -254,11 +295,34 @@ fn resolve_response_mode(headers: &axum::http::HeaderMap) -> ResponseMode {
     }
 }
 
+/// Per-backend authentication status reported on `GET /api/v1/agents`.
+///
+/// Distinct from `available` (which means "binary on PATH"): `auth` reports
+/// whether the backend is actually authenticated and ready to run a turn.
+/// - `Ok` — credentials present (env var set, or the backend's status command
+///   exited 0).
+/// - `Unauthenticated` — the backend's status command exited cleanly non-zero
+///   (logged out / invalid credentials).
+/// - `Unknown` — no reliable non-interactive probe (e.g. `opencode`), the probe
+///   timed out, the spawn failed, or the env var was unset for an env-only
+///   backend (e.g. `gemini`).
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AuthStatus {
+    Ok,
+    Unauthenticated,
+    Unknown,
+}
+
 #[derive(Serialize)]
 struct AgentInfo {
     key: String,
     name: String,
+    /// Binary is on PATH (or, for `aikit`, always true — it's built in).
     available: bool,
+    /// Whether the backend is authenticated. See [`AuthStatus`]. `available`
+    /// backends with no probe mechanism report `unknown`.
+    auth: AuthStatus,
 }
 
 #[derive(Serialize)]
@@ -293,6 +357,19 @@ struct SyncMessageResponse {
     exit_code: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<ErrorDetail>,
+    /// Aggregated token usage accumulated from `TokenUsage` frames seen during
+    /// the run. `None` when the backend emitted no usage events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<UsageSummary>,
+}
+
+/// Aggregated token usage for a single sync run.
+#[derive(Serialize)]
+struct UsageSummary {
+    input_tokens: u64,
+    output_tokens: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_read_tokens: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -336,13 +413,82 @@ fn frame_to_sse(frame: &StreamFrame) -> Event {
             let data = serde_json::json!({ "content": content }).to_string();
             Event::default().event("text").data(data)
         }
+        StreamFrame::Reasoning { content } => {
+            let data = serde_json::json!({ "content": content }).to_string();
+            Event::default().event("reasoning").data(data)
+        }
         StreamFrame::ToolUse { name, input } => {
             let data = serde_json::json!({ "name": name, "input": input }).to_string();
             Event::default().event("tool_use").data(data)
         }
-        StreamFrame::ToolResult { name, output } => {
-            let data = serde_json::json!({ "name": name, "output": output }).to_string();
+        StreamFrame::ToolResult {
+            name,
+            output,
+            is_error,
+        } => {
+            let data = serde_json::json!({ "name": name, "output": output, "is_error": is_error })
+                .to_string();
             Event::default().event("tool_result").data(data)
+        }
+        StreamFrame::TokenUsage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            source,
+        } => {
+            let data = serde_json::json!({
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_read_tokens": cache_read_tokens,
+                "source": source,
+            })
+            .to_string();
+            Event::default().event("token_usage").data(data)
+        }
+        StreamFrame::SubagentSpawn {
+            subagent_id,
+            workdir,
+        } => {
+            let data =
+                serde_json::json!({ "subagent_id": subagent_id, "workdir": workdir }).to_string();
+            Event::default().event("subagent_spawn").data(data)
+        }
+        StreamFrame::SubagentResult {
+            subagent_id,
+            status,
+            changed_files,
+            key_findings,
+        } => {
+            let data = serde_json::json!({
+                "subagent_id": subagent_id,
+                "status": status,
+                "changed_files": changed_files,
+                "key_findings": key_findings,
+            })
+            .to_string();
+            Event::default().event("subagent_result").data(data)
+        }
+        StreamFrame::ContextCompressed {
+            original_tokens,
+            compressed_tokens,
+            turns_summarized,
+        } => {
+            let data = serde_json::json!({
+                "original_tokens": original_tokens,
+                "compressed_tokens": compressed_tokens,
+                "turns_summarized": turns_summarized,
+            })
+            .to_string();
+            Event::default().event("context_compressed").data(data)
+        }
+        StreamFrame::StepFinish {
+            iteration,
+            finish_reason,
+        } => {
+            let data =
+                serde_json::json!({ "iteration": iteration, "finish_reason": finish_reason })
+                    .to_string();
+            Event::default().event("step_finish").data(data)
         }
         StreamFrame::Error { code, message } => {
             let data = serde_json::json!({ "code": code, "message": message }).to_string();
@@ -371,6 +517,8 @@ fn build_runnable_agents() -> Vec<AgentInfo> {
                 key,
                 name,
                 available: true,
+                // Filled in by `agents_handler` from the auth probe cache.
+                auth: AuthStatus::Unknown,
             }
         })
         .collect();
@@ -379,9 +527,132 @@ fn build_runnable_agents() -> Vec<AgentInfo> {
     agents
 }
 
+// ── per-backend auth probe (E2) ───────────────────────────────────────────────
+
+/// TTL for cached auth-probe results.
+const AUTH_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// Hard timeout for a single subprocess auth probe. Probes that don't return
+/// within this window are treated as `Unknown` (never block the handler).
+const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Probe a single backend's authentication status.
+///
+/// Detection per backend (verified live):
+/// - `aikit`  — env check only: `OPENAI_API_KEY` or `AIKIT_API_KEY` set &
+///   non-empty (mirrors `aikit-agent`'s `resolve_api_key`).
+/// - `codex`  — `codex login status`, exit 0 → ok.
+/// - `agent`  — `agent status` exit 0, OR `CURSOR_API_KEY` set & non-empty.
+/// - `claude` — `claude auth status`, exit 0 → ok. CAVEAT: can report ok even
+///   when a headless `claude -p` run fails (an invalid `ANTHROPIC_API_KEY` can
+///   override valid OAuth).
+/// - `gemini` — env check ONLY: `GEMINI_API_KEY` or `GOOGLE_API_KEY`, else
+///   `unknown`. The `gemini` status command HANGS in non-interactive mode and
+///   is NEVER spawned.
+/// - anything else (e.g. `opencode`) — `unknown` (no reliable probe).
+async fn probe_backend_auth(key: &str) -> AuthStatus {
+    match key {
+        "aikit" => env_auth(&["OPENAI_API_KEY", "AIKIT_API_KEY"]),
+        "gemini" => env_auth(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
+        "codex" => spawn_status_probe("codex", &["login", "status"]).await,
+        "claude" => spawn_status_probe("claude", &["auth", "status"]).await,
+        "agent" => {
+            // Cursor: env var OR `agent status` exit 0.
+            if env_auth(&["CURSOR_API_KEY"]) == AuthStatus::Ok {
+                AuthStatus::Ok
+            } else {
+                spawn_status_probe("agent", &["status"]).await
+            }
+        }
+        _ => AuthStatus::Unknown,
+    }
+}
+
+/// Pure env check: `Ok` when any of `vars` is set & non-empty, else `Unknown`.
+/// (Absence of an env var doesn't prove "logged out", only "not via env".)
+fn env_auth(vars: &[&str]) -> AuthStatus {
+    for v in vars {
+        if std::env::var(v).map(|s| !s.is_empty()).unwrap_or(false) {
+            return AuthStatus::Ok;
+        }
+    }
+    AuthStatus::Unknown
+}
+
+/// Spawn `bin args...` as a status preflight with a hard timeout.
+/// - exit 0 → `Ok`
+/// - clean non-zero exit → `Unauthenticated`
+/// - spawn error or timeout → `Unknown`
+///
+/// stdout/stderr are discarded (piped to null); the process is never inherited.
+async fn spawn_status_probe(bin: &str, args: &[&str]) -> AuthStatus {
+    use std::process::Stdio;
+
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    let fut = cmd.status();
+    match tokio::time::timeout(AUTH_PROBE_TIMEOUT, fut).await {
+        Ok(Ok(status)) if status.success() => AuthStatus::Ok,
+        Ok(Ok(_)) => AuthStatus::Unauthenticated,
+        // spawn failed (binary missing, etc.) or non-zero-with-no-code.
+        Ok(Err(_)) => AuthStatus::Unknown,
+        // timed out — kill best-effort by dropping; report unknown.
+        Err(_) => AuthStatus::Unknown,
+    }
+}
+
+/// Probe the given backends concurrently and return a key→status map. Worst
+/// case is bounded by [`AUTH_PROBE_TIMEOUT`] (~5s), not the sum of all probes.
+async fn probe_all(keys: &[String]) -> HashMap<String, AuthStatus> {
+    let handles: Vec<_> = keys
+        .iter()
+        .map(|key| {
+            let key = key.clone();
+            tokio::spawn(async move { (key.clone(), probe_backend_auth(&key).await) })
+        })
+        .collect();
+
+    let mut out = HashMap::new();
+    for h in handles {
+        if let Ok((key, status)) = h.await {
+            out.insert(key, status);
+        }
+    }
+    out
+}
+
+/// Return cached auth statuses if still within TTL, otherwise probe all
+/// `available` backends concurrently and refresh the cache.
+async fn auth_statuses(state: &AppState, keys: &[String]) -> HashMap<String, AuthStatus> {
+    {
+        let guard = state.auth_cache.lock().unwrap();
+        if let Some((at, ref map)) = *guard {
+            if at.elapsed() < AUTH_CACHE_TTL {
+                return map.clone();
+            }
+        }
+    }
+
+    let fresh = probe_all(keys).await;
+
+    {
+        let mut guard = state.auth_cache.lock().unwrap();
+        *guard = Some((Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
 async fn agents_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let _ = state;
-    let agents = build_runnable_agents();
+    let mut agents = build_runnable_agents();
+    let keys: Vec<String> = agents.iter().map(|a| a.key.clone()).collect();
+    let statuses = auth_statuses(&state, &keys).await;
+    for a in &mut agents {
+        a.auth = statuses.get(&a.key).copied().unwrap_or(AuthStatus::Unknown);
+    }
     let resp = ListAgentsResponse { agents };
     (
         StatusCode::OK,
@@ -572,6 +843,32 @@ fn validate_request(body: &SendMessageRequest, state: &AppState) -> Option<Respo
 
     // session_busy and max_sessions are checked atomically inside spawn_run (B9).
     None
+}
+
+/// Classify a backend failure's stderr/content into a stable error code.
+///
+/// E2: when the text matches a known authentication-failure signature
+/// (case-insensitive substring), return `"unauthenticated"`; otherwise the
+/// generic `"agent_error"`. The message text is preserved by callers as-is.
+fn classify_error_code(stderr_or_content: &str) -> &'static str {
+    let hay = stderr_or_content.to_ascii_lowercase();
+    const PATTERNS: &[&str] = &[
+        "invalid api key",
+        "authentication required",
+        "not logged in",
+        "unauthorized",
+        "cursor_api_key",
+        "fix external api key",
+        "no api key",
+    ];
+    if PATTERNS.iter().any(|p| hay.contains(p)) {
+        return "unauthenticated";
+    }
+    // "please run ... login" (the two tokens may be separated by other text).
+    if hay.contains("please run") && hay.contains("login") {
+        return "unauthenticated";
+    }
+    "agent_error"
 }
 
 /// Map a RunError to a StreamFrame::Error. Returns the exit code that should be
@@ -775,15 +1072,33 @@ fn spawn_run(
 
         let _exit_code = match outcome {
             Ok(out) => {
-                let mut runs = runs_ref.lock().unwrap();
-                if let Some(r) = runs.get_mut(&request_id_clone) {
-                    // B11: backfill session_id from the outcome if we don't have
-                    // one yet (fresh session whose id was assigned by the SDK).
-                    if r.session_id.is_none() {
-                        r.session_id = out.session_id.clone();
+                {
+                    let mut runs = runs_ref.lock().unwrap();
+                    if let Some(r) = runs.get_mut(&request_id_clone) {
+                        // B11: backfill session_id from the outcome if we don't
+                        // have one yet (fresh session whose id was assigned by
+                        // the SDK).
+                        if r.session_id.is_none() {
+                            r.session_id = out.session_id.clone();
+                        }
+                        r.stderr_tail = out.stderr_tail.clone();
+                        r.last_exit_code = Some(out.exit_code);
                     }
-                    r.stderr_tail = out.stderr_tail.clone();
-                    r.last_exit_code = Some(out.exit_code);
+                }
+                // E2: on a non-zero exit with captured stderr, emit an explicit
+                // Error frame so SSE clients see a terminal error (not just a
+                // `done` exit code). The code is normalized to "unauthenticated"
+                // for known auth-failure signatures, else "agent_error". (Sync
+                // mode would synthesize the same from the record; emitting it
+                // here keeps both paths consistent.)
+                if out.exit_code != 0 && !out.stderr_tail.is_empty() {
+                    let code = classify_error_code(&out.stderr_tail).to_string();
+                    let _ = tx
+                        .send(StreamFrame::Error {
+                            code,
+                            message: out.stderr_tail.clone(),
+                        })
+                        .await;
                 }
                 out.exit_code
             }
@@ -930,6 +1245,12 @@ async fn sync_response(
     let mut session_id: Option<String> = None;
     let mut content = String::new();
     let mut error: Option<ErrorDetail> = None;
+    // Accumulated usage across all TokenUsage frames. `seen` distinguishes
+    // "no usage events" (→ omit the field) from a genuine all-zero run.
+    let mut usage_seen = false;
+    let mut input_tokens: u64 = 0;
+    let mut output_tokens: u64 = 0;
+    let mut cache_read_tokens: Option<u64> = None;
 
     while let Some(frame) = rx.recv().await {
         match frame {
@@ -941,16 +1262,42 @@ async fn sync_response(
             StreamFrame::Text { content: c } => {
                 content.push_str(&c);
             }
+            StreamFrame::TokenUsage {
+                input_tokens: i,
+                output_tokens: o,
+                cache_read_tokens: c,
+                ..
+            } => {
+                usage_seen = true;
+                input_tokens = input_tokens.saturating_add(i);
+                output_tokens = output_tokens.saturating_add(o);
+                if let Some(c) = c {
+                    cache_read_tokens = Some(cache_read_tokens.unwrap_or(0).saturating_add(c));
+                }
+            }
             StreamFrame::Error { code, message } => {
                 if error.is_none() {
                     error = Some(ErrorDetail { code, message });
                 }
             }
-            // Tool frames are intentionally dropped in sync mode — clients
-            // that need tool visibility should use stream mode.
-            StreamFrame::ToolUse { .. } | StreamFrame::ToolResult { .. } => {}
+            // Reasoning, tool, sub-agent, compression, and step-finish frames
+            // are intentionally dropped in sync mode — clients that need that
+            // visibility should use stream mode.
+            StreamFrame::Reasoning { .. }
+            | StreamFrame::ToolUse { .. }
+            | StreamFrame::ToolResult { .. }
+            | StreamFrame::SubagentSpawn { .. }
+            | StreamFrame::SubagentResult { .. }
+            | StreamFrame::ContextCompressed { .. }
+            | StreamFrame::StepFinish { .. } => {}
         }
     }
+
+    let usage = usage_seen.then_some(UsageSummary {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+    });
 
     // Backfill session id, stderr, and exit code from the in-memory record
     // (the run_fn outcome may have populated them even if no frames were
@@ -968,14 +1315,17 @@ async fn sync_response(
     };
 
     // Determine exit code & error:
-    //   - If an explicit Error frame arrived → exit_code 1 with that error.
+    //   - If an explicit Error frame arrived → use the recorded exit code when
+    //     present (e.g. an agent that exited 2), else 1 (e.g. a RunError that
+    //     carries no process exit code).
     //   - Else use the recorded exit code (0 if missing).
     //   - B7: when exit_code != 0, ALWAYS populate `error` (using the explicit
     //     error frame if one arrived, otherwise synthesize from stderr/exit
     //     code). `content` is left as-is — error info must not be non-
     //     deterministically placed in either `content` or `error`.
     let (exit_code, error) = if let Some(e) = error {
-        (1, Some(e))
+        let code = record_exit.filter(|c| *c != 0).unwrap_or(1);
+        (code, Some(e))
     } else {
         let code = record_exit.unwrap_or(0);
         if code != 0 {
@@ -990,7 +1340,7 @@ async fn sync_response(
             (
                 code,
                 Some(ErrorDetail {
-                    code: "agent_error".to_string(),
+                    code: classify_error_code(&message).to_string(),
                     message,
                 }),
             )
@@ -1004,6 +1354,7 @@ async fn sync_response(
         content,
         exit_code,
         error,
+        usage,
     };
     (
         StatusCode::OK,
@@ -1195,8 +1546,14 @@ fn frame_kind_name(f: &StreamFrame) -> &'static str {
     match f {
         StreamFrame::Session { .. } => "session",
         StreamFrame::Text { .. } => "text",
+        StreamFrame::Reasoning { .. } => "reasoning",
         StreamFrame::ToolUse { .. } => "tool_use",
         StreamFrame::ToolResult { .. } => "tool_result",
+        StreamFrame::TokenUsage { .. } => "token_usage",
+        StreamFrame::SubagentSpawn { .. } => "subagent_spawn",
+        StreamFrame::SubagentResult { .. } => "subagent_result",
+        StreamFrame::ContextCompressed { .. } => "context_compressed",
+        StreamFrame::StepFinish { .. } => "step_finish",
         StreamFrame::Error { .. } => "error",
     }
 }
@@ -1228,12 +1585,25 @@ fn agent_event_to_frame(event: &aikit_sdk::AgentEvent, agent_key: &str) -> Optio
             (MessageRole::Tool, MessageKind::ToolOutput, _) => Some(StreamFrame::ToolResult {
                 name: agent_key.to_string(),
                 output: msg.text.clone(),
+                // The `StreamMessage` ToolOutput path carries no error flag.
+                is_error: false,
+            }),
+            // E1/B13: model reasoning ("thinking") for any role/phase.
+            (_, MessageKind::Reasoning, _) => Some(StreamFrame::Reasoning {
+                content: msg.text.clone(),
             }),
             _ => None,
         },
         AgentEventPayload::QuotaExceeded { info, .. } => Some(StreamFrame::Error {
             code: "quota_exceeded".to_string(),
             message: info.raw_message.clone(),
+        }),
+        // E1/B13: token usage (input/output/cache tokens) for metering.
+        AgentEventPayload::TokenUsageLine { usage, source, .. } => Some(StreamFrame::TokenUsage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cache_read_tokens: usage.cache_read_tokens,
+            source: usage_source_name(source).to_string(),
         }),
         // Emit deltas only. `AikitTextFinal` is the concatenation of all
         // preceding deltas, so emitting both would double the content in
@@ -1253,12 +1623,65 @@ fn agent_event_to_frame(event: &aikit_sdk::AgentEvent, agent_key: &str) -> Optio
         // B10: map AikitToolResult → tool_result frame. The variant has
         // `call_id` (not tool_name) and `output`.
         AgentEventPayload::AikitToolResult {
-            call_id, output, ..
+            call_id,
+            output,
+            is_error,
         } => Some(StreamFrame::ToolResult {
             name: call_id.clone(),
             output: output.clone(),
+            is_error: *is_error,
+        }),
+        // E1/B13: sub-agent, context-compression, and step-finish visibility
+        // for the built-in aikit agent.
+        AgentEventPayload::AikitSubagentSpawn {
+            subagent_id,
+            workdir,
+        } => Some(StreamFrame::SubagentSpawn {
+            subagent_id: subagent_id.clone(),
+            workdir: workdir.clone(),
+        }),
+        AgentEventPayload::AikitSubagentResult {
+            subagent_id,
+            status,
+            changed_files,
+            key_findings,
+            ..
+        } => Some(StreamFrame::SubagentResult {
+            subagent_id: subagent_id.clone(),
+            status: status.clone(),
+            changed_files: changed_files.clone(),
+            key_findings: key_findings.clone(),
+        }),
+        AgentEventPayload::AikitContextCompressed {
+            original_tokens,
+            compressed_tokens,
+            turns_summarized,
+        } => Some(StreamFrame::ContextCompressed {
+            original_tokens: *original_tokens,
+            compressed_tokens: *compressed_tokens,
+            turns_summarized: *turns_summarized,
+        }),
+        AgentEventPayload::AikitStepFinish {
+            iteration,
+            finish_reason,
+        } => Some(StreamFrame::StepFinish {
+            iteration: *iteration,
+            finish_reason: finish_reason.clone(),
         }),
         _ => None,
+    }
+}
+
+/// Stable lowercase name for a `UsageSource`, used as the `source` field of a
+/// `token_usage` frame.
+fn usage_source_name(source: &UsageSource) -> &'static str {
+    match source {
+        UsageSource::Codex => "codex",
+        UsageSource::Claude => "claude",
+        UsageSource::Gemini => "gemini",
+        UsageSource::OpenCode => "opencode",
+        UsageSource::Cursor => "cursor",
+        UsageSource::Aikit => "aikit",
     }
 }
 
@@ -1300,6 +1723,7 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
         runs: Arc::new(Mutex::new(HashMap::new())),
         config: config.clone(),
         run_fn,
+        auth_cache: Arc::new(Mutex::new(None)),
     };
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
@@ -1475,4 +1899,133 @@ pub fn make_timeout_stub_run_fn() -> RunFn {
             stderr: vec![],
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aikit_sdk::{
+        AgentEvent, AgentEventStream, MessagePhase, MessageRole, StreamMessage, TokenUsage,
+        UsageSource,
+    };
+
+    fn event(payload: AgentEventPayload) -> AgentEvent {
+        AgentEvent {
+            agent_key: "aikit".to_string(),
+            seq: 0,
+            stream: AgentEventStream::Stdout,
+            payload,
+        }
+    }
+
+    #[test]
+    fn maps_token_usage_line() {
+        let ev = event(AgentEventPayload::TokenUsageLine {
+            usage: TokenUsage {
+                input_tokens: 12,
+                output_tokens: 34,
+                total_tokens: Some(46),
+                cache_read_tokens: Some(5),
+                cache_creation_tokens: None,
+                reasoning_tokens: None,
+            },
+            source: UsageSource::Aikit,
+            raw_agent_line_seq: 0,
+        });
+        match agent_event_to_frame(&ev, "aikit") {
+            Some(StreamFrame::TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                source,
+            }) => {
+                assert_eq!(input_tokens, 12);
+                assert_eq!(output_tokens, 34);
+                assert_eq!(cache_read_tokens, Some(5));
+                assert_eq!(source, "aikit");
+            }
+            other => panic!("expected TokenUsage frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn maps_reasoning_stream_message() {
+        let ev = event(AgentEventPayload::StreamMessage(StreamMessage {
+            text: "thinking...".to_string(),
+            phase: MessagePhase::Delta,
+            role: MessageRole::Assistant,
+            kind: MessageKind::Reasoning,
+            source: AgentEventStream::Stdout,
+            raw_line_seq: 0,
+            turn_id: None,
+        }));
+        match agent_event_to_frame(&ev, "aikit") {
+            Some(StreamFrame::Reasoning { content }) => assert_eq!(content, "thinking..."),
+            other => panic!("expected Reasoning frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_status_serializes_lowercase() {
+        assert_eq!(serde_json::to_string(&AuthStatus::Ok).unwrap(), "\"ok\"");
+        assert_eq!(
+            serde_json::to_string(&AuthStatus::Unauthenticated).unwrap(),
+            "\"unauthenticated\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuthStatus::Unknown).unwrap(),
+            "\"unknown\""
+        );
+    }
+
+    #[test]
+    fn classify_error_code_detects_auth_patterns() {
+        // Each documented auth-failure signature → "unauthenticated".
+        for s in [
+            "Invalid API key · Fix external API key",
+            "Authentication required to continue",
+            "Error: not logged in",
+            "Please run `codex login` first",
+            "401 Unauthorized",
+            "CURSOR_API_KEY is not set",
+            "Fix external API key and retry",
+            "no api key found",
+        ] {
+            assert_eq!(
+                classify_error_code(s),
+                "unauthenticated",
+                "expected auth classification for: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_error_code_non_auth_is_agent_error() {
+        assert_eq!(
+            classify_error_code("Error: model is overloaded, try later"),
+            "agent_error"
+        );
+        assert_eq!(classify_error_code(""), "agent_error");
+    }
+
+    #[test]
+    fn maps_aikit_tool_result_is_error() {
+        let ev = event(AgentEventPayload::AikitToolResult {
+            call_id: "call-1".to_string(),
+            output: "boom".to_string(),
+            is_error: true,
+        });
+        match agent_event_to_frame(&ev, "aikit") {
+            Some(StreamFrame::ToolResult {
+                name,
+                output,
+                is_error,
+            }) => {
+                assert_eq!(name, "call-1");
+                assert_eq!(output, "boom");
+                assert!(is_error);
+            }
+            other => panic!("expected ToolResult frame, got {other:?}"),
+        }
+    }
 }
