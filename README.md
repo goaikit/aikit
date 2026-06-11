@@ -166,7 +166,7 @@ aikit serve --host 0.0.0.0 --port 8787 \
 |--------|------|---------|
 | `GET`  | `/healthz` | Liveness health check |
 | `GET`  | `/readyz` | Readiness health check |
-| `GET`  | `/api/v1/agents` | List runnable agents |
+| `GET`  | `/api/v1/agents` | List runnable agents (each with `available` + `auth` status) |
 | `POST` | `/api/v1/messages` | Send a turn; creates or resumes a session |
 | `GET`  | `/api/v1/sessions` | List active and recently completed runs |
 | `GET`  | `/api/v1/sessions/{id}` | Inspect one run |
@@ -193,6 +193,15 @@ curl -s -X POST http://127.0.0.1:8787/api/v1/messages \
 To resume, pass the `session_id` back in the body. Any other explicit
 `Accept` returns `406 Not Acceptable`. Full reference:
 [webdocs/serve.mdx](webdocs/serve.mdx).
+
+The SSE stream carries the agent's activity as typed events — `session`,
+`text`, `reasoning`, `tool_use`/`tool_result`, `token_usage`,
+`step_finish`, sub-agent and `context_compressed`, then `done` (and
+`error` on failure). The single-JSON shape mirrors this with `content`,
+`exit_code`, an aggregated `usage` object when reported, `session_id`
+when known, and `error` (`agent_error`, or `unauthenticated` for auth
+failures). Frame richness varies by backend; the built-in `aikit` agent
+emits the full set.
 
 **Logs and failure diagnosis:** the server installs a `tracing` subscriber
 on stderr that honours `RUST_LOG`
