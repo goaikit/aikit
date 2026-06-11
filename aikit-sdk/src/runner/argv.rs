@@ -67,8 +67,13 @@ fn get_agent_spec(key: &str) -> Option<&'static AgentCliSpec> {
 impl AgentCliSpec {
     fn push_model(&self, argv: &mut Vec<OsString>, model: Option<&String>) {
         if let Some(m) = model {
-            argv.push(OsString::from(self.model_flag));
-            argv.push(OsString::from(m.as_str()));
+            // An empty/whitespace model string means "unset" — passing the flag with
+            // an empty value makes engines fail (e.g. codex: 400 "The '' model is not
+            // supported"). Fall back to the engine's own default model instead.
+            if !m.trim().is_empty() {
+                argv.push(OsString::from(self.model_flag));
+                argv.push(OsString::from(m.as_str()));
+            }
         }
     }
 
@@ -166,9 +171,10 @@ pub(super) fn build_argv(
             let mut argv = vec![OsString::from(spec.binary)];
             spec.push_model(&mut argv, model);
             argv.push(OsString::from("run"));
-            if !events_mode {
-                spec.push_yolo(&mut argv, yolo);
-            }
+            // `--yolo` (auto-approve tool use) must be passed in BOTH plain and
+            // events mode. Without it opencode auto-rejects its own write/edit tool
+            // calls, so an agent asked to modify files silently produces nothing.
+            spec.push_yolo(&mut argv, yolo);
             if events_mode {
                 argv.extend_from_slice(&[OsString::from("--format"), OsString::from("json")]);
             }
@@ -260,6 +266,38 @@ mod tests {
         assert!(!argv.contains(&OsString::from("-m")));
         assert!(!argv.contains(&OsString::from("--yolo")));
         assert!(argv.contains(&OsString::from("--json")));
+    }
+
+    #[test]
+    fn test_empty_model_is_not_passed() {
+        // An empty model string must NOT produce `-m ""` (engines reject it).
+        let empty = "".to_string();
+        let argv = build_argv("codex", Some(&empty), true, false, false, None);
+        assert!(
+            !argv.contains(&OsString::from("-m")),
+            "empty model must be skipped; got {:?}",
+            argv
+        );
+        let ws = "   ".to_string();
+        let argv2 = build_argv("opencode", Some(&ws), true, false, true, None);
+        assert!(
+            !argv2.contains(&OsString::from("-m")),
+            "whitespace model must be skipped; got {:?}",
+            argv2
+        );
+    }
+
+    #[test]
+    fn test_opencode_events_mode_passes_yolo() {
+        // Regression: opencode must get --yolo in events mode too, else its write
+        // tool is auto-rejected and file-modifying agents silently produce nothing.
+        let argv = build_argv("opencode", None, true, false, true, None);
+        assert!(
+            argv.contains(&OsString::from("--yolo")),
+            "opencode events mode must include --yolo; got {:?}",
+            argv
+        );
+        assert!(argv.contains(&OsString::from("--format")));
     }
 
     #[test]

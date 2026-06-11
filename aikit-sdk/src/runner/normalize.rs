@@ -59,71 +59,167 @@ pub(super) fn normalize_codex(
     let mut results = Vec::new();
     let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-    if line_type == "message" {
-        let role_str = value.get("role").and_then(|v| v.as_str()).unwrap_or("");
-        if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
-            let role = match role_str {
-                "assistant" => MessageRole::Assistant,
-                "system" => MessageRole::System,
-                "user" => MessageRole::User,
-                _ => MessageRole::Assistant,
-            };
-            let kind = if role_str == "system" {
-                MessageKind::Status
-            } else {
-                MessageKind::Message
-            };
-            results.push(StreamMessage {
-                text: content.to_string(),
-                phase: MessagePhase::Final,
-                role,
-                kind,
-                source: stream,
-                raw_line_seq,
-                turn_id: None,
-            });
-        }
-    }
+    let mk = |text: String, role: MessageRole, kind: MessageKind| StreamMessage {
+        text,
+        phase: MessagePhase::Final,
+        role,
+        kind,
+        source: stream,
+        raw_line_seq,
+        turn_id: None,
+    };
 
-    if line_type == "action" {
-        if let Some(cmd) = value.get("command").and_then(|v| v.as_str()) {
-            results.push(StreamMessage {
-                text: cmd.to_string(),
-                phase: MessagePhase::Final,
-                role: MessageRole::Tool,
-                kind: MessageKind::Message,
-                source: stream,
-                raw_line_seq,
-                turn_id: None,
-            });
+    match line_type {
+        // ── Current codex-cli "thread/turn/item" schema (>= 0.13x) ──────────────
+        // Emit on terminal item state only (`item.completed`) to avoid duplicating
+        // the streamed `item.started` event for the same item.
+        "item.completed" => {
+            if let Some(item) = value.get("item") {
+                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match item_type {
+                    "agent_message" => {
+                        if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                            results.push(mk(
+                                t.to_string(),
+                                MessageRole::Assistant,
+                                MessageKind::Message,
+                            ));
+                        }
+                    }
+                    "reasoning" => {
+                        if let Some(t) = item
+                            .get("text")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| item.get("summary").and_then(|v| v.as_str()))
+                        {
+                            results.push(mk(
+                                t.to_string(),
+                                MessageRole::Assistant,
+                                MessageKind::Reasoning,
+                            ));
+                        }
+                    }
+                    "command_execution" => {
+                        if let Some(cmd) = item.get("command").and_then(|v| v.as_str()) {
+                            results.push(mk(
+                                cmd.to_string(),
+                                MessageRole::Tool,
+                                MessageKind::Message,
+                            ));
+                        }
+                        if let Some(out) = item.get("aggregated_output").and_then(|v| v.as_str()) {
+                            if !out.trim().is_empty() {
+                                results.push(mk(
+                                    out.to_string(),
+                                    MessageRole::Tool,
+                                    MessageKind::ToolOutput,
+                                ));
+                            }
+                        }
+                    }
+                    "file_change" => {
+                        if let Some(arr) = item.get("changes").and_then(|c| c.as_array()) {
+                            let summary = arr
+                                .iter()
+                                .filter_map(|c| {
+                                    let path = c.get("path").and_then(|v| v.as_str())?;
+                                    let kind =
+                                        c.get("kind").and_then(|v| v.as_str()).unwrap_or("change");
+                                    Some(format!("{kind} {path}"))
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            if !summary.is_empty() {
+                                results.push(mk(
+                                    format!("file_change: {summary}"),
+                                    MessageRole::Tool,
+                                    MessageKind::Message,
+                                ));
+                            }
+                        }
+                    }
+                    // Unknown item type: surface any text it carries.
+                    _ => {
+                        if let Some(t) = item.get("text").and_then(|v| v.as_str()) {
+                            results.push(mk(
+                                t.to_string(),
+                                MessageRole::Assistant,
+                                MessageKind::Message,
+                            ));
+                        }
+                    }
+                }
+            }
         }
-    }
-
-    if line_type == "output" {
-        if let Some(stdout) = value.get("stdout").and_then(|v| v.as_str()) {
-            results.push(StreamMessage {
-                text: stdout.to_string(),
-                phase: MessagePhase::Final,
-                role: MessageRole::Tool,
-                kind: MessageKind::ToolOutput,
-                source: stream,
-                raw_line_seq,
-                turn_id: None,
-            });
+        // ── Failure events — surface so a failed turn is never a silent empty run ──
+        "error" => {
+            if let Some(msg) = value.get("message").and_then(|v| v.as_str()) {
+                results.push(mk(
+                    msg.to_string(),
+                    MessageRole::System,
+                    MessageKind::Status,
+                ));
+            }
         }
-    }
-
-    if let Some(item) = value.get("item") {
-        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-            results.push(StreamMessage {
-                text: text.to_string(),
-                phase: MessagePhase::Final,
-                role: MessageRole::Assistant,
-                kind: MessageKind::Message,
-                source: stream,
-                raw_line_seq,
-                turn_id: None,
-            });
+        "turn.failed" => {
+            if let Some(msg) = value
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|v| v.as_str())
+            {
+                results.push(mk(
+                    msg.to_string(),
+                    MessageRole::System,
+                    MessageKind::Status,
+                ));
+            }
+        }
+        // ── Lifecycle frames carry no message text — intentionally ignored ──────
+        "thread.started" | "turn.started" | "turn.completed" | "item.started" => {}
+        // ── Legacy codex schema (older CLI): message / action / output ──────────
+        "message" => {
+            let role_str = value.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(content) = value.get("content").and_then(|v| v.as_str()) {
+                let role = match role_str {
+                    "system" => MessageRole::System,
+                    "user" => MessageRole::User,
+                    _ => MessageRole::Assistant,
+                };
+                let kind = if role_str == "system" {
+                    MessageKind::Status
+                } else {
+                    MessageKind::Message
+                };
+                results.push(mk(content.to_string(), role, kind));
+            }
+        }
+        "action" => {
+            if let Some(cmd) = value.get("command").and_then(|v| v.as_str()) {
+                results.push(mk(cmd.to_string(), MessageRole::Tool, MessageKind::Message));
+            }
+        }
+        "output" => {
+            if let Some(stdout) = value.get("stdout").and_then(|v| v.as_str()) {
+                results.push(mk(
+                    stdout.to_string(),
+                    MessageRole::Tool,
+                    MessageKind::ToolOutput,
+                ));
+            }
+        }
+        // ── Unknown line type: legacy fallback for a top-level `item.text` ──────
+        _ => {
+            if let Some(text) = value
+                .get("item")
+                .and_then(|item| item.get("text"))
+                .and_then(|v| v.as_str())
+            {
+                results.push(mk(
+                    text.to_string(),
+                    MessageRole::Assistant,
+                    MessageKind::Message,
+                ));
+            }
         }
     }
 
@@ -382,6 +478,96 @@ pub(super) fn normalize_agent(
 mod tests {
     use super::*;
     use crate::runner::types::{AgentEventStream, MessageKind, MessagePhase, MessageRole};
+
+    #[test]
+    fn test_normalize_codex_item_agent_message() {
+        // codex-cli >= 0.13x schema: item.completed / item.type=agent_message
+        let line = serde_json::json!({
+            "type": "item.completed",
+            "item": {"id": "item_0", "type": "agent_message", "text": "Done."}
+        });
+        let out = normalize_codex(&line, AgentEventStream::Stdout, 0);
+        assert_eq!(out.len(), 1, "got {:?}", out);
+        assert_eq!(out[0].text, "Done.");
+        assert_eq!(out[0].role, MessageRole::Assistant);
+        assert_eq!(out[0].kind, MessageKind::Message);
+        assert_eq!(out[0].phase, MessagePhase::Final);
+    }
+
+    #[test]
+    fn test_normalize_codex_item_command_execution() {
+        let line = serde_json::json!({
+            "type": "item.completed",
+            "item": {
+                "id": "item_1", "type": "command_execution",
+                "command": "ls -la", "aggregated_output": "file.txt\n",
+                "exit_code": 0, "status": "completed"
+            }
+        });
+        let out = normalize_codex(&line, AgentEventStream::Stdout, 0);
+        assert_eq!(out.len(), 2, "command + output; got {:?}", out);
+        assert_eq!(out[0].text, "ls -la");
+        assert_eq!(out[0].role, MessageRole::Tool);
+        assert_eq!(out[0].kind, MessageKind::Message);
+        assert_eq!(out[1].text, "file.txt\n");
+        assert_eq!(out[1].kind, MessageKind::ToolOutput);
+    }
+
+    #[test]
+    fn test_normalize_codex_item_file_change() {
+        let line = serde_json::json!({
+            "type": "item.completed",
+            "item": {
+                "id": "item_2", "type": "file_change", "status": "completed",
+                "changes": [{"path": "/tmp/a.md", "kind": "add"}]
+            }
+        });
+        let out = normalize_codex(&line, AgentEventStream::Stdout, 0);
+        assert_eq!(out.len(), 1, "got {:?}", out);
+        assert_eq!(out[0].text, "file_change: add /tmp/a.md");
+        assert_eq!(out[0].role, MessageRole::Tool);
+    }
+
+    #[test]
+    fn test_normalize_codex_error_and_turn_failed_are_surfaced() {
+        // These were previously dropped, making a failed turn an invisible empty run.
+        let err = serde_json::json!({"type": "error", "message": "The '' model is not supported"});
+        let out = normalize_codex(&err, AgentEventStream::Stdout, 0);
+        assert_eq!(out.len(), 1, "error must surface; got {:?}", out);
+        assert_eq!(out[0].role, MessageRole::System);
+        assert_eq!(out[0].kind, MessageKind::Status);
+        assert!(out[0].text.contains("not supported"));
+
+        let failed = serde_json::json!({"type": "turn.failed", "error": {"message": "boom"}});
+        let out2 = normalize_codex(&failed, AgentEventStream::Stdout, 0);
+        assert_eq!(out2.len(), 1, "turn.failed must surface; got {:?}", out2);
+        assert_eq!(out2[0].text, "boom");
+    }
+
+    #[test]
+    fn test_normalize_codex_lifecycle_frames_ignored() {
+        for t in [
+            "thread.started",
+            "turn.started",
+            "turn.completed",
+            "item.started",
+        ] {
+            let line = serde_json::json!({"type": t});
+            assert!(
+                normalize_codex(&line, AgentEventStream::Stdout, 0).is_empty(),
+                "lifecycle frame {t} should be ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_codex_legacy_message_shape_still_works() {
+        // Older codex schema.
+        let line = serde_json::json!({"type":"message","role":"assistant","content":"hi"});
+        let out = normalize_codex(&line, AgentEventStream::Stdout, 0);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].text, "hi");
+    }
 
     #[test]
     fn test_normalize_gemini_delta_message_is_delta() {
