@@ -1595,6 +1595,28 @@ fn agent_event_to_frame(event: &aikit_sdk::AgentEvent, agent_key: &str) -> Optio
             }),
             _ => None,
         },
+        // Structured tool calls from external backends (e.g. Claude via the
+        // typed decoder). The in-process aikit agent uses the `Aikit*` variants
+        // below; these are the engine-agnostic equivalents.
+        AgentEventPayload::ToolUse {
+            tool_name, input, ..
+        } => Some(StreamFrame::ToolUse {
+            name: tool_name.clone(),
+            input: input.clone(),
+        }),
+        AgentEventPayload::ToolResult {
+            call_id,
+            output,
+            is_error,
+        } => Some(StreamFrame::ToolResult {
+            name: call_id.clone(),
+            // `output` is JSON; unwrap a bare string, else compact-encode.
+            output: match output {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            },
+            is_error: *is_error,
+        }),
         AgentEventPayload::QuotaExceeded { info, .. } => Some(StreamFrame::Error {
             code: "quota_exceeded".to_string(),
             message: info.raw_message.clone(),
@@ -1916,6 +1938,58 @@ mod tests {
             seq: 0,
             stream: AgentEventStream::Stdout,
             payload,
+        }
+    }
+
+    #[test]
+    fn maps_external_tool_use_and_result() {
+        // Generic (external-backend) tool frames, e.g. from Claude's decoder.
+        let use_ev = event(AgentEventPayload::ToolUse {
+            call_id: "tu_1".into(),
+            tool_name: "Bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+        });
+        match agent_event_to_frame(&use_ev, "claude") {
+            Some(StreamFrame::ToolUse { name, input }) => {
+                assert_eq!(name, "Bash");
+                assert_eq!(input["command"], "ls");
+            }
+            other => panic!("expected ToolUse frame, got {other:?}"),
+        }
+
+        // String output is unwrapped (not JSON-quoted).
+        let res_str = event(AgentEventPayload::ToolResult {
+            call_id: "tu_1".into(),
+            output: serde_json::json!("file.txt\n"),
+            is_error: false,
+        });
+        match agent_event_to_frame(&res_str, "claude") {
+            Some(StreamFrame::ToolResult {
+                name,
+                output,
+                is_error,
+            }) => {
+                assert_eq!(name, "tu_1");
+                assert_eq!(output, "file.txt\n");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolResult frame, got {other:?}"),
+        }
+
+        // Structured output is compact-encoded.
+        let res_obj = event(AgentEventPayload::ToolResult {
+            call_id: "tu_2".into(),
+            output: serde_json::json!({"ok": true}),
+            is_error: true,
+        });
+        match agent_event_to_frame(&res_obj, "claude") {
+            Some(StreamFrame::ToolResult {
+                output, is_error, ..
+            }) => {
+                assert_eq!(output, "{\"ok\":true}");
+                assert!(is_error);
+            }
+            other => panic!("expected ToolResult frame, got {other:?}"),
         }
     }
 
