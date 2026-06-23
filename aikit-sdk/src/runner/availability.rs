@@ -3,20 +3,18 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use super::argv::{is_runnable, runnable_agents};
+use super::backend::Backend;
 use super::types::{AgentAvailabilityReason, AgentStatus, ChildTimeoutExt};
 
 /// Timeout for agent availability probing in milliseconds.
 pub(super) const PROBE_TIMEOUT_MS: u64 = 1500;
 
-/// Gets the binary candidates for an agent key.
+/// Gets the binary candidates for an agent key. Empty for unknown keys and for
+/// the in-process `aikit` Backend.
 pub(super) fn get_binary_candidates(agent_key: &str) -> &'static [&'static str] {
-    match agent_key {
-        "codex" => &["codex"],
-        "claude" => &["claude"],
-        "gemini" => &["gemini"],
-        "opencode" => &["opencode", "opencode-desktop"],
-        "agent" => &["agent"],
-        _ => &[],
+    match Backend::from_key(agent_key) {
+        Some(backend) => backend.binary_candidates(),
+        None => &[],
     }
 }
 
@@ -196,7 +194,12 @@ mod tests {
             get_binary_candidates("opencode"),
             &["opencode", "opencode-desktop"]
         );
-        assert_eq!(get_binary_candidates("agent"), &["agent"]);
+        assert_eq!(
+            get_binary_candidates("cursor"),
+            &["cursor-agent", "agent"] as &[&str]
+        );
+        assert!(get_binary_candidates("agent").is_empty()); // renamed (ADR 0006)
+        assert!(get_binary_candidates("aikit").is_empty()); // in-process
         assert!(get_binary_candidates("unknown").is_empty());
     }
 

@@ -542,7 +542,8 @@ const AUTH_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// - `aikit`  — env check only: `OPENAI_API_KEY` or `AIKIT_API_KEY` set &
 ///   non-empty (mirrors `aikit-agent`'s `resolve_api_key`).
 /// - `codex`  — `codex login status`, exit 0 → ok.
-/// - `agent`  — `agent status` exit 0, OR `CURSOR_API_KEY` set & non-empty.
+/// - `cursor` — `agent status` exit 0, OR `CURSOR_API_KEY` set & non-empty
+///   (Cursor's spawn binary is `agent`).
 /// - `claude` — `claude auth status`, exit 0 → ok. CAVEAT: can report ok even
 ///   when a headless `claude -p` run fails (an invalid `ANTHROPIC_API_KEY` can
 ///   override valid OAuth).
@@ -556,8 +557,8 @@ async fn probe_backend_auth(key: &str) -> AuthStatus {
         "gemini" => env_auth(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
         "codex" => spawn_status_probe("codex", &["login", "status"]).await,
         "claude" => spawn_status_probe("claude", &["auth", "status"]).await,
-        "agent" => {
-            // Cursor: env var OR `agent status` exit 0.
+        "cursor" => {
+            // Cursor: env var OR `agent status` exit 0 (spawn binary is `agent`).
             if env_auth(&["CURSOR_API_KEY"]) == AuthStatus::Ok {
                 AuthStatus::Ok
             } else {

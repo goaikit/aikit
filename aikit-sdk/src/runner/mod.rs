@@ -1,9 +1,11 @@
 pub mod argv;
 pub mod availability;
-pub mod normalize;
-pub mod quota;
-pub mod token_usage;
+pub mod backend;
+pub mod backends;
+pub mod capabilities;
+pub mod transport;
 pub mod types;
+pub mod usage;
 
 pub use types::{
     AgentAvailabilityReason, AgentEvent, AgentEventPayload, AgentEventStream, AgentStatus,
@@ -13,83 +15,55 @@ pub use types::{
 
 pub use argv::{is_runnable, runnable_agents};
 pub use availability::{get_agent_status, get_installed_agents, is_agent_available};
-pub use normalize::normalize_json_line;
-pub use quota::extract_quota_signal;
-pub use token_usage::{aggregate_token_usage, extract_usage_from_line};
+pub use backend::Backend;
+pub use capabilities::BackendCapabilities;
+pub use usage::aggregate_token_usage;
 
-use std::ffi::OsString;
-use std::io::{self, BufRead, Write};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::{panic, thread};
 
-use argv::{build_argv, should_write_stdin};
 use types::ReaderMsg;
 
-/// Shared internal function that spawns a child process with piped stdio.
-///
-/// Returns the spawned `Child` and the argv used (for diagnostics).
-/// `events_mode` selects event-optimized argv builders over the standard ones.
-fn spawn_agent_piped(
+/// Decode one inbound JSON line into canonical [`StreamMessage`]s for the given
+/// agent key. Unknown keys yield `[]` (with a warning). Thin wrapper over
+/// [`Backend::decode`]; retained for API compatibility.
+pub fn normalize_json_line(
     agent_key: &str,
-    _prompt: &str,
-    options: &RunOptions,
-    events_mode: bool,
-) -> Result<(Child, Vec<OsString>), RunError> {
-    if !is_runnable(agent_key) {
-        return Err(RunError::AgentNotRunnable(agent_key.to_string()));
+    stream: AgentEventStream,
+    value: &serde_json::Value,
+    raw_line_seq: u64,
+) -> Vec<StreamMessage> {
+    match Backend::from_key(agent_key) {
+        Some(backend) => backend.decode(value, stream, raw_line_seq),
+        None => {
+            tracing::warn!(
+                target: "aikit_sdk::runner::decode",
+                agent_key = %agent_key,
+                "E_DECODE_UNKNOWN_AGENT: unknown agent key"
+            );
+            Vec::new()
+        }
     }
+}
 
-    let sid = options.session_id.as_deref();
-    let argv = build_argv(
-        agent_key,
-        options.model.as_ref(),
-        options.yolo,
-        options.stream,
-        events_mode,
-        sid,
-    );
+/// Extract token usage from one inbound JSON line. `None` for lines without
+/// usage data or for unknown agent keys. Thin wrapper over
+/// [`Backend::extract_usage`].
+pub fn extract_usage_from_line(
+    line: &serde_json::Value,
+    agent_key: &str,
+) -> Option<(TokenUsage, UsageSource)> {
+    Backend::from_key(agent_key)?.extract_usage(line)
+}
 
-    let argv_display: Vec<String> = argv
-        .iter()
-        .map(|s| s.to_string_lossy().into_owned())
-        .collect();
-    tracing::debug!(
-        target: "aikit_sdk::runner",
-        agent_key = %agent_key,
-        argv = ?argv_display,
-        cwd = ?options.current_dir.as_ref().map(|p| p.display().to_string()),
-        timeout = ?options.timeout.map(|d| format!("{}s", d.as_secs())),
-        events_mode,
-        yolo = options.yolo,
-        stream = options.stream,
-        write_prompt_to_stdin = should_write_stdin(agent_key),
-        "spawning agent child process"
-    );
-
-    let binary = &argv[0];
-    let args = &argv[1..];
-
-    let resolved_program = crate::command_resolve::resolve_command(&binary.to_string_lossy());
-    tracing::debug!(
-        target: "aikit_sdk::runner",
-        resolved_program = ?resolved_program,
-        "resolved executable path"
-    );
-    let mut cmd = Command::new(resolved_program);
-    cmd.args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    if let Some(ref dir) = options.current_dir {
-        cmd.current_dir(dir);
-    }
-
-    let child = cmd.spawn().map_err(RunError::SpawnFailed)?;
-
-    Ok((child, argv))
+/// Detect a quota / rate-limit signal from one payload. `None` for no match or
+/// unknown agent keys. Thin wrapper over [`Backend::extract_quota`].
+pub fn extract_quota_signal(
+    agent_key: &str,
+    payload: &AgentEventPayload,
+) -> Option<QuotaExceededInfo> {
+    Backend::from_key(agent_key)?.extract_quota(payload)
 }
 
 /// Runs an agent with the given prompt and options.
@@ -167,45 +141,6 @@ pub fn run_builtin_agent(
     }
 }
 
-/// Spawns a reader thread that reads lines (delimited by `\n`) from `reader`
-/// and sends raw byte chunks (including the newline) to `tx`.
-/// Non-UTF-8 and partial final lines are sent as-is.
-/// I/O errors are sent as `ReaderMsg::Err` and the thread exits.
-fn spawn_reader_thread<R>(
-    reader: R,
-    stream: AgentEventStream,
-    tx: mpsc::Sender<ReaderMsg>,
-) -> thread::JoinHandle<()>
-where
-    R: io::Read + Send + 'static,
-{
-    thread::spawn(move || {
-        let mut reader = io::BufReader::new(reader);
-        let mut buf: Vec<u8> = Vec::new();
-        loop {
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf) {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    if tx
-                        .send(ReaderMsg::Chunk {
-                            stream,
-                            raw: buf.clone(),
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(ReaderMsg::Err { stream, source: e });
-                    break;
-                }
-            }
-        }
-    })
-}
-
 /// Parses a raw byte chunk into an `AgentEventPayload`.
 ///
 /// Strips a trailing CRLF or LF before attempting UTF-8 and JSON decode.
@@ -243,7 +178,7 @@ pub fn run_agent_events<F>(
 where
     F: FnMut(AgentEvent) + Send,
 {
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     tracing::debug!(
         target: "aikit_sdk::runner",
@@ -255,34 +190,25 @@ where
         "run_agent_events"
     );
 
+    // The built-in aikit Backend is in-process: it emits canonical events
+    // directly rather than over a subprocess Transport (ADR 0009).
     if agent_key == "aikit" {
         return crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, None, on_event);
     }
 
-    let (mut child, _argv) = spawn_agent_piped(agent_key, prompt, &options, true)?;
+    let backend = Backend::from_key(agent_key)
+        .ok_or_else(|| RunError::AgentNotRunnable(agent_key.to_string()))?;
 
-    // Write prompt and close stdin before reading output.
-    if should_write_stdin(agent_key) {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(prompt.as_bytes())
-                .map_err(RunError::StdinFailed)?;
-        }
-    } else {
-        drop(child.stdin.take());
-    }
-
-    let stdout_pipe = child.stdout.take().expect("stdout was piped");
-    let stderr_pipe = child.stderr.take().expect("stderr was piped");
-
-    // Wrap child in Arc<Mutex> so the watchdog thread can call child.kill()
-    // while the main thread retains access for child.wait() after the loop.
-    let child = Arc::new(Mutex::new(child));
-
-    let (tx, rx) = mpsc::channel::<ReaderMsg>();
-
-    let stdout_thread = spawn_reader_thread(stdout_pipe, AgentEventStream::Stdout, tx.clone());
-    let stderr_thread = spawn_reader_thread(stderr_pipe, AgentEventStream::Stderr, tx.clone());
+    // Establish the subprocess-stdout-lines Transport: spawn, write+close stdin,
+    // start reader threads. Returns the shared child, the inbound channel, and
+    // the reader-thread handles.
+    let transport::subprocess::SubprocessConnection {
+        child,
+        rx,
+        stdout_thread,
+        stderr_thread,
+        argv: _argv,
+    } = transport::subprocess::connect(backend, prompt, &options, true)?;
 
     // Watchdog: if timeout is configured, spawn a dedicated thread. It blocks
     // on a cancel channel for the configured duration. On timeout it kills the
@@ -317,8 +243,8 @@ where
         None
     };
 
-    // Drop our extra tx so rx closes when reader threads finish.
-    drop(tx);
+    // The Transport owns both senders (see `subprocess::connect`), so `rx`
+    // closes naturally once the reader threads finish — no extra sender to drop.
 
     let mut seq: u64 = 0;
     let mut stdout_bytes: Vec<u8> = Vec::new();
@@ -348,13 +274,13 @@ where
                     AgentEventPayload::JsonLine(ref json_val) => {
                         json_lines_seen += 1;
 
-                        let extracted_usage = extract_usage_from_line(json_val, agent_key);
+                        let extracted_usage = backend.extract_usage(json_val);
                         if let Some(ref up) = extracted_usage {
                             usage_entries.push(up.clone());
                         }
 
                         let json_line_seq = seq;
-                        let quota_signal = extract_quota_signal(agent_key, &payload);
+                        let quota_signal = backend.extract_quota(&payload);
 
                         if emit_raw {
                             let stripped = raw
@@ -383,8 +309,7 @@ where
                             }
                         }
 
-                        let messages =
-                            normalize_json_line(agent_key, stream, json_val, json_line_seq);
+                        let messages = backend.decode(json_val, stream, json_line_seq);
                         if messages.is_empty() {
                             json_lines_unmapped += 1;
                         }
@@ -458,7 +383,7 @@ where
                     }
                     _ => {
                         let source_seq = seq;
-                        let quota_signal = extract_quota_signal(agent_key, &payload);
+                        let quota_signal = backend.extract_quota(&payload);
                         let event = AgentEvent {
                             agent_key: agent_key.to_string(),
                             seq,
@@ -758,7 +683,7 @@ mod tests {
         std::env::set_var("PATH", &new_path);
 
         let mut events: Vec<AgentEvent> = Vec::new();
-        let result = run_agent_events("agent", "hello", RunOptions::default(), |ev| {
+        let result = run_agent_events("cursor", "hello", RunOptions::default(), |ev| {
             events.push(ev)
         });
 
@@ -1026,7 +951,7 @@ mod tests {
         std::env::set_var("PATH", &new_path);
 
         let opts = RunOptions::new().with_timeout(Duration::from_millis(500));
-        let result = run_agent_events("agent", "hi", opts, |_| {});
+        let result = run_agent_events("cursor", "hi", opts, |_| {});
 
         std::env::set_var("PATH", orig_path);
 
@@ -1059,7 +984,7 @@ mod tests {
         std::env::set_var("PATH", &new_path);
 
         let opts = RunOptions::new().with_timeout(Duration::from_secs(60));
-        let result = run_agent_events("agent", "hi", opts, |_| {});
+        let result = run_agent_events("cursor", "hi", opts, |_| {});
 
         std::env::set_var("PATH", orig_path);
 
@@ -1097,7 +1022,7 @@ mod tests {
 
         let mut collected_output = Vec::<u8>::new();
         let opts = RunOptions::new().with_current_dir(target_dir.clone());
-        let result = run_agent_events("agent", "hi", opts, |ev| {
+        let result = run_agent_events("cursor", "hi", opts, |ev| {
             if let AgentEventPayload::RawLine(ref line) = ev.payload {
                 collected_output.extend_from_slice(line.as_bytes());
                 collected_output.push(b'\n');
@@ -1130,7 +1055,7 @@ mod tests {
         let opts = RunOptions::new().with_current_dir(std::path::PathBuf::from(
             "/nonexistent/path/that/does/not/exist",
         ));
-        let result = run_agent_events("agent", "hi", opts, |_| {});
+        let result = run_agent_events("cursor", "hi", opts, |_| {});
         assert!(
             matches!(result, Err(RunError::SpawnFailed(_))),
             "Non-existent current_dir should return SpawnFailed, got {:?}",
@@ -1160,7 +1085,7 @@ mod tests {
         std::env::set_var("PATH", &new_path);
 
         let opts = RunOptions::new().with_timeout(Duration::from_millis(600));
-        let result = run_agent_events("agent", "hi", opts, |_| {});
+        let result = run_agent_events("cursor", "hi", opts, |_| {});
 
         std::env::set_var("PATH", orig_path);
 

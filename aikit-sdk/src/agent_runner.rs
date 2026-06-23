@@ -183,7 +183,7 @@ impl AgentDetector {
     /// Probe all runnable agent keys and return their availability status.
     ///
     /// Key name mapping:
-    /// - `"agent"` → catalog key `"cursor-agent"` → name `"Cursor"`
+    /// - `"cursor"` → catalog key `"cursor-agent"` → name `"Cursor"`
     /// - `"aikit"` → name `"aikit"` (fallback, not in catalog under that key)
     /// - all others → `crate::agent(key).name`
     pub fn detect() -> Vec<AgentInfo> {
@@ -211,8 +211,8 @@ impl AgentDetector {
     /// Resolve the human-readable name for a runnable key.
     fn resolve_name(key: &str) -> String {
         match key {
-            "agent" => {
-                // "agent" maps to catalog key "cursor-agent"
+            "cursor" => {
+                // runner key "cursor" maps to deploy-catalog key "cursor-agent"
                 crate::agent("cursor-agent")
                     .map(|c| c.name.to_string())
                     .unwrap_or_else(|| "Cursor".to_string())
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn test_agent_detector_name_mapping_agent_key() {
         let infos = AgentDetector::detect();
-        let agent_info = infos.iter().find(|i| i.key == "agent").unwrap();
+        let agent_info = infos.iter().find(|i| i.key == "cursor").unwrap();
         assert_eq!(agent_info.name, "Cursor");
     }
 
