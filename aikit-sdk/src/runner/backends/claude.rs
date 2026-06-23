@@ -82,16 +82,25 @@ fn sdk_decode(
     stream: AgentEventStream,
     raw_line_seq: u64,
 ) -> Vec<Decoded> {
-    use claude_agent_sdk::{ContentBlock, Message, UserContent};
-
     // The SDK parser is strict (requires e.g. `model` on assistant, full
     // `result` fields). On a parse miss (older/partial CLI output, or an
     // unrecognized type) fall back to the lenient text extraction so we never
     // regress below the legacy decoder's floor.
-    let msg = match claude_agent_sdk::parse_message(value) {
-        Ok(Some(m)) => m,
-        _ => return lenient_decode(value, stream, raw_line_seq),
-    };
+    match claude_agent_sdk::parse_message(value) {
+        Ok(Some(m)) => map_message(m, stream, raw_line_seq),
+        _ => lenient_decode(value, stream, raw_line_seq),
+    }
+}
+
+/// Map a typed `claude-agent-sdk` [`Message`] to canonical [`Decoded`] frames.
+/// Shared by line decode ([`sdk_decode`]) and the Phase-B2 session bridge.
+#[cfg(feature = "claude-sdk")]
+pub(crate) fn map_message(
+    msg: claude_agent_sdk::Message,
+    stream: AgentEventStream,
+    raw_line_seq: u64,
+) -> Vec<Decoded> {
+    use claude_agent_sdk::{ContentBlock, Message, UserContent};
 
     let mut out = Vec::new();
     match msg {

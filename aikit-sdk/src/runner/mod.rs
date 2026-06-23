@@ -3,6 +3,8 @@ pub mod availability;
 pub mod backend;
 pub mod backends;
 pub mod capabilities;
+#[cfg(feature = "claude-control")]
+pub mod claude_session;
 pub mod transport;
 pub mod types;
 pub mod usage;
@@ -17,6 +19,11 @@ pub use argv::{is_runnable, runnable_agents};
 pub use availability::{get_agent_status, get_installed_agents, is_agent_available};
 pub use backend::{Backend, Decoded};
 pub use capabilities::BackendCapabilities;
+#[cfg(feature = "claude-control")]
+pub use claude_session::{
+    open_claude_session, ClaudePermissionMode, ClaudeSession, ClaudeSessionError,
+    ClaudeSessionOptions, ControlHandle,
+};
 pub use usage::aggregate_token_usage;
 
 use std::sync::atomic::{AtomicBool, Ordering};
