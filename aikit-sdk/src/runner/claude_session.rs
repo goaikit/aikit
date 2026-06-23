@@ -7,16 +7,20 @@
 //! [`AgentEvent`]s into a sync channel the caller reads, while a [`ControlHandle`]
 //! sends interrupt / permission-mode / model commands back to the session.
 //!
-//! Concurrency: `Query::take_receiver()` yields the inbound half for the read
-//! task; the `Query` itself (wrapped in `Arc<Mutex>`) serves the control task —
-//! the two never contend (mirrors `ClaudeSDKClient::connect`). See spec 007 (B2).
+//! Concurrency: `Query::take_receiver()` yields the inbound half; a single-task
+//! `tokio::select!` multiplexes that receiver and the control channel against
+//! the (non-`Send`) `Query` — no second task, no `Arc<Mutex>`. Connection
+//! readiness is reported back synchronously so `open_claude_session` returns
+//! connect/handshake errors as a `Result`. See spec 007 (B2).
 
 use std::path::PathBuf;
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 
 use claude_agent_sdk::{
-    parse_message, ClaudeAgentOptions, Query, QueryConfig, SubprocessCLITransport, Transport,
+    parse_message, CanUseToolCallback, ClaudeAgentOptions, PermissionResult, Query, QueryConfig,
+    SubprocessCLITransport, Transport,
 };
 
 use crate::runner::backend::Decoded;
@@ -26,9 +30,36 @@ use crate::runner::types::{AgentEvent, AgentEventPayload, AgentEventStream};
 /// The Claude permission mode, re-exported from `claude-agent-sdk`.
 pub use claude_agent_sdk::PermissionMode as ClaudePermissionMode;
 
+/// A request for the caller to approve or deny a tool call mid-session.
+#[derive(Debug, Clone)]
+pub struct ToolApprovalRequest {
+    /// The tool being invoked (e.g. `Bash`, `Edit`).
+    pub tool_name: String,
+    /// The tool's structured input.
+    pub input: serde_json::Value,
+    /// The originating tool-use id, if provided.
+    pub tool_use_id: Option<String>,
+}
+
+/// The caller's decision on a [`ToolApprovalRequest`].
+#[derive(Debug, Clone)]
+pub enum ToolDecision {
+    /// Allow the call with its original input.
+    Allow,
+    /// Allow the call, substituting `input` for the original.
+    AllowWith { input: serde_json::Value },
+    /// Deny the call with a message shown to the agent.
+    Deny { message: String },
+}
+
+/// A synchronous permission callback. Invoked on the bridge thread when the
+/// agent requests a tool it isn't pre-authorised for; must be fast and
+/// non-blocking. `Send + Sync` so it can live on the bridge.
+pub type PermissionCallback = Arc<dyn Fn(ToolApprovalRequest) -> ToolDecision + Send + Sync>;
+
 /// Options for opening a Claude session. A focused subset of the SDK's options;
 /// extend as B2/B3 needs grow.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ClaudeSessionOptions {
     /// Model identifier (e.g. `claude-opus-4-5`). `None` = CLI default.
     pub model: Option<String>,
@@ -38,6 +69,35 @@ pub struct ClaudeSessionOptions {
     pub resume: Option<String>,
     /// Initial permission mode.
     pub permission_mode: Option<ClaudePermissionMode>,
+    /// Tool-approval callback. When set, the CLI routes permission prompts to
+    /// the SDK control protocol and this callback decides each one.
+    pub on_tool_permission: Option<PermissionCallback>,
+}
+
+impl ClaudeSessionOptions {
+    /// Set the tool-approval callback (builder style).
+    pub fn with_tool_permission<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(ToolApprovalRequest) -> ToolDecision + Send + Sync + 'static,
+    {
+        self.on_tool_permission = Some(Arc::new(callback));
+        self
+    }
+}
+
+impl std::fmt::Debug for ClaudeSessionOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaudeSessionOptions")
+            .field("model", &self.model)
+            .field("cwd", &self.cwd)
+            .field("resume", &self.resume)
+            .field("permission_mode", &self.permission_mode)
+            .field(
+                "on_tool_permission",
+                &self.on_tool_permission.as_ref().map(|_| "<callback>"),
+            )
+            .finish()
+    }
 }
 
 /// Errors opening or driving a Claude session.
@@ -45,6 +105,8 @@ pub struct ClaudeSessionOptions {
 pub enum ClaudeSessionError {
     /// The tokio runtime could not be created.
     Runtime(String),
+    /// Connecting / handshaking with the `claude` CLI failed.
+    Connect(String),
     /// The control channel is closed (the session ended).
     Closed,
 }
@@ -53,6 +115,7 @@ impl std::fmt::Display for ClaudeSessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClaudeSessionError::Runtime(e) => write!(f, "session runtime error: {e}"),
+            ClaudeSessionError::Connect(e) => write!(f, "session connect error: {e}"),
             ClaudeSessionError::Closed => write!(f, "session control channel closed"),
         }
     }
@@ -125,10 +188,9 @@ impl Drop for ClaudeSession {
 
 /// Open a bidirectional Claude session, sending `prompt` as the first turn.
 ///
-/// Returns immediately; connection/handshake happen on the bridge thread.
-/// Connection failures surface as a final stderr `RawLine` event followed by
-/// channel close (rather than a synchronous error), so callers drive the same
-/// event loop regardless.
+/// Blocks until the session is connected and the first turn has been sent, so
+/// connection/handshake failures are returned as [`ClaudeSessionError::Connect`]
+/// rather than surfacing only as a closed event stream.
 pub fn open_claude_session(
     prompt: impl Into<String>,
     options: ClaudeSessionOptions,
@@ -136,6 +198,9 @@ pub fn open_claude_session(
     let prompt = prompt.into();
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
     let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel::<ControlCmd>();
+    // Readiness handshake: the bridge reports Ok once connected + first turn
+    // sent, or Err(msg) if setup failed.
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
 
     let join = thread::Builder::new()
         .name("aikit-claude-session".into())
@@ -146,19 +211,31 @@ pub fn open_claude_session(
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    emit_error(&event_tx, format!("failed to build runtime: {e}"));
+                    let _ = ready_tx.send(Err(format!("failed to build runtime: {e}")));
                     return;
                 }
             };
-            rt.block_on(run_session(prompt, options, event_tx, control_rx));
+            rt.block_on(run_session(prompt, options, event_tx, control_rx, ready_tx));
         })
         .map_err(|e| ClaudeSessionError::Runtime(e.to_string()))?;
 
-    Ok(ClaudeSession {
-        control: ControlHandle { tx: control_tx },
-        events: event_rx,
-        join: Some(join),
-    })
+    match ready_rx.recv() {
+        Ok(Ok(())) => Ok(ClaudeSession {
+            control: ControlHandle { tx: control_tx },
+            events: event_rx,
+            join: Some(join),
+        }),
+        Ok(Err(msg)) => {
+            let _ = join.join();
+            Err(ClaudeSessionError::Connect(msg))
+        }
+        Err(_) => {
+            let _ = join.join();
+            Err(ClaudeSessionError::Connect(
+                "session thread terminated before ready".to_string(),
+            ))
+        }
+    }
 }
 
 fn build_options(options: &ClaudeSessionOptions) -> ClaudeAgentOptions {
@@ -167,8 +244,53 @@ fn build_options(options: &ClaudeSessionOptions) -> ClaudeAgentOptions {
         cwd: options.cwd.clone(),
         resume: options.resume.clone(),
         permission_mode: options.permission_mode.clone(),
+        // Mirror ClaudeSDKClient::connect: routing permission prompts through the
+        // control protocol requires the "stdio" prompt tool.
+        permission_prompt_tool_name: options
+            .on_tool_permission
+            .as_ref()
+            .map(|_| "stdio".to_string()),
         ..ClaudeAgentOptions::default()
     }
+}
+
+fn build_query_config(options: &ClaudeSessionOptions) -> QueryConfig {
+    QueryConfig {
+        can_use_tool: options
+            .on_tool_permission
+            .clone()
+            .map(wrap_permission_callback),
+        ..QueryConfig::default()
+    }
+}
+
+/// Adapt aikit's synchronous [`PermissionCallback`] into the SDK's async
+/// [`CanUseToolCallback`].
+fn wrap_permission_callback(cb: PermissionCallback) -> CanUseToolCallback {
+    Arc::new(move |tool_name, input, ctx| {
+        let cb = cb.clone();
+        Box::pin(async move {
+            let req = ToolApprovalRequest {
+                tool_name,
+                input,
+                tool_use_id: ctx.tool_use_id,
+            };
+            match cb(req) {
+                ToolDecision::Allow => PermissionResult::Allow {
+                    updated_input: None,
+                    updated_permissions: None,
+                },
+                ToolDecision::AllowWith { input } => PermissionResult::Allow {
+                    updated_input: Some(input),
+                    updated_permissions: None,
+                },
+                ToolDecision::Deny { message } => PermissionResult::Deny {
+                    message,
+                    interrupt: false,
+                },
+            }
+        })
+    })
 }
 
 async fn run_session(
@@ -176,37 +298,43 @@ async fn run_session(
     options: ClaudeSessionOptions,
     event_tx: mpsc::Sender<AgentEvent>,
     mut control_rx: tokio::sync::mpsc::UnboundedReceiver<ControlCmd>,
+    ready_tx: mpsc::Sender<Result<(), String>>,
 ) {
     let opts = build_options(&options);
-    let mut transport = SubprocessCLITransport::new(opts.clone());
+    let config = build_query_config(&options);
+
+    let mut transport = SubprocessCLITransport::new(opts);
     if let Err(e) = transport.connect().await {
-        emit_error(&event_tx, format!("connect failed: {e}"));
+        let _ = ready_tx.send(Err(format!("connect failed: {e}")));
         return;
     }
 
-    let mut query = match Query::new(Box::new(transport), QueryConfig::default()) {
+    let mut query = match Query::new(Box::new(transport), config) {
         Ok(q) => q,
         Err(e) => {
-            emit_error(&event_tx, format!("query init failed: {e}"));
+            let _ = ready_tx.send(Err(format!("query init failed: {e}")));
             return;
         }
     };
     query.start();
     if let Err(e) = query.initialize().await {
-        emit_error(&event_tx, format!("initialize failed: {e}"));
+        let _ = ready_tx.send(Err(format!("initialize failed: {e}")));
         return;
     }
     if let Err(e) = query.write_user_message(&prompt).await {
-        emit_error(&event_tx, format!("send prompt failed: {e}"));
+        let _ = ready_tx.send(Err(format!("send prompt failed: {e}")));
         return;
     }
     let mut rx = match query.take_receiver() {
         Some(rx) => rx,
         None => {
-            emit_error(&event_tx, "message receiver unavailable".to_string());
+            let _ = ready_tx.send(Err("message receiver unavailable".to_string()));
             return;
         }
     };
+
+    // Connected and first turn sent — unblock the caller.
+    let _ = ready_tx.send(Ok(()));
 
     // Single task owns both `query` (control) and `rx` (reading); a `select!`
     // multiplexes inbound messages and control commands. `Query` is not `Send`,
@@ -334,38 +462,133 @@ mod tests {
         assert!(matches!(h.interrupt(), Err(ClaudeSessionError::Closed)));
     }
 
+    #[test]
+    fn build_options_carries_fields_and_permission_tool() {
+        let plain = build_options(&ClaudeSessionOptions {
+            model: Some("claude-x".into()),
+            cwd: Some("/tmp".into()),
+            resume: Some("sess-1".into()),
+            permission_mode: None,
+            on_tool_permission: None,
+        });
+        assert_eq!(plain.model.as_deref(), Some("claude-x"));
+        assert_eq!(plain.resume.as_deref(), Some("sess-1"));
+        // No callback → no permission prompt tool routing.
+        assert_eq!(plain.permission_prompt_tool_name, None);
+
+        let with_cb =
+            ClaudeSessionOptions::default().with_tool_permission(|_req| ToolDecision::Allow);
+        let opts = build_options(&with_cb);
+        // Callback present → CLI routes permission prompts via "stdio".
+        assert_eq!(opts.permission_prompt_tool_name.as_deref(), Some("stdio"));
+        assert!(build_query_config(&with_cb).can_use_tool.is_some());
+    }
+
+    #[test]
+    fn permission_callback_maps_decisions() {
+        let cb: PermissionCallback = Arc::new(|req: ToolApprovalRequest| {
+            if req.tool_name == "Bash" {
+                ToolDecision::Deny {
+                    message: "no shell".into(),
+                }
+            } else if req.tool_name == "Edit" {
+                ToolDecision::AllowWith {
+                    input: serde_json::json!({"sanitized": true}),
+                }
+            } else {
+                ToolDecision::Allow
+            }
+        });
+        let wrapped = wrap_permission_callback(cb);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ctx = claude_agent_sdk::ToolPermissionContext::default();
+
+        let deny = rt.block_on(wrapped("Bash".into(), serde_json::json!({}), ctx.clone()));
+        assert!(matches!(
+            deny,
+            PermissionResult::Deny {
+                interrupt: false,
+                ..
+            }
+        ));
+
+        let allow_with = rt.block_on(wrapped("Edit".into(), serde_json::json!({}), ctx.clone()));
+        match allow_with {
+            PermissionResult::Allow { updated_input, .. } => {
+                assert_eq!(updated_input.unwrap()["sanitized"], true);
+            }
+            _ => panic!("expected Allow with updated input"),
+        }
+
+        let allow = rt.block_on(wrapped("Read".into(), serde_json::json!({}), ctx));
+        assert!(matches!(
+            allow,
+            PermissionResult::Allow {
+                updated_input: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn connect_error_is_synchronous() {
+        // A nonexistent working directory makes the subprocess spawn fail, so
+        // connect fails — and `open_claude_session` must surface that
+        // synchronously as `Connect`, not as a silently-closed stream.
+        let opts = ClaudeSessionOptions {
+            cwd: Some("/nonexistent/aikit/session/path".into()),
+            ..Default::default()
+        };
+        match open_claude_session("hi", opts) {
+            Err(ClaudeSessionError::Connect(_)) => {}
+            Err(e) => panic!("expected synchronous Connect error, got {e:?}"),
+            Ok(_) => panic!("expected synchronous Connect error, got Ok(session)"),
+        }
+    }
+
     // Live end-to-end smoke test: drives a real `claude` session, streams a
     // turn, and interrupts. Ignored by default (needs the CLI + credentials);
     // run with `cargo test --features claude-control -- --ignored live_`.
     #[test]
     #[ignore = "requires a real `claude` CLI on PATH and credentials"]
     fn live_session_streams_and_interrupts() {
-        let session =
-            open_claude_session("Say hello in one word.", ClaudeSessionOptions::default()).unwrap();
+        use std::time::{Duration, Instant};
+
+        let session = open_claude_session(
+            "Say hello in exactly one word.",
+            ClaudeSessionOptions::default(),
+        )
+        .expect("connect to live claude session");
+
+        let deadline = Instant::now() + Duration::from_secs(60);
         let mut saw_text = false;
-        while let Ok(ev) = session.events.recv() {
-            if let AgentEventPayload::StreamMessage(m) = &ev.payload {
-                if !m.text.trim().is_empty() {
-                    saw_text = true;
-                    let _ = session.control.interrupt();
+        let mut interrupted = false;
+        while Instant::now() < deadline {
+            match session.events.recv_timeout(Duration::from_secs(5)) {
+                Ok(ev) => {
+                    eprintln!("LIVE EVENT seq={} {:?}", ev.seq, ev.payload);
+                    if let AgentEventPayload::StreamMessage(m) = &ev.payload {
+                        if !m.text.trim().is_empty() {
+                            saw_text = true;
+                            if !interrupted {
+                                let _ = session.control.interrupt();
+                                interrupted = true;
+                            }
+                        }
+                    }
                 }
+                // Quiet after we've seen output → end the probe.
+                Err(mpsc::RecvTimeoutError::Timeout) if saw_text => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
         assert!(
             saw_text,
             "expected at least one text frame from a live session"
         );
-    }
-
-    #[test]
-    fn build_options_carries_fields() {
-        let opts = build_options(&ClaudeSessionOptions {
-            model: Some("claude-x".into()),
-            cwd: Some("/tmp".into()),
-            resume: Some("sess-1".into()),
-            permission_mode: None,
-        });
-        assert_eq!(opts.model.as_deref(), Some("claude-x"));
-        assert_eq!(opts.resume.as_deref(), Some("sess-1"));
     }
 }
