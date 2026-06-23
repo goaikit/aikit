@@ -9,7 +9,11 @@ keywords = ["ai", "agents", "deploy", "catalog", "capabilities"]
 categories = ["command-line-utilities"]
 
 [features]
+default = ["claude-sdk"]
 testing = []
+# Delegate Claude decode to the typed `claude-agent-sdk` parser (richer
+# tool/thinking frames). When off, a hand-rolled text-only decode is used.
+claude-sdk = ["dep:claude-agent-sdk"]
 
 [dependencies]
 tracing = "0.1"
@@ -24,6 +28,7 @@ zip = "2.3"
 tempfile = "3.12"
 uuid = { version = "1", features = ["v4"] }
 aikit-agent = { path = "../aikit-agent", version = "0.1.0" }
+claude-agent-sdk = { git = "https://github.com/aroff/claude-agent-sdk-rust", rev = "717eacf", optional = true }
 jsonschema = "0.46"
 
 [dev-dependencies]

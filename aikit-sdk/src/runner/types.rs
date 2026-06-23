@@ -448,6 +448,21 @@ pub enum AgentEventPayload {
     RawBytes(Vec<u8>),
     /// Canonical text output from an agent, engine-agnostic.
     StreamMessage(StreamMessage),
+    /// A structured tool call decoded from an external Backend's output
+    /// (engine-agnostic; the in-process aikit agent uses `AikitToolUse`).
+    /// Emitted in decode order, in place of the corresponding `StreamMessage`s.
+    ToolUse {
+        call_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
+    /// A structured tool result decoded from an external Backend's output.
+    /// `call_id` correlates to the originating `ToolUse`.
+    ToolResult {
+        call_id: String,
+        output: serde_json::Value,
+        is_error: bool,
+    },
     /// Normalized token usage extracted from the preceding `JsonLine`.
     /// Emitted immediately after the corresponding `JsonLine` event when
     /// `RunOptions::emit_token_usage_events` is `true`.

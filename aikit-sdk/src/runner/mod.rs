@@ -15,7 +15,7 @@ pub use types::{
 
 pub use argv::{is_runnable, runnable_agents};
 pub use availability::{get_agent_status, get_installed_agents, is_agent_available};
-pub use backend::Backend;
+pub use backend::{Backend, Decoded};
 pub use capabilities::BackendCapabilities;
 pub use usage::aggregate_token_usage;
 
@@ -35,7 +35,16 @@ pub fn normalize_json_line(
     raw_line_seq: u64,
 ) -> Vec<StreamMessage> {
     match Backend::from_key(agent_key) {
-        Some(backend) => backend.decode(value, stream, raw_line_seq),
+        // The StreamMessage view of decode; structured tool frames (visible via
+        // `run_agent_events`) are not surfaced through this legacy helper.
+        Some(backend) => backend
+            .decode(value, stream, raw_line_seq)
+            .into_iter()
+            .filter_map(|d| match d {
+                backend::Decoded::Stream(m) => Some(m),
+                _ => None,
+            })
+            .collect(),
         None => {
             tracing::warn!(
                 target: "aikit_sdk::runner::decode",
@@ -309,22 +318,45 @@ where
                             }
                         }
 
-                        let messages = backend.decode(json_val, stream, json_line_seq);
-                        if messages.is_empty() {
+                        let decoded = backend.decode(json_val, stream, json_line_seq);
+                        if decoded.is_empty() {
                             json_lines_unmapped += 1;
                         }
-                        for msg_instance in messages {
-                            stream_messages_emitted += 1;
-                            let sm_event = AgentEvent {
+                        for frame in decoded {
+                            let payload = match frame {
+                                backend::Decoded::Stream(m) => {
+                                    stream_messages_emitted += 1;
+                                    AgentEventPayload::StreamMessage(m)
+                                }
+                                backend::Decoded::ToolUse {
+                                    call_id,
+                                    tool_name,
+                                    input,
+                                } => AgentEventPayload::ToolUse {
+                                    call_id,
+                                    tool_name,
+                                    input,
+                                },
+                                backend::Decoded::ToolResult {
+                                    call_id,
+                                    output,
+                                    is_error,
+                                } => AgentEventPayload::ToolResult {
+                                    call_id,
+                                    output,
+                                    is_error,
+                                },
+                            };
+                            let frame_event = AgentEvent {
                                 agent_key: agent_key.to_string(),
                                 seq,
                                 stream,
-                                payload: AgentEventPayload::StreamMessage(msg_instance),
+                                payload,
                             };
                             seq += 1;
                             if callback_panic.is_none() {
                                 let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                                    on_event(sm_event);
+                                    on_event(frame_event);
                                 }));
                                 if let Err(p) = result {
                                     callback_panic = Some(p);
@@ -828,6 +860,8 @@ mod tests {
                 AgentEventPayload::RawLine(_) => "raw",
                 AgentEventPayload::RawBytes(_) => "bytes",
                 AgentEventPayload::StreamMessage(_) => "stream_message",
+                AgentEventPayload::ToolUse { .. } => "tool_use",
+                AgentEventPayload::ToolResult { .. } => "tool_result",
                 AgentEventPayload::TokenUsageLine { .. } => "token_usage",
                 AgentEventPayload::QuotaExceeded { .. } => "quota_exceeded",
                 AgentEventPayload::RawTransportLine { .. } => "raw_transport",

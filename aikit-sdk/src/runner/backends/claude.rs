@@ -1,11 +1,14 @@
 //! Claude backend: `claude --output-format stream-json` over a subprocess.
 //!
-//! Phase A relocates the existing decode/usage/quota/argv logic verbatim.
-//! Phase B will delegate decode to `claude-agent-sdk-rust::parse_message` and
-//! light up the bidirectional control axis (see spec 006).
+//! Decode delegates to the typed `claude-agent-sdk` parser (`parse_message`)
+//! when the `claude-sdk` feature is enabled (default), emitting structured
+//! tool/thinking frames in addition to text; a hand-rolled text-only decode is
+//! the fallback. Phase B2 will light up the bidirectional control axis via the
+//! SDK client (see spec 006/007).
 
 use std::ffi::OsString;
 
+use crate::runner::backend::Decoded;
 use crate::runner::backends::argv_spec::{ArgvCtx, ArgvSpec, SessionMode};
 use crate::runner::backends::quota_match::{match_quota, JsonPat, RawPat};
 use crate::runner::capabilities::BackendCapabilities;
@@ -34,11 +37,156 @@ const SPEC: ArgvSpec = ArgvSpec {
     session_mode: SessionMode::Flag("--resume"),
 };
 
+/// Build a canonical `StreamMessage` frame.
+fn sm(
+    text: String,
+    phase: MessagePhase,
+    kind: MessageKind,
+    turn_id: Option<String>,
+    stream: AgentEventStream,
+    raw_line_seq: u64,
+) -> StreamMessage {
+    StreamMessage {
+        text,
+        phase,
+        role: MessageRole::Assistant,
+        kind,
+        source: stream,
+        raw_line_seq,
+        turn_id,
+    }
+}
+
 pub(crate) fn decode(
     value: &serde_json::Value,
     stream: AgentEventStream,
     raw_line_seq: u64,
-) -> Vec<StreamMessage> {
+) -> Vec<Decoded> {
+    #[cfg(feature = "claude-sdk")]
+    {
+        sdk_decode(value, stream, raw_line_seq)
+    }
+    #[cfg(not(feature = "claude-sdk"))]
+    {
+        lenient_decode(value, stream, raw_line_seq)
+    }
+}
+
+/// Typed decode via `claude-agent-sdk`. Text/result behaviour matches the
+/// fallback; additionally surfaces thinking (as `Reasoning`) and structured
+/// tool calls/results. Parse errors and unknown message types yield no frames
+/// (same as the legacy decoder).
+#[cfg(feature = "claude-sdk")]
+fn sdk_decode(
+    value: &serde_json::Value,
+    stream: AgentEventStream,
+    raw_line_seq: u64,
+) -> Vec<Decoded> {
+    use claude_agent_sdk::{ContentBlock, Message, UserContent};
+
+    // The SDK parser is strict (requires e.g. `model` on assistant, full
+    // `result` fields). On a parse miss (older/partial CLI output, or an
+    // unrecognized type) fall back to the lenient text extraction so we never
+    // regress below the legacy decoder's floor.
+    let msg = match claude_agent_sdk::parse_message(value) {
+        Ok(Some(m)) => m,
+        _ => return lenient_decode(value, stream, raw_line_seq),
+    };
+
+    let mut out = Vec::new();
+    match msg {
+        Message::Assistant(a) => {
+            for block in a.content {
+                match block {
+                    ContentBlock::Text(t) => out.push(Decoded::Stream(sm(
+                        t.text,
+                        MessagePhase::Delta,
+                        MessageKind::Message,
+                        None,
+                        stream,
+                        raw_line_seq,
+                    ))),
+                    ContentBlock::Thinking(t) => out.push(Decoded::Stream(sm(
+                        t.thinking,
+                        MessagePhase::Delta,
+                        MessageKind::Reasoning,
+                        None,
+                        stream,
+                        raw_line_seq,
+                    ))),
+                    ContentBlock::ToolUse(t) => out.push(Decoded::ToolUse {
+                        call_id: t.id,
+                        tool_name: t.name,
+                        input: serde_json::Value::Object(t.input),
+                    }),
+                    ContentBlock::ToolResult(t) => out.push(Decoded::ToolResult {
+                        call_id: t.tool_use_id,
+                        output: t.content.unwrap_or(serde_json::Value::Null),
+                        is_error: t.is_error.unwrap_or(false),
+                    }),
+                    ContentBlock::ServerToolUse(s) => out.push(Decoded::ToolUse {
+                        call_id: s.id,
+                        tool_name: server_tool_name(&s.name),
+                        input: serde_json::Value::Object(s.input),
+                    }),
+                    ContentBlock::ServerToolResult(s) => out.push(Decoded::ToolResult {
+                        call_id: s.tool_use_id,
+                        output: serde_json::Value::Object(s.content),
+                        is_error: false,
+                    }),
+                }
+            }
+        }
+        // `user` lines carry tool_result blocks paired to prior tool calls.
+        Message::User(u) => {
+            if let UserContent::Blocks(blocks) = u.content {
+                for block in blocks {
+                    if let ContentBlock::ToolResult(t) = block {
+                        out.push(Decoded::ToolResult {
+                            call_id: t.tool_use_id,
+                            output: t.content.unwrap_or(serde_json::Value::Null),
+                            is_error: t.is_error.unwrap_or(false),
+                        });
+                    }
+                }
+            }
+        }
+        Message::Result(r) => {
+            if let Some(text) = r.result {
+                out.push(Decoded::Stream(sm(
+                    text,
+                    MessagePhase::Final,
+                    MessageKind::Message,
+                    Some(r.session_id),
+                    stream,
+                    raw_line_seq,
+                )));
+            }
+        }
+        // System / StreamEvent / RateLimit / Task* / Hook / Mirror carry no
+        // message text in the legacy contract: rate-limit is surfaced by
+        // `extract_quota` and usage by `extract_usage` (both unchanged).
+        _ => {}
+    }
+    out
+}
+
+#[cfg(feature = "claude-sdk")]
+fn server_tool_name(name: &claude_agent_sdk::ServerToolName) -> String {
+    serde_json::to_value(name)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{name:?}"))
+}
+
+/// Hand-rolled text-only decode. The sole decoder when the `claude-sdk` feature
+/// is off, and the lenient fallback for lines the SDK parser rejects when it is
+/// on. Handles only `assistant` text and `result` — the legacy floor.
+fn lenient_decode(
+    value: &serde_json::Value,
+    stream: AgentEventStream,
+    raw_line_seq: u64,
+) -> Vec<Decoded> {
     let mut results = Vec::new();
     let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -48,15 +196,14 @@ pub(crate) fn decode(
                 for item in arr {
                     if item.get("type").and_then(|v| v.as_str()) == Some("text") {
                         if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
-                            results.push(StreamMessage {
-                                text: text.to_string(),
-                                phase: MessagePhase::Delta,
-                                role: MessageRole::Assistant,
-                                kind: MessageKind::Message,
-                                source: stream,
+                            results.push(Decoded::Stream(sm(
+                                text.to_string(),
+                                MessagePhase::Delta,
+                                MessageKind::Message,
+                                None,
+                                stream,
                                 raw_line_seq,
-                                turn_id: None,
-                            });
+                            )));
                         }
                     }
                 }
@@ -70,15 +217,14 @@ pub(crate) fn decode(
                 .get("session_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            results.push(StreamMessage {
-                text: result_text.to_string(),
-                phase: MessagePhase::Final,
-                role: MessageRole::Assistant,
-                kind: MessageKind::Message,
-                source: stream,
-                raw_line_seq,
+            results.push(Decoded::Stream(sm(
+                result_text.to_string(),
+                MessagePhase::Final,
+                MessageKind::Message,
                 turn_id,
-            });
+                stream,
+                raw_line_seq,
+            )));
         }
     }
 
@@ -189,4 +335,122 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
     }
     SPEC.push_session_flag(&mut argv, ctx.session_id);
     argv
+}
+
+#[cfg(all(test, feature = "claude-sdk"))]
+mod sdk_tests {
+    use super::*;
+    use crate::runner::backend::Decoded;
+
+    fn dec(line: serde_json::Value) -> Vec<Decoded> {
+        decode(&line, AgentEventStream::Stdout, 7)
+    }
+
+    #[test]
+    fn assistant_text_preserved_as_stream_delta() {
+        let out = dec(serde_json::json!({
+            "type": "assistant",
+            "message": {"model": "claude-x", "content": [{"type": "text", "text": "hi"}]}
+        }));
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            Decoded::Stream(m) => {
+                assert_eq!(m.text, "hi");
+                assert_eq!(m.phase, MessagePhase::Delta);
+                assert_eq!(m.kind, MessageKind::Message);
+                assert_eq!(m.raw_line_seq, 7);
+            }
+            other => panic!("expected Stream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_thinking_becomes_reasoning() {
+        let out = dec(serde_json::json!({
+            "type": "assistant",
+            "message": {"model": "m", "content": [
+                {"type": "thinking", "thinking": "let me think", "signature": "sig"}
+            ]}
+        }));
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            Decoded::Stream(m) => {
+                assert_eq!(m.text, "let me think");
+                assert_eq!(m.kind, MessageKind::Reasoning);
+            }
+            other => panic!("expected Reasoning Stream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn assistant_tool_use_is_structured() {
+        let out = dec(serde_json::json!({
+            "type": "assistant",
+            "message": {"model": "m", "content": [
+                {"type": "tool_use", "id": "tu_1", "name": "Bash", "input": {"command": "ls"}}
+            ]}
+        }));
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            Decoded::ToolUse {
+                call_id,
+                tool_name,
+                input,
+            } => {
+                assert_eq!(call_id, "tu_1");
+                assert_eq!(tool_name, "Bash");
+                assert_eq!(input.get("command").unwrap(), "ls");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn user_tool_result_is_structured() {
+        let out = dec(serde_json::json!({
+            "type": "user",
+            "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "tu_1", "content": "file.txt", "is_error": false}
+            ]}
+        }));
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            Decoded::ToolResult {
+                call_id,
+                output,
+                is_error,
+            } => {
+                assert_eq!(call_id, "tu_1");
+                assert_eq!(output, "file.txt");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn result_text_is_final_with_turn_id() {
+        let out = dec(serde_json::json!({
+            "type": "result", "subtype": "success", "duration_ms": 1, "duration_api_ms": 1,
+            "is_error": false, "num_turns": 1, "session_id": "sess-9", "result": "done"
+        }));
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            Decoded::Stream(m) => {
+                assert_eq!(m.text, "done");
+                assert_eq!(m.phase, MessagePhase::Final);
+                assert_eq!(m.turn_id.as_deref(), Some("sess-9"));
+            }
+            other => panic!("expected Final Stream, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_and_malformed_yield_nothing() {
+        assert!(
+            dec(serde_json::json!({"type": "stream_event", "event": {"type": "ping"}})).is_empty()
+        );
+        assert!(dec(serde_json::json!({"type": "system", "subtype": "init"})).is_empty());
+        assert!(dec(serde_json::json!({})).is_empty());
+    }
 }
