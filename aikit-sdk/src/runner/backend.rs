@@ -16,6 +16,30 @@ use super::types::{
     AgentEventPayload, AgentEventStream, QuotaExceededInfo, StreamMessage, TokenUsage, UsageSource,
 };
 
+/// One canonical frame produced by decoding a line of a Backend's Dialect.
+///
+/// Phase A backends emit only [`Decoded::Stream`]. Richer Backends (Claude via
+/// `claude-agent-sdk`) also emit structured tool frames. The run loop maps each
+/// variant to the corresponding [`AgentEventPayload`]; the order within the
+/// returned `Vec` is the emission order.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Decoded {
+    /// Canonical text/reasoning/status message.
+    Stream(StreamMessage),
+    /// A structured tool call.
+    ToolUse {
+        call_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
+    /// A structured tool result, correlated to a prior `ToolUse` by `call_id`.
+    ToolResult {
+        call_id: String,
+        output: serde_json::Value,
+        is_error: bool,
+    },
+}
+
 /// A runnable agent. Closed set; parse from a key with [`Backend::from_key`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Backend {
@@ -39,6 +63,11 @@ pub const ALL: &[Backend] = &[
     Backend::Cursor,
     Backend::Aikit,
 ];
+
+/// Wrap a backend's `StreamMessage`s as `Decoded::Stream` frames.
+fn wrap(messages: Vec<StreamMessage>) -> Vec<Decoded> {
+    messages.into_iter().map(Decoded::Stream).collect()
+}
 
 impl Backend {
     /// Parse a key string into a Backend. Returns `None` for unknown keys.
@@ -95,34 +124,37 @@ impl Backend {
         }
     }
 
-    /// Decode one inbound JSON line into canonical [`StreamMessage`]s.
-    /// Empty-text messages are filtered out (an invariant no decoder may break).
+    /// Decode one inbound JSON line into canonical [`Decoded`] frames.
+    ///
+    /// `Decoded::Stream` frames with empty text are filtered out (an invariant
+    /// no decoder may break); structured tool frames always pass through.
     pub fn decode(
         self,
         value: &serde_json::Value,
         stream: AgentEventStream,
         raw_line_seq: u64,
-    ) -> Vec<StreamMessage> {
-        let messages = match self {
+    ) -> Vec<Decoded> {
+        // Claude (with the `claude-sdk` feature) emits rich frames directly;
+        // the other backends emit StreamMessages that we wrap as Decoded::Stream.
+        let decoded: Vec<Decoded> = match self {
             Backend::Claude => claude::decode(value, stream, raw_line_seq),
-            Backend::Codex => codex::decode(value, stream, raw_line_seq),
-            Backend::Gemini => gemini::decode(value, stream, raw_line_seq),
-            Backend::OpenCode => opencode::decode(value, stream, raw_line_seq),
-            Backend::Cursor => cursor::decode(value, stream, raw_line_seq),
-            Backend::Aikit => aikit::decode(value, stream, raw_line_seq),
+            Backend::Codex => wrap(codex::decode(value, stream, raw_line_seq)),
+            Backend::Gemini => wrap(gemini::decode(value, stream, raw_line_seq)),
+            Backend::OpenCode => wrap(opencode::decode(value, stream, raw_line_seq)),
+            Backend::Cursor => wrap(cursor::decode(value, stream, raw_line_seq)),
+            Backend::Aikit => wrap(aikit::decode(value, stream, raw_line_seq)),
         };
-        messages
+        decoded
             .into_iter()
-            .filter(|m| {
-                if m.text.trim().is_empty() {
+            .filter(|d| match d {
+                Decoded::Stream(m) if m.text.trim().is_empty() => {
                     tracing::debug!(
                         target: "aikit_sdk::runner::decode",
                         "E_DECODE_EMPTY_TEXT: matched rule but text is empty"
                     );
                     false
-                } else {
-                    true
                 }
+                _ => true,
             })
             .collect()
     }
@@ -253,11 +285,13 @@ mod tests {
         ];
         for &b in ALL {
             for c in &cases {
-                for m in b.decode(c, AgentEventStream::Stdout, 0) {
-                    assert!(
-                        !m.text.trim().is_empty(),
-                        "{b:?} produced an empty-text StreamMessage"
-                    );
+                for d in b.decode(c, AgentEventStream::Stdout, 0) {
+                    if let Decoded::Stream(m) = d {
+                        assert!(
+                            !m.text.trim().is_empty(),
+                            "{b:?} produced an empty-text StreamMessage"
+                        );
+                    }
                 }
             }
         }

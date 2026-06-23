@@ -129,6 +129,19 @@ impl RunProgress {
                     self.last_assistant_text = Some(text.to_string());
                 }
             }
+            AgentEventPayload::ToolUse { tool_name, .. } => {
+                self.add_row(format!("tool> {}", tool_name));
+            }
+            AgentEventPayload::ToolResult {
+                output, is_error, ..
+            } => {
+                let prefix = if *is_error { "tool error>" } else { "tool>" };
+                self.add_row(format!(
+                    "{} {}",
+                    prefix,
+                    truncate(&output.to_string(), self.config.max_tool_output_chars)
+                ));
+            }
             AgentEventPayload::AikitToolUse { tool_name, .. } => {
                 self.add_row(format!("tool> {}", tool_name));
             }
