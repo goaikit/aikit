@@ -543,7 +543,7 @@ impl AgentEvent {
 }
 
 /// Internal channel message from reader threads to the dispatcher.
-pub(super) enum ReaderMsg {
+pub(crate) enum ReaderMsg {
     Chunk {
         stream: AgentEventStream,
         /// Raw bytes including any newline character(s)

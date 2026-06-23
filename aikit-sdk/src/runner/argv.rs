@@ -1,100 +1,29 @@
+//! Runnable-agent listing and argv construction.
+//!
+//! The per-Backend argv assembly now lives in `backends/<name>.rs`; this module
+//! keeps the string-keyed entry points (`runnable_agents`, `is_runnable`,
+//! `build_argv`) that the runner and public API use, delegating to
+//! [`Backend`](super::backend::Backend).
+
 use std::ffi::OsString;
 
+use super::backend::Backend;
+
+/// The runnable agent keys, in canonical order. Kept in lockstep with
+/// [`Backend::ALL`] (enforced by a test below).
 pub fn runnable_agents() -> &'static [&'static str] {
-    &["codex", "claude", "gemini", "opencode", "agent", "aikit"]
+    &["codex", "claude", "gemini", "opencode", "cursor", "aikit"]
 }
 
 pub fn is_runnable(agent_key: &str) -> bool {
-    runnable_agents().contains(&agent_key)
+    Backend::from_key(agent_key).is_some()
 }
 
-#[derive(Clone, Copy)]
-enum SessionMode {
-    Positional,
-    Flag(&'static str),
-}
-
-struct AgentCliSpec {
-    key: &'static str,
-    binary: &'static str,
-    model_flag: &'static str,
-    yolo_flag: Option<&'static str>,
-    session_mode: SessionMode,
-}
-
-static SPECS: &[AgentCliSpec] = &[
-    AgentCliSpec {
-        key: "codex",
-        binary: "codex",
-        model_flag: "-m",
-        yolo_flag: Some("--yolo"),
-        session_mode: SessionMode::Positional,
-    },
-    AgentCliSpec {
-        key: "claude",
-        binary: "claude",
-        model_flag: "--model",
-        yolo_flag: None,
-        session_mode: SessionMode::Flag("--resume"),
-    },
-    AgentCliSpec {
-        key: "gemini",
-        binary: "gemini",
-        model_flag: "--model",
-        yolo_flag: None,
-        session_mode: SessionMode::Flag("--resume"),
-    },
-    AgentCliSpec {
-        key: "opencode",
-        binary: "opencode",
-        model_flag: "-m",
-        yolo_flag: Some("--yolo"),
-        session_mode: SessionMode::Flag("--session"),
-    },
-    AgentCliSpec {
-        key: "agent",
-        binary: "agent",
-        model_flag: "--model",
-        yolo_flag: Some("--force"),
-        session_mode: SessionMode::Flag("--resume"),
-    },
-];
-
-fn get_agent_spec(key: &str) -> Option<&'static AgentCliSpec> {
-    SPECS.iter().find(|s| s.key == key)
-}
-
-impl AgentCliSpec {
-    fn push_model(&self, argv: &mut Vec<OsString>, model: Option<&String>) {
-        if let Some(m) = model {
-            // An empty/whitespace model string means "unset" — passing the flag with
-            // an empty value makes engines fail (e.g. codex: 400 "The '' model is not
-            // supported"). Fall back to the engine's own default model instead.
-            if !m.trim().is_empty() {
-                argv.push(OsString::from(self.model_flag));
-                argv.push(OsString::from(m.as_str()));
-            }
-        }
-    }
-
-    fn push_yolo(&self, argv: &mut Vec<OsString>, yolo: bool) {
-        if let Some(flag) = self.yolo_flag {
-            if yolo {
-                argv.push(OsString::from(flag));
-            }
-        }
-    }
-
-    fn push_session_flag(&self, argv: &mut Vec<OsString>, session_id: Option<&str>) {
-        if let SessionMode::Flag(flag) = self.session_mode {
-            if let Some(id) = session_id {
-                argv.push(OsString::from(flag));
-                argv.push(OsString::from(id));
-            }
-        }
-    }
-}
-
+/// Build the spawn argv for an agent key. Delegates to the typed
+/// [`Backend::build_argv`].
+///
+/// Panics if `agent_key` is not a known Backend (callers gate with
+/// [`is_runnable`]) or if it is the in-process `aikit` Backend.
 pub(super) fn build_argv(
     agent_key: &str,
     model: Option<&String>,
@@ -103,106 +32,8 @@ pub(super) fn build_argv(
     events_mode: bool,
     session_id: Option<&str>,
 ) -> Vec<OsString> {
-    let spec = get_agent_spec(agent_key).expect("unknown agent key for build_argv");
-
-    match spec.key {
-        "codex" => {
-            let mut argv = match session_id {
-                Some(id) => vec![
-                    OsString::from(spec.binary),
-                    OsString::from("resume"),
-                    OsString::from(id),
-                ],
-                None => vec![OsString::from(spec.binary), OsString::from("exec")],
-            };
-            spec.push_model(&mut argv, model);
-            spec.push_yolo(&mut argv, yolo);
-            argv.extend_from_slice(&[
-                OsString::from("--json"),
-                OsString::from("--"),
-                OsString::from("-"),
-            ]);
-            argv
-        }
-        "claude" => {
-            let mut argv = vec![
-                OsString::from(spec.binary),
-                OsString::from("-p"),
-                OsString::from("-"),
-                OsString::from("--dangerously-skip-permissions"),
-            ];
-            spec.push_model(&mut argv, model);
-            let fmt = if events_mode {
-                if stream {
-                    "stream-json"
-                } else {
-                    "json"
-                }
-            } else if stream {
-                "stream-json"
-            } else {
-                "text"
-            };
-            argv.extend_from_slice(&[OsString::from("--output-format"), OsString::from(fmt)]);
-            if events_mode && stream {
-                argv.push(OsString::from("--verbose"));
-            }
-            spec.push_session_flag(&mut argv, session_id);
-            argv
-        }
-        "gemini" => {
-            let mut argv = vec![
-                OsString::from(spec.binary),
-                OsString::from("--prompt"),
-                OsString::from("-"),
-            ];
-            if events_mode {
-                argv.extend_from_slice(&[
-                    OsString::from("--output-format"),
-                    OsString::from("stream-json"),
-                    OsString::from("--yolo"),
-                ]);
-            }
-            spec.push_model(&mut argv, model);
-            spec.push_session_flag(&mut argv, session_id);
-            argv
-        }
-        "opencode" => {
-            let mut argv = vec![OsString::from(spec.binary)];
-            spec.push_model(&mut argv, model);
-            argv.push(OsString::from("run"));
-            // `--yolo` (auto-approve tool use) must be passed in BOTH plain and
-            // events mode. Without it opencode auto-rejects its own write/edit tool
-            // calls, so an agent asked to modify files silently produces nothing.
-            spec.push_yolo(&mut argv, yolo);
-            if events_mode {
-                argv.extend_from_slice(&[OsString::from("--format"), OsString::from("json")]);
-            }
-            spec.push_session_flag(&mut argv, session_id);
-            argv
-        }
-        "agent" => {
-            let mut argv = vec![OsString::from(spec.binary), OsString::from("--print")];
-            if events_mode {
-                let fmt = if stream { "stream-json" } else { "json" };
-                argv.extend_from_slice(&[OsString::from("--output-format"), OsString::from(fmt)]);
-            } else if stream {
-                argv.extend_from_slice(&[
-                    OsString::from("--output-format"),
-                    OsString::from("json"),
-                ]);
-            }
-            spec.push_model(&mut argv, model);
-            spec.push_yolo(&mut argv, yolo);
-            spec.push_session_flag(&mut argv, session_id);
-            argv
-        }
-        _ => unreachable!(),
-    }
-}
-
-pub(super) fn should_write_stdin(_agent_key: &str) -> bool {
-    true
+    let backend = Backend::from_key(agent_key).expect("unknown agent key for build_argv");
+    backend.build_argv(model, yolo, stream, events_mode, session_id)
 }
 
 #[cfg(test)]
@@ -215,7 +46,9 @@ mod tests {
         assert!(is_runnable("claude"));
         assert!(is_runnable("gemini"));
         assert!(is_runnable("opencode"));
-        assert!(is_runnable("agent"));
+        assert!(is_runnable("cursor"));
+        assert!(is_runnable("aikit"));
+        assert!(!is_runnable("agent")); // renamed to "cursor" (ADR 0006)
         assert!(!is_runnable("copilot"));
         assert!(!is_runnable("cursor-agent"));
         assert!(!is_runnable("unknown"));
@@ -229,15 +62,24 @@ mod tests {
     }
 
     #[test]
-    fn test_runnable_agents_includes_codex_claude_gemini_opencode_agent() {
+    fn test_runnable_agents_matches_backend_all() {
         let agents = runnable_agents();
         assert!(agents.contains(&"codex"));
         assert!(agents.contains(&"claude"));
         assert!(agents.contains(&"gemini"));
         assert!(agents.contains(&"opencode"));
-        assert!(agents.contains(&"agent"));
+        assert!(agents.contains(&"cursor"));
         assert!(agents.contains(&"aikit"));
         assert_eq!(agents.len(), 6);
+        // Single source of truth: same set as Backend::ALL.
+        let mut from_list: Vec<&str> = agents.to_vec();
+        from_list.sort_unstable();
+        let mut from_enum: Vec<&str> = crate::runner::backend::ALL
+            .iter()
+            .map(|b| b.key())
+            .collect();
+        from_enum.sort_unstable();
+        assert_eq!(from_list, from_enum);
     }
 
     // --- codex ---
@@ -288,13 +130,16 @@ mod tests {
     }
 
     #[test]
-    fn test_opencode_events_mode_passes_yolo() {
-        // Regression: opencode must get --yolo in events mode too, else its write
-        // tool is auto-rejected and file-modifying agents silently produce nothing.
+    fn test_opencode_events_mode_passes_dangerously_skip_permissions() {
         let argv = build_argv("opencode", None, true, false, true, None);
         assert!(
-            argv.contains(&OsString::from("--yolo")),
-            "opencode events mode must include --yolo; got {:?}",
+            argv.contains(&OsString::from("--dangerously-skip-permissions")),
+            "opencode events mode must include --dangerously-skip-permissions; got {:?}",
+            argv
+        );
+        assert!(
+            !argv.contains(&OsString::from("--yolo")),
+            "opencode does not support --yolo; got {:?}",
             argv
         );
         assert!(argv.contains(&OsString::from("--format")));
@@ -462,13 +307,13 @@ mod tests {
         assert!(!argv.contains(&OsString::from("test prompt")));
         assert!(argv.contains(&OsString::from("-m")));
         assert!(argv.contains(&OsString::from("zai-coding-plan/glm-4.7")));
-        assert!(argv.contains(&OsString::from("--yolo")));
+        assert!(argv.contains(&OsString::from("--dangerously-skip-permissions")));
     }
 
     #[test]
     fn test_opencode_plain_no_options() {
         let argv = build_argv("opencode", None, false, false, false, None);
-        assert!(!argv.contains(&OsString::from("--yolo")));
+        assert!(!argv.contains(&OsString::from("--dangerously-skip-permissions")));
     }
 
     #[test]
@@ -517,19 +362,19 @@ mod tests {
         assert_eq!(argv[session_pos + 1], OsString::from("test-id-abc"));
     }
 
-    // --- agent (cursor) ---
+    // --- cursor (was "agent") ---
 
     #[test]
-    fn test_agent_plain_contains_all_options() {
+    fn test_cursor_plain_contains_all_options() {
         let argv = build_argv(
-            "agent",
+            "cursor",
             Some(&"custom-model".to_string()),
             true,
             true,
             false,
             None,
         );
-        assert!(argv.contains(&OsString::from("agent")));
+        assert!(argv.contains(&OsString::from("agent"))); // spawn binary stays `agent`
         assert!(argv.contains(&OsString::from("--print")));
         assert!(argv.contains(&OsString::from("--output-format")));
         assert!(argv.contains(&OsString::from("json")));
@@ -542,15 +387,15 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_plain_with_session_id() {
-        let argv = build_argv("agent", None, false, false, false, Some("test-session-id"));
+    fn test_cursor_plain_with_session_id() {
+        let argv = build_argv("cursor", None, false, false, false, Some("test-session-id"));
         assert!(argv.contains(&OsString::from("--resume")));
         assert!(argv.contains(&OsString::from("test-session-id")));
     }
 
     #[test]
-    fn test_agent_events_has_json_flag() {
-        let argv = build_argv("agent", None, false, false, true, None);
+    fn test_cursor_events_has_json_flag() {
+        let argv = build_argv("cursor", None, false, false, true, None);
         assert!(argv.contains(&OsString::from("--print")));
         assert!(argv.contains(&OsString::from("--output-format")));
         assert!(argv.contains(&OsString::from("json")));
@@ -558,27 +403,18 @@ mod tests {
     }
 
     #[test]
-    fn test_agent_events_stream_json() {
-        let argv = build_argv("agent", None, false, true, true, None);
+    fn test_cursor_events_stream_json() {
+        let argv = build_argv("cursor", None, false, true, true, None);
         assert!(argv.contains(&OsString::from("stream-json")));
         assert!(!argv.contains(&OsString::from("test")));
     }
 
     #[test]
-    fn test_agent_events_with_session_id() {
-        let argv = build_argv("agent", None, false, false, true, Some("test-id-def"));
+    fn test_cursor_events_with_session_id() {
+        let argv = build_argv("cursor", None, false, false, true, Some("test-id-def"));
         assert!(argv.contains(&OsString::from("--resume")));
         assert!(argv.contains(&OsString::from("test-id-def")));
         let resume_pos = argv.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(argv[resume_pos + 1], OsString::from("test-id-def"));
-    }
-
-    #[test]
-    fn test_should_write_stdin() {
-        assert!(should_write_stdin("agent"));
-        assert!(should_write_stdin("opencode"));
-        assert!(should_write_stdin("codex"));
-        assert!(should_write_stdin("claude"));
-        assert!(should_write_stdin("gemini"));
     }
 }

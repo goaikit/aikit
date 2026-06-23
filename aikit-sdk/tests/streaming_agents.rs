@@ -184,7 +184,7 @@ printf '{"event":"end","status":"success"}\n'"#,
 
         let mut events = Vec::new();
         let result = with_stub_path(dir.path(), || {
-            run_agent_events("agent", "test prompt", RunOptions::default(), |ev| {
+            run_agent_events("cursor", "test prompt", RunOptions::default(), |ev| {
                 events.push(ev)
             })
         });
@@ -488,7 +488,9 @@ printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
 
         let mut events = Vec::new();
         let result = with_stub_path(dir.path(), || {
-            run_agent_events("agent", "test", RunOptions::default(), |ev| events.push(ev))
+            run_agent_events("cursor", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
         });
 
         assert!(result.is_ok());
@@ -498,7 +500,7 @@ printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
             .collect();
         assert!(!quota_events.is_empty());
         if let AgentEventPayload::QuotaExceeded { info, .. } = &quota_events[0].payload {
-            assert_eq!(info.agent_key, "agent");
+            assert_eq!(info.agent_key, "cursor");
             assert_eq!(info.category, aikit_sdk::QuotaCategory::Hourly);
         }
     }
@@ -515,7 +517,9 @@ printf '{"type":"result","subtype":"success","result":"OK"}\n'"#,
 
         let mut events = Vec::new();
         let result = with_stub_path(dir.path(), || {
-            run_agent_events("agent", "test", RunOptions::default(), |ev| events.push(ev))
+            run_agent_events("cursor", "test", RunOptions::default(), |ev| {
+                events.push(ev)
+            })
         });
 
         assert!(result.is_ok());
@@ -784,7 +788,7 @@ fn test_fixture_agent_produces_stream_messages() {
     let mut found = false;
     for (i, line) in fixture.lines().filter(|l| !l.is_empty()).enumerate() {
         let val: serde_json::Value = serde_json::from_str(line).unwrap();
-        let messages = normalize_json_line("agent", AgentEventStream::Stdout, &val, i as u64);
+        let messages = normalize_json_line("cursor", AgentEventStream::Stdout, &val, i as u64);
         if !messages.is_empty() {
             found = true;
         }
@@ -796,7 +800,7 @@ fn test_fixture_agent_produces_stream_messages() {
 
     let line = r#"{"event":"message","role":"assistant","text":"Working on it..."}"#;
     let val: serde_json::Value = serde_json::from_str(line).unwrap();
-    let messages = normalize_json_line("agent", AgentEventStream::Stdout, &val, 0);
+    let messages = normalize_json_line("cursor", AgentEventStream::Stdout, &val, 0);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages[0].text, "Working on it...");
     assert_eq!(messages[0].role, MessageRole::Assistant);
