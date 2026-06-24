@@ -418,10 +418,17 @@ pub mod aikit_agent_adapter;
 pub mod runner;
 pub mod session_store;
 
+/// Re-export SDK-MCP builder helpers so callers need no direct
+/// `claude-agent-sdk` dependency.
+#[cfg(feature = "claude-control")]
+pub use claude_agent_sdk::{
+    create_sdk_mcp_server, tool as sdk_mcp_tool, SdkMcpTool, SdkMcpToolHandler,
+};
 #[cfg(feature = "claude-control")]
 pub use runner::{
     open_claude_session, ClaudePermissionMode, ClaudeSession, ClaudeSessionError,
-    ClaudeSessionOptions, ControlHandle, PermissionCallback, ToolApprovalRequest, ToolDecision,
+    ClaudeSessionOptions, ControlHandle, HookCallback, HookMatcherConfig, PermissionCallback,
+    SdkMcpServerConfig, ToolApprovalRequest, ToolDecision,
 };
 #[cfg(feature = "codex-app-server")]
 pub use runner::{

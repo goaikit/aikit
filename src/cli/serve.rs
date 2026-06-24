@@ -1746,11 +1746,31 @@ async fn live_session_control_handler(
             )
                 .into_response()
         }
+        "get_context_usage" => match &record.control {
+            LiveSessionControl::Claude(h) => match h.get_context_usage() {
+                Ok(usage) => (
+                    StatusCode::OK,
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    usage.to_string(),
+                )
+                    .into_response(),
+                Err(e) => error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "context_usage_error",
+                    &e.to_string(),
+                ),
+            },
+            LiveSessionControl::Codex(_) => error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "not_supported",
+                "get_context_usage is only supported for Claude sessions",
+            ),
+        },
         other => error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_action",
             &format!(
-                "Unknown action '{other}'. Supported: interrupt, disconnect, set_model, send_turn"
+                "Unknown action '{other}'. Supported: interrupt, disconnect, set_model, send_turn, get_context_usage"
             ),
         ),
     }

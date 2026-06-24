@@ -23,6 +23,8 @@ pub use availability::{get_agent_status, get_installed_agents, is_agent_availabl
 pub use backend::{Backend, Decoded};
 pub use capabilities::BackendCapabilities;
 #[cfg(feature = "claude-control")]
+pub use claude_agent_sdk::{HookCallback, HookMatcherConfig, SdkMcpServerConfig};
+#[cfg(feature = "claude-control")]
 pub use claude_session::{
     open_claude_session, ClaudePermissionMode, ClaudeSession, ClaudeSessionError,
     ClaudeSessionOptions, ControlHandle,

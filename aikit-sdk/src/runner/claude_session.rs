@@ -1,4 +1,4 @@
-//! Phase B2: bidirectional Claude sessions over a tokio bridge.
+//! Phase B2/B3: bidirectional Claude sessions over a tokio bridge.
 //!
 //! aikit's runner is synchronous; `claude-agent-sdk`'s client is async. This
 //! module bridges them: a dedicated thread runs a current-thread tokio runtime
@@ -11,18 +11,17 @@
 //! `tokio::select!` multiplexes that receiver and the control channel against
 //! the (non-`Send`) `Query` — no second task, no `Arc<Mutex>`. Connection
 //! readiness is reported back synchronously so `open_claude_session` returns
-//! connect/handshake errors as a `Result`. See spec 007 (B2).
+//! connect/handshake errors as a `Result`. See spec 007 (B2/B3).
 
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 
-use std::collections::BTreeMap;
-
 use claude_agent_sdk::{
-    parse_message, CanUseToolCallback, ClaudeAgentOptions, McpServers, PermissionResult, Query,
-    QueryConfig, SubprocessCLITransport, Transport,
+    parse_message, CanUseToolCallback, ClaudeAgentOptions, HookMatcherConfig, McpServers,
+    PermissionResult, Query, QueryConfig, SdkMcpServerConfig, SubprocessCLITransport, Transport,
 };
 
 use crate::runner::backend::Decoded;
@@ -35,8 +34,8 @@ pub use crate::runner::approval::{PermissionCallback, ToolApprovalRequest, ToolD
 /// The Claude permission mode, re-exported from `claude-agent-sdk`.
 pub use claude_agent_sdk::PermissionMode as ClaudePermissionMode;
 
-/// Options for opening a Claude session. A focused subset of the SDK's options;
-/// extend as B2/B3 needs grow.
+/// Options for opening a Claude session. Covers B2 (control) and B3 (hooks,
+/// in-process MCP, fork/resume).
 #[derive(Clone, Default)]
 pub struct ClaudeSessionOptions {
     /// Model identifier (e.g. `claude-opus-4-5`). `None` = CLI default.
@@ -50,12 +49,20 @@ pub struct ClaudeSessionOptions {
     /// Tool-approval callback. When set, the CLI routes permission prompts to
     /// the SDK control protocol and this callback decides each one.
     pub on_tool_permission: Option<PermissionCallback>,
-    /// MCP server map forwarded to `claude --mcp-config`. Keys are server
-    /// names; values are the full server config objects (`McpServerConfig`).
+    /// External MCP server map forwarded to `claude --mcp-config`. Keys are
+    /// server names; values are the full server config objects.
     pub mcp_servers: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     /// When `true`, passes `--fork-session` to the CLI so the new turn forks
     /// rather than continues the resumed session.
     pub fork_session: bool,
+    /// Hook matchers registered during the control-protocol initialize
+    /// handshake. Keys are lifecycle event names (e.g. `"PreToolUse"`,
+    /// `"PostToolUse"`); values are ordered lists of matchers with callbacks.
+    pub hooks: HashMap<String, Vec<HookMatcherConfig>>,
+    /// In-process SDK MCP servers. Each entry is built via
+    /// [`claude_agent_sdk::create_sdk_mcp_server`] and registered with the CLI
+    /// through the control protocol. The server name is stored in the config.
+    pub sdk_mcp_servers: Vec<SdkMcpServerConfig>,
 }
 
 impl ClaudeSessionOptions {
@@ -65,6 +72,21 @@ impl ClaudeSessionOptions {
         F: Fn(ToolApprovalRequest) -> ToolDecision + Send + Sync + 'static,
     {
         self.on_tool_permission = Some(Arc::new(callback));
+        self
+    }
+
+    /// Register a hook callback for a lifecycle event (builder style).
+    ///
+    /// `event` is the lifecycle event name (`"PreToolUse"`, `"PostToolUse"`,
+    /// etc.). Multiple calls with the same event append to its matcher list.
+    pub fn with_hook(mut self, event: impl Into<String>, config: HookMatcherConfig) -> Self {
+        self.hooks.entry(event.into()).or_default().push(config);
+        self
+    }
+
+    /// Register an in-process SDK MCP server (builder style).
+    pub fn with_sdk_mcp_server(mut self, server: SdkMcpServerConfig) -> Self {
+        self.sdk_mcp_servers.push(server);
         self
     }
 }
@@ -82,6 +104,8 @@ impl std::fmt::Debug for ClaudeSessionOptions {
             )
             .field("mcp_servers_count", &self.mcp_servers.len())
             .field("fork_session", &self.fork_session)
+            .field("hooks_events", &self.hooks.keys().collect::<Vec<_>>())
+            .field("sdk_mcp_servers_count", &self.sdk_mcp_servers.len())
             .finish()
     }
 }
@@ -116,6 +140,8 @@ enum ControlCmd {
     SetModel(Option<String>),
     /// Send a follow-up user message (multi-turn).
     SendTurn(String),
+    /// Request context-window usage stats; reply is sent on the oneshot.
+    GetContextUsage(tokio::sync::oneshot::Sender<Result<serde_json::Value, ClaudeSessionError>>),
     Disconnect,
 }
 
@@ -152,6 +178,17 @@ impl ControlHandle {
     /// Send a follow-up user message on the same session (multi-turn).
     pub fn send_turn(&self, text: impl Into<String>) -> Result<(), ClaudeSessionError> {
         self.send(ControlCmd::SendTurn(text.into()))
+    }
+
+    /// Request context-window usage statistics from the running Claude process.
+    ///
+    /// Blocks until the CLI responds (or the session closes). Returns the raw
+    /// JSON payload from the control-protocol response.
+    pub fn get_context_usage(&self) -> Result<serde_json::Value, ClaudeSessionError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.send(ControlCmd::GetContextUsage(tx))?;
+        rx.blocking_recv()
+            .unwrap_or(Err(ClaudeSessionError::Closed))
     }
 
     /// Disconnect the session.
@@ -275,13 +312,24 @@ fn build_options(options: &ClaudeSessionOptions) -> ClaudeAgentOptions {
 }
 
 fn build_query_config(options: &ClaudeSessionOptions) -> QueryConfig {
-    QueryConfig {
+    let mut config = QueryConfig {
         can_use_tool: options
             .on_tool_permission
             .clone()
             .map(wrap_permission_callback),
+        hooks: options.hooks.clone(),
         ..QueryConfig::default()
+    };
+    for server in &options.sdk_mcp_servers {
+        let name = server
+            .config
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sdk-mcp")
+            .to_string();
+        config = config.with_sdk_mcp_server(name, server.clone());
     }
+    config
 }
 
 /// Adapt aikit's synchronous [`PermissionCallback`] into the SDK's async
@@ -371,6 +419,24 @@ async fn run_session(
                         if ty == "control_request" || ty == "control_response" {
                             continue;
                         }
+                        // Emit SessionStarted on the first result message that
+                        // carries a session_id so callers can observe it and
+                        // use it for a subsequent `resume`.
+                        if ty == "result" {
+                            if let Some(sid) =
+                                value.get("session_id").and_then(|v| v.as_str())
+                            {
+                                let _ = event_tx.send(AgentEvent {
+                                    agent_key: "claude".to_string(),
+                                    seq,
+                                    stream: AgentEventStream::Stdout,
+                                    payload: AgentEventPayload::SessionStarted {
+                                        session_id: sid.to_string(),
+                                    },
+                                });
+                                seq += 1;
+                            }
+                        }
                         if let Ok(Some(msg)) = parse_message(&value) {
                             for frame in map_message(msg, AgentEventStream::Stdout, seq) {
                                 let payload = decoded_to_payload(frame);
@@ -415,6 +481,13 @@ async fn run_session(
                         if let Err(e) = query.write_user_message(&text).await {
                             emit_error(&event_tx, format!("send_turn error: {e}"));
                         }
+                    }
+                    Some(ControlCmd::GetContextUsage(reply_tx)) => {
+                        let result = query
+                            .get_context_usage()
+                            .await
+                            .map_err(|e| ClaudeSessionError::Connect(e.to_string()));
+                        let _ = reply_tx.send(result);
                     }
                     Some(ControlCmd::Disconnect) | None => break,
                 }
@@ -616,5 +689,75 @@ mod tests {
             saw_text,
             "expected at least one text frame from a live session"
         );
+    }
+
+    // ── B3 unit tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn options_default_hooks_and_sdk_mcp_empty() {
+        let opts = ClaudeSessionOptions::default();
+        assert!(opts.hooks.is_empty());
+        assert!(opts.sdk_mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn with_hook_builder_accumulates() {
+        use claude_agent_sdk::HookCallback;
+        let cb: HookCallback =
+            Arc::new(|_input, _id| Box::pin(async { serde_json::json!({"decision": "approve"}) }));
+        let matcher = HookMatcherConfig {
+            matcher: Some("Bash".to_string()),
+            hooks: vec![cb],
+            timeout: None,
+        };
+        let opts = ClaudeSessionOptions::default()
+            .with_hook("PreToolUse", matcher.clone())
+            .with_hook("PreToolUse", matcher.clone());
+        assert_eq!(opts.hooks.get("PreToolUse").map(|v| v.len()), Some(2));
+    }
+
+    #[test]
+    fn with_sdk_mcp_server_builder_accumulates() {
+        use claude_agent_sdk::{create_sdk_mcp_server, tool};
+        let t = tool("ping", "Pong", serde_json::json!({}), |_| async move {
+            serde_json::json!("pong")
+        });
+        let srv = create_sdk_mcp_server("test-server", "1.0.0", vec![t]);
+        let opts = ClaudeSessionOptions::default().with_sdk_mcp_server(srv);
+        assert_eq!(opts.sdk_mcp_servers.len(), 1);
+        assert_eq!(
+            opts.sdk_mcp_servers[0]
+                .config
+                .get("name")
+                .and_then(|v| v.as_str()),
+            Some("test-server")
+        );
+    }
+
+    #[test]
+    fn get_context_usage_queues_command_and_returns_on_reply() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ControlCmd>();
+        let handle = ControlHandle { tx };
+
+        let reply_val = serde_json::json!({"inputTokens": 500, "outputTokens": 200});
+        let rv = reply_val.clone();
+
+        // Simulate the bridge answering in a background thread.
+        std::thread::spawn(move || {
+            if let Some(ControlCmd::GetContextUsage(reply_tx)) = rx.blocking_recv() {
+                let _ = reply_tx.send(Ok(rv));
+            }
+        });
+
+        let result = handle.get_context_usage().unwrap();
+        assert_eq!(result["inputTokens"], 500);
+    }
+
+    #[test]
+    fn debug_shows_hook_events_and_sdk_mcp_count() {
+        let opts = ClaudeSessionOptions::default();
+        let dbg = format!("{opts:?}");
+        assert!(dbg.contains("hooks_events"));
+        assert!(dbg.contains("sdk_mcp_servers_count"));
     }
 }
