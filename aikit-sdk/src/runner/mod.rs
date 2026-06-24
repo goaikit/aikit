@@ -1,3 +1,4 @@
+pub mod approval;
 pub mod argv;
 pub mod availability;
 pub mod backend;
@@ -30,6 +31,9 @@ pub use claude_session::{
 pub use codex_session::{
     open_codex_session, CodexControlHandle, CodexSession, CodexSessionError, CodexSessionOptions,
 };
+// Shared approval types; available when at least one session feature is enabled.
+#[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
+pub use approval::{PermissionCallback, ToolApprovalRequest, ToolDecision};
 pub use usage::aggregate_token_usage;
 
 use std::sync::atomic::{AtomicBool, Ordering};

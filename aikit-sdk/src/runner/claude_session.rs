@@ -27,35 +27,11 @@ use crate::runner::backend::Decoded;
 use crate::runner::backends::claude::map_message;
 use crate::runner::types::{AgentEvent, AgentEventPayload, AgentEventStream};
 
+// Re-export so callers can reach them via `claude_session::` as before.
+pub use crate::runner::approval::{PermissionCallback, ToolApprovalRequest, ToolDecision};
+
 /// The Claude permission mode, re-exported from `claude-agent-sdk`.
 pub use claude_agent_sdk::PermissionMode as ClaudePermissionMode;
-
-/// A request for the caller to approve or deny a tool call mid-session.
-#[derive(Debug, Clone)]
-pub struct ToolApprovalRequest {
-    /// The tool being invoked (e.g. `Bash`, `Edit`).
-    pub tool_name: String,
-    /// The tool's structured input.
-    pub input: serde_json::Value,
-    /// The originating tool-use id, if provided.
-    pub tool_use_id: Option<String>,
-}
-
-/// The caller's decision on a [`ToolApprovalRequest`].
-#[derive(Debug, Clone)]
-pub enum ToolDecision {
-    /// Allow the call with its original input.
-    Allow,
-    /// Allow the call, substituting `input` for the original.
-    AllowWith { input: serde_json::Value },
-    /// Deny the call with a message shown to the agent.
-    Deny { message: String },
-}
-
-/// A synchronous permission callback. Invoked on the bridge thread when the
-/// agent requests a tool it isn't pre-authorised for; must be fast and
-/// non-blocking. `Send + Sync` so it can live on the bridge.
-pub type PermissionCallback = Arc<dyn Fn(ToolApprovalRequest) -> ToolDecision + Send + Sync>;
 
 /// Options for opening a Claude session. A focused subset of the SDK's options;
 /// extend as B2/B3 needs grow.
@@ -183,6 +159,27 @@ impl Drop for ClaudeSession {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+    }
+}
+
+impl ClaudeSession {
+    /// Dissolve the session into its control handle and event receiver.
+    ///
+    /// The bridge thread is detached rather than joined. It exits naturally
+    /// when the returned [`ControlHandle`] is eventually dropped (control
+    /// channel closes → bridge loop breaks → `query.close()` is called).
+    pub fn into_parts(self) -> (ControlHandle, mpsc::Receiver<AgentEvent>) {
+        // Prevent Drop from running (which would disconnect + join synchronously).
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: ManuallyDrop prevents the destructor from running; we read
+        // every field exactly once and explicitly handle the JoinHandle.
+        let control = unsafe { std::ptr::read(&this.control) };
+        let events = unsafe { std::ptr::read(&this.events) };
+        let join = unsafe { std::ptr::read(&this.join) };
+        if let Some(j) = join {
+            drop(j); // detach — thread exits when control sender is dropped
+        }
+        (control, events)
     }
 }
 

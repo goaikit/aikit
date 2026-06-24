@@ -14,7 +14,7 @@
 //! session's, is a follow-up). See spec 007.
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::thread;
 
 use aikit_agent_codex::{
@@ -28,8 +28,11 @@ use crate::runner::types::{
     StreamMessage,
 };
 
+// Re-export for callers who import approval types via `codex_session::`.
+pub use crate::runner::approval::{PermissionCallback, ToolApprovalRequest, ToolDecision};
+
 /// Options for opening a Codex session.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodexSessionOptions {
     /// Working directory for the thread (and the spawned `codex` process).
     pub cwd: PathBuf,
@@ -37,6 +40,9 @@ pub struct CodexSessionOptions {
     pub approval_policy: String,
     /// Sandbox mode: e.g. `read-only`, `workspace-write`, `danger-full-access`.
     pub sandbox: String,
+    /// Tool-approval callback. When set, server→client approval requests are
+    /// passed to this callback instead of being auto-approved.
+    pub on_tool_permission: Option<PermissionCallback>,
 }
 
 impl Default for CodexSessionOptions {
@@ -47,7 +53,33 @@ impl Default for CodexSessionOptions {
             // codex via `--yolo` today); approvals never block the stream.
             approval_policy: "never".to_string(),
             sandbox: "workspace-write".to_string(),
+            on_tool_permission: None,
         }
+    }
+}
+
+impl CodexSessionOptions {
+    /// Set the tool-approval callback (builder style).
+    pub fn with_tool_permission<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(ToolApprovalRequest) -> ToolDecision + Send + Sync + 'static,
+    {
+        self.on_tool_permission = Some(Arc::new(callback));
+        self
+    }
+}
+
+impl std::fmt::Debug for CodexSessionOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodexSessionOptions")
+            .field("cwd", &self.cwd)
+            .field("approval_policy", &self.approval_policy)
+            .field("sandbox", &self.sandbox)
+            .field(
+                "on_tool_permission",
+                &self.on_tool_permission.as_ref().map(|_| "<callback>"),
+            )
+            .finish()
     }
 }
 
@@ -122,6 +154,26 @@ impl Drop for CodexSession {
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
+    }
+}
+
+impl CodexSession {
+    /// Dissolve the session into its control handle and event receiver.
+    ///
+    /// The bridge thread is detached and exits naturally when the returned
+    /// [`CodexControlHandle`] is dropped (control channel closes → bridge
+    /// loop breaks → client disconnects).
+    pub fn into_parts(self) -> (CodexControlHandle, mpsc::Receiver<AgentEvent>) {
+        let this = std::mem::ManuallyDrop::new(self);
+        // SAFETY: ManuallyDrop prevents the destructor; we read every field
+        // exactly once and handle the JoinHandle explicitly.
+        let control = unsafe { std::ptr::read(&this.control) };
+        let events = unsafe { std::ptr::read(&this.events) };
+        let join = unsafe { std::ptr::read(&this.join) };
+        if let Some(j) = join {
+            drop(j); // detach
+        }
+        (control, events)
     }
 }
 
@@ -246,12 +298,28 @@ async fn run_session(
                             seq += 1;
                         }
                     }
-                    // Server→client request (e.g. an approval prompt). Auto-approve
-                    // for now — a permission-callback seam is a follow-up.
+                    // Server→client request (e.g. an approval prompt). Route to
+                    // the permission callback when one is set; auto-approve otherwise.
                     Some(ServerMessage::ServerRequest(req)) => {
-                        let _ = client
-                            .reply_server_request(req.id, json!({ "outcome": "approved" }))
-                            .await;
+                        let outcome = if let Some(cb) = &options.on_tool_permission {
+                            let request = ToolApprovalRequest {
+                                tool_name: req.method.clone(),
+                                input: req.params.clone(),
+                                tool_use_id: None,
+                            };
+                            match cb(request) {
+                                ToolDecision::Allow => json!({ "outcome": "approved" }),
+                                ToolDecision::AllowWith { input } => {
+                                    json!({ "outcome": "approved", "input": input })
+                                }
+                                ToolDecision::Deny { message } => {
+                                    json!({ "outcome": "rejected", "reason": message })
+                                }
+                            }
+                        } else {
+                            json!({ "outcome": "approved" })
+                        };
+                        let _ = client.reply_server_request(req.id, outcome).await;
                     }
                     None => break, // app-server closed the stream
                 }
@@ -543,6 +611,61 @@ mod tests {
         let h = CodexControlHandle { tx };
         drop(rx);
         assert!(matches!(h.interrupt(), Err(CodexSessionError::Closed)));
+    }
+
+    #[test]
+    fn with_tool_permission_builder_sets_callback() {
+        let opts = CodexSessionOptions::default().with_tool_permission(|_req| ToolDecision::Allow);
+        assert!(opts.on_tool_permission.is_some());
+    }
+
+    #[test]
+    fn permission_callback_decisions() {
+        let cb: PermissionCallback =
+            Arc::new(|req: ToolApprovalRequest| match req.tool_name.as_str() {
+                "thread/approveCommand" => ToolDecision::Deny {
+                    message: "not allowed".into(),
+                },
+                "thread/approveFileWrite" => ToolDecision::AllowWith {
+                    input: serde_json::json!({ "sanitized": true }),
+                },
+                _ => ToolDecision::Allow,
+            });
+
+        let deny_req = ToolApprovalRequest {
+            tool_name: "thread/approveCommand".into(),
+            input: serde_json::json!({}),
+            tool_use_id: None,
+        };
+        assert!(matches!(cb(deny_req), ToolDecision::Deny { .. }));
+
+        let allow_with_req = ToolApprovalRequest {
+            tool_name: "thread/approveFileWrite".into(),
+            input: serde_json::json!({}),
+            tool_use_id: None,
+        };
+        match cb(allow_with_req) {
+            ToolDecision::AllowWith { input } => assert_eq!(input["sanitized"], true),
+            other => panic!("expected AllowWith, got {other:?}"),
+        }
+
+        let allow_req = ToolApprovalRequest {
+            tool_name: "other".into(),
+            input: serde_json::json!({}),
+            tool_use_id: None,
+        };
+        assert!(matches!(cb(allow_req), ToolDecision::Allow));
+    }
+
+    #[test]
+    fn options_debug_hides_callback() {
+        let plain = CodexSessionOptions::default();
+        let debug = format!("{plain:?}");
+        assert!(debug.contains("on_tool_permission: None"), "got: {debug}");
+
+        let with_cb = CodexSessionOptions::default().with_tool_permission(|_| ToolDecision::Allow);
+        let debug = format!("{with_cb:?}");
+        assert!(debug.contains("on_tool_permission: Some"), "got: {debug}");
     }
 
     // Live end-to-end smoke test against a real `codex`. Ignored by default;

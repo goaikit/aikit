@@ -418,6 +418,16 @@ pub mod aikit_agent_adapter;
 pub mod runner;
 pub mod session_store;
 
+#[cfg(feature = "claude-control")]
+pub use runner::{
+    open_claude_session, ClaudePermissionMode, ClaudeSession, ClaudeSessionError,
+    ClaudeSessionOptions, ControlHandle, PermissionCallback, ToolApprovalRequest, ToolDecision,
+};
+#[cfg(feature = "codex-app-server")]
+pub use runner::{
+    open_codex_session, CodexControlHandle, CodexSession, CodexSessionError, CodexSessionOptions,
+};
+
 // Re-export host tool types so cli-framework can depend on aikit-sdk alone.
 pub use aikit_agent::{HostToolDefinition, HostToolProvider};
 

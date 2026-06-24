@@ -51,6 +51,10 @@ use aikit_sdk::{
     get_agent_status, AgentEventPayload, MessageKind, MessagePhase, MessageRole, RunError,
     RunOptions, UsageSource,
 };
+use aikit_sdk::{
+    open_claude_session, open_codex_session, ClaudeSessionError, ClaudeSessionOptions,
+    CodexControlHandle, CodexSessionError, CodexSessionOptions, ControlHandle,
+};
 
 use cli_framework::api::{
     ApiServerBuilder, ApiVersion, ApiVersionName, DefaultVersion, ReadinessReport, Stability,
@@ -162,6 +166,57 @@ pub enum StreamFrame {
     },
 }
 
+// ── live session (bidirectional) ─────────────────────────────────────────────
+
+/// Wraps either a [`ControlHandle`] (Claude) or a [`CodexControlHandle`] (Codex)
+/// so both can be stored in a unified registry.
+enum LiveSessionControl {
+    Claude(ControlHandle),
+    Codex(CodexControlHandle),
+}
+
+impl LiveSessionControl {
+    fn interrupt(&self) {
+        match self {
+            LiveSessionControl::Claude(h) => {
+                let _ = h.interrupt();
+            }
+            LiveSessionControl::Codex(h) => {
+                let _ = h.interrupt();
+            }
+        }
+    }
+
+    fn disconnect(&self) {
+        match self {
+            LiveSessionControl::Claude(h) => {
+                let _ = h.disconnect();
+            }
+            LiveSessionControl::Codex(h) => {
+                let _ = h.disconnect();
+            }
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum LiveSessionStatus {
+    Active,
+    Closed,
+}
+
+struct LiveSessionRecord {
+    session_id: String,
+    agent_key: String,
+    control: LiveSessionControl,
+    status: LiveSessionStatus,
+    created_at: DateTime<Utc>,
+}
+
+/// Registry of open bidirectional sessions, keyed by session_id.
+type LiveSessions = Arc<Mutex<HashMap<String, LiveSessionRecord>>>;
+
 // ── run function type (injectable for tests) ──────────────────────────────────
 
 pub struct RunFnOutcome {
@@ -206,6 +261,7 @@ type AuthCache = Arc<Mutex<Option<(Instant, HashMap<String, AuthStatus>)>>>;
 #[derive(Clone)]
 struct AppState {
     runs: Arc<Mutex<HashMap<String, RunRecord>>>,
+    live_sessions: LiveSessions,
     config: ServeConfig,
     run_fn: RunFn,
     auth_cache: AuthCache,
@@ -257,6 +313,50 @@ struct SendMessageRequest {
     model: Option<String>,
     #[serde(default)]
     yolo: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateLiveSessionRequest {
+    agent: String,
+    prompt: String,
+    #[serde(default)]
+    model: Option<String>,
+    /// Codex approval policy: `never`, `on-failure`, `on-request`, `untrusted`.
+    #[serde(default)]
+    approval_policy: Option<String>,
+    /// Codex sandbox mode: `read-only`, `workspace-write`, `danger-full-access`.
+    #[serde(default)]
+    sandbox: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiveSessionControlRequest {
+    /// Action to perform: `interrupt`, `set_model`, `disconnect`.
+    action: String,
+    /// Model to switch to; required when `action = "set_model"`.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Serialize)]
+struct LiveSessionSummary {
+    session_id: String,
+    agent: String,
+    status: LiveSessionStatus,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Serialize)]
+struct ListLiveSessionsResponse {
+    sessions: Vec<LiveSessionSummary>,
+}
+
+#[derive(Serialize)]
+struct DeleteLiveSessionResponse {
+    session_id: String,
+    status: LiveSessionStatus,
 }
 
 /// Response representation negotiated from the request's `Accept` header.
@@ -1365,6 +1465,303 @@ async fn sync_response(
         .into_response()
 }
 
+// ── live session handlers ─────────────────────────────────────────────────────
+
+/// `POST /api/v1/live-sessions` — create a bidirectional Claude or Codex
+/// session and stream its events as SSE.
+///
+/// The `X-Session-Id` response header carries the session_id before the first
+/// SSE frame so clients can associate it even before reading the stream.
+/// The first SSE frame is also `event: session` with `{"session_id": ...}`.
+async fn create_live_session_handler(
+    State(state): State<AppState>,
+    Json(body): Json<CreateLiveSessionRequest>,
+) -> Response {
+    if body.agent.trim().is_empty() {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "agent field is required",
+        );
+    }
+    if body.prompt.is_empty() {
+        return error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_request",
+            "prompt must not be empty",
+        );
+    }
+
+    let session_id = Uuid::new_v4().to_string();
+
+    // Open the session synchronously — connect/handshake errors surface here.
+    let (control, events_rx) = match body.agent.as_str() {
+        "claude" => {
+            let opts = ClaudeSessionOptions {
+                model: body.model.clone(),
+                ..ClaudeSessionOptions::default()
+            };
+            match open_claude_session(&body.prompt, opts) {
+                Ok(s) => {
+                    let (ctrl, evts) = s.into_parts();
+                    (LiveSessionControl::Claude(ctrl), evts)
+                }
+                Err(ClaudeSessionError::Connect(msg)) => {
+                    return error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "session_connect_failed",
+                        &format!("Failed to connect to claude: {msg}"),
+                    );
+                }
+                Err(e) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "session_error",
+                        &e.to_string(),
+                    );
+                }
+            }
+        }
+        "codex" => {
+            let default_opts = CodexSessionOptions::default();
+            let opts = CodexSessionOptions {
+                approval_policy: body
+                    .approval_policy
+                    .clone()
+                    .unwrap_or(default_opts.approval_policy),
+                sandbox: body.sandbox.clone().unwrap_or(default_opts.sandbox),
+                ..default_opts
+            };
+            match open_codex_session(&body.prompt, opts) {
+                Ok(s) => {
+                    let (ctrl, evts) = s.into_parts();
+                    (LiveSessionControl::Codex(ctrl), evts)
+                }
+                Err(CodexSessionError::Connect(msg)) => {
+                    return error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "session_connect_failed",
+                        &format!("Failed to connect to codex: {msg}"),
+                    );
+                }
+                Err(e) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "session_error",
+                        &e.to_string(),
+                    );
+                }
+            }
+        }
+        other => {
+            return error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "agent_not_supported",
+                &format!("Live sessions require agent 'claude' or 'codex', got '{other}'"),
+            );
+        }
+    };
+
+    // Register the session in the live registry.
+    {
+        let mut live = state.live_sessions.lock().unwrap();
+        live.insert(
+            session_id.clone(),
+            LiveSessionRecord {
+                session_id: session_id.clone(),
+                agent_key: body.agent.clone(),
+                control,
+                status: LiveSessionStatus::Active,
+                created_at: Utc::now(),
+            },
+        );
+    }
+
+    // Spawn a blocking forwarder: sync mpsc → tokio mpsc → SSE.
+    let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
+    let agent_key = body.agent.clone();
+    let live_ref = Arc::clone(&state.live_sessions);
+    let sid_for_cleanup = session_id.clone();
+    let sid_for_frame = session_id.clone();
+    tokio::task::spawn_blocking(move || {
+        // First frame: announce the session_id.
+        if frame_tx
+            .blocking_send(StreamFrame::Session {
+                session_id: sid_for_frame,
+            })
+            .is_err()
+        {
+            return;
+        }
+        // Forward agent events until the session closes or the client disconnects.
+        while let Ok(event) = events_rx.recv() {
+            if let Some(frame) = agent_event_to_frame(&event, &agent_key) {
+                if frame_tx.blocking_send(frame).is_err() {
+                    break; // client disconnected
+                }
+            }
+        }
+        // Mark session closed in the registry.
+        if let Ok(mut live) = live_ref.lock() {
+            if let Some(r) = live.get_mut(&sid_for_cleanup) {
+                r.status = LiveSessionStatus::Closed;
+            }
+        }
+    });
+
+    // Build the SSE response with the session_id header.
+    let sid_header = session_id.clone();
+    let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
+    let mut frame_rx = frame_rx;
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                maybe = frame_rx.recv() => {
+                    match maybe {
+                        Some(frame) => {
+                            if out_tx.send(Ok(frame_to_sse(&frame))).await.is_err() {
+                                return;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                _ = out_tx.closed() => return,
+            }
+        }
+        let data = serde_json::json!({ "exit_code": 0 }).to_string();
+        let _ = out_tx
+            .send(Ok(Event::default().event("done").data(data)))
+            .await;
+    });
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+    headers.insert("x-accel-buffering", HeaderValue::from_static("no"));
+    if let Ok(val) = HeaderValue::from_str(&sid_header) {
+        headers.insert("x-session-id", val);
+    }
+
+    (headers, Sse::new(ReceiverStream::new(out_rx))).into_response()
+}
+
+/// `POST /api/v1/live-sessions/{session_id}/control` — send a control command.
+async fn live_session_control_handler(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<LiveSessionControlRequest>,
+) -> impl IntoResponse {
+    let live = state.live_sessions.lock().unwrap();
+    let Some(record) = live.get(&session_id) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "Live session not found",
+        );
+    };
+    if record.status == LiveSessionStatus::Closed {
+        return error_response(
+            StatusCode::GONE,
+            "session_closed",
+            "Live session is already closed",
+        );
+    }
+    match body.action.as_str() {
+        "interrupt" => {
+            record.control.interrupt();
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                r#"{"ok":true,"action":"interrupt"}"#,
+            )
+                .into_response()
+        }
+        "disconnect" => {
+            record.control.disconnect();
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                r#"{"ok":true,"action":"disconnect"}"#,
+            )
+                .into_response()
+        }
+        "set_model" => {
+            // Only supported for Claude sessions.
+            match &record.control {
+                LiveSessionControl::Claude(h) => {
+                    let _ = h.set_model(body.model.clone());
+                    (
+                        StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        r#"{"ok":true,"action":"set_model"}"#,
+                    )
+                        .into_response()
+                }
+                LiveSessionControl::Codex(_) => error_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "not_supported",
+                    "set_model is only supported for Claude sessions",
+                ),
+            }
+        }
+        other => error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_action",
+            &format!("Unknown action '{other}'. Supported: interrupt, disconnect, set_model"),
+        ),
+    }
+}
+
+/// `GET /api/v1/live-sessions` — list active live sessions.
+async fn list_live_sessions_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let live = state.live_sessions.lock().unwrap();
+    let sessions: Vec<LiveSessionSummary> = live
+        .values()
+        .filter(|r| r.status != LiveSessionStatus::Closed)
+        .map(|r| LiveSessionSummary {
+            session_id: r.session_id.clone(),
+            agent: r.agent_key.clone(),
+            status: r.status.clone(),
+            created_at: r.created_at,
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&ListLiveSessionsResponse { sessions }).unwrap_or_default(),
+    )
+}
+
+/// `DELETE /api/v1/live-sessions/{session_id}` — disconnect a live session.
+async fn delete_live_session_handler(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+) -> impl IntoResponse {
+    let mut live = state.live_sessions.lock().unwrap();
+    let Some(record) = live.get_mut(&session_id) else {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "Live session not found",
+        );
+    };
+    record.control.disconnect();
+    record.status = LiveSessionStatus::Closed;
+    let resp = DeleteLiveSessionResponse {
+        session_id,
+        status: LiveSessionStatus::Closed,
+    };
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string(&resp).unwrap_or_default(),
+    )
+        .into_response()
+}
+
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/agents", get(agents_handler))
@@ -1372,6 +1769,16 @@ fn build_router(state: AppState) -> Router {
         .route("/sessions", get(list_runs_handler))
         .route("/sessions/{session_id}", get(get_run_handler))
         .route("/sessions/{session_id}", delete(delete_run_handler))
+        .route("/live-sessions", post(create_live_session_handler))
+        .route("/live-sessions", get(list_live_sessions_handler))
+        .route(
+            "/live-sessions/{session_id}/control",
+            post(live_session_control_handler),
+        )
+        .route(
+            "/live-sessions/{session_id}",
+            delete(delete_live_session_handler),
+        )
         .with_state(state)
 }
 
@@ -1744,6 +2151,7 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
 
     let state = AppState {
         runs: Arc::new(Mutex::new(HashMap::new())),
+        live_sessions: Arc::new(Mutex::new(HashMap::new())),
         config: config.clone(),
         run_fn,
         auth_cache: Arc::new(Mutex::new(None)),
