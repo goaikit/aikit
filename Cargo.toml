@@ -4,6 +4,7 @@ members = [
     "aikit-sdk",
     "aikit-py",
     "aikit-agent",
+    "aikit-agent-codex",
     "aikit-evals",
     "aikit-magictool",
     "aikit-textgrad",

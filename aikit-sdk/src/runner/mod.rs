@@ -5,6 +5,8 @@ pub mod backends;
 pub mod capabilities;
 #[cfg(feature = "claude-control")]
 pub mod claude_session;
+#[cfg(feature = "codex-app-server")]
+pub mod codex_session;
 pub mod transport;
 pub mod types;
 pub mod usage;
@@ -23,6 +25,10 @@ pub use capabilities::BackendCapabilities;
 pub use claude_session::{
     open_claude_session, ClaudePermissionMode, ClaudeSession, ClaudeSessionError,
     ClaudeSessionOptions, ControlHandle,
+};
+#[cfg(feature = "codex-app-server")]
+pub use codex_session::{
+    open_codex_session, CodexControlHandle, CodexSession, CodexSessionError, CodexSessionOptions,
 };
 pub use usage::aggregate_token_usage;
 
