@@ -17,6 +17,9 @@ claude-sdk = ["dep:claude-agent-sdk"]
 # Bidirectional Claude sessions (B2): drive `claude-agent-sdk`'s client over a
 # tokio bridge with a Control handle (interrupt / permission mode / model).
 claude-control = ["claude-sdk", "dep:tokio"]
+# Bidirectional Codex sessions: drive `aikit-agent-codex`'s app-server client
+# (JSON-RPC over stdio) over a tokio bridge with a Control handle.
+codex-app-server = ["dep:aikit-agent-codex", "dep:tokio"]
 
 [dependencies]
 tracing = "0.1"
@@ -32,6 +35,7 @@ tempfile = "3.12"
 uuid = { version = "1", features = ["v4"] }
 aikit-agent = { path = "../aikit-agent", version = "0.1.0" }
 claude-agent-sdk = { git = "https://github.com/aroff/claude-agent-sdk-rust", rev = "717eacf", optional = true }
+aikit-agent-codex = { path = "../aikit-agent-codex", version = "0.1.0", optional = true }
 tokio = { version = "1", features = ["rt", "sync", "macros"], optional = true }
 jsonschema = "0.46"
 
