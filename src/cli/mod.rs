@@ -8,6 +8,7 @@ mod mcp;
 mod release;
 mod run;
 pub mod serve;
+pub mod session;
 mod template_package;
 mod version;
 
@@ -299,6 +300,53 @@ pub fn build_app() -> Result<AikitApp> {
             commands::package::execute_publish(args)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))
+        },
+    )?;
+
+    // ── session group ─────────────────────────────────────────────────────────
+    let session_path = CommandPath::new(&["session"])?;
+    builder = builder.register_group(
+        &session_path,
+        GroupMetadata {
+            summary: "Interactive bidirectional agent sessions (multi-turn REPL)",
+            hidden: false,
+        },
+    )?;
+
+    builder = builder.register(
+        path!["session", "new"],
+        |_ctx, args: SessionNewArgs| async move {
+            if args.agent.is_empty() {
+                return Err(anyhow::anyhow!("--agent is required (e.g. --agent claude)"));
+            }
+            if args.prompt.is_empty() {
+                return Err(anyhow::anyhow!("--prompt is required for session new"));
+            }
+            tokio::task::spawn_blocking(move || {
+                session::execute_new(session::NewSessionArgs {
+                    agent: args.agent,
+                    prompt: args.prompt,
+                    model: args.model,
+                    approval_policy: args.approval_policy,
+                    sandbox: args.sandbox,
+                    events: args.events,
+                })
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("task join error: {}", e))?
+        },
+    )?;
+
+    builder = builder.register(
+        path!["session", "list"],
+        |_ctx, args: SessionListArgs| async move {
+            tokio::task::spawn_blocking(move || {
+                session::execute_list(session::ListSessionsArgs {
+                    serve_url: args.serve_url,
+                })
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("task join error: {}", e))?
         },
     )?;
 
@@ -1065,6 +1113,91 @@ impl FromArgValueMap for McpAddArgs {
             env: get_repeated_val(map, "env"),
             header: get_repeated_val(map, "header"),
             overwrite: get_bool_val(map, "overwrite"),
+        }
+    }
+}
+
+// ── session ───────────────────────────────────────────────────────────────────
+
+struct SessionNewArgs {
+    agent: String,
+    prompt: String,
+    model: Option<String>,
+    approval_policy: Option<String>,
+    sandbox: Option<String>,
+    events: bool,
+}
+
+impl IntoCommandSpec for SessionNewArgs {
+    fn command_spec() -> CommandSpec {
+        CommandSpec {
+            summary: "Open a live bidirectional agent session (multi-turn REPL)",
+            syntax: Some("session new --agent <AGENT> --prompt <TEXT>"),
+            category: Some("agents"),
+            args: vec![
+                ArgSpec {
+                    name: "agent",
+                    short: Some('a'),
+                    long: Some("agent"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Agent to connect to: 'claude' or 'codex'",
+                    ..Default::default()
+                },
+                opt_short_spec("prompt", 'p', "Initial prompt to send"),
+                opt_short_spec("model", 'm', "Model identifier (claude only)"),
+                opt_spec(
+                    "approval-policy",
+                    "Codex approval policy: never|on-request|on-failure|untrusted",
+                ),
+                opt_spec("sandbox", "Codex sandbox mode"),
+                flag_spec("events", "Print events as NDJSON instead of human-readable"),
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for SessionNewArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        SessionNewArgs {
+            agent: get_str_default(map, "agent", "claude"),
+            prompt: get_str_default(map, "prompt", ""),
+            model: get_opt_val(map, "model"),
+            approval_policy: get_opt_val(map, "approval-policy"),
+            sandbox: get_opt_val(map, "sandbox"),
+            events: get_bool_val(map, "events"),
+        }
+    }
+}
+
+struct SessionListArgs {
+    serve_url: Option<String>,
+}
+
+impl IntoCommandSpec for SessionListArgs {
+    fn command_spec() -> CommandSpec {
+        CommandSpec {
+            summary: "List active live sessions on a running aikit serve instance",
+            syntax: Some("session list"),
+            category: Some("agents"),
+            args: vec![opt_spec(
+                "serve-url",
+                "URL of aikit serve (default: AIKIT_SERVE_URL or http://127.0.0.1:8080)",
+            )],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for SessionListArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        SessionListArgs {
+            serve_url: get_opt_val(map, "serve-url"),
         }
     }
 }

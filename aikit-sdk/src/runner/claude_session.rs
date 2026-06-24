@@ -18,9 +18,11 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
 
+use std::collections::BTreeMap;
+
 use claude_agent_sdk::{
-    parse_message, CanUseToolCallback, ClaudeAgentOptions, PermissionResult, Query, QueryConfig,
-    SubprocessCLITransport, Transport,
+    parse_message, CanUseToolCallback, ClaudeAgentOptions, McpServers, PermissionResult, Query,
+    QueryConfig, SubprocessCLITransport, Transport,
 };
 
 use crate::runner::backend::Decoded;
@@ -48,6 +50,12 @@ pub struct ClaudeSessionOptions {
     /// Tool-approval callback. When set, the CLI routes permission prompts to
     /// the SDK control protocol and this callback decides each one.
     pub on_tool_permission: Option<PermissionCallback>,
+    /// MCP server map forwarded to `claude --mcp-config`. Keys are server
+    /// names; values are the full server config objects (`McpServerConfig`).
+    pub mcp_servers: BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
+    /// When `true`, passes `--fork-session` to the CLI so the new turn forks
+    /// rather than continues the resumed session.
+    pub fork_session: bool,
 }
 
 impl ClaudeSessionOptions {
@@ -72,6 +80,8 @@ impl std::fmt::Debug for ClaudeSessionOptions {
                 "on_tool_permission",
                 &self.on_tool_permission.as_ref().map(|_| "<callback>"),
             )
+            .field("mcp_servers_count", &self.mcp_servers.len())
+            .field("fork_session", &self.fork_session)
             .finish()
     }
 }
@@ -104,6 +114,8 @@ enum ControlCmd {
     Interrupt,
     SetPermissionMode(ClaudePermissionMode),
     SetModel(Option<String>),
+    /// Send a follow-up user message (multi-turn).
+    SendTurn(String),
     Disconnect,
 }
 
@@ -135,6 +147,11 @@ impl ControlHandle {
     /// Switch the model mid-session (`None` resets to default).
     pub fn set_model(&self, model: Option<String>) -> Result<(), ClaudeSessionError> {
         self.send(ControlCmd::SetModel(model))
+    }
+
+    /// Send a follow-up user message on the same session (multi-turn).
+    pub fn send_turn(&self, text: impl Into<String>) -> Result<(), ClaudeSessionError> {
+        self.send(ControlCmd::SendTurn(text.into()))
     }
 
     /// Disconnect the session.
@@ -247,6 +264,12 @@ fn build_options(options: &ClaudeSessionOptions) -> ClaudeAgentOptions {
             .on_tool_permission
             .as_ref()
             .map(|_| "stdio".to_string()),
+        mcp_servers: if options.mcp_servers.is_empty() {
+            McpServers::None
+        } else {
+            McpServers::Map(options.mcp_servers.clone())
+        },
+        fork_session: options.fork_session,
         ..ClaudeAgentOptions::default()
     }
 }
@@ -388,6 +411,11 @@ async fn run_session(
                     Some(ControlCmd::SetModel(model)) => {
                         let _ = query.set_model(model.as_deref()).await;
                     }
+                    Some(ControlCmd::SendTurn(text)) => {
+                        if let Err(e) = query.write_user_message(&text).await {
+                            emit_error(&event_tx, format!("send_turn error: {e}"));
+                        }
+                    }
                     Some(ControlCmd::Disconnect) | None => break,
                 }
             }
@@ -467,6 +495,7 @@ mod tests {
             resume: Some("sess-1".into()),
             permission_mode: None,
             on_tool_permission: None,
+            ..ClaudeSessionOptions::default()
         });
         assert_eq!(plain.model.as_deref(), Some("claude-x"));
         assert_eq!(plain.resume.as_deref(), Some("sess-1"));
