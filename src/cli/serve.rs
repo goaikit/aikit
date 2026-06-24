@@ -435,6 +435,8 @@ struct AgentInfo {
     /// Whether the backend is authenticated. See [`AuthStatus`]. `available`
     /// backends with no probe mechanism report `unknown`.
     auth: AuthStatus,
+    /// Static capability flags declared by this backend. `null` for unknown keys.
+    capabilities: Option<aikit_sdk::BackendCapabilities>,
 }
 
 #[derive(Serialize)]
@@ -626,6 +628,7 @@ fn build_runnable_agents() -> Vec<AgentInfo> {
                 .map(|c| c.name.clone())
                 .unwrap_or_else(|| key.clone());
             AgentInfo {
+                capabilities: aikit_sdk::runner::Backend::from_key(&key).map(|b| b.capabilities()),
                 key,
                 name,
                 available: true,

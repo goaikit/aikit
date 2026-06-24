@@ -17,7 +17,7 @@
 /// breaking change. Construct via [`BackendCapabilities::NONE`] and the
 /// builder-style `with_*` setters, or the `const fn` constructor used by the
 /// per-Backend tables.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[non_exhaustive]
 pub struct BackendCapabilities {
     /// Has a Control channel (approvals / interrupts / turn lifecycle).

@@ -2,9 +2,9 @@
 //!
 //! Decode delegates to the typed `claude-agent-sdk` parser (`parse_message`)
 //! when the `claude-sdk` feature is enabled (default), emitting structured
-//! tool/thinking frames in addition to text; a hand-rolled text-only decode is
-//! the fallback. Phase B2 will light up the bidirectional control axis via the
-//! SDK client (see spec 006/007).
+//! tool/thinking/server-tool frames. Bidirectional control (interrupts, hooks,
+//! SDK-MCP, fork/resume) is wired via `runner/claude_session.rs` (spec 007
+//! B2/B3, feature `claude-control`).
 
 use std::ffi::OsString;
 
@@ -22,8 +22,10 @@ pub(crate) const KEY: &str = "claude";
 pub(crate) const BINARY_CANDIDATES: &[&str] = &["claude"];
 
 pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
+    .with_bidirectional()
     .with_structured_tools()
     .with_reasoning()
+    .with_interruptible()
     .with_resumable_sessions()
     .with_mcp_routing()
     .with_hooks()
