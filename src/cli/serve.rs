@@ -328,16 +328,28 @@ struct CreateLiveSessionRequest {
     /// Codex sandbox mode: `read-only`, `workspace-write`, `danger-full-access`.
     #[serde(default)]
     sandbox: Option<String>,
+    /// Claude: MCP servers forwarded to `--mcp-config`. Keys = server names.
+    #[serde(default)]
+    mcp_servers: std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
+    /// Claude: fork the resumed session into a new branch.
+    #[serde(default)]
+    fork_session: bool,
+    /// Claude: resume an existing session by id.
+    #[serde(default)]
+    resume: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LiveSessionControlRequest {
-    /// Action to perform: `interrupt`, `set_model`, `disconnect`.
+    /// Action: `interrupt`, `set_model`, `send_turn`, `disconnect`.
     action: String,
     /// Model to switch to; required when `action = "set_model"`.
     #[serde(default)]
     model: Option<String>,
+    /// Prompt for the next turn; required when `action = "send_turn"`.
+    #[serde(default)]
+    text: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1499,6 +1511,9 @@ async fn create_live_session_handler(
         "claude" => {
             let opts = ClaudeSessionOptions {
                 model: body.model.clone(),
+                resume: body.resume.clone(),
+                fork_session: body.fork_session,
+                mcp_servers: body.mcp_servers.clone(),
                 ..ClaudeSessionOptions::default()
             };
             match open_claude_session(&body.prompt, opts) {
@@ -1707,10 +1722,36 @@ async fn live_session_control_handler(
                 ),
             }
         }
+        "send_turn" => {
+            let text = body.text.as_deref().unwrap_or("").trim().to_string();
+            if text.is_empty() {
+                return error_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "invalid_request",
+                    "send_turn requires a non-empty 'text' field",
+                );
+            }
+            match &record.control {
+                LiveSessionControl::Claude(h) => {
+                    let _ = h.send_turn(text);
+                }
+                LiveSessionControl::Codex(h) => {
+                    let _ = h.send_turn(text);
+                }
+            }
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                r#"{"ok":true,"action":"send_turn"}"#,
+            )
+                .into_response()
+        }
         other => error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_action",
-            &format!("Unknown action '{other}'. Supported: interrupt, disconnect, set_model"),
+            &format!(
+                "Unknown action '{other}'. Supported: interrupt, disconnect, set_model, send_turn"
+            ),
         ),
     }
 }
