@@ -35,26 +35,71 @@ pub struct ListSessionsArgs {
 // ── new session ───────────────────────────────────────────────────────────────
 
 pub fn execute_new(args: NewSessionArgs) -> anyhow::Result<()> {
-    match args.agent.as_str() {
-        "claude" => execute_new_claude(args),
-        "codex" => execute_new_codex(args),
-        other => anyhow::bail!(
-            "Unknown agent '{}'. Live sessions support 'claude' or 'codex'.",
-            other
-        ),
-    }
-}
+    use std::sync::Arc;
 
-fn execute_new_claude(args: NewSessionArgs) -> anyhow::Result<()> {
-    let opts = ClaudeSessionOptions {
-        model: args.model.clone(),
-        ..ClaudeSessionOptions::default()
-    };
-    let session = open_claude_session(&args.prompt, opts)
-        .map_err(|e| anyhow::anyhow!("Failed to open claude session: {e}"))?;
-    let (control, events) = session.into_parts();
+    type SendFn = Box<dyn Fn(&str) -> anyhow::Result<()>>;
+    type VoidFn = Box<dyn Fn()>;
+    type Events = std::sync::mpsc::Receiver<aikit_sdk::AgentEvent>;
 
-    // Print events in a background thread while the main thread handles stdin.
+    // Both control handles share the same method names, so we normalise them
+    // to closures and drive the rest of the function identically.
+    let (send_turn_fn, interrupt_fn, disconnect_fn, events): (SendFn, VoidFn, VoidFn, Events) =
+        match args.agent.as_str() {
+            "claude" => {
+                let opts = ClaudeSessionOptions {
+                    model: args.model.clone(),
+                    ..ClaudeSessionOptions::default()
+                };
+                let (ctrl, evts) = open_claude_session(&args.prompt, opts)
+                    .map_err(|e| anyhow::anyhow!("Failed to open claude session: {e}"))?
+                    .into_parts();
+                let ctrl = Arc::new(ctrl);
+                let c1 = Arc::clone(&ctrl);
+                let c2 = Arc::clone(&ctrl);
+                let c3 = Arc::clone(&ctrl);
+                (
+                    Box::new(move |text: &str| {
+                        c1.send_turn(text).map_err(|e| anyhow::anyhow!("{e}"))
+                    }),
+                    Box::new(move || {
+                        let _ = c2.interrupt();
+                    }),
+                    Box::new(move || {
+                        let _ = c3.disconnect();
+                    }),
+                    evts,
+                )
+            }
+            "codex" => {
+                let opts = CodexSessionOptions::default()
+                    .with_approval_policy(args.approval_policy.clone())
+                    .with_sandbox(args.sandbox.clone());
+                let (ctrl, evts) = open_codex_session(&args.prompt, opts)
+                    .map_err(|e| anyhow::anyhow!("Failed to open codex session: {e}"))?
+                    .into_parts();
+                let ctrl = Arc::new(ctrl);
+                let c1 = Arc::clone(&ctrl);
+                let c2 = Arc::clone(&ctrl);
+                let c3 = Arc::clone(&ctrl);
+                (
+                    Box::new(move |text: &str| {
+                        c1.send_turn(text).map_err(|e| anyhow::anyhow!("{e}"))
+                    }),
+                    Box::new(move || {
+                        let _ = c2.interrupt();
+                    }),
+                    Box::new(move || {
+                        let _ = c3.disconnect();
+                    }),
+                    evts,
+                )
+            }
+            other => anyhow::bail!(
+                "Unknown agent '{}'. Live sessions support 'claude' or 'codex'.",
+                other
+            ),
+        };
+
     let events_thread = std::thread::spawn({
         let ndjson = args.events;
         move || {
@@ -64,53 +109,7 @@ fn execute_new_claude(args: NewSessionArgs) -> anyhow::Result<()> {
         }
     });
 
-    run_repl(
-        |text| control.send_turn(text).map_err(|e| anyhow::anyhow!("{e}")),
-        || {
-            let _ = control.interrupt();
-        },
-        || {
-            let _ = control.disconnect();
-        },
-    )?;
-
-    let _ = events_thread.join();
-    Ok(())
-}
-
-fn execute_new_codex(args: NewSessionArgs) -> anyhow::Result<()> {
-    let default_opts = CodexSessionOptions::default();
-    let opts = CodexSessionOptions {
-        approval_policy: args
-            .approval_policy
-            .clone()
-            .unwrap_or(default_opts.approval_policy),
-        sandbox: args.sandbox.clone().unwrap_or(default_opts.sandbox),
-        ..default_opts
-    };
-    let session = open_codex_session(&args.prompt, opts)
-        .map_err(|e| anyhow::anyhow!("Failed to open codex session: {e}"))?;
-    let (control, events) = session.into_parts();
-
-    let events_thread = std::thread::spawn({
-        let ndjson = args.events;
-        move || {
-            while let Ok(event) = events.recv() {
-                print_event(&event, ndjson);
-            }
-        }
-    });
-
-    run_repl(
-        |text| control.send_turn(text).map_err(|e| anyhow::anyhow!("{e}")),
-        || {
-            let _ = control.interrupt();
-        },
-        || {
-            let _ = control.disconnect();
-        },
-    )?;
-
+    run_repl(&send_turn_fn, &interrupt_fn, &disconnect_fn)?;
     let _ = events_thread.join();
     Ok(())
 }
@@ -118,9 +117,9 @@ fn execute_new_codex(args: NewSessionArgs) -> anyhow::Result<()> {
 /// Drive a multi-turn REPL loop.  Reads lines from stdin; `/interrupt` sends
 /// an interrupt; an empty EOF or `/quit` ends the session.
 fn run_repl(
-    send_turn: impl Fn(&str) -> anyhow::Result<()>,
-    interrupt: impl Fn(),
-    disconnect: impl Fn(),
+    send_turn: &dyn Fn(&str) -> anyhow::Result<()>,
+    interrupt: &dyn Fn(),
+    disconnect: &dyn Fn(),
 ) -> anyhow::Result<()> {
     let stdin = io::stdin();
     loop {

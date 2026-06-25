@@ -67,6 +67,22 @@ impl CodexSessionOptions {
         self.on_tool_permission = Some(Arc::new(callback));
         self
     }
+
+    /// Override the approval policy; `None` keeps the default (`"never"`).
+    pub fn with_approval_policy(mut self, policy: Option<String>) -> Self {
+        if let Some(p) = policy {
+            self.approval_policy = p;
+        }
+        self
+    }
+
+    /// Override the sandbox mode; `None` keeps the default (`"workspace-write"`).
+    pub fn with_sandbox(mut self, sandbox: Option<String>) -> Self {
+        if let Some(s) = sandbox {
+            self.sandbox = s;
+        }
+        self
+    }
 }
 
 impl std::fmt::Debug for CodexSessionOptions {
