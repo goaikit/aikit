@@ -320,6 +320,11 @@ pub(super) fn agent_event_to_frame(
                     content: msg.text.clone(),
                 })
             }
+            // CLI backends (codex, opencode) emit tool invocations as (Tool, Message).
+            (MessageRole::Tool, MessageKind::Message, _) => Some(StreamFrame::ToolUse {
+                name: msg.text.clone(),
+                input: serde_json::Value::Null,
+            }),
             (MessageRole::Tool, MessageKind::ToolOutput, _) => Some(StreamFrame::ToolResult {
                 name: agent_key.to_string(),
                 output: msg.text.clone(),
@@ -885,6 +890,50 @@ mod tests {
                 assert_eq!(name, "call-1");
                 assert_eq!(output, "boom");
                 assert!(is_error);
+            }
+            other => panic!("expected ToolResult frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_tool_message_becomes_tool_use() {
+        // codex emits (Tool, Message) for command text — should become ToolUse
+        let ev = event(AgentEventPayload::StreamMessage(StreamMessage {
+            text: "ls -la".to_string(),
+            phase: MessagePhase::Delta,
+            role: MessageRole::Tool,
+            kind: aikit_sdk::MessageKind::Message,
+            source: AgentEventStream::Stdout,
+            raw_line_seq: 0,
+            turn_id: None,
+        }));
+        match agent_event_to_frame(&ev, "codex") {
+            Some(StreamFrame::ToolUse { name, input }) => {
+                assert_eq!(name, "ls -la");
+                assert_eq!(input, serde_json::Value::Null);
+            }
+            other => panic!("expected ToolUse frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_tool_output_becomes_tool_result() {
+        // codex/opencode emit (Tool, ToolOutput) for command output — should become ToolResult
+        let ev = event(AgentEventPayload::StreamMessage(StreamMessage {
+            text: "Cargo.toml\nsrc/".to_string(),
+            phase: MessagePhase::Delta,
+            role: MessageRole::Tool,
+            kind: aikit_sdk::MessageKind::ToolOutput,
+            source: AgentEventStream::Stdout,
+            raw_line_seq: 0,
+            turn_id: None,
+        }));
+        match agent_event_to_frame(&ev, "codex") {
+            Some(StreamFrame::ToolResult {
+                output, is_error, ..
+            }) => {
+                assert_eq!(output, "Cargo.toml\nsrc/");
+                assert!(!is_error);
             }
             other => panic!("expected ToolResult frame, got {other:?}"),
         }

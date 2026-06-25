@@ -202,8 +202,9 @@ async fn test_api_root_redirect() {
 
 #[tokio::test]
 async fn test_new_then_resume_then_new_flow() {
-    // The stub mints "stub-session-1" the first time options.session_id is
-    // None; on resume it echoes whatever id the client supplied.
+    // The stub back-end mints a fixed "stub-session-1" backend token, but the
+    // *server* now mints its own stable UUID as the map key. Clients must use
+    // the server-emitted session_id, not the backend token.
     let run_fn = make_stub_run_fn_with_session(
         vec![StreamFrame::Text {
             content: "hello".to_string(),
@@ -214,7 +215,7 @@ async fn test_new_then_resume_then_new_flow() {
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}", port);
 
-    // ── 1. First turn: no session_id → server mints + returns it ──
+    // ── 1. First turn: no session_id → server mints + returns a UUID ──
     let resp = client
         .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({"agent": "aikit", "content": "hi"}))
@@ -232,7 +233,7 @@ async fn test_new_then_resume_then_new_flow() {
     let text = resp.text().await.unwrap();
 
     let sid1 = parse_session_id(&text).expect("first turn must emit an event: session frame");
-    assert_eq!(sid1, "stub-session-1");
+    assert!(!sid1.is_empty(), "server must mint a non-empty session_id");
     assert!(
         text.contains("event: text"),
         "stream must contain the stub text frame; got:\n{}",
@@ -244,7 +245,7 @@ async fn test_new_then_resume_then_new_flow() {
         text
     );
 
-    // The session should now be listable under its id.
+    // The session should now be listable under its server-minted id.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let resp = client
         .get(format!("{}/api/v1/sessions/{}", base, sid1))
@@ -257,7 +258,7 @@ async fn test_new_then_resume_then_new_flow() {
     assert_eq!(body["agent"], "aikit");
     assert_eq!(body["status"], "idle");
 
-    // ── 2. Second turn: same session_id → stub echoes that id back ──
+    // ── 2. Second turn: same session_id → server returns the same UUID ──
     let resp = client
         .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({
@@ -270,13 +271,10 @@ async fn test_new_then_resume_then_new_flow() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let text = resp.text().await.unwrap();
-    let sid2 = parse_session_id(&text).expect("resume must echo session id");
-    assert_eq!(sid2, sid1, "resume must reuse the supplied session_id");
+    let sid2 = parse_session_id(&text).expect("resume must emit a session frame");
+    assert_eq!(sid2, sid1, "resume must return the same server session_id");
 
-    // ── 3. Third turn: no session_id again → mint a fresh one ──
-    // (Our stub uses a fixed mint id; swap in a different one mid-test by
-    // restarting the server is overkill. The contract we check here is that
-    // omitting session_id triggers a fresh `session` frame.)
+    // ── 3. Third turn: no session_id again → a fresh, different UUID ──
     let resp = client
         .post(format!("{}/api/v1/messages", base))
         .json(&serde_json::json!({"agent": "aikit", "content": "new topic"}))
@@ -286,7 +284,11 @@ async fn test_new_then_resume_then_new_flow() {
     assert_eq!(resp.status(), 200);
     let text = resp.text().await.unwrap();
     let sid3 = parse_session_id(&text).expect("third turn must emit a session frame");
-    assert_eq!(sid3, "stub-session-1");
+    assert!(!sid3.is_empty(), "server must mint a non-empty session_id");
+    assert_ne!(
+        sid3, sid1,
+        "new conversation must have a different session_id"
+    );
 }
 
 #[tokio::test]
@@ -329,7 +331,10 @@ async fn test_accept_application_json_returns_sync() {
     );
 
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["session_id"], "sync-session-1");
+    let sid = body["session_id"]
+        .as_str()
+        .expect("session_id must be present");
+    assert!(!sid.is_empty(), "server must emit a session_id");
     assert_eq!(body["content"], "Hello, world!");
     assert_eq!(body["exit_code"], 0);
     assert!(
@@ -363,14 +368,19 @@ async fn test_accept_application_json_resume() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["session_id"], "sync-resume-test");
+    let sid = body["session_id"]
+        .as_str()
+        .expect("session_id must be present")
+        .to_string();
+    assert!(!sid.is_empty(), "server must emit a session_id");
 
+    // Resume uses the server-minted UUID, not the stub's backend token.
     let resp = client
         .post(format!("{}/api/v1/messages", base))
         .header("Accept", "application/json")
         .json(&serde_json::json!({
             "agent": "aikit",
-            "session_id": "sync-resume-test",
+            "session_id": sid,
             "content": "again",
         }))
         .send()
@@ -378,7 +388,10 @@ async fn test_accept_application_json_resume() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["session_id"], "sync-resume-test");
+    assert_eq!(
+        body["session_id"], sid,
+        "resume must return the same server session_id"
+    );
     assert_eq!(body["content"], "ok");
 }
 
@@ -592,7 +605,8 @@ async fn test_list_sessions_includes_completed_run() {
         .send()
         .await
         .unwrap();
-    let _ = resp.text().await.unwrap();
+    let text = resp.text().await.unwrap();
+    let sid = parse_session_id(&text).expect("must emit a session frame");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -606,7 +620,7 @@ async fn test_list_sessions_includes_completed_run() {
     let list = body["sessions"].as_array().unwrap();
     assert!(
         list.iter()
-            .any(|s| s["session_id"] == "stub-list-test" && s["agent"] == "aikit"),
+            .any(|s| s["session_id"] == sid && s["agent"] == "aikit"),
         "list must include the just-completed session; got: {:?}",
         list
     );
@@ -628,12 +642,14 @@ async fn test_delete_session() {
         .send()
         .await
         .unwrap();
-    let _ = resp.text().await.unwrap();
+    let text = resp.text().await.unwrap();
+    // Capture the server-minted session_id — needed for DELETE and GET.
+    let sid = parse_session_id(&text).expect("must emit a session frame");
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let resp = client
-        .delete(format!("{}/api/v1/sessions/stub-delete-test", base))
+        .delete(format!("{}/api/v1/sessions/{}", base, sid))
         .send()
         .await
         .unwrap();
@@ -643,7 +659,7 @@ async fn test_delete_session() {
 
     // Subsequent GET is 404.
     let resp = client
-        .get(format!("{}/api/v1/sessions/stub-delete-test", base))
+        .get(format!("{}/api/v1/sessions/{}", base, sid))
         .send()
         .await
         .unwrap();
