@@ -36,9 +36,13 @@ pub(super) enum RunStatus {
 
 #[derive(Clone)]
 pub(super) struct RunRecord {
-    pub session_id: Option<String>,
+    /// Session token the underlying CLI backend recognises for `--resume`.
+    /// May differ from the server-minted map key.  `None` while the first
+    /// turn is in flight and the backend hasn't yet returned a session id.
+    pub backend_session_id: Option<String>,
     pub agent: String,
     pub status: RunStatus,
+    /// When the session was first opened (not updated on resume turns).
     pub started_at: DateTime<Utc>,
     pub last_active_at: DateTime<Utc>,
     pub abort_handle: Option<tokio::task::AbortHandle>,
@@ -294,7 +298,7 @@ fn resolve_response_mode(headers: &axum::http::HeaderMap) -> ResponseMode {
 
 #[derive(Serialize)]
 struct RunSummary {
-    session_id: Option<String>,
+    session_id: String,
     agent: String,
     status: RunStatus,
     started_at: DateTime<Utc>,
@@ -360,11 +364,10 @@ pub(super) fn validate_request(body: &SendMessageRequest, state: &AppState) -> O
         ));
     }
     if let Some(ref sid) = body.session_id {
-        let in_memory = {
-            let runs = state.runs.lock().unwrap();
-            runs.values().any(|r| r.session_id.as_deref() == Some(sid))
-        };
+        let in_memory = state.runs.lock().unwrap().contains_key(sid.as_str());
         if !in_memory {
+            // For the aikit backend, fall back to the persistent SessionStore so
+            // cross-restart resume works when the client holds the aikit session id.
             if body.agent == "aikit" {
                 let store = SessionStore::open();
                 match store.load(sid) {
@@ -445,28 +448,55 @@ fn run_error_to_frame(err: RunError) -> (StreamFrame, i32) {
 
 // ── spawn_run ─────────────────────────────────────────────────────────────────
 
+/// B3/B5: `runs` is keyed by a stable server-minted `session_id` so that
+/// multi-turn conversations occupy exactly one record.  Resume turns upsert
+/// into the existing record rather than inserting a sibling.
+///
+/// The returned `String` is the `server_session_id` — the key clients use for
+/// subsequent turns and for `GET/DELETE /api/v1/sessions/{id}`.
 #[allow(clippy::result_large_err)]
 pub(super) fn spawn_run(
     state: &AppState,
     body: &SendMessageRequest,
 ) -> Result<(tokio::sync::mpsc::Receiver<StreamFrame>, String), Response> {
-    let request_id = Uuid::new_v4().to_string();
     let now = Utc::now();
+
+    // Stable server-assigned session id.  For new sessions we mint a UUID; for
+    // resume turns the client supplies the id it received from the prior turn.
+    let server_session_id = body
+        .session_id
+        .clone()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    // The backend resume token (may differ from server_session_id for external
+    // CLIs whose own session id is returned in the stream).
+    let backend_session_id_for_run: Option<String>;
+
     {
         let mut runs = state.runs.lock().unwrap();
-        // B9: atomic busy-check + capacity-check + insert under one lock.
-        if let Some(ref sid) = body.session_id {
-            let busy = runs.values().any(|r| {
-                r.session_id.as_deref() == Some(sid.as_str()) && r.status == RunStatus::Running
-            });
-            if busy {
+
+        // B9 (atomic busy + capacity + upsert under one lock).
+        if let Some(r) = runs.get(&server_session_id) {
+            if r.status == RunStatus::Running {
                 return Err(error_response(
                     StatusCode::CONFLICT,
                     "session_busy",
                     "Session is currently processing a message",
                 ));
             }
+            // For an in-memory resume turn use the recorded backend token.
+            // If the backend never returned one, fall back to the server id
+            // (works for aikit whose session_id == backend session_id).
+            backend_session_id_for_run = r
+                .backend_session_id
+                .clone()
+                .or_else(|| body.session_id.clone());
+        } else {
+            // New session or cross-restart aikit resume: treat the client-
+            // provided id as the backend token (it IS the aikit session_id).
+            backend_session_id_for_run = body.session_id.clone();
         }
+
         let active = runs
             .values()
             .filter(|r| r.status == RunStatus::Running)
@@ -481,10 +511,14 @@ pub(super) fn spawn_run(
                 ),
             ));
         }
-        runs.insert(
-            request_id.clone(),
-            RunRecord {
-                session_id: body.session_id.clone(),
+
+        // Upsert: update an existing record in place or insert a fresh one.
+        // `started_at` is preserved on resume turns so it reflects when the
+        // session was first opened.
+        let record = runs
+            .entry(server_session_id.clone())
+            .or_insert_with(|| RunRecord {
+                backend_session_id: backend_session_id_for_run.clone(),
                 agent: body.agent.clone(),
                 status: RunStatus::Running,
                 started_at: now,
@@ -492,11 +526,14 @@ pub(super) fn spawn_run(
                 abort_handle: None,
                 stderr_tail: String::new(),
                 last_exit_code: None,
-            },
-        );
+            });
+        record.status = RunStatus::Running;
+        record.last_active_at = now;
+        record.abort_handle = None;
+        record.stderr_tail = String::new();
+        record.last_exit_code = None;
     }
 
-    let session_id_in = body.session_id.clone();
     let content = body.content.clone();
     let model = body.model.clone();
     let yolo = body.yolo;
@@ -505,38 +542,52 @@ pub(super) fn spawn_run(
     let run_fn = state.run_fn.clone();
     let runs_ref = Arc::clone(&state.runs);
 
-    // B11: relay channel so `Session` frames update the record before the run
-    // completes, enabling concurrent requests to find the session_id early.
     let (inner_tx, mut inner_rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
     let (outer_tx, rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
+
+    // B5: emit the server-minted session id as the very first frame so clients
+    // have a stable, resolvable id before any backend frames arrive.
+    let _ = outer_tx.try_send(StreamFrame::Session {
+        session_id: server_session_id.clone(),
+    });
+
+    // B11: relay so back-end `Session` frames (backend token) update the record
+    // without racing with the initial synthetic frame above.
     let relay_runs = Arc::clone(&runs_ref);
-    let relay_request_id = request_id.clone();
+    let relay_sid = server_session_id.clone();
     let relay_outer_tx = outer_tx.clone();
     tokio::spawn(async move {
         while let Some(frame) = inner_rx.recv().await {
+            // When the backend emits its own session id, store it as the resume
+            // token but do NOT forward another Session frame (we already sent one).
             if let StreamFrame::Session { ref session_id } = frame {
                 let mut runs = relay_runs.lock().unwrap();
-                if let Some(r) = runs.get_mut(&relay_request_id) {
-                    if r.session_id.is_none() {
-                        r.session_id = Some(session_id.clone());
+                if let Some(r) = runs.get_mut(&relay_sid) {
+                    if r.backend_session_id.is_none() {
+                        r.backend_session_id = Some(session_id.clone());
                     }
                 }
+                // Suppress the duplicate Session frame from the backend.
+                continue;
             }
             if relay_outer_tx.send(frame).await.is_err() {
                 break;
             }
         }
     });
+
     let tx = outer_tx;
-    let request_id_clone = request_id.clone();
+    let sid_clone = server_session_id.clone();
 
     let task = tokio::task::spawn(async move {
         let mut options = RunOptions::new()
             .with_yolo(yolo)
             .with_stream(true)
             .with_timeout(timeout);
-        if let Some(ref sid) = session_id_in {
-            options = options.with_session_id(sid);
+        // Pass the backend resume token (not the server id) so external CLIs
+        // receive the id they originally issued (e.g. claude --resume <token>).
+        if let Some(ref backend_sid) = backend_session_id_for_run {
+            options = options.with_session_id(backend_sid);
         }
         if let Some(m) = model {
             options = options.with_model(m);
@@ -546,7 +597,7 @@ pub(super) fn spawn_run(
         let blocking_handle =
             tokio::task::spawn_blocking(move || run_fn(agent, content, options, tx_inner));
 
-        // B12: server-level wall-clock timeout so the blocking path is bounded.
+        // B12: server-level wall-clock timeout.
         let outcome: Result<RunFnOutcome, RunError> = tokio::select! {
             timed_out = tokio::time::timeout(timeout, blocking_handle) => {
                 match timed_out {
@@ -556,7 +607,7 @@ pub(super) fn spawn_run(
                             message: "Run exceeded timeout".to_string(),
                         }).await;
                         let mut runs = runs_ref.lock().unwrap();
-                        if let Some(r) = runs.get_mut(&request_id_clone) {
+                        if let Some(r) = runs.get_mut(&sid_clone) {
                             r.status = RunStatus::Idle;
                             r.last_active_at = Utc::now();
                             r.abort_handle = None;
@@ -572,7 +623,7 @@ pub(super) fn spawn_run(
                                 tracing::error!("spawn_blocking join error: {}", join_err);
                             }
                             let mut runs = runs_ref.lock().unwrap();
-                            if let Some(r) = runs.get_mut(&request_id_clone) {
+                            if let Some(r) = runs.get_mut(&sid_clone) {
                                 r.status = RunStatus::Idle;
                                 r.last_active_at = Utc::now();
                                 r.abort_handle = None;
@@ -584,7 +635,7 @@ pub(super) fn spawn_run(
             }
             _ = tx.closed() => {
                 let mut runs = runs_ref.lock().unwrap();
-                if let Some(r) = runs.get_mut(&request_id_clone) {
+                if let Some(r) = runs.get_mut(&sid_clone) {
                     r.status = RunStatus::Idle;
                     r.last_active_at = Utc::now();
                     r.abort_handle = None;
@@ -597,15 +648,14 @@ pub(super) fn spawn_run(
             Ok(out) => {
                 {
                     let mut runs = runs_ref.lock().unwrap();
-                    if let Some(r) = runs.get_mut(&request_id_clone) {
-                        if r.session_id.is_none() {
-                            r.session_id = out.session_id.clone();
+                    if let Some(r) = runs.get_mut(&sid_clone) {
+                        if r.backend_session_id.is_none() {
+                            r.backend_session_id = out.session_id.clone();
                         }
                         r.stderr_tail = out.stderr_tail.clone();
                         r.last_exit_code = Some(out.exit_code);
                     }
                 }
-                // E2: emit an error frame for non-zero exits with captured stderr.
                 if out.exit_code != 0 && !out.stderr_tail.is_empty() {
                     let code = classify_error_code(&out.stderr_tail).to_string();
                     let _ = tx
@@ -626,7 +676,7 @@ pub(super) fn spawn_run(
 
         {
             let mut runs = runs_ref.lock().unwrap();
-            if let Some(r) = runs.get_mut(&request_id_clone) {
+            if let Some(r) = runs.get_mut(&sid_clone) {
                 r.status = RunStatus::Idle;
                 r.last_active_at = Utc::now();
                 r.abort_handle = None;
@@ -644,12 +694,12 @@ pub(super) fn spawn_run(
 
     {
         let mut runs = state.runs.lock().unwrap();
-        if let Some(r) = runs.get_mut(&request_id) {
+        if let Some(r) = runs.get_mut(&server_session_id) {
             r.abort_handle = Some(task.abort_handle());
         }
     }
     drop(task);
-    Ok((rx, request_id))
+    Ok((rx, server_session_id))
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
@@ -670,7 +720,7 @@ pub(super) async fn messages_handler(
     if let Some(err) = validate_request(&body, &state) {
         return err;
     }
-    let (rx, request_id) = match spawn_run(&state, &body) {
+    let (rx, server_session_id) = match spawn_run(&state, &body) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -678,18 +728,18 @@ pub(super) async fn messages_handler(
         ResponseMode::Sse => {
             let stream = spawn_frame_forwarder(rx, {
                 let runs = Arc::clone(&state.runs);
-                let request_id = request_id.clone();
+                let server_session_id = server_session_id.clone();
                 move |saw_error| {
                     runs.lock()
                         .unwrap()
-                        .get(&request_id)
+                        .get(&server_session_id)
                         .and_then(|r| r.last_exit_code)
                         .unwrap_or(if saw_error { 1 } else { 0 })
                 }
             });
             sse_response_with_headers(stream, None)
         }
-        ResponseMode::Sync => sync_response(rx, Arc::clone(&state.runs), request_id).await,
+        ResponseMode::Sync => sync_response(rx, Arc::clone(&state.runs), server_session_id).await,
         ResponseMode::NotAcceptable => unreachable!(),
     }
 }
@@ -698,7 +748,7 @@ pub(super) async fn messages_handler(
 async fn sync_response(
     mut rx: tokio::sync::mpsc::Receiver<StreamFrame>,
     runs: Arc<Mutex<HashMap<String, RunRecord>>>,
-    request_id: String,
+    server_session_id: String,
 ) -> Response {
     let mut session_id: Option<String> = None;
     let mut content = String::new();
@@ -752,10 +802,7 @@ async fn sync_response(
 
     let (record_stderr, record_exit) = {
         let guard = runs.lock().unwrap();
-        if let Some(r) = guard.get(&request_id) {
-            if session_id.is_none() {
-                session_id.clone_from(&r.session_id);
-            }
+        if let Some(r) = guard.get(&server_session_id) {
             (r.stderr_tail.clone(), r.last_exit_code)
         } else {
             (String::new(), None)
@@ -803,10 +850,10 @@ async fn sync_response(
 pub(super) async fn list_runs_handler(State(state): State<AppState>) -> impl IntoResponse {
     let runs = state.runs.lock().unwrap();
     let sessions: Vec<RunSummary> = runs
-        .values()
-        .filter(|r| r.status != RunStatus::Closed)
-        .map(|r| RunSummary {
-            session_id: r.session_id.clone(),
+        .iter()
+        .filter(|(_, r)| r.status != RunStatus::Closed)
+        .map(|(sid, r)| RunSummary {
+            session_id: sid.clone(),
             agent: r.agent.clone(),
             status: r.status.clone(),
             started_at: r.started_at,
@@ -825,13 +872,13 @@ pub(super) async fn get_run_handler(
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
     let runs = state.runs.lock().unwrap();
-    let found = runs
-        .values()
-        .find(|r| r.session_id.as_deref() == Some(&session_id) && r.status != RunStatus::Closed);
-    match found {
+    match runs
+        .get(&session_id)
+        .filter(|r| r.status != RunStatus::Closed)
+    {
         Some(r) => {
             let resp = RunSummary {
-                session_id: r.session_id.clone(),
+                session_id: session_id.clone(),
                 agent: r.agent.clone(),
                 status: r.status.clone(),
                 started_at: r.started_at,
@@ -856,35 +903,27 @@ pub(super) async fn delete_run_handler(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    let abort_handles: Vec<tokio::task::AbortHandle> = {
+    let abort_handle: Option<tokio::task::AbortHandle> = {
         let mut runs = state.runs.lock().unwrap();
-        let matching_keys: Vec<String> = runs
-            .iter()
-            .filter_map(|(k, r)| {
-                if r.session_id.as_deref() == Some(&session_id) && r.status != RunStatus::Closed {
-                    Some(k.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-        if matching_keys.is_empty() {
-            return error_response(
-                StatusCode::NOT_FOUND,
-                "session_not_found",
-                "Session not found",
-            );
-        }
-        matching_keys
-            .into_iter()
-            .filter_map(|k| {
-                let r = runs.get_mut(&k).unwrap();
+        match runs.get_mut(&session_id) {
+            None
+            | Some(RunRecord {
+                status: RunStatus::Closed,
+                ..
+            }) => {
+                return error_response(
+                    StatusCode::NOT_FOUND,
+                    "session_not_found",
+                    "Session not found",
+                );
+            }
+            Some(r) => {
                 r.status = RunStatus::Closed;
                 r.abort_handle.take()
-            })
-            .collect()
+            }
+        }
     };
-    for handle in abort_handles {
+    if let Some(handle) = abort_handle {
         handle.abort();
     }
     let resp = DeleteSessionResponse {
