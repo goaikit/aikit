@@ -345,7 +345,7 @@ pub(super) fn validate_request(body: &SendMessageRequest, state: &AppState) -> O
             "agent field is required",
         ));
     }
-    if body.content.is_empty() {
+    if body.content.trim().is_empty() {
         return Some(error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_request",
@@ -1044,6 +1044,41 @@ mod tests {
                 classify_error_code(s),
                 "unauthenticated",
                 "expected auth classification for: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn whitespace_only_content_is_rejected() {
+        use crate::cli::serve::ServeConfig;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let state = AppState {
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            live_sessions: Arc::new(Mutex::new(HashMap::new())),
+            config: ServeConfig {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                run_timeout_secs: 30,
+                max_sessions: 10,
+                api_key: None,
+            },
+            run_fn: make_stub_run_fn(),
+            auth_cache: Arc::new(Mutex::new(None)),
+        };
+
+        for ws in ["   ", "\t", "\n", " \t\n "] {
+            let body = SendMessageRequest {
+                agent: "aikit".into(),
+                session_id: None,
+                content: ws.into(),
+                model: None,
+                yolo: false,
+            };
+            assert!(
+                validate_request(&body, &state).is_some(),
+                "expected rejection for content={ws:?}"
             );
         }
     }
