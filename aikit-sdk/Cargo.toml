@@ -29,7 +29,7 @@ toml = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dirs = "6.0"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-tls"] }
 zip = "2.3"
 tempfile = "3.12"
 uuid = { version = "1", features = ["v4"] }
