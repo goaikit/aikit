@@ -1,4 +1,7 @@
-//! OpenCode backend: `opencode run --format json` over a subprocess.
+//! OpenCode backend: `opencode run --format json -` over a subprocess.
+//!
+//! The prompt is written to stdin; `-` tells `opencode run` to read the message
+//! from stdin (same pattern as `codex exec --json -- -`).
 
 use std::ffi::OsString;
 
@@ -155,5 +158,6 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
         argv.extend_from_slice(&[OsString::from("--format"), OsString::from("json")]);
     }
     SPEC.push_session_flag(&mut argv, ctx.session_id);
+    argv.push(OsString::from("-"));
     argv
 }
