@@ -305,9 +305,16 @@ mod tests {
         assert!(argv.contains(&OsString::from("opencode")));
         assert!(argv.contains(&OsString::from("run")));
         assert!(!argv.contains(&OsString::from("test prompt")));
+        assert!(argv.contains(&OsString::from("-")));
         assert!(argv.contains(&OsString::from("-m")));
         assert!(argv.contains(&OsString::from("zai-coding-plan/glm-4.7")));
         assert!(argv.contains(&OsString::from("--dangerously-skip-permissions")));
+        let run_pos = argv.iter().position(|a| a == "run").unwrap();
+        let dash_pos = argv.iter().position(|a| a == "-").unwrap();
+        assert!(
+            run_pos < dash_pos,
+            "stdin marker must follow run subcommand"
+        );
     }
 
     #[test]
@@ -336,6 +343,7 @@ mod tests {
         assert!(argv.contains(&OsString::from("opencode")));
         assert!(argv.contains(&OsString::from("run")));
         assert!(!argv.contains(&OsString::from("test prompt")));
+        assert_eq!(*argv.last().unwrap(), OsString::from("-"));
         assert!(argv.contains(&OsString::from("--format")));
         assert!(argv.contains(&OsString::from("json")));
         assert!(!argv.contains(&OsString::from("--json")));
