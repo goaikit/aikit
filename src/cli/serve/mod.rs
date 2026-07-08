@@ -15,6 +15,11 @@
 mod live_session;
 mod run_session;
 
+#[cfg(feature = "agent-adapters")]
+mod capture;
+#[cfg(feature = "agent-adapters")]
+pub(crate) mod storage;
+
 use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -608,6 +613,75 @@ pub fn make_production_run_fn() -> RunFn {
 
 // ── router + entry point ──────────────────────────────────────────────────────
 
+/// Build the default capture registry + storage for `aikit serve`, and
+/// optionally spawn a background WatchDriver (spec 010 §14.5). The SQLite
+/// DB lives under `~/.local/share/aikit/capture.db`.
+#[cfg(feature = "agent-adapters")]
+pub(crate) fn capture_db_path() -> std::path::PathBuf {
+    dirs::data_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("aikit")
+        .join("capture.db")
+}
+
+#[cfg(feature = "agent-adapters")]
+fn build_capture_state() -> anyhow::Result<capture::CaptureState> {
+    use aikit_session_capture::Registry;
+
+    let mut reg = Registry::new();
+    #[cfg(feature = "claudecode")]
+    reg.register(Box::new(
+        aikit_session_capture::claudecode::ClaudeCodeAdapter::new(),
+    ));
+    #[cfg(feature = "codex")]
+    reg.register(Box::new(aikit_session_capture::codex::CodexAdapter::new()));
+    #[cfg(feature = "opencode")]
+    reg.register(Box::new(
+        aikit_session_capture::opencode::OpenCodeAdapter::new(),
+    ));
+
+    let db_path = capture_db_path();
+    let conn = storage::schema::open(&db_path)?;
+    let event_store: std::sync::Arc<dyn aikit_session_capture::EventStore> =
+        std::sync::Arc::new(storage::SqliteEventStore::new(conn.clone()));
+    let cursor_store: std::sync::Arc<dyn aikit_session_capture::CursorStore> =
+        std::sync::Arc::new(storage::SqliteCursorStore::new(conn));
+
+    let state = capture::CaptureState::new(reg, event_store, cursor_store);
+
+    // Spawn the background WatchDriver if the `watcher` feature is enabled.
+    // The driver drains into the same parse_and_store_file pipeline the
+    // manual POST /capture/scan route uses (spec §14.3 invariant).
+    #[cfg(feature = "watcher")]
+    {
+        let state_ref = std::sync::Arc::new(state.clone());
+        // Build a NotifyWatchDriver over every detected adapter's watch paths.
+        let adapters: Vec<&dyn aikit_session_capture::Adapter> = state_ref.registry.all();
+        match aikit_session_capture::watch::NotifyWatchDriver::new(
+            adapters,
+            std::time::Duration::from_millis(250),
+        ) {
+            Ok(driver) => {
+                state_ref.spawn_watcher(Box::new(driver));
+                tracing::info!(
+                    target: "aikit::serve::capture",
+                    "watch driver started (250ms debounce)"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "aikit::serve::capture",
+                    error = %e,
+                    "watch driver failed to start; falling back to manual scans only"
+                );
+            }
+        }
+    }
+
+    Ok(state)
+}
+
 fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/agents", get(run_session::agents_handler))
@@ -686,6 +760,12 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
             reg
         }),
     ));
+
+    #[cfg(feature = "agent-adapters")]
+    let domain_router = {
+        let capture_state = build_capture_state()?;
+        domain_router.merge(capture::build_router(capture_state))
+    };
 
     let mut builder = ApiServerBuilder::new()
         .version(ApiVersion {

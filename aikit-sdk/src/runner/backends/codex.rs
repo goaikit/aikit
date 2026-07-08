@@ -18,6 +18,19 @@ pub(crate) const KEY: &str = "codex";
 
 pub(crate) const BINARY_CANDIDATES: &[&str] = &["codex"];
 
+// `passive_capture` flips on only when both `agent-adapters` and the
+// `codex` adapter feature are enabled. Spec 010 §17.2.
+#[cfg(all(feature = "agent-adapters", feature = "codex"))]
+pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
+    .with_bidirectional()
+    .with_structured_tools()
+    .with_reasoning()
+    .with_file_changes()
+    .with_interruptible()
+    .with_resumable_sessions()
+    .with_passive_capture();
+
+#[cfg(not(all(feature = "agent-adapters", feature = "codex")))]
 pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_bidirectional()
     .with_structured_tools()

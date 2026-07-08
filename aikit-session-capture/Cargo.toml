@@ -1,0 +1,46 @@
+[package]
+name = "aikit-session-capture"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Session capture for AI coding tools (Claude Code, Codex, OpenCode) — normalized event parsing of on-disk session data with offset cursors, secret scrubbing, and SQLite/JSONL support. Spec 010."
+repository = "https://github.com/goaikit/aikit"
+keywords = ["ai", "agents", "capture", "observability", "sessions"]
+categories = ["development-tools"]
+
+[features]
+default = ["claudecode", "codex", "opencode"]
+# One feature per adapter. Feature names match the module name (not the
+# Backend name) so adding an adapter for a Backend whose SDK lives elsewhere
+# doesn't collide. See spec 010 §17.1.
+claudecode = []
+codex = []
+# OpenCode persists state in SQLite, not JSONL — pulls rusqlite only when on.
+opencode = ["dep:rusqlite"]
+# WSL2 ↔ Windows home enumeration. Opt-in; default HomeResolver is native only.
+crossmount = []
+# cli-framework Command registrations for MCP exposure.
+mcp-tools = ["dep:cli-framework"]
+# notify-based fsnotify-equivalent watch driver. See spec 010 §14.5.
+watcher = ["dep:notify", "dep:walkdir"]
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+regex = "1"
+dirs = "6"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+anyhow = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "fs", "time"] }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "eaef0191a64faab76a27267567a0358b0c7af0e1", optional = true }
+notify = { version = "6", optional = true }
+walkdir = { version = "2", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+insta = { version = "1", features = ["json"] }
+rusqlite = { version = "0.39", features = ["bundled"] }

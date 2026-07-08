@@ -17,6 +17,14 @@ pub(crate) const KEY: &str = "opencode";
 
 pub(crate) const BINARY_CANDIDATES: &[&str] = &["opencode", "opencode-desktop"];
 
+// `passive_capture` flips on only when both `agent-adapters` and the
+// `opencode` adapter feature are enabled. Spec 010 §17.2.
+#[cfg(all(feature = "agent-adapters", feature = "opencode"))]
+pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
+    .with_structured_tools()
+    .with_passive_capture();
+
+#[cfg(not(all(feature = "agent-adapters", feature = "opencode")))]
 pub(crate) const CAPABILITIES: BackendCapabilities =
     BackendCapabilities::NONE.with_structured_tools();
 

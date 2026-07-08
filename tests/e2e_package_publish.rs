@@ -4,10 +4,37 @@
 //! through building and publishing with asset upload.
 
 use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::TempDir;
 
 use aikit::cli::commands::package as pkg_cmd;
 use aikit::models::package::Package;
+
+static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct CwdGuard {
+    _lock: MutexGuard<'static, ()>,
+    original: PathBuf,
+}
+
+impl CwdGuard {
+    fn set(path: &Path) -> Self {
+        let lock = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let original = std::env::current_dir().expect("Failed to get original CWD");
+        std::env::set_current_dir(path).expect("Failed to set CWD for test");
+        Self {
+            _lock: lock,
+            original,
+        }
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
+}
 
 fn stable_create_release_error_snapshot(msg: &str) -> &'static str {
     assert!(
@@ -65,8 +92,7 @@ help = {{ description = "Show help information" }}
     )
     .expect("Failed to write help.md");
 
-    let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-    std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+    let _cwd = CwdGuard::set(&package_dir);
 
     let build_args = pkg_cmd::PackageBuildArgs {
         output: "dist".to_string(),
@@ -104,8 +130,6 @@ help = {{ description = "Show help information" }}
 
     let publish_result = pkg_cmd::execute_publish(publish_args).await;
 
-    std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
-
     insta::assert_snapshot!(
         "e2e_complete_publish_workflow",
         stable_create_release_error_snapshot(&publish_result.unwrap_err().to_string())
@@ -140,8 +164,7 @@ authors = ["test@example.com"]
     fs::write(templates_dir.join("help.md"), "# Help\n\nE2E test help.")
         .expect("Failed to write help.md");
 
-    let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-    std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+    let _cwd = CwdGuard::set(&package_dir);
 
     let build_args = pkg_cmd::PackageBuildArgs {
         output: "dist".to_string(),
@@ -168,8 +191,6 @@ authors = ["test@example.com"]
     };
 
     let publish_result = pkg_cmd::execute_publish(publish_args).await;
-
-    std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     insta::assert_snapshot!(
         "e2e_publish_no_release",
@@ -225,8 +246,7 @@ authors = ["test@example.com"]
 
     zip.finish().expect("Failed to finish zip");
 
-    let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-    std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+    let _cwd = CwdGuard::set(&package_dir);
 
     let publish_args = pkg_cmd::PackagePublishArgs {
         repo: "test-owner/test-repo".to_string(),
@@ -239,8 +259,6 @@ authors = ["test@example.com"]
     };
 
     let publish_result = pkg_cmd::execute_publish(publish_args).await;
-
-    std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     insta::assert_snapshot!(
         "e2e_publish_custom_path",
@@ -282,8 +300,7 @@ authors = ["test@example.com"]
         include_sources: false,
     };
 
-    let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-    std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+    let _cwd = CwdGuard::set(&package_dir);
 
     let build_result = pkg_cmd::execute_build(build_args).await;
     assert!(
@@ -307,7 +324,6 @@ authors = ["test@example.com"]
     let publish_result = pkg_cmd::execute_publish(publish_args).await;
 
     std::env::remove_var("GITHUB_TOKEN");
-    std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     insta::assert_snapshot!(
         "e2e_publish_env_token",
@@ -337,8 +353,7 @@ async fn test_e2e_validate_version_number_availability() {
     fs::create_dir_all(&templates_dir).expect("Failed to create templates directory");
     fs::write(templates_dir.join("help.md"), "# Help\n").expect("Failed to write help.md");
 
-    let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-    std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+    let _cwd = CwdGuard::set(&package_dir);
 
     let build_args = pkg_cmd::PackageBuildArgs {
         output: "dist".to_string(),
@@ -374,8 +389,6 @@ async fn test_e2e_validate_version_number_availability() {
     };
 
     let publish_result = pkg_cmd::execute_publish(publish_args).await;
-
-    std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     insta::assert_snapshot!(
         "e2e_validate_version_number",
@@ -425,8 +438,7 @@ description = "Deploy to production"
         .expect("Failed to write command template");
     }
 
-    let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-    std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+    let _cwd = CwdGuard::set(&package_dir);
 
     let build_args = pkg_cmd::PackageBuildArgs {
         output: "dist".to_string(),
@@ -453,8 +465,6 @@ description = "Deploy to production"
     };
 
     let publish_result = pkg_cmd::execute_publish(publish_args).await;
-
-    std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     insta::assert_snapshot!(
         "e2e_publish_multiple_commands",

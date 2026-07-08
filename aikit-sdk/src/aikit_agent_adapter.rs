@@ -79,8 +79,7 @@ where
         .current_dir
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    let mut config = AgentConfig::from_env(workdir, options.stream, options.model.clone())
-        .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
+    let mut config = config_for_injected_gateway(workdir, options);
 
     apply_session_options(options, &mut config);
 
@@ -93,6 +92,58 @@ where
         resolved_store,
         &mut on_event,
     )
+}
+
+fn config_for_injected_gateway(workdir: PathBuf, options: &RunOptions) -> AgentConfig {
+    AgentConfig::from_env(workdir.clone(), options.stream, options.model.clone()).unwrap_or_else(
+        |_| AgentConfig {
+            model: options
+                .model
+                .clone()
+                .or_else(|| std::env::var("AIKIT_MODEL").ok())
+                .unwrap_or_else(|| "gpt-4o".to_string()),
+            base_url: std::env::var("AIKIT_LLM_URL")
+                .unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
+            api_key: "injected-gateway".to_string(),
+            stream: options.stream
+                || std::env::var("AIKIT_STREAM")
+                    .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+                    .unwrap_or(false),
+            max_iterations: std::env::var("AIKIT_MAX_ITERATIONS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10u32),
+            max_subagent_depth: std::env::var("AIKIT_MAX_SUBAGENT_DEPTH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2u32),
+            context_budget_tokens: std::env::var("AIKIT_CONTEXT_BUDGET_TOKENS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(12000u64),
+            allowed_roots: vec![workdir.clone()],
+            skills_dirs: Vec::new(),
+            agents_md_path: agents_md_path(&workdir),
+            workdir,
+            timeout_secs: 60,
+            connect_timeout_secs: 10,
+            session_persona: None,
+            session_agents: std::collections::HashMap::new(),
+            host_tool_provider: None,
+        },
+    )
+}
+
+fn agents_md_path(workdir: &std::path::Path) -> Option<PathBuf> {
+    let agents_md = workdir.join("AGENTS.md");
+    let claude_md = workdir.join("CLAUDE.md");
+    if agents_md.exists() {
+        Some(agents_md)
+    } else if claude_md.exists() {
+        Some(claude_md)
+    } else {
+        None
+    }
 }
 
 fn apply_session_options(options: &RunOptions, config: &mut AgentConfig) {

@@ -20,6 +20,15 @@ claude-control = ["claude-sdk", "dep:tokio"]
 # Bidirectional Codex sessions: drive `aikit-agent-codex`'s app-server client
 # (JSON-RPC over stdio) over a tokio bridge with a Control handle.
 codex-app-server = ["dep:aikit-agent-codex", "dep:tokio"]
+# Agent session capture (spec 010): passive on-disk session parsing for AI
+# coding tools. Pulls the aikit-session-capture crate and flips the matching
+# Backend `passive_capture` capability. Per-adapter features below gate the
+# individual adapter modules so consumers can opt in to just Claude Code
+# without dragging rusqlite (opencode) etc.
+agent-adapters = ["dep:aikit-session-capture"]
+claudecode = ["agent-adapters", "aikit-session-capture/claudecode"]
+codex = ["agent-adapters", "aikit-session-capture/codex"]
+opencode = ["agent-adapters", "aikit-session-capture/opencode"]
 
 [dependencies]
 tracing = "0.1"
@@ -38,9 +47,11 @@ claude-agent-sdk = { git = "https://github.com/aroff/claude-agent-sdk-rust", rev
 aikit-agent-codex = { path = "../aikit-agent-codex", version = "0.1.0", optional = true }
 tokio = { version = "1", features = ["rt", "sync", "macros"], optional = true }
 jsonschema = "0.46"
+aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", optional = true }
 
 [dev-dependencies]
 insta = { version = "1.39", features = ["json"] }
 assert_cmd = "2.0"
 mockito = "1.2"
 serde_json = "1.0"
+tokio = { version = "1", features = ["rt", "macros"] }
