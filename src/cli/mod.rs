@@ -350,6 +350,14 @@ pub fn build_app() -> Result<AikitApp> {
         },
     )?;
 
+    #[cfg(all(feature = "agent-adapters", feature = "mcp-tools"))]
+    {
+        let conn = serve::storage::schema::open(&serve::capture_db_path())?;
+        let event_store: Arc<dyn aikit_session_capture::EventStore> =
+            Arc::new(serve::storage::SqliteEventStore::new(conn));
+        builder = aikit_session_capture::mcp::try_register_commands(builder, event_store)?;
+    }
+
     builder.build(AikitContext)
 }
 

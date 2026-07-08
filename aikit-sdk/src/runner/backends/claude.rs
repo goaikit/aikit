@@ -21,6 +21,23 @@ pub(crate) const KEY: &str = "claude";
 
 pub(crate) const BINARY_CANDIDATES: &[&str] = &["claude"];
 
+// `passive_capture` flips on only when both `agent-adapters` and the
+// `claudecode` adapter feature are enabled. Spec 010 §17.2. Two `#[cfg]`
+// arms keep the const evaluable without runtime branching.
+#[cfg(all(feature = "agent-adapters", feature = "claudecode"))]
+pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
+    .with_bidirectional()
+    .with_structured_tools()
+    .with_reasoning()
+    .with_interruptible()
+    .with_resumable_sessions()
+    .with_mcp_routing()
+    .with_hooks()
+    .with_server_tools()
+    .with_subagents()
+    .with_passive_capture();
+
+#[cfg(not(all(feature = "agent-adapters", feature = "claudecode")))]
 pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_bidirectional()
     .with_structured_tools()

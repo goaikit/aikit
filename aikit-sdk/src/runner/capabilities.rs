@@ -42,6 +42,10 @@ pub struct BackendCapabilities {
     pub subagents: bool,
     /// Emits context-compression events.
     pub context_compression: bool,
+    /// The Backend's on-disk session format is parseable by `aikit-session-capture`.
+    /// `false` ⇒ no adapter is registered for this Backend; passive capture
+    /// is unavailable, not merely empty. Spec 010.
+    pub passive_capture: bool,
 }
 
 impl BackendCapabilities {
@@ -58,6 +62,7 @@ impl BackendCapabilities {
         server_tools: false,
         subagents: false,
         context_compression: false,
+        passive_capture: false,
     };
 
     pub const fn with_bidirectional(mut self) -> Self {
@@ -102,6 +107,12 @@ impl BackendCapabilities {
     }
     pub const fn with_context_compression(mut self) -> Self {
         self.context_compression = true;
+        self
+    }
+    /// Enable passive on-disk capture (spec 010). Flipped per-Backend only
+    /// when the matching `aikit-session-capture` feature is on.
+    pub const fn with_passive_capture(mut self) -> Self {
+        self.passive_capture = true;
         self
     }
 }

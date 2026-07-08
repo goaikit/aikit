@@ -5,11 +5,37 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use tempfile::TempDir;
 
 use aikit::cli::commands::package as pkg_cmd;
 use aikit::core::git::GitHubClient;
 use aikit::models::package::Package;
+
+static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct CwdGuard {
+    _lock: MutexGuard<'static, ()>,
+    original: PathBuf,
+}
+
+impl CwdGuard {
+    fn set(path: &Path) -> Self {
+        let lock = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let original = std::env::current_dir().expect("Failed to get original CWD");
+        std::env::set_current_dir(path).expect("Failed to set CWD for test");
+        Self {
+            _lock: lock,
+            original,
+        }
+    }
+}
+
+impl Drop for CwdGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original);
+    }
+}
 
 async fn create_test_package(temp_dir: &Path) -> Package {
     let package = Package::create_template(
@@ -102,9 +128,8 @@ async fn test_package_publish_with_upload_integration() {
         .join("test-package/dist/integration-test-package-1.0.0.zip");
     create_test_zip_file(&zip_path);
 
-    let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-    std::env::set_current_dir(temp_dir.path().join("test-package"))
-        .expect("Failed to set CWD for test");
+    let package_dir = temp_dir.path().join("test-package");
+    let _cwd = CwdGuard::set(&package_dir);
 
     let args = pkg_cmd::PackagePublishArgs {
         repo: "test-owner/test-repo".to_string(),
@@ -117,8 +142,6 @@ async fn test_package_publish_with_upload_integration() {
     };
 
     let result = pkg_cmd::execute_publish(args).await;
-
-    std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     assert!(result.is_err());
     assert_create_release_failed(&result.unwrap_err().to_string());
@@ -134,9 +157,8 @@ async fn test_package_publish_no_release_integration() {
         .join("test-package/dist/integration-test-package-1.0.0.zip");
     create_test_zip_file(&zip_path);
 
-    let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-    std::env::set_current_dir(temp_dir.path().join("test-package"))
-        .expect("Failed to set CWD for test");
+    let package_dir = temp_dir.path().join("test-package");
+    let _cwd = CwdGuard::set(&package_dir);
 
     let args = pkg_cmd::PackagePublishArgs {
         repo: "test-owner/test-repo".to_string(),
@@ -149,8 +171,6 @@ async fn test_package_publish_no_release_integration() {
     };
 
     let result = pkg_cmd::execute_publish(args).await;
-
-    std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     assert!(result.is_err());
     assert_no_release_failed(&result.unwrap_err().to_string());
@@ -190,9 +210,8 @@ async fn test_package_build_and_publish_workflow_integration() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let _package = create_test_package(temp_dir.path()).await;
 
-    let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-    std::env::set_current_dir(temp_dir.path().join("test-package"))
-        .expect("Failed to set CWD for test");
+    let package_dir = temp_dir.path().join("test-package");
+    let _cwd = CwdGuard::set(&package_dir);
 
     let build_args = pkg_cmd::PackageBuildArgs {
         output: "dist".to_string(),
@@ -216,8 +235,6 @@ async fn test_package_build_and_publish_workflow_integration() {
 
     let publish_result = pkg_cmd::execute_publish(publish_args).await;
 
-    std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
-
     assert!(publish_result.is_err());
     assert_create_release_failed(&publish_result.unwrap_err().to_string());
 }
@@ -232,9 +249,8 @@ async fn test_package_publish_with_custom_release_notes_integration() {
         .join("test-package/dist/integration-test-package-1.0.0.zip");
     create_test_zip_file(&zip_path);
 
-    let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-    std::env::set_current_dir(temp_dir.path().join("test-package"))
-        .expect("Failed to set CWD for test");
+    let package_dir = temp_dir.path().join("test-package");
+    let _cwd = CwdGuard::set(&package_dir);
 
     let args = pkg_cmd::PackagePublishArgs {
         repo: "test-owner/test-repo".to_string(),
@@ -247,8 +263,6 @@ async fn test_package_publish_with_custom_release_notes_integration() {
     };
 
     let result = pkg_cmd::execute_publish(args).await;
-
-    std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
 
     assert!(result.is_err());
     assert_create_release_failed(&result.unwrap_err().to_string());

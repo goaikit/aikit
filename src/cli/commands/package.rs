@@ -830,7 +830,33 @@ mod tests {
     use crate::models::package::Package;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard, OnceLock};
     use tempfile::TempDir;
+
+    static CWD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct CwdGuard {
+        _lock: MutexGuard<'static, ()>,
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &Path) -> Self {
+            let lock = CWD_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+            let original = std::env::current_dir().expect("Failed to get original CWD");
+            std::env::set_current_dir(path).expect("Failed to set CWD for test");
+            Self {
+                _lock: lock,
+                original,
+            }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
 
     fn create_test_package_dir() -> (TempDir, Package) {
         let temp_dir = TempDir::new().unwrap();
@@ -916,8 +942,7 @@ mod tests {
         let temp_dir_obj = TempDir::new().expect("Failed to create main temp dir object");
         let temp_dir_path = temp_dir_obj.path();
 
-        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-        std::env::set_current_dir(temp_dir_path).expect("Failed to set CWD for test");
+        let _cwd = CwdGuard::set(temp_dir_path);
 
         let package = crate::models::package::Package::create_template(
             "test-package".to_string(),
@@ -937,9 +962,6 @@ mod tests {
 
         let result = find_package_zip(&package, None);
 
-        // Restore CWD after result is obtained, but before assertions
-        std::env::set_current_dir(orig_cwd).expect("Failed to restore original CWD");
-
         assert!(
             result.is_ok(),
             "Expected find_package_zip to be Ok, but got {:?}",
@@ -957,8 +979,7 @@ mod tests {
         let empty_work_dir_obj = TempDir::new().unwrap();
         let empty_work_dir = empty_work_dir_obj.path();
 
-        let orig = std::env::current_dir().unwrap();
-        std::env::set_current_dir(empty_work_dir).unwrap();
+        let _cwd = CwdGuard::set(empty_work_dir);
 
         // Ensure no 'dist' directory exists in this empty temp dir
         let dist_path = empty_work_dir.join("dist");
@@ -967,7 +988,6 @@ mod tests {
         }
 
         let result = find_package_zip(&package, None);
-        std::env::set_current_dir(&orig).unwrap(); // Restore CWD
 
         assert!(result.is_err()); // Should now correctly return an error
     }
@@ -1259,8 +1279,7 @@ authors = ["test"]
         // Create docs directory
         fs::create_dir_all(package_dir.join("docs")).unwrap();
 
-        // Change to package directory
-        std::env::set_current_dir(&package_dir).unwrap();
+        let _cwd = CwdGuard::set(&package_dir);
 
         // Run build
         let args = PackageBuildArgs {
@@ -1270,9 +1289,6 @@ authors = ["test"]
         };
 
         let result = execute_build(args).await;
-
-        // Restore current directory
-        std::env::set_current_dir("/home/sysuser/ws001/goaikit/aikit").unwrap();
 
         assert!(result.is_ok());
 
@@ -1366,8 +1382,7 @@ authors = ["test"]
         ));
         create_test_zip_file(&zip_path);
 
-        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+        let _cwd = CwdGuard::set(&package_dir);
 
         let args = PackagePublishArgs {
             repo: "test-owner/test-repo".to_string(),
@@ -1380,8 +1395,6 @@ authors = ["test"]
         };
 
         let result = execute_publish(args).await;
-
-        let _ = std::env::set_current_dir(orig_cwd);
 
         assert!(result.is_err());
         insta::assert_snapshot!(
@@ -1398,8 +1411,7 @@ authors = ["test"]
         let custom_zip = temp_dir.path().join("custom-package.zip");
         create_test_zip_file(&custom_zip);
 
-        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+        let _cwd = CwdGuard::set(&package_dir);
 
         let args = PackagePublishArgs {
             repo: "test-owner/test-repo".to_string(),
@@ -1412,8 +1424,6 @@ authors = ["test"]
         };
 
         let result = execute_publish(args).await;
-
-        let _ = std::env::set_current_dir(orig_cwd);
 
         assert!(result.is_err());
         insta::assert_snapshot!(
@@ -1436,8 +1446,7 @@ authors = ["test"]
         ));
         create_test_zip_file(&zip_path);
 
-        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+        let _cwd = CwdGuard::set(&package_dir);
 
         let args = PackagePublishArgs {
             repo: "test-owner/test-repo".to_string(),
@@ -1450,8 +1459,6 @@ authors = ["test"]
         };
 
         let result = execute_publish(args).await;
-
-        let _ = std::env::set_current_dir(orig_cwd);
 
         assert!(result.is_err());
         insta::assert_snapshot!(
@@ -1501,8 +1508,7 @@ authors = ["test"]
         ));
         create_test_zip_file(&zip_path);
 
-        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+        let _cwd = CwdGuard::set(&package_dir);
 
         std::env::set_var("GITHUB_TOKEN", "env_test_token");
 
@@ -1519,7 +1525,6 @@ authors = ["test"]
         let result = execute_publish(args).await;
 
         std::env::remove_var("GITHUB_TOKEN");
-        let _ = std::env::set_current_dir(orig_cwd);
 
         assert!(result.is_err());
     }
@@ -1541,8 +1546,7 @@ authors = ["test"]
         ));
         create_test_zip_file(&zip_path);
 
-        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+        let _cwd = CwdGuard::set(&package_dir);
 
         let args = PackagePublishArgs {
             repo: "test-owner/test-repo".to_string(),
@@ -1556,7 +1560,6 @@ authors = ["test"]
 
         let result = execute_publish(args).await;
 
-        let _ = std::env::set_current_dir(orig_cwd);
         if let Some(t) = saved_token {
             std::env::set_var("GITHUB_TOKEN", t);
         }
@@ -1579,8 +1582,7 @@ authors = ["test"]
         ));
         create_test_zip_file(&zip_path);
 
-        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+        let _cwd = CwdGuard::set(&package_dir);
 
         let args = PackagePublishArgs {
             repo: "invalid-repo".to_string(),
@@ -1593,8 +1595,6 @@ authors = ["test"]
         };
 
         let result = execute_publish(args).await;
-
-        let _ = std::env::set_current_dir(orig_cwd);
 
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
@@ -1657,8 +1657,7 @@ authors = ["test"]
         fs::create_dir_all(&templates_dir).unwrap();
         fs::write(templates_dir.join("help.md"), "# Help\n").unwrap();
 
-        let orig_cwd = std::env::current_dir().expect("Failed to get original CWD");
-        std::env::set_current_dir(&package_dir).expect("Failed to set CWD for test");
+        let _cwd = CwdGuard::set(&package_dir);
 
         let build_args = PackageBuildArgs {
             output: "dist".to_string(),
@@ -1670,7 +1669,6 @@ authors = ["test"]
 
         assert!(build_result.is_ok());
 
-        std::env::set_current_dir(&package_dir).expect("Restore CWD before publish (Windows)");
         let publish_args = PackagePublishArgs {
             repo: "test-owner/test-repo".to_string(),
             package: None,
@@ -1682,8 +1680,6 @@ authors = ["test"]
         };
 
         let publish_result = execute_publish(publish_args).await;
-
-        let _ = std::env::set_current_dir(orig_cwd);
 
         insta::assert_snapshot!(
             "complete_workflow_publish_result",

@@ -307,4 +307,80 @@ mod tests {
             assert_eq!(a, c, "extract_usage not deterministic for {b:?}");
         }
     }
+
+    // ---- spec 010: passive_capture capability gate ----------------------
+
+    /// Spec 010 §18 acceptance criterion 1: Claude's `passive_capture` flips
+    /// on only when both `agent-adapters` and `claudecode` are enabled;
+    /// Backends with no adapter shipped (Cursor, Gemini, Aikit) are always
+    /// false. The two `#[cfg]` arms mirror the production const definition
+    /// in `backends/claude.rs`, so a future feature-add won't silently
+    /// regress this test.
+    #[cfg(all(feature = "agent-adapters", feature = "claudecode"))]
+    #[test]
+    fn claude_passive_capture_on_when_feature_enabled() {
+        assert!(
+            Backend::Claude.capabilities().passive_capture,
+            "Claude.passive_capture MUST be true with agent-adapters + claudecode features"
+        );
+        // Backends with no adapter shipped — stays false (spec 010 §5 table).
+        assert!(
+            !Backend::Cursor.capabilities().passive_capture,
+            "Cursor has no adapter; passive_capture MUST be false"
+        );
+        assert!(
+            !Backend::Gemini.capabilities().passive_capture,
+            "Gemini has no adapter; passive_capture MUST be false"
+        );
+    }
+
+    #[cfg(not(all(feature = "agent-adapters", feature = "claudecode")))]
+    #[test]
+    fn claude_passive_capture_off_when_feature_disabled() {
+        // Without the feature, Claude's passive_capture stays off — even
+        // though Claude is a known Backend. The capability is honest:
+        // "unsupported" rather than "supported but no data".
+        assert!(
+            !Backend::Claude.capabilities().passive_capture,
+            "Claude.passive_capture MUST be false without agent-adapters feature"
+        );
+    }
+
+    /// Spec 010 Phase 3: Codex passive_capture follows the same pattern.
+    #[cfg(all(feature = "agent-adapters", feature = "codex"))]
+    #[test]
+    fn codex_passive_capture_on_when_feature_enabled() {
+        assert!(
+            Backend::Codex.capabilities().passive_capture,
+            "Codex.passive_capture MUST be true with agent-adapters + codex features"
+        );
+    }
+
+    #[cfg(not(all(feature = "agent-adapters", feature = "codex")))]
+    #[test]
+    fn codex_passive_capture_off_when_feature_disabled() {
+        assert!(
+            !Backend::Codex.capabilities().passive_capture,
+            "Codex.passive_capture MUST be false without agent-adapters + codex features"
+        );
+    }
+
+    /// Spec 010 Phase 3: OpenCode passive_capture follows the same pattern.
+    #[cfg(all(feature = "agent-adapters", feature = "opencode"))]
+    #[test]
+    fn opencode_passive_capture_on_when_feature_enabled() {
+        assert!(
+            Backend::OpenCode.capabilities().passive_capture,
+            "OpenCode.passive_capture MUST be true with agent-adapters + opencode features"
+        );
+    }
+
+    #[cfg(not(all(feature = "agent-adapters", feature = "opencode")))]
+    #[test]
+    fn opencode_passive_capture_off_when_feature_disabled() {
+        assert!(
+            !Backend::OpenCode.capabilities().passive_capture,
+            "OpenCode.passive_capture MUST be false without agent-adapters + opencode features"
+        );
+    }
 }
