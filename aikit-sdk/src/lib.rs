@@ -459,6 +459,9 @@ pub mod fetch;
 pub mod install;
 pub mod manifest;
 pub mod mcp_deploy;
+pub mod paths;
+
+pub use paths::{is_safe_id, is_safe_relative_path, safe_join, PathError};
 
 pub mod agent_runner;
 pub mod pipeline;
