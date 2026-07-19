@@ -195,10 +195,40 @@ impl Package {
             if def.source.is_empty() {
                 return Err(format!("Subagent '{}' has empty source path", name));
             }
+            // SEC-5: reject a subagent name/source that is absolute or contains `..`. `name`
+            // is a flat identifier (becomes a filename segment via aikit_sdk::deploy_subagent
+            // / a directory join in commands/install.rs), `source` is a relative path
+            // fragment read from within the package.
+            if !aikit_sdk::is_safe_id(name) {
+                return Err(format!(
+                    "Subagent name '{}' is not a safe identifier (must be alphanumeric, '-', '_', or '.')",
+                    name
+                ));
+            }
+            if !aikit_sdk::is_safe_relative_path(&def.source) {
+                return Err(format!(
+                    "Subagent '{}' has an unsafe source path (absolute or contains '..'): {}",
+                    name, def.source
+                ));
+            }
         }
         for (name, def) in &self.skills {
             if def.source.is_empty() {
                 return Err(format!("Skill '{}' has empty source path", name));
+            }
+            // SEC-5: same guard for skills — `name` becomes a directory segment under the
+            // agent's skills_dir, `source` is a relative path fragment into the package.
+            if !aikit_sdk::is_safe_id(name) {
+                return Err(format!(
+                    "Skill name '{}' is not a safe identifier (must be alphanumeric, '-', '_', or '.')",
+                    name
+                ));
+            }
+            if !aikit_sdk::is_safe_relative_path(&def.source) {
+                return Err(format!(
+                    "Skill '{}' has an unsafe source path (absolute or contains '..'): {}",
+                    name, def.source
+                ));
             }
         }
 
@@ -532,5 +562,137 @@ impl PackageRegistryEntry {
             downloads: None,
             updated_at: Some(chrono::Utc::now()),
         }
+    }
+}
+
+#[cfg(test)]
+mod sec5_validate_tests {
+    //! SEC-5: `Package::validate` must reject subagent/skill names and `source` values that
+    //! are absolute or contain `..`, before those values ever reach a filesystem join in
+    //! `src/cli/commands/install.rs` (`deploy_subagents_for_agent`/`deploy_skills_for_agent`).
+    use super::*;
+
+    fn base_package() -> Package {
+        Package::new(
+            "ok-pkg".to_string(),
+            "1.0.0".to_string(),
+            "A valid package".to_string(),
+        )
+    }
+
+    #[test]
+    fn validate_accepts_safe_subagent_and_skill() {
+        let mut package = base_package();
+        package.subagents.insert(
+            "my-agent".to_string(),
+            SubagentDefinition {
+                source: "agents/my-agent.md".to_string(),
+                name: None,
+                description: None,
+                model: None,
+                readonly: None,
+                is_background: None,
+            },
+        );
+        package.skills.insert(
+            "my-skill".to_string(),
+            SkillDefinition {
+                source: "skills/my-skill".to_string(),
+            },
+        );
+        assert!(package.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_subagent_source_with_traversal() {
+        let mut package = base_package();
+        package.subagents.insert(
+            "evil".to_string(),
+            SubagentDefinition {
+                source: "../../../etc/passwd".to_string(),
+                name: None,
+                description: None,
+                model: None,
+                readonly: None,
+                is_background: None,
+            },
+        );
+        let err = package.validate().unwrap_err();
+        assert!(err.contains("unsafe source path"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_rejects_subagent_source_absolute() {
+        let mut package = base_package();
+        package.subagents.insert(
+            "evil".to_string(),
+            SubagentDefinition {
+                source: "/etc/passwd".to_string(),
+                name: None,
+                description: None,
+                model: None,
+                readonly: None,
+                is_background: None,
+            },
+        );
+        let err = package.validate().unwrap_err();
+        assert!(err.contains("unsafe source path"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_rejects_skill_source_with_traversal() {
+        let mut package = base_package();
+        package.skills.insert(
+            "evil".to_string(),
+            SkillDefinition {
+                source: "../../outside".to_string(),
+            },
+        );
+        let err = package.validate().unwrap_err();
+        assert!(err.contains("unsafe source path"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_rejects_skill_source_absolute() {
+        let mut package = base_package();
+        package.skills.insert(
+            "evil".to_string(),
+            SkillDefinition {
+                source: "/root/.ssh".to_string(),
+            },
+        );
+        let err = package.validate().unwrap_err();
+        assert!(err.contains("unsafe source path"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_rejects_skill_name_with_path_separator() {
+        let mut package = base_package();
+        package.skills.insert(
+            "../escape".to_string(),
+            SkillDefinition {
+                source: "skills/fine".to_string(),
+            },
+        );
+        let err = package.validate().unwrap_err();
+        assert!(err.contains("not a safe identifier"), "got: {}", err);
+    }
+
+    #[test]
+    fn validate_rejects_subagent_name_with_path_separator() {
+        let mut package = base_package();
+        package.subagents.insert(
+            "sub/dir".to_string(),
+            SubagentDefinition {
+                source: "agents/fine.md".to_string(),
+                name: None,
+                description: None,
+                model: None,
+                readonly: None,
+                is_background: None,
+            },
+        );
+        let err = package.validate().unwrap_err();
+        assert!(err.contains("not a safe identifier"), "got: {}", err);
     }
 }

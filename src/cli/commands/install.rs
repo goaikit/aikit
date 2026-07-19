@@ -925,7 +925,15 @@ fn deploy_subagents_for_agent(
     };
     let _ = agents_dir; // used by deploy_subagent via aikit-sdk
     for (name, def) in &package.subagents {
-        let src_path = package_root.join(&def.source);
+        // SEC-5: `source` is an attacker-controlled manifest field; `Package::validate`
+        // already rejects absolute/`..` values at parse time, but re-validate at the join
+        // site (defense in depth — this is where the read actually happens).
+        let src_path = aikit_sdk::safe_join(package_root, &def.source).map_err(|e| {
+            format!(
+                "Subagent '{}' has an unsafe source path '{}': {}",
+                name, def.source, e
+            )
+        })?;
         let content = std::fs::read_to_string(&src_path).map_err(|e| {
             format!(
                 "Failed to read subagent '{}' from {}: {}",
@@ -954,7 +962,15 @@ fn deploy_skills_for_agent(
     };
     let dest_base = project_root.join(skills_dir);
     for (name, def) in &package.skills {
-        let src_dir = package_root.join(&def.source);
+        // SEC-5: same defense-in-depth re-validation as subagents, for both the
+        // attacker-controlled `source` (read side) and `name` (write side — becomes a
+        // directory segment under the agent's skills_dir).
+        let src_dir = aikit_sdk::safe_join(package_root, &def.source).map_err(|e| {
+            format!(
+                "Skill '{}' has an unsafe source path '{}': {}",
+                name, def.source, e
+            )
+        })?;
         if !src_dir.is_dir() {
             return Err(format!(
                 "Skill '{}' source is not a directory: {}",
@@ -963,7 +979,8 @@ fn deploy_skills_for_agent(
             )
             .into());
         }
-        let dest_dir = dest_base.join(name);
+        let dest_dir = aikit_sdk::safe_join(&dest_base, name)
+            .map_err(|e| format!("Skill '{}' has an unsafe name: {}", name, e))?;
         std::fs::create_dir_all(&dest_dir)?;
         copy_package_files(&src_dir, &dest_dir)?;
     }
