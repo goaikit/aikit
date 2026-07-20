@@ -328,14 +328,14 @@ mod tests {
 
     #[test]
     fn select_template_asset_case_insensitive() {
-        let assets =
-            vec!["https://example.com/Spec-Kit-Template-Claude-SH-v1.0.0.ZIP".to_string()];
+        let assets = vec!["https://example.com/Spec-Kit-Template-Claude-SH-v1.0.0.ZIP".to_string()];
         assert!(select_template_asset(&assets, "claude", "sh").is_some());
     }
 
     #[test]
     fn select_template_asset_returns_none_when_no_match() {
-        let assets = vec!["https://example.com/spec-kit-template-copilot-sh-v1.0.0.zip".to_string()];
+        let assets =
+            vec!["https://example.com/spec-kit-template-copilot-sh-v1.0.0.zip".to_string()];
         assert!(select_template_asset(&assets, "claude", "sh").is_none());
     }
 
