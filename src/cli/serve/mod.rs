@@ -83,6 +83,11 @@ pub(super) struct ServeConfig {
 pub(super) struct AppState {
     pub(super) runs: Arc<Mutex<HashMap<String, run_session::RunRecord>>>,
     pub(super) live_sessions: live_session::LiveSessions,
+    /// SEC-3: slots reserved by in-flight live-session opens that have passed the capacity
+    /// check but not yet inserted their record. Mutated only while holding the
+    /// `live_sessions` lock, so check-and-reserve is atomic and concurrent opens can't
+    /// overshoot `max_sessions`.
+    pub(super) pending_live_sessions: Arc<std::sync::atomic::AtomicUsize>,
     pub(super) config: ServeConfig,
     pub(super) run_fn: RunFn,
     pub(super) auth_cache: run_session::AuthCache,
@@ -800,6 +805,7 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
     let state = AppState {
         runs: Arc::new(Mutex::new(HashMap::new())),
         live_sessions: Arc::new(Mutex::new(HashMap::new())),
+        pending_live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         config: config.clone(),
         run_fn,
         auth_cache: Arc::new(Mutex::new(None)),

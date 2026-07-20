@@ -191,6 +191,15 @@ pub fn copy_artifacts(
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
+            // Do not follow symlinks inside the package tree. A symlink-to-file would
+            // otherwise have its *target's* content copied into the project (info
+            // disclosure — e.g. a local untrusted template planting a link to
+            // ~/.ssh/id_rsa). `WalkDir` already declines to recurse into symlinked dirs;
+            // this also drops symlinked files. (ADR 0013: the write side must not follow
+            // symlinks; the read side must not exfiltrate through them either.)
+            if entry.path_is_symlink() {
+                continue;
+            }
             if path.is_dir() {
                 continue;
             }
@@ -500,6 +509,44 @@ mod tests {
         let advisor = fs::read_to_string(project_root.join(".newton/scripts/advisor.sh"))
             .map_err(InstallError::Io)?;
         assert!(advisor.contains("echo advisor"));
+
+        Ok(())
+    }
+
+    // Read-side symlink guard: a symlink-to-file inside the package tree must NOT be followed
+    // and have its target's content copied into the project (info-disclosure vector — a local
+    // untrusted template planting a link to e.g. ~/.ssh/id_rsa).
+    #[cfg(unix)]
+    #[test]
+    fn test_copy_artifacts_skips_symlinked_files() -> Result<(), InstallError> {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(InstallError::Io)?;
+        let work = temp.path();
+
+        // A "secret" file living OUTSIDE the package that a symlink points at.
+        let secret = work.join("secret.txt");
+        fs::write(&secret, "TOP SECRET").map_err(InstallError::Io)?;
+
+        let package_root = work.join("package_root");
+        fs::create_dir_all(package_root.join("payload")).map_err(InstallError::Io)?;
+        fs::write(package_root.join("payload/real.txt"), "legit").map_err(InstallError::Io)?;
+        // Plant a symlink inside the package tree pointing at the external secret.
+        symlink(&secret, package_root.join("payload/leak.txt")).map_err(InstallError::Io)?;
+
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root).map_err(InstallError::Io)?;
+
+        let mut mappings = HashMap::new();
+        mappings.insert("payload/**".to_string(), ".dest".to_string());
+        copy_artifacts(&package_root, &project_root, &mappings)?;
+
+        // The regular file is copied; the symlink is skipped (its target never exfiltrated).
+        assert!(project_root.join(".dest/real.txt").exists());
+        assert!(
+            !project_root.join(".dest/leak.txt").exists(),
+            "symlinked file must not be copied — secret would leak into the project"
+        );
 
         Ok(())
     }

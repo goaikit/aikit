@@ -1173,6 +1173,7 @@ mod tests {
         let state = AppState {
             runs: Arc::new(Mutex::new(HashMap::new())),
             live_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             config: ServeConfig {
                 host: "127.0.0.1".into(),
                 port: 8787,
@@ -1211,6 +1212,7 @@ mod tests {
         let state = AppState {
             runs: Arc::new(Mutex::new(HashMap::new())),
             live_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             config: ServeConfig {
                 host: "127.0.0.1".into(),
                 port: 8787,
@@ -1283,6 +1285,7 @@ mod tests {
         let state = AppState {
             runs: Arc::new(Mutex::new(HashMap::new())),
             live_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             config: ServeConfig {
                 host: "127.0.0.1".into(),
                 port: 8787,

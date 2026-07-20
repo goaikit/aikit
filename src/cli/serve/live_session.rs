@@ -124,6 +124,38 @@ pub(super) struct LiveSessionRecord {
 
 pub(super) type LiveSessions = Arc<Mutex<HashMap<String, LiveSessionRecord>>>;
 
+/// RAII guard for a reserved live-session slot (SEC-3). Incrementing happens under the
+/// `live_sessions` lock together with the capacity check; this guard releases the reservation
+/// on every exit path (including the many early `return`s in the open path) via `Drop`. On the
+/// success path the inserted `Active` record supersedes the reservation.
+struct PendingReservation(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for PendingReservation {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Reserve one live-session slot if capacity allows, returning a guard that releases it on
+/// drop. Returns `None` when `active` (existing sessions) plus already-reserved in-flight
+/// opens would meet or exceed `max`.
+///
+/// The caller MUST hold the `live_sessions` lock across this call: that lock is what makes the
+/// load-check-increment atomic, so concurrent opens cannot all observe spare capacity and
+/// overshoot `max` (SEC-3 TOCTOU).
+fn try_reserve_live_slot(
+    active: usize,
+    pending: &Arc<std::sync::atomic::AtomicUsize>,
+    max: usize,
+) -> Option<PendingReservation> {
+    use std::sync::atomic::Ordering;
+    if active + pending.load(Ordering::Relaxed) >= max {
+        return None;
+    }
+    pending.fetch_add(1, Ordering::Relaxed);
+    Some(PendingReservation(pending.clone()))
+}
+
 // ── HTTP body types ───────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -204,25 +236,38 @@ pub(super) async fn create_live_session_handler(
     // one-shot runs, are never bounded by a run timeout — enforce the same
     // `max_sessions` cap one-shot runs already have, or an unauthenticated
     // (or merely careless) caller can open unbounded long-lived agent
-    // subprocesses (resource-exhaustion DoS). Checked before doing any of
-    // the expensive session-opening work below.
-    {
+    // subprocesses (resource-exhaustion DoS).
+    //
+    // The check and the slot reservation happen under a single `live_sessions`
+    // lock: counting active records plus already-reserved (in-flight) opens, then
+    // incrementing the reservation before releasing the lock. Without this, N
+    // concurrent requests could all pass the check while the lock is dropped for
+    // the expensive open below, then each insert its record — overshooting the cap
+    // (a TOCTOU race). `_reservation` releases the slot on every exit path.
+    let _reservation = {
         let live = state.live_sessions.lock().unwrap();
         let active = live
             .values()
             .filter(|r| r.status == LiveSessionStatus::Active)
             .count();
-        if active >= state.config.max_sessions {
-            return error_response(
-                StatusCode::TOO_MANY_REQUESTS,
-                "session_limit_reached",
-                &format!(
-                    "Maximum of {} concurrent live sessions reached",
-                    state.config.max_sessions
-                ),
-            );
+        match try_reserve_live_slot(
+            active,
+            &state.pending_live_sessions,
+            state.config.max_sessions,
+        ) {
+            Some(guard) => guard,
+            None => {
+                return error_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "session_limit_reached",
+                    &format!(
+                        "Maximum of {} concurrent live sessions reached",
+                        state.config.max_sessions
+                    ),
+                );
+            }
         }
-    }
+    };
 
     let session_id = Uuid::new_v4().to_string();
 
@@ -460,4 +505,94 @@ fn ok_action(action: &'static str) -> Response {
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn try_reserve_live_slot_respects_capacity() {
+        let pending = Arc::new(AtomicUsize::new(0));
+        // active=0, max=2: first two reservations succeed, third is refused.
+        let g1 = try_reserve_live_slot(0, &pending, 2);
+        let g2 = try_reserve_live_slot(0, &pending, 2);
+        assert!(g1.is_some() && g2.is_some());
+        assert_eq!(pending.load(Ordering::Relaxed), 2);
+        assert!(try_reserve_live_slot(0, &pending, 2).is_none());
+        // Dropping a guard frees its slot.
+        drop(g1);
+        assert_eq!(pending.load(Ordering::Relaxed), 1);
+        assert!(try_reserve_live_slot(0, &pending, 2).is_some());
+    }
+
+    #[test]
+    fn try_reserve_live_slot_counts_existing_active_sessions() {
+        let pending = Arc::new(AtomicUsize::new(0));
+        // One session already Active, max=1 → no spare capacity.
+        assert!(try_reserve_live_slot(1, &pending, 1).is_none());
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
+    }
+
+    // SEC-3: the TOCTOU fix. Many threads race to reserve a slot; the reservation must be
+    // performed while holding the same lock as the capacity check (here a stand-in Mutex for
+    // `live_sessions`). The number of slots simultaneously held must never exceed `max`.
+    #[test]
+    fn concurrent_reservations_never_exceed_capacity() {
+        const MAX: usize = 3;
+        const THREADS: usize = 64;
+
+        let pending = Arc::new(AtomicUsize::new(0));
+        let lock = Arc::new(StdMutex::new(())); // stands in for the live_sessions lock
+        let live_held = Arc::new(AtomicUsize::new(0)); // slots currently held
+        let peak = Arc::new(AtomicUsize::new(0)); // max simultaneously held
+        let granted = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let (pending, lock, live_held, peak, granted) = (
+                pending.clone(),
+                lock.clone(),
+                live_held.clone(),
+                peak.clone(),
+                granted.clone(),
+            );
+            handles.push(std::thread::spawn(move || {
+                // Check-and-reserve under the lock, exactly like the handler does.
+                let reservation = {
+                    let _guard = lock.lock().unwrap();
+                    try_reserve_live_slot(0, &pending, MAX)
+                };
+                if let Some(_r) = reservation {
+                    granted.fetch_add(1, Ordering::SeqCst);
+                    let held = live_held.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(held, Ordering::SeqCst);
+                    // Hold the slot briefly to widen the race window.
+                    std::thread::yield_now();
+                    live_held.fetch_sub(1, Ordering::SeqCst);
+                    // `_r` drops here, releasing the reservation.
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(
+            peak.load(Ordering::SeqCst) <= MAX,
+            "held {} slots at once, exceeds max {MAX}",
+            peak.load(Ordering::SeqCst)
+        );
+        assert!(
+            granted.load(Ordering::SeqCst) >= MAX,
+            "no reservations granted"
+        );
+        assert_eq!(
+            pending.load(Ordering::SeqCst),
+            0,
+            "all reservations should be released"
+        );
+    }
 }

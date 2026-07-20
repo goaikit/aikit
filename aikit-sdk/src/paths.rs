@@ -85,10 +85,16 @@ pub fn safe_join(base: &Path, untrusted: &str) -> Result<PathBuf, PathError> {
     reject_unsafe_components(untrusted)?;
 
     let candidate = Path::new(untrusted);
-    let joined = base.join(candidate);
 
-    // Defense in depth: after any symlink resolution the result must stay under base.
+    // Build the joined path from the *canonical* base so the escape check compares like with
+    // like. If we joined onto the raw `base` while comparing against the canonicalized root,
+    // any base reached through a symlink — macOS `/tmp` -> `/private/tmp`, a symlinked
+    // `$HOME`, a Docker bind mount — would make `starts_with` fail for even a wholly benign
+    // fragment, breaking legitimate installs. Fall back to the raw base when it doesn't exist
+    // yet (canonicalize fails); the lexical `reject_unsafe_components` check above already
+    // guarantees the fragment can't escape in that case.
     let root = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let joined = root.join(candidate);
     if !joined.starts_with(&root) {
         return Err(PathError::Escape(untrusted.to_string()));
     }
@@ -167,15 +173,12 @@ mod tests {
     }
 
     #[test]
-    fn safe_join_fails_closed_when_base_itself_is_a_symlink() {
-        // The escape check compares the (non-canonical) joined path against the
-        // *canonicalized* base. If `base` itself is a symlink, those two frames of
-        // reference disagree even for an entirely benign fragment — so `safe_join` fails
-        // closed (rejects) rather than risk silently trusting a base that isn't what it
-        // appears to be. This is intentional strictness (ADR 0013: prefer the strict/robust
-        // option), not a bug: callers are expected to pass an already-trustworthy base
-        // (e.g. `project_root`/`package_root`, never attacker-controlled), and a spurious
-        // rejection is a far safer failure mode than a spurious escape.
+    fn safe_join_accepts_benign_fragment_when_base_is_a_symlink() {
+        // A base reached through a symlink (macOS `/tmp` -> `/private/tmp`, a symlinked
+        // `$HOME`, a Docker bind mount) must NOT cause a benign fragment to be rejected —
+        // that was a real regression that broke legitimate installs. `safe_join` canonicalizes
+        // the base first and joins onto the canonical root, so the fragment resolves under the
+        // real directory and the escape check passes.
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
@@ -187,8 +190,15 @@ mod tests {
             let base_link = tmp.path().join("project-link");
             symlink(&real_base, &base_link).unwrap();
 
-            let err = safe_join(&base_link, "sub/file.txt").unwrap_err();
-            assert!(matches!(err, PathError::Escape(_)));
+            let joined = safe_join(&base_link, "sub/file.txt").unwrap();
+            // Resolves under the *real* directory (canonical root), and a traversal fragment
+            // is still rejected even through the symlinked base.
+            let canonical_real = real_base.canonicalize().unwrap();
+            assert!(joined.starts_with(&canonical_real));
+            assert!(matches!(
+                safe_join(&base_link, "../escape").unwrap_err(),
+                PathError::Traversal(_)
+            ));
         }
     }
 
