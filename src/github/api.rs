@@ -18,6 +18,13 @@ pub(crate) const USER_AGENT: &str = "aikit";
 pub struct GitHubClient {
     client: Client,
     base_url: String,
+    /// Host manifest content (`aikit.toml`/`package.toml`) is fetched from.
+    /// Always `https://raw.githubusercontent.com` in production — unlike
+    /// `base_url` this has **no** environment-variable override, so it can't
+    /// compound SEC-9 (arbitrary-host token exfiltration via `GITHUB_API_URL`)
+    /// with a second overridable host. Only the `#[cfg(test)]` constructor
+    /// (`for_test`) points it elsewhere, at an in-process mock server.
+    raw_base_url: String,
     token: Option<String>,
 }
 
@@ -50,6 +57,7 @@ impl GitHubClient {
         Ok(Self {
             client,
             base_url,
+            raw_base_url: "https://raw.githubusercontent.com".to_string(),
             token,
         })
     }
@@ -175,8 +183,8 @@ impl GitHubClient {
 
         // Try aikit.toml first
         let aikit_url = format!(
-            "https://raw.githubusercontent.com/{}/{}/{}/aikit.toml",
-            owner, repo, ref_param
+            "{}/{}/{}/{}/aikit.toml",
+            self.raw_base_url, owner, repo, ref_param
         );
 
         let response = self
@@ -196,8 +204,8 @@ impl GitHubClient {
         // If 404, try package.toml as fallback
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             let package_url = format!(
-                "https://raw.githubusercontent.com/{}/{}/{}/package.toml",
-                owner, repo, ref_param
+                "{}/{}/{}/{}/package.toml",
+                self.raw_base_url, owner, repo, ref_param
             );
 
             let fallback_response = self
@@ -225,6 +233,49 @@ impl GitHubClient {
             "Failed to fetch aikit.toml: HTTP {}",
             response.status()
         ))
+    }
+
+    /// Resolve a git ref (branch, tag, or SHA) to its immutable commit SHA (SEC-7).
+    ///
+    /// `aikit update`/`aikit install` fetch package archives by mutable ref
+    /// (typically the default branch); this pins that ref to a concrete
+    /// commit at fetch time so the lock file (`src/core/lock.rs`) can record
+    /// something that can't silently change out from under an install.
+    pub async fn resolve_ref_to_sha(&self, owner: &str, repo: &str, ref_: &str) -> Result<String> {
+        let url = format!(
+            "{}/repos/{}/{}/commits/{}",
+            self.base_url, owner, repo, ref_
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .headers(self.headers())
+            .send()
+            .await
+            .context("Failed to resolve ref to commit SHA")?;
+
+        self.check_rate_limit(&response)?;
+
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "Failed to resolve ref '{}' to a commit: HTTP {}",
+                ref_,
+                response.status()
+            ));
+        }
+
+        let commit: serde_json::Value = response
+            .json()
+            .await
+            .context("Failed to parse commit JSON")?;
+
+        commit["sha"]
+            .as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                anyhow::anyhow!("Commit response for ref '{}' missing 'sha' field", ref_)
+            })
     }
 
     /// Get release ID by tag from GitHub repository
@@ -434,6 +485,32 @@ pub struct ReleaseResponse {
     pub body: String,
     pub html_url: String,
     pub upload_url: String,
+}
+
+#[cfg(test)]
+impl GitHubClient {
+    /// Test-only constructor that points both the API host (`base_url`) and
+    /// the raw-content host (`raw_base_url`) at the same mock server URL,
+    /// avoiding the process-global `GITHUB_API_URL` env var (which would
+    /// race under parallel test execution within this test binary) and
+    /// avoiding any real network access. A single mockito server can serve
+    /// both `/repos/...` (API) and `/{owner}/{repo}/{ref}/aikit.toml` (raw
+    /// content) style paths, so one URL covers both.
+    ///
+    /// `pub(crate)` so other modules' tests (e.g.
+    /// `src/cli/commands/install.rs`) can build a fully mocked client too.
+    pub(crate) fn for_test(base_url: String) -> Self {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .expect("failed to build test http client");
+        Self {
+            client,
+            raw_base_url: base_url.clone(),
+            base_url,
+            token: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -716,6 +793,59 @@ authors = ["test"]
             .upload_release_asset("test-owner", "test-repo", 123, &test_file)
             .await;
 
+        assert!(result.is_err());
+    }
+
+    // -- SEC-7: resolve_ref_to_sha (mocked GitHub API, no real network) -----
+
+    #[tokio::test]
+    async fn test_resolve_ref_to_sha_success() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/repos/owner/repo/commits/main")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"sha": "abc123def456"}"#)
+            .create_async()
+            .await;
+
+        let client = GitHubClient::for_test(server.url());
+        let sha = client
+            .resolve_ref_to_sha("owner", "repo", "main")
+            .await
+            .unwrap();
+        assert_eq!(sha, "abc123def456");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_ref_to_sha_not_found() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/repos/owner/repo/commits/does-not-exist")
+            .with_status(404)
+            .create_async()
+            .await;
+
+        let client = GitHubClient::for_test(server.url());
+        let result = client
+            .resolve_ref_to_sha("owner", "repo", "does-not-exist")
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_ref_to_sha_missing_sha_field() {
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/repos/owner/repo/commits/main")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"not_sha": "oops"}"#)
+            .create_async()
+            .await;
+
+        let client = GitHubClient::for_test(server.url());
+        let result = client.resolve_ref_to_sha("owner", "repo", "main").await;
         assert!(result.is_err());
     }
 
