@@ -52,8 +52,8 @@ use cli_framework::tower::util::BoxCloneLayer;
 // Stub run-fns used by integration tests — not referenced from the binary itself.
 #[allow(unused_imports)]
 pub use run_session::{
-    make_blocking_stub_run_fn, make_failing_stub_run_fn, make_stub_run_fn,
-    make_stub_run_fn_with_session, make_timeout_stub_run_fn, RunFn, RunFnOutcome,
+    make_blocking_stub_run_fn, make_capturing_stub_run_fn, make_failing_stub_run_fn,
+    make_stub_run_fn, make_stub_run_fn_with_session, make_timeout_stub_run_fn, RunFn, RunFnOutcome,
 };
 
 // ── public args ───────────────────────────────────────────────────────────────

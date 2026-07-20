@@ -285,6 +285,19 @@ pub(super) struct SendMessageRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub yolo: bool,
+    /// D2 / ADR 0012: opt-in least-privilege tool allowlist for this run.
+    /// Threaded through `RunOptions::session_persona` into the existing
+    /// `AgentPersona.tools` hard filter (`aikit-agent/src/loop_runner.rs`).
+    /// Absent (the default) leaves the full toolset unchanged — this is a
+    /// capability lever, not a security gate; the sandbox remains the trust
+    /// boundary. No-op for external CLI backends, which have no equivalent
+    /// tool-filter mechanism.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    /// D2 / ADR 0012: opt-in tool denylist, same mechanism as `tools`
+    /// above (`AgentPersona.disallowed_tools`).
+    #[serde(default)]
+    pub disallowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -588,6 +601,10 @@ pub(super) fn spawn_run(
     let model = body.model.clone();
     let yolo = body.yolo;
     let agent = body.agent.clone();
+    // D2 / ADR 0012: opt-in tool policy, plumbed through the existing
+    // `session_persona` mechanism (see below) rather than a parallel one.
+    let tools = body.tools.clone();
+    let disallowed_tools = body.disallowed_tools.clone();
     let timeout = Duration::from_secs(state.config.run_timeout_secs);
     let run_fn = state.run_fn.clone();
     let runs_ref = Arc::clone(&state.runs);
@@ -654,6 +671,28 @@ pub(super) fn spawn_run(
         }
         if let Some(m) = model {
             options = options.with_model(m);
+        }
+        // D2 / ADR 0012: when the request carries a tool policy, thread it
+        // into `RunOptions::session_persona` — the SAME mechanism
+        // `--session-persona` already uses (see `src/cli/run.rs`) to reach
+        // `aikit_agent_adapter::apply_session_options`, which deserializes
+        // this into `AgentPersona` and sets `AgentConfig.session_persona`,
+        // hard-filtered by `build_tools` in
+        // `aikit-agent/src/loop_runner.rs`. `name`/`description`/`prompt`
+        // are required by `AgentPersona`'s `Deserialize` impl but unused
+        // here beyond an empty (no-op) prompt — this is a tool-policy
+        // overlay, not a persona swap. Absent (both None), behavior is
+        // unchanged: full default toolset. This only affects the in-process
+        // `aikit` backend, which is the only one that reads
+        // `session_persona`; external CLI backends silently ignore it.
+        if tools.is_some() || disallowed_tools.is_some() {
+            options = options.with_session_persona(serde_json::json!({
+                "name": "",
+                "description": "",
+                "prompt": "",
+                "tools": tools,
+                "disallowed_tools": disallowed_tools,
+            }));
         }
 
         let tx_inner = inner_tx.clone();
@@ -1119,6 +1158,29 @@ pub fn make_stub_run_fn_with_session(
     })
 }
 
+/// D2 / ADR 0012: a stub `run_fn` that records the `RunOptions` each
+/// invocation was actually built with (in particular `session_persona`,
+/// which carries the tool policy) so a test can assert on what `spawn_run`
+/// constructed, not just on the resulting event stream.
+#[allow(dead_code)]
+pub fn make_capturing_stub_run_fn() -> (RunFn, Arc<Mutex<Vec<RunOptions>>>) {
+    let captured: Arc<Mutex<Vec<RunOptions>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_closure = Arc::clone(&captured);
+    let run_fn: RunFn = Arc::new(move |agent, _prompt, options, tx, _cancel| {
+        captured_for_closure.lock().unwrap().push(options.clone());
+        let sid = options.session_id.clone();
+        if let Some(ref id) = sid {
+            let _ = tx.blocking_send(stub_session_started(&agent, id));
+        }
+        Ok(RunFnOutcome {
+            exit_code: 0,
+            session_id: sid,
+            stderr_tail: String::new(),
+        })
+    });
+    (run_fn, captured)
+}
+
 #[allow(dead_code)]
 pub fn make_stub_run_fn() -> RunFn {
     make_stub_run_fn_with_session(vec![], None)
@@ -1228,6 +1290,8 @@ mod tests {
                 content: ws.into(),
                 model: None,
                 yolo: false,
+                tools: None,
+                disallowed_tools: None,
             };
             assert!(
                 validate_request(&body, &state, &[]).is_some(),
@@ -1283,6 +1347,8 @@ mod tests {
                 content: "hi".into(),
                 model: None,
                 yolo: false,
+                tools: None,
+                disallowed_tools: None,
             };
             let resp = validate_request(&body, &state, &runnable);
             assert!(
@@ -1303,6 +1369,8 @@ mod tests {
             content: "hi".into(),
             model: None,
             yolo: false,
+            tools: None,
+            disallowed_tools: None,
         };
         let resp = validate_request(&body, &state, &runnable);
         std::env::remove_var("AIKIT_SESSIONS_DIR");
@@ -1358,6 +1426,8 @@ mod tests {
             content: "resume me".into(),
             model: None,
             yolo: false,
+            tools: None,
+            disallowed_tools: None,
         };
 
         let err = spawn_run(&state, &body).expect_err("a Closed session must reject resume");
