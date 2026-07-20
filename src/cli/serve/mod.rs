@@ -2,9 +2,16 @@
 //!
 //! Two response shapes share one endpoint, `POST /api/v1/messages`, selected
 //! by the `Accept` header:
-//! - `text/event-stream` → SSE. Events: `session`, `text`, `reasoning`,
-//!   `tool_use`, `tool_result`, `token_usage`, `subagent_spawn`,
-//!   `subagent_result`, `context_compressed`, `step_finish`, `error`, `done`.
+//! - `text/event-stream` → SSE. serve emits the canonical SDK
+//!   [`aikit_sdk::AgentEventPayload`] directly (ADR 0016 / ARCH-4): the SSE
+//!   `event:` name is the payload's own snake_case variant tag (e.g.
+//!   `stream_message`, `tool_use`, `tool_result`, `token_usage_line`,
+//!   `session_started`, `aikit_subagent_spawn`, …) and `data:` is that
+//!   variant's inner JSON, unmodified. Two additional SSE events are
+//!   serve-level control signals, not agent events: `error` (an
+//!   orchestration failure — timeout, capacity, closed session, internal
+//!   error, abnormal termination) and `done` (terminal event carrying
+//!   `exit_code`).
 //! - `application/json` → server accumulates text + usage, returns a single
 //!   `{session_id, content, exit_code, error?, usage?}` body.
 //! - `*/*` or missing → SSE (default). Any other type → 406.
@@ -34,7 +41,7 @@ use serde::Serialize;
 use tokio_stream::wrappers::ReceiverStream;
 
 use aikit_sdk::{
-    AgentEventPayload, MessageKind, MessagePhase, MessageRole, RunOptions, UsageSource,
+    AgentEvent, AgentEventPayload, MessageKind, MessagePhase, MessageRole, RunOptions,
 };
 
 use cli_framework::api::{
@@ -95,57 +102,22 @@ pub(super) struct AppState {
 
 // ── shared types ──────────────────────────────────────────────────────────────
 
-/// One structured event from an agent run. Handlers convert these to SSE
-/// for stream mode and accumulate them for sync mode.
+/// One item flowing from run orchestration to the SSE encoder.
+///
+/// ADR 0016 / ARCH-4: the old serve-private event vocabulary — a second,
+/// lossy re-map of the SDK's canonical [`AgentEventPayload`] — is deleted
+/// outright. serve now forwards `AgentEvent` unmodified; the only other item
+/// this channel carries is a serve-level `Error`, which signals an
+/// *orchestration* failure (timeout, capacity, closed session, internal
+/// error, abnormal termination) that originates from serve itself, not from
+/// the agent, and therefore has no canonical `AgentEventPayload` shape to
+/// borrow.
 #[derive(Debug, Clone)]
-pub enum StreamFrame {
-    Session {
-        session_id: String,
-    },
-    Text {
-        content: String,
-    },
-    Reasoning {
-        content: String,
-    },
-    ToolUse {
-        name: String,
-        input: serde_json::Value,
-    },
-    ToolResult {
-        name: String,
-        output: String,
-        is_error: bool,
-    },
-    TokenUsage {
-        input_tokens: u64,
-        output_tokens: u64,
-        cache_read_tokens: Option<u64>,
-        source: String,
-    },
-    SubagentSpawn {
-        subagent_id: String,
-        workdir: String,
-    },
-    SubagentResult {
-        subagent_id: String,
-        status: String,
-        changed_files: Vec<String>,
-        key_findings: String,
-    },
-    ContextCompressed {
-        original_tokens: u64,
-        compressed_tokens: u64,
-        turns_summarized: u64,
-    },
-    StepFinish {
-        iteration: u32,
-        finish_reason: String,
-    },
-    Error {
-        code: String,
-        message: String,
-    },
+pub enum ServeEvent {
+    /// A canonical SDK agent event, forwarded as-is (no re-mapping).
+    Agent(AgentEvent),
+    /// A serve-level orchestration error (not an agent event).
+    Error { code: String, message: String },
 }
 
 #[derive(Serialize)]
@@ -177,92 +149,63 @@ pub(super) fn error_response(status: StatusCode, code: &str, message: &str) -> R
         .into_response()
 }
 
-// ── frame → SSE ───────────────────────────────────────────────────────────────
+// ── ServeEvent → SSE ──────────────────────────────────────────────────────────
 
-pub(super) fn frame_to_sse(frame: &StreamFrame) -> Event {
-    match frame {
-        StreamFrame::Session { session_id } => Event::default()
-            .event("session")
-            .data(serde_json::json!({ "session_id": session_id }).to_string()),
-        StreamFrame::Text { content } => Event::default()
-            .event("text")
-            .data(serde_json::json!({ "content": content }).to_string()),
-        StreamFrame::Reasoning { content } => Event::default()
-            .event("reasoning")
-            .data(serde_json::json!({ "content": content }).to_string()),
-        StreamFrame::ToolUse { name, input } => Event::default()
-            .event("tool_use")
-            .data(serde_json::json!({ "name": name, "input": input }).to_string()),
-        StreamFrame::ToolResult {
-            name,
-            output,
-            is_error,
-        } => Event::default().event("tool_result").data(
-            serde_json::json!({ "name": name, "output": output, "is_error": is_error }).to_string(),
-        ),
-        StreamFrame::TokenUsage {
-            input_tokens,
-            output_tokens,
-            cache_read_tokens,
-            source,
-        } => Event::default().event("token_usage").data(
-            serde_json::json!({
-                "input_tokens": input_tokens, "output_tokens": output_tokens,
-                "cache_read_tokens": cache_read_tokens, "source": source,
-            })
-            .to_string(),
-        ),
-        StreamFrame::SubagentSpawn {
-            subagent_id,
-            workdir,
-        } => Event::default().event("subagent_spawn").data(
-            serde_json::json!({ "subagent_id": subagent_id, "workdir": workdir }).to_string(),
-        ),
-        StreamFrame::SubagentResult {
-            subagent_id,
-            status,
-            changed_files,
-            key_findings,
-        } => Event::default().event("subagent_result").data(
-            serde_json::json!({
-                "subagent_id": subagent_id, "status": status,
-                "changed_files": changed_files, "key_findings": key_findings,
-            })
-            .to_string(),
-        ),
-        StreamFrame::ContextCompressed {
-            original_tokens,
-            compressed_tokens,
-            turns_summarized,
-        } => Event::default().event("context_compressed").data(
-            serde_json::json!({
-                "original_tokens": original_tokens, "compressed_tokens": compressed_tokens,
-                "turns_summarized": turns_summarized,
-            })
-            .to_string(),
-        ),
-        StreamFrame::StepFinish {
-            iteration,
-            finish_reason,
-        } => Event::default().event("step_finish").data(
-            serde_json::json!({ "iteration": iteration, "finish_reason": finish_reason })
-                .to_string(),
-        ),
-        StreamFrame::Error { code, message } => Event::default()
+/// Serialize one [`ServeEvent`] to an SSE `Event`.
+///
+/// For `ServeEvent::Agent`, the SSE `event:` name is derived directly from
+/// the payload's own serde tag (its externally-tagged JSON representation is
+/// always a single-key object, `{"<snake_case_variant>": <inner>}` — every
+/// `AgentEventPayload` variant is a newtype or struct variant, never a bare
+/// unit) and `data:` is that inner JSON, unmodified. This is the canonical
+/// passthrough ADR 0016 requires: no hand-maintained variant→name table to
+/// drift out of sync with the SDK, and no lossy re-mapping.
+pub(super) fn serve_event_to_sse(item: &ServeEvent) -> Event {
+    match item {
+        ServeEvent::Agent(event) => {
+            let value = serde_json::to_value(&event.payload).unwrap_or(serde_json::Value::Null);
+            if let serde_json::Value::Object(map) = value {
+                if let Some((tag, inner)) = map.into_iter().next() {
+                    return Event::default().event(tag).data(inner.to_string());
+                }
+            }
+            // Unreachable for any current `AgentEventPayload` variant (all are
+            // newtype/struct, never unit), but degrade gracefully rather than
+            // panic if the SDK ever adds one.
+            Event::default()
+                .event("agent_event")
+                .data(serde_json::to_string(&event.payload).unwrap_or_else(|_| "null".into()))
+        }
+        ServeEvent::Error { code, message } => Event::default()
             .event("error")
             .data(serde_json::json!({ "code": code, "message": message }).to_string()),
     }
 }
 
+/// True when `item` represents an error condition — either a serve-level
+/// `ServeEvent::Error`, or a canonical `QuotaExceeded` agent event. Quota
+/// exhaustion is agent-originated and passes through as its own canonical
+/// SSE event (`quota_exceeded`) for full fidelity, but it still counts as an
+/// error for the stream's terminal `done` exit-code fallback, matching prior
+/// behaviour when it was lossily re-mapped onto a generic error frame.
+fn is_error_signal(item: &ServeEvent) -> bool {
+    match item {
+        ServeEvent::Error { .. } => true,
+        ServeEvent::Agent(event) => {
+            matches!(event.payload, AgentEventPayload::QuotaExceeded { .. })
+        }
+    }
+}
+
 // ── shared SSE utilities ──────────────────────────────────────────────────────
 
-/// Spawn an async forwarder that pumps `frame_rx` into a new SSE event channel,
+/// Spawn an async forwarder that pumps `item_rx` into a new SSE event channel,
 /// then emits a terminal `done` event. `get_exit_code(saw_error)` is called
 /// once after the stream closes to determine the done payload.
 ///
 /// Returns the receiver stream ready to be wrapped in `Sse::new(...)`.
 pub(super) fn spawn_frame_forwarder(
-    mut frame_rx: tokio::sync::mpsc::Receiver<StreamFrame>,
+    mut item_rx: tokio::sync::mpsc::Receiver<ServeEvent>,
     get_exit_code: impl FnOnce(bool) -> i32 + Send + 'static,
 ) -> ReceiverStream<Result<Event, Infallible>> {
     let (out_tx, out_rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
@@ -270,12 +213,12 @@ pub(super) fn spawn_frame_forwarder(
         let mut saw_error = false;
         loop {
             tokio::select! {
-                maybe = frame_rx.recv() => match maybe {
-                    Some(frame) => {
-                        if matches!(frame, StreamFrame::Error { .. }) {
+                maybe = item_rx.recv() => match maybe {
+                    Some(item) => {
+                        if is_error_signal(&item) {
                             saw_error = true;
                         }
-                        if out_tx.send(Ok(frame_to_sse(&frame))).await.is_err() {
+                        if out_tx.send(Ok(serve_event_to_sse(&item))).await.is_err() {
                             return;
                         }
                     }
@@ -317,144 +260,14 @@ pub(super) fn sse_response_with_headers(
     (headers, Sse::new(stream)).into_response()
 }
 
-// ── event → frame ─────────────────────────────────────────────────────────────
-
-/// Map an SDK [`AgentEvent`] to a [`StreamFrame`], or `None` to suppress.
-pub(super) fn agent_event_to_frame(
-    event: &aikit_sdk::AgentEvent,
-    agent_key: &str,
-) -> Option<StreamFrame> {
-    match &event.payload {
-        AgentEventPayload::SessionStarted { session_id } => Some(StreamFrame::Session {
-            session_id: session_id.clone(),
-        }),
-        AgentEventPayload::StreamMessage(msg) => match (msg.role, msg.kind, msg.phase) {
-            (MessageRole::Assistant, MessageKind::Message, MessagePhase::Delta)
-            | (MessageRole::Assistant, MessageKind::Message, MessagePhase::Final) => {
-                Some(StreamFrame::Text {
-                    content: msg.text.clone(),
-                })
-            }
-            // CLI backends (codex, opencode) emit tool invocations as (Tool, Message).
-            (MessageRole::Tool, MessageKind::Message, _) => Some(StreamFrame::ToolUse {
-                name: msg.text.clone(),
-                input: serde_json::Value::Null,
-            }),
-            (MessageRole::Tool, MessageKind::ToolOutput, _) => Some(StreamFrame::ToolResult {
-                name: agent_key.to_string(),
-                output: msg.text.clone(),
-                is_error: false,
-            }),
-            (_, MessageKind::Reasoning, _) => Some(StreamFrame::Reasoning {
-                content: msg.text.clone(),
-            }),
-            _ => None,
-        },
-        AgentEventPayload::ToolUse {
-            tool_name, input, ..
-        } => Some(StreamFrame::ToolUse {
-            name: tool_name.clone(),
-            input: input.clone(),
-        }),
-        AgentEventPayload::ToolResult {
-            call_id,
-            output,
-            is_error,
-        } => Some(StreamFrame::ToolResult {
-            name: call_id.clone(),
-            output: match output {
-                serde_json::Value::String(s) => s.clone(),
-                other => other.to_string(),
-            },
-            is_error: *is_error,
-        }),
-        AgentEventPayload::QuotaExceeded { info, .. } => Some(StreamFrame::Error {
-            code: "quota_exceeded".to_string(),
-            message: info.raw_message.clone(),
-        }),
-        AgentEventPayload::TokenUsageLine { usage, source, .. } => Some(StreamFrame::TokenUsage {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-            cache_read_tokens: usage.cache_read_tokens,
-            source: usage_source_name(source).to_string(),
-        }),
-        AgentEventPayload::AikitTextDelta { content, .. } => Some(StreamFrame::Text {
-            content: content.clone(),
-        }),
-        AgentEventPayload::AikitTextFinal { .. } => None,
-        AgentEventPayload::AikitToolUse {
-            tool_name,
-            tool_input,
-            ..
-        } => Some(StreamFrame::ToolUse {
-            name: tool_name.clone(),
-            input: tool_input.clone(),
-        }),
-        AgentEventPayload::AikitToolResult {
-            call_id,
-            output,
-            is_error,
-        } => Some(StreamFrame::ToolResult {
-            name: call_id.clone(),
-            output: output.clone(),
-            is_error: *is_error,
-        }),
-        AgentEventPayload::AikitSubagentSpawn {
-            subagent_id,
-            workdir,
-        } => Some(StreamFrame::SubagentSpawn {
-            subagent_id: subagent_id.clone(),
-            workdir: workdir.clone(),
-        }),
-        AgentEventPayload::AikitSubagentResult {
-            subagent_id,
-            status,
-            changed_files,
-            key_findings,
-            ..
-        } => Some(StreamFrame::SubagentResult {
-            subagent_id: subagent_id.clone(),
-            status: status.clone(),
-            changed_files: changed_files.clone(),
-            key_findings: key_findings.clone(),
-        }),
-        AgentEventPayload::AikitContextCompressed {
-            original_tokens,
-            compressed_tokens,
-            turns_summarized,
-        } => Some(StreamFrame::ContextCompressed {
-            original_tokens: *original_tokens,
-            compressed_tokens: *compressed_tokens,
-            turns_summarized: *turns_summarized,
-        }),
-        AgentEventPayload::AikitStepFinish {
-            iteration,
-            finish_reason,
-        } => Some(StreamFrame::StepFinish {
-            iteration: *iteration,
-            finish_reason: finish_reason.clone(),
-        }),
-        _ => None,
-    }
-}
-
-fn usage_source_name(source: &UsageSource) -> &'static str {
-    match source {
-        UsageSource::Codex => "codex",
-        UsageSource::Claude => "claude",
-        UsageSource::Gemini => "gemini",
-        UsageSource::OpenCode => "opencode",
-        UsageSource::Cursor => "cursor",
-        UsageSource::Aikit => "aikit",
-    }
-}
-
 fn payload_kind_name(p: &AgentEventPayload) -> &'static str {
     match p {
         AgentEventPayload::JsonLine(_) => "json_line",
         AgentEventPayload::RawLine(_) => "raw_line",
         AgentEventPayload::RawBytes(_) => "raw_bytes",
         AgentEventPayload::StreamMessage(_) => "stream_message",
+        AgentEventPayload::ToolUse { .. } => "tool_use",
+        AgentEventPayload::ToolResult { .. } => "tool_result",
         AgentEventPayload::TokenUsageLine { .. } => "token_usage_line",
         AgentEventPayload::QuotaExceeded { .. } => "quota_exceeded",
         AgentEventPayload::RawTransportLine { .. } => "raw_transport_line",
@@ -468,22 +281,6 @@ fn payload_kind_name(p: &AgentEventPayload) -> &'static str {
         AgentEventPayload::AikitStepFinish { .. } => "aikit_step_finish",
         AgentEventPayload::SessionStarted { .. } => "session_started",
         _ => "other",
-    }
-}
-
-fn frame_kind_name(f: &StreamFrame) -> &'static str {
-    match f {
-        StreamFrame::Session { .. } => "session",
-        StreamFrame::Text { .. } => "text",
-        StreamFrame::Reasoning { .. } => "reasoning",
-        StreamFrame::ToolUse { .. } => "tool_use",
-        StreamFrame::ToolResult { .. } => "tool_result",
-        StreamFrame::TokenUsage { .. } => "token_usage",
-        StreamFrame::SubagentSpawn { .. } => "subagent_spawn",
-        StreamFrame::SubagentResult { .. } => "subagent_result",
-        StreamFrame::ContextCompressed { .. } => "context_compressed",
-        StreamFrame::StepFinish { .. } => "step_finish",
-        StreamFrame::Error { .. } => "error",
     }
 }
 
@@ -504,7 +301,7 @@ pub fn make_production_run_fn() -> RunFn {
         move |agent: String,
               prompt: String,
               options: RunOptions,
-              tx: tokio::sync::mpsc::Sender<StreamFrame>,
+              tx: tokio::sync::mpsc::Sender<ServeEvent>,
               cancel: aikit_sdk::runner::RunCancelHandle| {
             use aikit_sdk::runner::run_agent_events_cancellable;
 
@@ -528,19 +325,35 @@ pub fn make_production_run_fn() -> RunFn {
             let result =
                 run_agent_events_cancellable(&agent, &prompt, options, &cancel, move |event| {
                     let payload_kind = payload_kind_name(&event.payload);
+
+                    // B5: capture the first session_id learned from a turn_id
+                    // and synthesize a canonical `SessionStarted` event for
+                    // it — this is serve's own bookkeeping (not a re-map of
+                    // the triggering event, which is still forwarded below).
                     if let AgentEventPayload::StreamMessage(msg) = &event.payload {
-                        // B5: capture first session_id from turn_id.
                         if let Some(ref tid) = msg.turn_id {
                             let mut cap = captured_for_cb.lock().unwrap();
                             if cap.is_none() {
                                 *cap = Some(tid.clone());
                                 drop(cap);
-                                let _ = tx_cb.blocking_send(StreamFrame::Session {
-                                    session_id: tid.clone(),
-                                });
+                                let synthetic = AgentEvent {
+                                    agent_key: agent_for_cb.clone(),
+                                    seq: event.seq,
+                                    stream: event.stream,
+                                    payload: AgentEventPayload::SessionStarted {
+                                        session_id: tid.clone(),
+                                    },
+                                };
+                                let _ = tx_cb.blocking_send(ServeEvent::Agent(synthetic));
                             }
                         }
-                        // Dedup Final-after-Delta for non-aikit assistant messages.
+                        // Dedup Final-after-Delta for non-aikit assistant messages:
+                        // many CLI backends emit a Delta stream of chunks
+                        // followed by a redundant Final containing the same
+                        // concatenated text; forwarding both would duplicate
+                        // content for consumers. This is stream hygiene, not
+                        // vocabulary loss — every other `StreamMessage` (any
+                        // role/kind/phase) passes through untouched below.
                         if msg.role == MessageRole::Assistant && msg.kind == MessageKind::Message {
                             if msg.phase == MessagePhase::Delta {
                                 *saw_delta_for_cb.lock().unwrap() = true;
@@ -551,42 +364,45 @@ pub fn make_production_run_fn() -> RunFn {
                                     target: "aikit::serve::run",
                                     agent = %agent_for_cb,
                                     payload = payload_kind,
-                                    "suppressing Final assistant StreamMessage"
+                                    "suppressing Final assistant StreamMessage (dup of Delta)"
                                 );
                                 return;
                             }
                         }
                     }
-                    match agent_event_to_frame(&event, &agent_for_cb) {
-                        Some(frame) => {
-                            let frame_name = frame_kind_name(&frame);
-                            tracing::debug!(
-                                target: "aikit::serve::run",
-                                agent = %agent_for_cb,
-                                payload = payload_kind,
-                                frame = frame_name,
-                                "mapped SDK event to frame"
-                            );
-                            if let StreamFrame::Session { ref session_id } = frame {
-                                *captured_for_cb.lock().unwrap() = Some(session_id.clone());
-                            }
-                            if let Err(e) = tx_cb.blocking_send(frame) {
-                                tracing::warn!(
-                                    target: "aikit::serve::run",
-                                    agent = %agent_for_cb,
-                                    error = %e,
-                                    "frame channel send failed"
-                                );
-                            }
+
+                    // Mirror the same Final-after-Delta dedup for the
+                    // built-in aikit backend's own delta/final text events.
+                    if matches!(event.payload, AgentEventPayload::AikitTextFinal { .. }) {
+                        tracing::trace!(
+                            target: "aikit::serve::run",
+                            agent = %agent_for_cb,
+                            payload = payload_kind,
+                            "suppressing AikitTextFinal (dup of AikitTextDelta)"
+                        );
+                        return;
+                    }
+
+                    if let AgentEventPayload::SessionStarted { ref session_id } = event.payload {
+                        let mut cap = captured_for_cb.lock().unwrap();
+                        if cap.is_none() {
+                            *cap = Some(session_id.clone());
                         }
-                        None => {
-                            tracing::trace!(
-                                target: "aikit::serve::run",
-                                agent = %agent_for_cb,
-                                payload = payload_kind,
-                                "SDK event suppressed"
-                            );
-                        }
+                    }
+
+                    tracing::debug!(
+                        target: "aikit::serve::run",
+                        agent = %agent_for_cb,
+                        payload = payload_kind,
+                        "forwarding canonical event"
+                    );
+                    if let Err(e) = tx_cb.blocking_send(ServeEvent::Agent(event)) {
+                        tracing::warn!(
+                            target: "aikit::serve::run",
+                            agent = %agent_for_cb,
+                            error = %e,
+                            "event channel send failed"
+                        );
                     }
                 });
 
@@ -601,7 +417,7 @@ pub fn make_production_run_fn() -> RunFn {
                     let exit_code = match r.exit_code() {
                         Some(code) => code,
                         None => {
-                            let _ = tx.blocking_send(StreamFrame::Error {
+                            let _ = tx.blocking_send(ServeEvent::Error {
                                 code: "abnormal_termination".to_string(),
                                 message: "Agent process terminated abnormally (signal or crash)"
                                     .to_string(),
@@ -925,58 +741,53 @@ mod tests {
         }
     }
 
-    #[test]
-    fn maps_external_tool_use_and_result() {
-        let use_ev = event(AgentEventPayload::ToolUse {
-            call_id: "tu_1".into(),
-            tool_name: "Bash".into(),
-            input: serde_json::json!({"command": "ls"}),
-        });
-        match agent_event_to_frame(&use_ev, "claude") {
-            Some(StreamFrame::ToolUse { name, input }) => {
-                assert_eq!(name, "Bash");
-                assert_eq!(input["command"], "ls");
+    /// Extract `(tag, inner_json)` the same way `serve_event_to_sse` does,
+    /// without going through the opaque `axum::response::sse::Event` type.
+    fn tag_and_inner(payload: &AgentEventPayload) -> (String, serde_json::Value) {
+        let value = serde_json::to_value(payload).unwrap();
+        match value {
+            serde_json::Value::Object(map) => {
+                let (tag, inner) = map.into_iter().next().expect("non-empty object");
+                (tag, inner)
             }
-            other => panic!("expected ToolUse frame, got {other:?}"),
-        }
-
-        let res_str = event(AgentEventPayload::ToolResult {
-            call_id: "tu_1".into(),
-            output: serde_json::json!("file.txt\n"),
-            is_error: false,
-        });
-        match agent_event_to_frame(&res_str, "claude") {
-            Some(StreamFrame::ToolResult {
-                name,
-                output,
-                is_error,
-            }) => {
-                assert_eq!(name, "tu_1");
-                assert_eq!(output, "file.txt\n");
-                assert!(!is_error);
-            }
-            other => panic!("expected ToolResult frame, got {other:?}"),
-        }
-
-        let res_obj = event(AgentEventPayload::ToolResult {
-            call_id: "tu_2".into(),
-            output: serde_json::json!({"ok": true}),
-            is_error: true,
-        });
-        match agent_event_to_frame(&res_obj, "claude") {
-            Some(StreamFrame::ToolResult {
-                output, is_error, ..
-            }) => {
-                assert_eq!(output, "{\"ok\":true}");
-                assert!(is_error);
-            }
-            other => panic!("expected ToolResult frame, got {other:?}"),
+            other => panic!("expected externally-tagged object, got {other:?}"),
         }
     }
 
     #[test]
-    fn maps_token_usage_line() {
-        let ev = event(AgentEventPayload::TokenUsageLine {
+    fn canonical_tool_use_and_result_pass_through_untranslated() {
+        // ARCH-4: `ToolResult.call_id` keeps its own meaning — no more
+        // overloaded `name` field standing in for agent-key on CLI backends
+        // and call-id on structured ones.
+        let use_ev = AgentEventPayload::ToolUse {
+            call_id: "tu_1".into(),
+            tool_name: "Bash".into(),
+            input: serde_json::json!({"command": "ls"}),
+        };
+        let (tag, data) = tag_and_inner(&use_ev);
+        assert_eq!(tag, "tool_use");
+        assert_eq!(data["tool_name"], "Bash");
+        assert_eq!(data["call_id"], "tu_1");
+        assert_eq!(data["input"]["command"], "ls");
+
+        let res_ev = AgentEventPayload::ToolResult {
+            call_id: "tu_1".into(),
+            output: serde_json::json!("file.txt\n"),
+            is_error: false,
+        };
+        let (tag, data) = tag_and_inner(&res_ev);
+        assert_eq!(tag, "tool_result");
+        assert_eq!(data["call_id"], "tu_1");
+        assert_eq!(data["output"], "file.txt\n");
+        assert_eq!(data["is_error"], false);
+    }
+
+    #[test]
+    fn token_usage_line_passes_through_with_native_usage_source_serialization() {
+        // Previously-dropped event (ARCH-4 recovery target): TokenUsageLine
+        // was never forwarded by the old serve-side event re-map targeting
+        // SSE — now it flows as its own canonical `token_usage_line` event.
+        let ev = AgentEventPayload::TokenUsageLine {
             usage: TokenUsage {
                 input_tokens: 12,
                 output_tokens: 34,
@@ -986,27 +797,23 @@ mod tests {
                 reasoning_tokens: None,
             },
             source: UsageSource::Aikit,
-            raw_agent_line_seq: 0,
-        });
-        match agent_event_to_frame(&ev, "aikit") {
-            Some(StreamFrame::TokenUsage {
-                input_tokens,
-                output_tokens,
-                cache_read_tokens,
-                source,
-            }) => {
-                assert_eq!(input_tokens, 12);
-                assert_eq!(output_tokens, 34);
-                assert_eq!(cache_read_tokens, Some(5));
-                assert_eq!(source, "aikit");
-            }
-            other => panic!("expected TokenUsage frame, got {other:?}"),
-        }
+            raw_agent_line_seq: 7,
+        };
+        let (tag, data) = tag_and_inner(&ev);
+        assert_eq!(tag, "token_usage_line");
+        assert_eq!(data["usage"]["input_tokens"], 12);
+        assert_eq!(data["usage"]["output_tokens"], 34);
+        assert_eq!(data["usage"]["cache_read_tokens"], 5);
+        // Native enum serialization (no serve-local lowercasing map).
+        assert_eq!(data["source"], "Aikit");
     }
 
     #[test]
-    fn maps_reasoning_stream_message() {
-        let ev = event(AgentEventPayload::StreamMessage(StreamMessage {
+    fn reasoning_stream_message_passes_through() {
+        // Previously-dropped event: Reasoning-kind StreamMessages were
+        // suppressed for every role except the narrow (_, Reasoning, _) arm
+        // that happened to be kept; now every StreamMessage passes through.
+        let ev = AgentEventPayload::StreamMessage(StreamMessage {
             text: "thinking...".to_string(),
             phase: MessagePhase::Delta,
             role: MessageRole::Assistant,
@@ -1014,38 +821,64 @@ mod tests {
             source: AgentEventStream::Stdout,
             raw_line_seq: 0,
             turn_id: None,
-        }));
-        match agent_event_to_frame(&ev, "aikit") {
-            Some(StreamFrame::Reasoning { content }) => assert_eq!(content, "thinking..."),
-            other => panic!("expected Reasoning frame, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn maps_aikit_tool_result_is_error() {
-        let ev = event(AgentEventPayload::AikitToolResult {
-            call_id: "call-1".to_string(),
-            output: "boom".to_string(),
-            is_error: true,
         });
-        match agent_event_to_frame(&ev, "aikit") {
-            Some(StreamFrame::ToolResult {
-                name,
-                output,
-                is_error,
-            }) => {
-                assert_eq!(name, "call-1");
-                assert_eq!(output, "boom");
-                assert!(is_error);
-            }
-            other => panic!("expected ToolResult frame, got {other:?}"),
-        }
+        let (tag, data) = tag_and_inner(&ev);
+        assert_eq!(tag, "stream_message");
+        assert_eq!(data["text"], "thinking...");
+        assert_eq!(data["kind"], "reasoning");
     }
 
     #[test]
-    fn cli_tool_message_becomes_tool_use() {
-        // codex emits (Tool, Message) for command text — should become ToolUse
-        let ev = event(AgentEventPayload::StreamMessage(StreamMessage {
+    fn aikit_subagent_and_context_compression_events_pass_through() {
+        // Previously-dropped events (ARCH-4 recovery target): subagent
+        // spawn/result and context compression were never reachable over SSE
+        // with full fidelity before (the old serve-side re-map produced a
+        // similar shape, but the canonical fields — call_id-correct
+        // identifiers, final_message, etc. — were still lossy).
+        let spawn = AgentEventPayload::AikitSubagentSpawn {
+            subagent_id: "sub-1".into(),
+            workdir: "/tmp/sub-1".into(),
+        };
+        let (tag, data) = tag_and_inner(&spawn);
+        assert_eq!(tag, "aikit_subagent_spawn");
+        assert_eq!(data["subagent_id"], "sub-1");
+
+        let result = AgentEventPayload::AikitSubagentResult {
+            subagent_id: "sub-1".into(),
+            status: "done".into(),
+            changed_files: vec!["a.rs".into()],
+            key_findings: "fixed it".into(),
+            final_message: "all good".into(),
+        };
+        let (tag, data) = tag_and_inner(&result);
+        assert_eq!(tag, "aikit_subagent_result");
+        assert_eq!(data["final_message"], "all good");
+
+        let compressed = AgentEventPayload::AikitContextCompressed {
+            original_tokens: 1000,
+            compressed_tokens: 200,
+            turns_summarized: 5,
+        };
+        let (tag, data) = tag_and_inner(&compressed);
+        assert_eq!(tag, "aikit_context_compressed");
+        assert_eq!(data["original_tokens"], 1000);
+
+        let step = AgentEventPayload::AikitStepFinish {
+            iteration: 3,
+            finish_reason: "stop".into(),
+        };
+        let (tag, data) = tag_and_inner(&step);
+        assert_eq!(tag, "aikit_step_finish");
+        assert_eq!(data["iteration"], 3);
+    }
+
+    #[test]
+    fn cli_tool_message_stream_events_pass_through_as_stream_message() {
+        // codex/opencode emit (Tool, Message) for command text and (Tool,
+        // ToolOutput) for its output — no longer squashed into a generic
+        // ToolUse/ToolResult with a synthetic call_id/name; they keep their
+        // native `stream_message` shape with role/kind intact.
+        let ev = AgentEventPayload::StreamMessage(StreamMessage {
             text: "ls -la".to_string(),
             phase: MessagePhase::Delta,
             role: MessageRole::Tool,
@@ -1053,36 +886,66 @@ mod tests {
             source: AgentEventStream::Stdout,
             raw_line_seq: 0,
             turn_id: None,
-        }));
-        match agent_event_to_frame(&ev, "codex") {
-            Some(StreamFrame::ToolUse { name, input }) => {
-                assert_eq!(name, "ls -la");
-                assert_eq!(input, serde_json::Value::Null);
-            }
-            other => panic!("expected ToolUse frame, got {other:?}"),
-        }
+        });
+        let (tag, data) = tag_and_inner(&ev);
+        assert_eq!(tag, "stream_message");
+        assert_eq!(data["role"], "tool");
+        assert_eq!(data["kind"], "message");
+        assert_eq!(data["text"], "ls -la");
     }
 
     #[test]
-    fn cli_tool_output_becomes_tool_result() {
-        // codex/opencode emit (Tool, ToolOutput) for command output — should become ToolResult
-        let ev = event(AgentEventPayload::StreamMessage(StreamMessage {
-            text: "Cargo.toml\nsrc/".to_string(),
-            phase: MessagePhase::Delta,
-            role: MessageRole::Tool,
-            kind: aikit_sdk::MessageKind::ToolOutput,
-            source: AgentEventStream::Stdout,
-            raw_line_seq: 0,
+    fn serve_error_event_shape() {
+        let sse = serve_event_to_sse(&ServeEvent::Error {
+            code: "run_timeout".into(),
+            message: "Run exceeded timeout".into(),
+        });
+        let rendered = format!("{:?}", sse);
+        assert!(rendered.contains("run_timeout"));
+    }
+
+    #[test]
+    fn is_error_signal_covers_serve_error_and_quota_exceeded() {
+        let err = ServeEvent::Error {
+            code: "run_timeout".into(),
+            message: "x".into(),
+        };
+        assert!(is_error_signal(&err));
+
+        let quota = ServeEvent::Agent(event(AgentEventPayload::QuotaExceeded {
+            info: aikit_sdk::QuotaExceededInfo {
+                agent_key: "codex".into(),
+                category: aikit_sdk::QuotaCategory::Hourly,
+                raw_message: "rate limited".into(),
+            },
+            raw_agent_line_seq: 0,
+        }));
+        assert!(is_error_signal(&quota));
+
+        let text = ServeEvent::Agent(event(AgentEventPayload::AikitTextDelta {
+            content: "hi".into(),
             turn_id: None,
         }));
-        match agent_event_to_frame(&ev, "codex") {
-            Some(StreamFrame::ToolResult {
-                output, is_error, ..
-            }) => {
-                assert_eq!(output, "Cargo.toml\nsrc/");
-                assert!(!is_error);
-            }
-            other => panic!("expected ToolResult frame, got {other:?}"),
-        }
+        assert!(!is_error_signal(&text));
+    }
+
+    #[test]
+    fn payload_kind_name_covers_external_tool_variants() {
+        // Regression guard: the old helper's fallback `_ => "other"` silently
+        // swallowed ToolUse/ToolResult (never given explicit arms because
+        // nothing depended on their debug label before). Now that debug
+        // logging is the only consumer, still keep it accurate.
+        let use_ev = AgentEventPayload::ToolUse {
+            call_id: "c1".into(),
+            tool_name: "Bash".into(),
+            input: serde_json::Value::Null,
+        };
+        assert_eq!(payload_kind_name(&use_ev), "tool_use");
+        let res_ev = AgentEventPayload::ToolResult {
+            call_id: "c1".into(),
+            output: serde_json::Value::Null,
+            is_error: false,
+        };
+        assert_eq!(payload_kind_name(&res_ev), "tool_result");
     }
 }

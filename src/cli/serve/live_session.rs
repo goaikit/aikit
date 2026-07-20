@@ -19,8 +19,7 @@ use aikit_sdk::{
 use uuid::Uuid;
 
 use super::{
-    agent_event_to_frame, error_response, spawn_frame_forwarder, sse_response_with_headers,
-    AppState, StreamFrame,
+    error_response, spawn_frame_forwarder, sse_response_with_headers, AppState, ServeEvent,
 };
 
 // ── control abstraction ───────────────────────────────────────────────────────
@@ -349,26 +348,35 @@ pub(super) async fn create_live_session_handler(
         );
     }
 
-    // Blocking forwarder: sync event channel → tokio frame channel → SSE.
-    let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
+    // Blocking forwarder: sync event channel → tokio item channel → SSE.
+    // ARCH-4 / ADR 0016: every canonical `AgentEvent` from the underlying
+    // session engine is forwarded as-is — no serve-side re-map — so
+    // tool/reasoning/usage/subagent/compression/step-finish events reach the
+    // client with their native shape instead of being lossily squashed or
+    // dropped.
+    let (item_tx, item_rx) = tokio::sync::mpsc::channel::<ServeEvent>(64);
     let agent_key = body.agent.clone();
     let live_ref = Arc::clone(&state.live_sessions);
     let sid_for_cleanup = session_id.clone();
-    let sid_for_frame = session_id.clone();
+    let sid_for_session_event = session_id.clone();
     tokio::task::spawn_blocking(move || {
-        if frame_tx
-            .blocking_send(StreamFrame::Session {
-                session_id: sid_for_frame,
-            })
-            .is_err()
-        {
+        // Synthetic first event: the locally-minted live-session id, so
+        // clients have a stable, resolvable id before any backend events
+        // arrive (mirrors the one-shot run path's B5 behaviour).
+        let synthetic = aikit_sdk::AgentEvent {
+            agent_key,
+            seq: 0,
+            stream: aikit_sdk::AgentEventStream::Stdout,
+            payload: aikit_sdk::AgentEventPayload::SessionStarted {
+                session_id: sid_for_session_event,
+            },
+        };
+        if item_tx.blocking_send(ServeEvent::Agent(synthetic)).is_err() {
             return;
         }
         while let Ok(event) = events_rx.recv() {
-            if let Some(frame) = agent_event_to_frame(&event, &agent_key) {
-                if frame_tx.blocking_send(frame).is_err() {
-                    break;
-                }
+            if item_tx.blocking_send(ServeEvent::Agent(event)).is_err() {
+                break;
             }
         }
         if let Ok(mut live) = live_ref.lock() {
@@ -378,7 +386,7 @@ pub(super) async fn create_live_session_handler(
         }
     });
 
-    let stream = spawn_frame_forwarder(frame_rx, |_| 0);
+    let stream = spawn_frame_forwarder(item_rx, |_| 0);
     sse_response_with_headers(stream, Some(("x-session-id", &session_id)))
 }
 
