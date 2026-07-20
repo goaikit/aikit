@@ -65,11 +65,8 @@ mod tests {
     #[test]
     fn test_from_existing_without_sentinels() {
         let skill_md = "# My Skill\n\nSome content.".to_string();
-        let artifact = SkillArtifact::from_existing(
-            skill_md,
-            "my-skill".to_string(),
-            "cursor-agent".to_string(),
-        );
+        let artifact =
+            SkillArtifact::from_existing(skill_md, "my-skill".to_string(), "cursor".to_string());
         let text = artifact.text();
         assert_eq!(count_occurrences(text, PROTECTED_BEGIN), 1);
         assert_eq!(count_occurrences(text, PROTECTED_END), 1);
@@ -90,7 +87,7 @@ mod tests {
         let artifact = SkillArtifact::from_existing(
             skill_md.clone(),
             "my-skill".to_string(),
-            "cursor-agent".to_string(),
+            "cursor".to_string(),
         );
         assert_eq!(artifact.text(), skill_md.as_str());
     }
@@ -100,15 +97,12 @@ mod tests {
     async fn test_materialize_writes_correct_content() {
         let dir = tempfile::TempDir::new().unwrap();
         let skill_md = "# My Skill\n\nContent.".to_string();
-        let artifact = SkillArtifact::from_existing(
-            skill_md,
-            "my-skill".to_string(),
-            "cursor-agent".to_string(),
-        );
+        let artifact =
+            SkillArtifact::from_existing(skill_md, "my-skill".to_string(), "cursor".to_string());
         artifact.materialize(dir.path()).await.unwrap();
 
         // Determine expected path using the same logic as deploy_skill.
-        let expected_path = skill_dir(dir.path(), "cursor-agent", "my-skill")
+        let expected_path = skill_dir(dir.path(), "cursor", "my-skill")
             .unwrap()
             .join("SKILL.md");
         assert!(

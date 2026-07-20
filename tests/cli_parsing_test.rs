@@ -464,8 +464,8 @@ mod tests {
         let out = h.run(&["aikit", "mcp", "list"]).await;
         assert_eq!(out.exit_code, 0, "expected exit 0; stderr: {}", out.stderr);
         assert!(
-            out.stdout.contains("cursor-agent"),
-            "mcp list must list cursor-agent; stdout: {}",
+            out.stdout.contains("cursor"),
+            "mcp list must list cursor; stdout: {}",
             out.stdout
         );
     }

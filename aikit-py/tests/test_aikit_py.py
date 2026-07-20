@@ -38,7 +38,7 @@ def test_agent_fields():
     assert config.commands_dir == ".claude/commands"
     assert config.skills_dir == ".claude/skills"
     assert config.agents_dir == ".claude/agents"
-    assert config.key() == "claude code"  # Corrected assertion
+    assert config.key == "claude"
 
 
 def test_agent_fields_for_copilot():
@@ -47,7 +47,7 @@ def test_agent_fields_for_copilot():
     assert config.commands_dir == ".github/agents"
     assert config.skills_dir is None
     assert config.agents_dir == ".github/agents"
-    assert config.key() == "github copilot"  # Corrected assertion
+    assert config.key == "copilot"
 
 
 def test_agent_fields_for_qwen():
@@ -56,7 +56,7 @@ def test_agent_fields_for_qwen():
     assert config.commands_dir == ".qwen/commands"
     assert config.skills_dir is None
     assert config.agents_dir is None
-    assert config.key() == "qwen code"  # Corrected assertion
+    assert config.key == "qwen"
 
 
 def test_commands_dir(temp_project_root):
@@ -80,7 +80,7 @@ def test_subagent_path_copilot(temp_project_root):
 def test_subagent_filename_convention():
     assert aikit_py.subagent_filename("claude", "test") == "test.md"
     assert aikit_py.subagent_filename("copilot", "test") == "test.agent.md"
-    assert aikit_py.subagent_filename("cursor-agent", "test") == "test.md"
+    assert aikit_py.subagent_filename("cursor", "test") == "test.md"
 
 
 def test_subagent_path_unsupported(temp_project_root):
@@ -109,7 +109,7 @@ Description here."""
     ]
 
     path = aikit_py.deploy_skill(
-        "cursor-agent",
+        "cursor",
         temp_project_root,
         "my-skill",
         skill_md,

@@ -58,9 +58,35 @@ impl Error for DeployError {
     }
 }
 
+/// Command/subagent file format an agent's deploy layout expects.
+///
+/// Distinct from [`pipeline::OutputFormat`] (report rendering); this is a
+/// deploy-layout concern owned by the [`AgentConfig`] catalog (ADR 0015).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeployOutputFormat {
+    /// Plain Markdown (`.md`).
+    Markdown,
+    /// TOML front matter/body.
+    Toml,
+    /// Agent-specific Markdown variant (e.g. Copilot's `.agent.md`).
+    AgentMd,
+}
+
 /// Configuration for an AI agent.
+///
+/// This is the **deploy-layout registry** (ADR 0015): the single source of
+/// truth for every agent's on-disk layout and scaffolding metadata, covering
+/// both runnable agents (also present in the `Backend` enum) and deploy-only
+/// agents that are never spawned (e.g. Copilot, Windsurf). It does **not**
+/// carry `requires_cli` — that question belongs to the runnable-backend
+/// registry and is derived, never stored (see [`requires_cli`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentConfig {
+    /// Canonical catalog key (e.g. `"claude"`, `"cursor"`). One key resolves
+    /// consistently across this deploy-layout registry and the `Backend`
+    /// enum for every runnable agent (ADR 0015 closes the historical
+    /// `cursor` vs `cursor-agent` split).
+    pub key: String,
     /// Display name of the agent
     pub name: String,
     /// Directory for agent commands
@@ -73,13 +99,12 @@ pub struct AgentConfig {
     pub scripts_dir: Option<String>,
     /// Optional primary instruction file name (e.g., "CLAUDE.md", "GEMINI.md", "AGENTS.md")
     pub instruction_file: Option<String>,
-}
-
-impl AgentConfig {
-    /// Get the agent key (lowercase name for matching)
-    pub fn key(&self) -> String {
-        self.name.to_lowercase()
-    }
+    /// Optional URL for installing the agent's CLI/tooling.
+    pub install_url: Option<String>,
+    /// Argument-substitution placeholder used in this agent's command files.
+    pub arg_placeholder: String,
+    /// Command/subagent file format this agent expects.
+    pub output_format: DeployOutputFormat,
 }
 
 /// Returns the filename for a subagent based on the agent type.
@@ -182,19 +207,24 @@ pub fn validate_agent_key(key: &str) -> Result<(), DeployError> {
     Ok(())
 }
 
+fn agent_config_from_entry(entry: &AgentEntry) -> AgentConfig {
+    AgentConfig {
+        key: entry.key.to_string(),
+        name: entry.name.to_string(),
+        commands_dir: entry.commands.to_string(),
+        skills_dir: entry.skills.map(|s| s.to_string()),
+        agents_dir: entry.subagents.map(|a| a.to_string()),
+        scripts_dir: entry.scripts.map(|s| s.to_string()),
+        instruction_file: entry.instruction_file.map(|f| f.to_string()),
+        install_url: entry.install_url.map(|s| s.to_string()),
+        arg_placeholder: entry.arg_placeholder.to_string(),
+        output_format: entry.output_format,
+    }
+}
+
 /// Returns all agents in the catalog.
 pub fn all_agents() -> Vec<AgentConfig> {
-    AGENTS
-        .iter()
-        .map(|entry| AgentConfig {
-            name: entry.name.to_string(),
-            commands_dir: entry.commands.to_string(),
-            skills_dir: entry.skills.map(|s| s.to_string()),
-            agents_dir: entry.subagents.map(|a| a.to_string()),
-            scripts_dir: entry.scripts.map(|s| s.to_string()),
-            instruction_file: entry.instruction_file.map(|f| f.to_string()),
-        })
-        .collect()
+    AGENTS.iter().map(agent_config_from_entry).collect()
 }
 
 /// Returns an agent by key.
@@ -204,14 +234,22 @@ pub fn agent(key: &str) -> Option<AgentConfig> {
     AGENTS
         .iter()
         .find(|entry| entry.key == key)
-        .map(|entry| AgentConfig {
-            name: entry.name.to_string(),
-            commands_dir: entry.commands.to_string(),
-            skills_dir: entry.skills.map(|s| s.to_string()),
-            agents_dir: entry.subagents.map(|a| a.to_string()),
-            scripts_dir: entry.scripts.map(|s| s.to_string()),
-            instruction_file: entry.instruction_file.map(|f| f.to_string()),
-        })
+        .map(agent_config_from_entry)
+}
+
+/// Whether the agent identified by `key` requires an external CLI binary to
+/// run, derived from `Backend` membership (ADR 0015: `requires_cli`
+/// disappears as a stored field on either registry).
+///
+/// - Every external [`runner::Backend`] (claude, codex, gemini, opencode,
+///   cursor) requires its CLI: `true`.
+/// - The in-process [`runner::Backend::Aikit`] backend does not: `false`.
+/// - Deploy-only agents (e.g. copilot, windsurf) are never Backends — they
+///   have no runnable identity to require a CLI for: `false`.
+pub fn requires_cli(key: &str) -> bool {
+    runner::Backend::from_key(key)
+        .map(runner::Backend::requires_cli)
+        .unwrap_or(false)
 }
 
 /// Returns the primary instruction file path for a specific agent.
@@ -490,6 +528,11 @@ pub use mcp_deploy::{
 };
 
 /// Agent catalog entry containing all supported agents and their capabilities.
+///
+/// This is the single deploy-layout row per agent (ADR 0015). `key` is the
+/// **canonical** identifier: for runnable agents it is exactly the key
+/// `runner::Backend::key()` returns for the matching Backend, so a config
+/// value, a Backend, and a deploy layout always resolve the same agent.
 struct AgentEntry<'a> {
     key: &'a str,
     name: &'a str,
@@ -498,8 +541,35 @@ struct AgentEntry<'a> {
     subagents: Option<&'a str>,
     scripts: Option<&'a str>,
     instruction_file: Option<&'a str>,
+    install_url: Option<&'a str>,
+    arg_placeholder: &'a str,
+    output_format: DeployOutputFormat,
 }
 
+// Divergent-value resolutions folded in from the three tables ADR 0015
+// replaces (`core/agent.rs::EXTRAS`, the deleted `models/config.rs
+// ::default_agents`, and this table):
+//
+// - `cursor`'s catalog key was `cursor-agent` here while `runner::Backend`
+//   already canonicalized on `cursor` (ADR 0006). Closed by renaming this
+//   row's key to `cursor` — the single canonical key for both registries.
+// - `cursor`'s arg placeholder: EXTRAS said `$ARGUMENTS` (mirroring Claude
+//   Code's slash-command convention, which the Cursor CLI's custom commands
+//   also follow); the deleted `models/config.rs` said `{args}`. Kept
+//   `$ARGUMENTS` — it matches Cursor's actual shipped command-file behavior.
+// - `gemini`/`qwen`'s arg placeholder is `{{args}}`, matching the Gemini CLI
+//   TOML custom-command format's documented substitution token (Qwen Code is
+//   Gemini-CLI-derived and shares it).
+// - `copilot`'s output dir is `.github/agents` (this table, actively used by
+//   `deploy_command`/`commands_dir` and covered by tests); the deleted
+//   `models/config.rs` had the stale, unused `.github/copilot-instructions`.
+// - `requires_cli` no longer lives on this table at all (see [`requires_cli`]
+//   below) — it disappears as a stored field per ADR 0015 and is derived
+//   from `runner::Backend` membership instead. Gemini's old EXTRAS value
+//   (`true`) is what that derivation now produces, since Gemini is a
+//   runnable Backend; the deleted `models/config.rs` value (`false`) was
+//   answering the unrelated question "does scaffolding need the CLI" and no
+//   longer exists to disagree.
 const AGENTS: &[AgentEntry] = &[
     AgentEntry {
         key: "claude",
@@ -509,6 +579,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: Some(".claude/agents"),
         scripts: None,
         instruction_file: Some("CLAUDE.md"),
+        install_url: Some("https://claude.ai/code"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "gemini",
@@ -518,6 +591,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: Some(".gemini/agents"),
         scripts: None,
         instruction_file: Some("GEMINI.md"),
+        install_url: Some("https://ai.google.dev/"),
+        arg_placeholder: "{{args}}",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "copilot",
@@ -527,15 +603,21 @@ const AGENTS: &[AgentEntry] = &[
         subagents: Some(".github/agents"),
         scripts: None,
         instruction_file: None,
+        install_url: None,
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::AgentMd,
     },
     AgentEntry {
-        key: "cursor-agent",
+        key: "cursor",
         name: "Cursor",
         commands: ".cursor/commands",
         skills: Some(".cursor/skills"),
         subagents: Some(".cursor/agents"),
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://cursor.sh/"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "qwen",
@@ -545,6 +627,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://qwenlm.github.io/"),
+        arg_placeholder: "{{args}}",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "newton",
@@ -554,6 +639,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: Some(".newton/agents"),
         scripts: Some(".newton/scripts"),
         instruction_file: Some("AGENTS.md"),
+        install_url: None,
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "opencode",
@@ -563,6 +651,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://opencode.dev/"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "codex",
@@ -572,6 +663,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://codex.ai/"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "windsurf",
@@ -581,6 +675,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: None,
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "kilocode",
@@ -590,6 +687,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: None,
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "auggie",
@@ -599,6 +699,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: Some(".augment/agents"),
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://auggie.ai/"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "roo",
@@ -608,6 +711,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: None,
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "codebuddy",
@@ -617,6 +723,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://codebuddy.ai/"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "qoder",
@@ -626,6 +735,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: Some(".qoder/agents"),
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://qoder.ai/"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "amp",
@@ -635,6 +747,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://amp.dev/"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "shai",
@@ -644,6 +759,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://shai.ai/"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "q",
@@ -653,6 +771,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://aws.amazon.com/q/"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
         key: "bob",
@@ -662,6 +783,9 @@ const AGENTS: &[AgentEntry] = &[
         subagents: None,
         scripts: None,
         instruction_file: Some("AGENTS.md"),
+        install_url: None,
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
     },
 ];
 
@@ -705,7 +829,7 @@ mod tests {
     #[test]
     fn test_instruction_file_cursor_agent() {
         let temp_dir = TempDir::new().unwrap();
-        let path = instruction_file(temp_dir.path(), "cursor-agent").unwrap();
+        let path = instruction_file(temp_dir.path(), "cursor").unwrap();
         assert!(path.is_some());
         assert_eq!(path.unwrap(), temp_dir.path().join("AGENTS.md"));
     }
@@ -1033,7 +1157,7 @@ mod tests {
     fn test_subagent_filename_convention() {
         assert_eq!(subagent_filename("claude", "test"), "test.md");
         assert_eq!(subagent_filename("copilot", "test"), "test.agent.md");
-        assert_eq!(subagent_filename("cursor-agent", "test"), "test.md");
+        assert_eq!(subagent_filename("cursor", "test"), "test.md");
     }
 
     #[test]
@@ -1067,7 +1191,7 @@ mod tests {
         ];
 
         let path = deploy_skill(
-            "cursor-agent",
+            "cursor",
             temp_dir.path(),
             "my-skill",
             skill_md,
@@ -1149,7 +1273,7 @@ mod tests {
         ];
 
         let path = deploy_skill(
-            "cursor-agent",
+            "cursor",
             temp_dir.path(),
             "my-skill",
             skill_md,
@@ -1282,8 +1406,66 @@ mod catalog_tests {
 
     #[test]
     fn test_catalog_cursor_has_both() {
-        let config = agent("cursor-agent").unwrap();
+        let config = agent("cursor").unwrap();
         assert!(config.skills_dir.is_some());
         assert!(config.agents_dir.is_some());
+    }
+
+    // ---- ADR 0015: single canonical registry (deploy-layout ⟂ Backend) ----
+
+    #[test]
+    fn test_single_canonical_key_no_cursor_agent_split() {
+        // The old deploy-catalog key `cursor-agent` no longer resolves at all;
+        // only the canonical `cursor` key (matching `runner::Backend::Cursor`)
+        // resolves in this registry.
+        assert!(agent("cursor-agent").is_none());
+        assert!(agent("cursor").is_some());
+        assert_eq!(agent("cursor").unwrap().key, "cursor");
+    }
+
+    #[test]
+    fn test_canonical_keys_match_backend_keys_for_runnable_agents() {
+        // Every runnable Backend's key must resolve to the same agent row in
+        // this deploy-layout registry (ADR 0015: "one canonical key per
+        // agent across both registries").
+        for &backend in crate::runner::backend::ALL {
+            if backend == crate::runner::Backend::Aikit {
+                continue; // in-process; not a deploy-layout row
+            }
+            let key = backend.key();
+            let config = agent(key)
+                .unwrap_or_else(|| panic!("Backend key '{key}' has no deploy-layout row"));
+            assert_eq!(config.key, key);
+        }
+    }
+
+    #[test]
+    fn test_divergent_values_now_single_and_correct() {
+        // gemini: EXTRAS said requires_cli=true (correct: Gemini CLI is
+        // required to run it); the deleted models/config.rs said false. The
+        // field no longer exists on this table at all — derived instead.
+        assert!(requires_cli("gemini"));
+
+        // cursor: EXTRAS said "$ARGUMENTS" (matches Cursor's actual custom
+        // command substitution syntax); the deleted models/config.rs said
+        // "{args}". Single value now:
+        assert_eq!(agent("cursor").unwrap().arg_placeholder, "$ARGUMENTS");
+
+        // copilot: this table's output dir (".github/agents", actively used
+        // and tested) beat the deleted models/config.rs's stale, unused
+        // ".github/copilot-instructions".
+        assert_eq!(agent("copilot").unwrap().commands_dir, ".github/agents");
+    }
+
+    #[test]
+    fn test_requires_cli_derived_from_backend_membership() {
+        // Runnable external Backend: requires its CLI.
+        assert!(requires_cli("claude"));
+        // In-process Backend: no CLI at all.
+        assert!(!requires_cli("aikit"));
+        // Deploy-only agent (never a Backend): not applicable, so `false`.
+        assert!(!requires_cli("copilot"));
+        // Unknown key: also `false` (no runnable identity to require a CLI for).
+        assert!(!requires_cli("not-a-real-agent"));
     }
 }
