@@ -1,5 +1,6 @@
 use crate::install::InstallError;
 use crate::manifest::TemplateManifest;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -496,6 +497,18 @@ pub fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError
     Ok(())
 }
 
+/// SHA-256 hex digest of raw bytes (SEC-7 / FEAT-4: archive integrity).
+///
+/// Used by callers that fetch a package archive (e.g. a GitHub zipball) to
+/// compute a checksum for the lock file (`src/core/lock.rs`) so a later
+/// re-install/update at the same recorded version can detect that the
+/// content behind a mutable ref (branch/tag) changed underneath it.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
 /// Find package root: directory containing aikit.toml
 /// Handles GitHub zipball case (single top-level directory)
 fn find_package_root(dir: &Path) -> Option<PathBuf> {
@@ -983,6 +996,34 @@ mod tests {
 
         // Verify that safe.txt was created in dest_dir
         assert!(dest_dir.join("safe.txt").exists());
+    }
+
+    #[test]
+    fn test_sha256_hex_deterministic() {
+        let a = sha256_hex(b"hello world");
+        let b = sha256_hex(b"hello world");
+        assert_eq!(a, b);
+        // Known SHA-256 of "hello world"
+        assert_eq!(
+            a,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[test]
+    fn test_sha256_hex_different_for_different_inputs() {
+        assert_ne!(sha256_hex(b"hello"), sha256_hex(b"world"));
+    }
+
+    #[test]
+    fn test_sha256_hex_matches_archive_bytes() {
+        // Regression guard: the checksum must be over the raw archive bytes,
+        // not e.g. a text/UTF-8 reinterpretation, so it stays stable across
+        // Read implementations that hand back a Vec<u8> zipball body.
+        let bytes: Vec<u8> = vec![0, 159, 146, 150, 255, 0, 1, 2];
+        let digest = sha256_hex(&bytes);
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
