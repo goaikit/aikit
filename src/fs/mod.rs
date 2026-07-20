@@ -9,29 +9,13 @@ pub mod permissions;
 
 use std::path::{Path, PathBuf};
 
-/// Copy directory recursively
+/// Copy directory recursively.
+///
+/// Delegates to `aikit_sdk::copy_dir`, the single canonical recursive-copy
+/// implementation (ARCH-1) — carries the same read-side symlink-skip
+/// hardening as every other copy path in this workspace.
 pub fn copy_directory<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> anyhow::Result<()> {
-    use walkdir::WalkDir;
-
-    let from = from.as_ref();
-    let to = to.as_ref();
-
-    for entry in WalkDir::new(from) {
-        let entry = entry?;
-        let path = entry.path();
-        let relative = path.strip_prefix(from)?;
-        let dest = to.join(relative);
-
-        if path.is_dir() {
-            std::fs::create_dir_all(&dest)?;
-        } else {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::copy(path, &dest)?;
-        }
-    }
-
+    aikit_sdk::copy_dir(from.as_ref(), to.as_ref())?;
     Ok(())
 }
 

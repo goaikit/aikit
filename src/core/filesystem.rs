@@ -5,7 +5,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 /// .aikit/ directory manager
 #[allow(dead_code)]
@@ -98,8 +97,11 @@ impl AikDirectory {
         // Create package directory
         fs::create_dir_all(&install_path)?;
 
-        // Copy package files
-        self.copy_directory(source_dir, &install_path)?;
+        // Copy package files (aikit_sdk::copy_dir — the single canonical
+        // recursive-copy implementation, ARCH-1). This also picks up the
+        // read-side symlink-skip hardening, which matters here since
+        // `source_dir` may be a downloaded/extracted, untrusted tree.
+        aikit_sdk::copy_dir(source_dir, &install_path)?;
 
         Ok(install_path)
     }
@@ -201,26 +203,6 @@ impl AikDirectory {
         }
 
         remove_empty_dirs(&self.packages_path())
-    }
-
-    /// Copy directory recursively
-    fn copy_directory(&self, from: &Path, to: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        for entry in WalkDir::new(from).into_iter().filter_map(|e| e.ok()) {
-            let source_path = entry.path();
-            let relative_path = source_path.strip_prefix(from)?;
-            let dest_path = to.join(relative_path);
-
-            if source_path.is_dir() {
-                fs::create_dir_all(&dest_path)?;
-            } else {
-                if let Some(parent) = dest_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                fs::copy(source_path, dest_path)?;
-            }
-        }
-
-        Ok(())
     }
 }
 

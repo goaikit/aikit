@@ -79,6 +79,11 @@ impl TemplateSource {
 
 /// Parse GitHub URL to extract owner, repo, optional version, and optional subdir.
 ///
+/// This is the **single canonical GitHub-source parser** for aikit (ARCH-1 —
+/// previously duplicated in `src/cli/commands/install.rs`, which accepted a
+/// narrower grammar). Every GitHub-source entry point, including the `aikit`
+/// CLI's own install command, parses through this function.
+///
 /// Supported forms:
 /// - `owner/repo`
 /// - `owner/repo/subdir/path`
@@ -87,7 +92,13 @@ impl TemplateSource {
 /// - `github.com/owner/repo/tree/<ref>/subdir`
 /// - `https://github.com/owner/repo`
 /// - `https://github.com/owner/repo/tree/<ref>/subdir`
-fn parse_github_url(s: &str) -> Result<TemplateSource, InstallError> {
+///
+/// Any extra path segments beyond `owner/repo` that don't follow the
+/// `/tree/<ref>/...` form (e.g. a GitHub release-asset URL like
+/// `.../releases/download/v1.0.0/package.zip`) are treated as `subdir` and
+/// otherwise ignored by callers that don't use it — this function never
+/// rejects them.
+pub fn parse_github_url(s: &str) -> Result<TemplateSource, InstallError> {
     let url = s
         .trim_start_matches("https://")
         .trim_start_matches("http://");
@@ -399,8 +410,18 @@ fn zip_entry_has_absolute_prefix(entry_name: &str) -> bool {
     )
 }
 
-/// Extract zip bytes to destination directory
-fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
+/// Extract zip bytes to destination directory.
+///
+/// This is the **single canonical zip extractor** for aikit (ARCH-1 —
+/// previously duplicated in `src/core/template.rs`). It rejects zip-slip
+/// (`..`) and absolute-path entries and never materializes an entry as an
+/// OS-level symlink regardless of the archive's stored metadata — every
+/// entry is written as plain bytes into a regular file at the validated,
+/// computed destination path. Callers that also need to flatten a single
+/// common top-level wrapping directory (GitHub-zipball style) do so as a
+/// post-processing step on top of this function (see
+/// `aikit::core::template::extract_and_flatten_zip`).
+pub fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
     use std::io::Cursor;
 
     // Create dest_dir if it doesn't exist
@@ -692,6 +713,119 @@ mod tests {
     fn test_template_source_parse_invalid() {
         let result = TemplateSource::parse("not-a-valid-source");
         assert!(result.is_err());
+    }
+
+    // -- ARCH-1: grammar parity with the deleted `src/cli/commands/install.rs`
+    // `parse_github_url` (kept `github.com/...` and `owner/repo` forms; this
+    // parser is now the single canonical implementation both entry points
+    // share) --------------------------------------------------------------
+
+    #[test]
+    fn test_parse_github_url_github_com_prefix_no_scheme() {
+        // The old CLI parser explicitly special-cased the bare (schemeless)
+        // `github.com/owner/repo` form.
+        let source = parse_github_url("github.com/owner/repo").unwrap();
+        match source {
+            TemplateSource::GitHub {
+                owner,
+                repo,
+                version,
+                subdir,
+            } => {
+                assert_eq!(owner, "owner");
+                assert_eq!(repo, "repo");
+                assert!(version.is_none());
+                assert!(subdir.is_none());
+            }
+            _ => panic!("Expected GitHub source"),
+        }
+    }
+
+    #[test]
+    fn test_parse_github_url_extra_segments_beyond_owner_repo_are_ignored() {
+        // The old CLI parser only ever read parts[0]/parts[1] as owner/repo
+        // and silently dropped anything after — e.g. a GitHub release-asset
+        // URL like `.../releases/download/v1.0.0/package.zip`. The unified
+        // parser must not *reject* this shape; it captures the extra
+        // segments as `subdir` instead of erroring, so callers that only
+        // want owner/repo (like the CLI) see identical behavior.
+        let source =
+            parse_github_url("https://github.com/owner/repo/releases/download/v1.0.0/package.zip")
+                .unwrap();
+        match source {
+            TemplateSource::GitHub {
+                owner,
+                repo,
+                version,
+                subdir,
+            } => {
+                assert_eq!(owner, "owner");
+                assert_eq!(repo, "repo");
+                assert!(version.is_none());
+                assert_eq!(
+                    subdir,
+                    Some("releases/download/v1.0.0/package.zip".to_string())
+                );
+            }
+            _ => panic!("Expected GitHub source"),
+        }
+    }
+
+    #[test]
+    fn test_parse_github_url_short_owner_repo_no_version() {
+        // The old CLI parser's plain `owner/repo` (no scheme, no version).
+        let source = parse_github_url("owner/repo").unwrap();
+        match source {
+            TemplateSource::GitHub {
+                owner,
+                repo,
+                version,
+                ..
+            } => {
+                assert_eq!(owner, "owner");
+                assert_eq!(repo, "repo");
+                assert!(version.is_none());
+            }
+            _ => panic!("Expected GitHub source"),
+        }
+    }
+
+    #[test]
+    fn test_parse_github_url_rejects_missing_repo_segment() {
+        // Matches the old CLI parser's "Invalid GitHub URL format" rejection
+        // for a source with no `/` at all once the github.com prefix (if
+        // any) is stripped.
+        let result = parse_github_url("github.com/onlyowner");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_zip_is_the_canonical_extractor_public_api() {
+        // ARCH-1: `extract_zip` must be reachable from outside this module
+        // (`src/core/template.rs` routes its flatten step through it)
+        // without needing its own duplicate extraction loop.
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let temp_dir = TempDir::new().unwrap();
+        let zip_path = temp_dir.path().join("test.zip");
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        zip.start_file("hello.txt", options).unwrap();
+        zip.write_all(b"world").unwrap();
+        zip.finish().unwrap();
+
+        let zip_bytes = fs::read(&zip_path).unwrap();
+        let dest_dir = temp_dir.path().join("dest");
+        extract_zip(&zip_bytes, &dest_dir).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("hello.txt")).unwrap(),
+            "world"
+        );
     }
 
     #[test]
