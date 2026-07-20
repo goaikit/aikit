@@ -170,6 +170,10 @@ path = "tests/serve/serve_live_session_limits_test.rs"
 name = "serve_signal_kill_test"
 path = "tests/serve/serve_signal_kill_test.rs"
 
+[[test]]
+name = "serve_tool_policy_test"
+path = "tests/serve/serve_tool_policy_test.rs"
+
 [features]
 tools = ["dep:aikit-magictool"]
 # Session capture (spec 010): on-disk adapter parsing for AI coding tools.
