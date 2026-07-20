@@ -1,13 +1,20 @@
 //! Configuration Data Structures
 //!
 //! This module defines configuration structures for AIKIT's template package system,
-//! including global settings, agent configurations, and user preferences.
+//! including global settings and user preferences.
+//!
+//! ADR 0015: agent configuration is no longer duplicated here. The former
+//! `default_agents()` table and its own `AgentConfig`/`OutputFormat` types
+//! (a third, independently-drifted copy of agent metadata, distinct from
+//! both `aikit_sdk::AgentConfig` and `crate::core::agent::AgentConfig`) have
+//! been deleted; the canonical deploy-layout registry lives in aikit-sdk
+//! (`aikit_sdk::{AgentConfig, all_agents, agent}`), fronted for this crate by
+//! `crate::core::agent`.
 
 #![allow(dead_code)]
 
 use crate::models::registry::RegistryConfig;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Global AIKIT configuration
@@ -17,8 +24,6 @@ pub struct AikConfig {
     pub version: String,
     /// Package installation directory (default: ".aikit")
     pub install_dir: String,
-    /// Agent configurations
-    pub agents: HashMap<String, AgentConfig>,
     /// Registry configuration
     pub registry: RegistryConfig,
     /// User preferences
@@ -30,7 +35,6 @@ impl Default for AikConfig {
         Self {
             version: "1.0".to_string(),
             install_dir: ".aikit".to_string(),
-            agents: Self::default_agents(),
             registry: RegistryConfig::default(),
             preferences: UserPreferences::default(),
         }
@@ -69,139 +73,6 @@ impl AikConfig {
             Err(errors)
         }
     }
-
-    /// Get default agent configurations
-    fn default_agents() -> HashMap<String, AgentConfig> {
-        let mut agents = HashMap::new();
-
-        // Claude Code
-        agents.insert(
-            "claude".to_string(),
-            AgentConfig {
-                name: "Claude Code".to_string(),
-                key: "claude".to_string(),
-                folder: ".claude".to_string(),
-                install_url: Some("https://claude.ai/code".to_string()),
-                requires_cli: true,
-                output_format: OutputFormat::Markdown,
-                output_dir: ".claude/commands".to_string(),
-                arg_placeholder: "$ARGUMENTS".to_string(),
-                extensions: vec![".md".to_string()],
-            },
-        );
-
-        // Cursor
-        agents.insert(
-            "cursor".to_string(),
-            AgentConfig {
-                name: "Cursor".to_string(),
-                key: "cursor".to_string(),
-                folder: ".cursor".to_string(),
-                install_url: None,
-                requires_cli: false,
-                output_format: OutputFormat::Markdown,
-                output_dir: ".cursor/commands".to_string(),
-                arg_placeholder: "{args}".to_string(),
-                extensions: vec![".md".to_string()],
-            },
-        );
-
-        // GitHub Copilot
-        agents.insert(
-            "copilot".to_string(),
-            AgentConfig {
-                name: "GitHub Copilot".to_string(),
-                key: "copilot".to_string(),
-                folder: ".github".to_string(),
-                install_url: None,
-                requires_cli: false,
-                output_format: OutputFormat::Markdown,
-                output_dir: ".github/copilot-instructions".to_string(),
-                arg_placeholder: "{args}".to_string(),
-                extensions: vec![".md".to_string()],
-            },
-        );
-
-        // Gemini (Google AI)
-        agents.insert(
-            "gemini".to_string(),
-            AgentConfig {
-                name: "Gemini".to_string(),
-                key: "gemini".to_string(),
-                folder: ".gemini".to_string(),
-                install_url: None,
-                requires_cli: false,
-                output_format: OutputFormat::Markdown,
-                output_dir: ".gemini/prompts".to_string(),
-                arg_placeholder: "{args}".to_string(),
-                extensions: vec![".md".to_string()],
-            },
-        );
-
-        // Continue (Codex)
-        agents.insert(
-            "continue".to_string(),
-            AgentConfig {
-                name: "Continue".to_string(),
-                key: "continue".to_string(),
-                folder: ".continue".to_string(),
-                install_url: None,
-                requires_cli: false,
-                output_format: OutputFormat::Markdown,
-                output_dir: ".continue/config".to_string(),
-                arg_placeholder: "{args}".to_string(),
-                extensions: vec![".json".to_string(), ".md".to_string()],
-            },
-        );
-
-        agents
-    }
-}
-
-/// Agent configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentConfig {
-    /// Display name
-    pub name: String,
-    /// Internal key (lowercase, no spaces)
-    pub key: String,
-    /// Configuration folder name
-    pub folder: String,
-    /// Installation URL (optional)
-    pub install_url: Option<String>,
-    /// Whether this agent requires CLI installation
-    pub requires_cli: bool,
-    /// Output format for generated content
-    pub output_format: OutputFormat,
-    /// Output directory for commands/prompts
-    pub output_dir: String,
-    /// Placeholder for command arguments
-    pub arg_placeholder: String,
-    /// Supported file extensions
-    pub extensions: Vec<String>,
-}
-
-impl AgentConfig {
-    /// Get the full output path for a command
-    pub fn get_command_path(&self, command_name: &str) -> PathBuf {
-        PathBuf::from(&self.output_dir).join(format!("{}.md", command_name))
-    }
-
-    /// Check if agent supports a file extension
-    pub fn supports_extension(&self, extension: &str) -> bool {
-        self.extensions.iter().any(|ext| ext == extension)
-    }
-}
-
-/// Output format for generated content
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum OutputFormat {
-    /// Markdown format
-    Markdown,
-    /// JSON format
-    Json,
-    /// Plain text
-    Plain,
 }
 
 /// User preferences

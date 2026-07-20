@@ -994,7 +994,7 @@ impl IntoCommandSpec for McpAddArgs {
                     default: None,
                     conflicts_with: vec![],
                     requires: vec![],
-                    help: "Agent key (e.g. cursor-agent, claude, gemini, copilot, codex)",
+                    help: "Agent key (e.g. cursor, claude, gemini, copilot, codex)",
                     ..Default::default()
                 },
                 ArgSpec {

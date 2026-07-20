@@ -539,7 +539,7 @@ fn resolve_agent_selection(ai: Option<&str>) -> Result<Vec<String>, AikError> {
     // Non-interactive: require --ai flag
     Err(AikError::InvalidSource(
         "AI agent not specified. Use --ai <agent> to specify an agent, or run in interactive mode.\n\
-         Available agents: claude, copilot, cursor-agent, gemini, qwen, opencode, codex, windsurf, kilocode, auggie, roo, codebuddy, qoder, amp, shai, q, bob".to_string(),
+         Available agents: claude, copilot, cursor, gemini, qwen, opencode, codex, windsurf, kilocode, auggie, roo, codebuddy, qoder, amp, shai, q, bob".to_string(),
     ))
 }
 

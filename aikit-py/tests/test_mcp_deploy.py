@@ -14,7 +14,7 @@ def temp_project_root():
 
 
 def test_normalize_mcp_agent_key():
-    assert aikit_py.normalize_mcp_agent_key("cursor") == "cursor-agent"
+    assert aikit_py.normalize_mcp_agent_key("cursor") == "cursor"
     assert aikit_py.normalize_mcp_agent_key("vscode") == "copilot"
     assert aikit_py.normalize_mcp_agent_key("claude") == "claude"
 
@@ -22,7 +22,7 @@ def test_normalize_mcp_agent_key():
 def test_mcp_supported_agent_keys():
     keys = aikit_py.mcp_supported_agent_keys()
     assert "claude" in keys
-    assert "cursor-agent" in keys
+    assert "cursor" in keys
     assert len(keys) == 6
 
 
