@@ -149,7 +149,11 @@ pub fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
 /// package-install path to skip `.git`, `node_modules`, `target`, and
 /// similar directories when copying a whole project-shaped source tree.
 pub fn copy_dir_excluding(src: &Path, dst: &Path, exclude: &[&str]) -> io::Result<()> {
-    for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(src) {
+        // Propagate traversal errors (e.g. a permission-denied subdirectory)
+        // rather than silently skipping them: a partial copy that looks like a
+        // success is worse than a hard failure for an install/deploy step.
+        let entry = entry.map_err(io::Error::from)?;
         let path = entry.path();
         let relative = match path.strip_prefix(src) {
             Ok(r) if !r.as_os_str().is_empty() => r,
@@ -463,5 +467,40 @@ mod tests {
         copy_dir_excluding(&src, &dst, &["target"]).unwrap();
 
         assert!(!dst.join("TARGET").exists());
+    }
+
+    // ARCH-1 review: a traversal error (e.g. an unreadable subdirectory) must
+    // propagate as a hard failure, not be silently skipped — a partial copy that
+    // looks like success is worse than an error for an install/deploy step.
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_propagates_traversal_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let src = temp.path().join("src");
+        let locked = src.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(src.join("ok.txt"), "hi").unwrap();
+        // Remove read+execute so WalkDir can't list/descend into `locked`.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        // If the directory is still listable (e.g. the test runs as root, which
+        // bypasses permission bits) the error can't be provoked — skip the
+        // assertion rather than record a false negative.
+        let can_still_read = std::fs::read_dir(&locked).is_ok();
+
+        let dst = temp.path().join("dst");
+        let result = copy_dir(&src, &dst);
+
+        // Restore permissions so TempDir cleanup can remove `locked`.
+        let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+
+        if !can_still_read {
+            assert!(
+                result.is_err(),
+                "copy_dir must propagate a permission/traversal error, not silently skip it"
+            );
+        }
     }
 }

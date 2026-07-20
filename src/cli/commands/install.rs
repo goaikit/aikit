@@ -561,8 +561,13 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
                 package.package.name, package.package.version
             ));
 
+            // Download the exact commit we just resolved (not the mutable ref), so the
+            // archive bytes match the recorded commit_sha and there is no TOCTOU window
+            // where the ref moves between resolution and download. Fall back to the ref
+            // only when resolution failed (in which case no commit_sha is recorded anyway).
+            let download_ref = resolved_commit_sha.as_deref().unwrap_or(&version);
             github
-                .download_archive(&owner, &repo, Some(&version), &archive_path)
+                .download_archive(&owner, &repo, Some(download_ref), &archive_path)
                 .await
                 .map_err(|e| AikError::Generic(e.to_string()))?;
             download_spinner.finish_with_message("Package downloaded");
@@ -1296,8 +1301,11 @@ async fn execute_update_with_client(
     let archive_path = temp_dir
         .path()
         .join(format!("{}-{}.zip", package.package.name, latest_version));
+    // Download the exact resolved commit (not the mutable ref) so the archive bytes
+    // match the recorded commit_sha — no TOCTOU window between resolve and download.
+    let download_ref = resolved_commit_sha.as_deref().unwrap_or(&ref_);
     github
-        .download_archive(&owner, &repo, Some(&ref_), &archive_path)
+        .download_archive(&owner, &repo, Some(download_ref), &archive_path)
         .await
         .map_err(|e| AikError::Generic(e.to_string()))?;
 
@@ -2100,8 +2108,10 @@ mod tests {
             .with_body(r#"{"sha": "resolved-sha-123"}"#)
             .create_async()
             .await;
+        // Download is now keyed by the resolved commit SHA (not the mutable ref),
+        // so the archive bytes match the recorded commit_sha (TOCTOU fix).
         let _zip = server
-            .mock("GET", "/repos/owner/repo/zipball/main")
+            .mock("GET", "/repos/owner/repo/zipball/resolved-sha-123")
             .with_status(200)
             .with_body(minimal_zip_bytes())
             .create_async()
@@ -2199,7 +2209,7 @@ mod tests {
             .create_async()
             .await;
         let _zip = server
-            .mock("GET", "/repos/owner/repo/zipball/main")
+            .mock("GET", "/repos/owner/repo/zipball/resolved-sha-456")
             .with_status(200)
             .with_body(minimal_zip_bytes())
             .create_async()
@@ -2278,7 +2288,7 @@ mod tests {
             .create_async()
             .await;
         let _zip = server
-            .mock("GET", "/repos/owner/repo/zipball/main")
+            .mock("GET", "/repos/owner/repo/zipball/some-other-sha")
             .with_status(200)
             .with_body(minimal_zip_bytes())
             .create_async()
