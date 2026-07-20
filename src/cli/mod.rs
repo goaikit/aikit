@@ -135,6 +135,7 @@ pub fn build_app() -> Result<AikitApp> {
             api_key: args
                 .api_key
                 .or_else(|| std::env::var("AIKIT_SERVE_API_KEY").ok()),
+            insecure: args.insecure,
         };
         serve::execute(serve_args)
             .await
@@ -711,6 +712,7 @@ struct ServeArgs {
     run_timeout_secs: String,
     max_sessions: String,
     api_key: Option<String>,
+    insecure: bool,
 }
 
 impl IntoCommandSpec for ServeArgs {
@@ -719,6 +721,16 @@ impl IntoCommandSpec for ServeArgs {
             summary: "Start HTTP server for multi-turn agent sessions (SSE streaming)",
             syntax: Some("serve"),
             category: Some("agents"),
+            long_about: Some(
+                "aikit serve exposes an in-process coding agent over HTTP. The agent keeps \
+                 its full default toolset (including shell execution) — protecting the HOST \
+                 from the agent is the job of the container/sandbox you run aikit serve in, \
+                 not aikit itself. Because the agent is deliberately unconstrained \
+                 internally, the network perimeter is the only in-app control: a bind to a \
+                 non-loopback address REQUIRES --api-key (or --insecure to explicitly \
+                 override). Deployment contract: run aikit serve inside a disposable, \
+                 network-isolated sandbox; never expose it directly to an untrusted network.",
+            ),
             args: vec![
                 opt_spec("host", "Bind address (default: 127.0.0.1)"),
                 opt_spec("port", "Port to listen on (default: 8787)"),
@@ -729,7 +741,14 @@ impl IntoCommandSpec for ServeArgs {
                 opt_spec("max-sessions", "Max concurrent sessions (default: 10)"),
                 opt_spec(
                     "api-key",
-                    "Require Authorization: Bearer <key>. Also reads AIKIT_SERVE_API_KEY.",
+                    "Require Authorization: Bearer <key>. Also reads AIKIT_SERVE_API_KEY. \
+                     Mandatory for a non-loopback --host unless --insecure is set.",
+                ),
+                flag_spec(
+                    "insecure",
+                    "Allow a non-loopback --host with no --api-key. Only the network \
+                     perimeter guards this server (see ADR 0012) — do not set this outside \
+                     a disposable, network-isolated sandbox.",
                 ),
             ],
             ..CommandSpec::default()
@@ -745,6 +764,7 @@ impl FromArgValueMap for ServeArgs {
             run_timeout_secs: get_str_default(map, "run-timeout-secs", "300"),
             max_sessions: get_str_default(map, "max-sessions", "10"),
             api_key: get_opt_val(map, "api-key"),
+            insecure: get_bool_val(map, "insecure"),
         }
     }
 }

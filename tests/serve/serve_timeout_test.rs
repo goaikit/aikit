@@ -15,6 +15,7 @@ async fn start_timeout_server(timeout_secs: u64) -> u16 {
         run_timeout_secs: timeout_secs,
         max_sessions: 10,
         api_key: None,
+        insecure: false,
     };
     let stub = make_timeout_stub_run_fn();
 

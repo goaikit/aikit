@@ -17,6 +17,7 @@ async fn start_server(run_fn: RunFn, max_sessions: usize) -> u16 {
         run_timeout_secs: 30,
         max_sessions,
         api_key: None,
+        insecure: false,
     };
 
     tokio::spawn(async move {

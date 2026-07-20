@@ -58,6 +58,10 @@ pub struct ServeArgs {
     pub run_timeout_secs: u64,
     pub max_sessions: usize,
     pub api_key: Option<String>,
+    /// SEC-2 / ADR 0012: override the fail-closed startup check that
+    /// otherwise refuses to bind a non-loopback address without
+    /// `--api-key`. Off by default; operators must opt in explicitly.
+    pub insecure: bool,
 }
 
 // ── shared config ─────────────────────────────────────────────────────────────
@@ -69,6 +73,7 @@ pub(super) struct ServeConfig {
     pub run_timeout_secs: u64,
     pub max_sessions: usize,
     pub api_key: Option<String>,
+    pub insecure: bool,
 }
 
 // ── app state ─────────────────────────────────────────────────────────────────
@@ -494,8 +499,9 @@ pub fn make_production_run_fn() -> RunFn {
         move |agent: String,
               prompt: String,
               options: RunOptions,
-              tx: tokio::sync::mpsc::Sender<StreamFrame>| {
-            use aikit_sdk::run_agent_events;
+              tx: tokio::sync::mpsc::Sender<StreamFrame>,
+              cancel: aikit_sdk::runner::RunCancelHandle| {
+            use aikit_sdk::runner::run_agent_events_cancellable;
 
             tracing::info!(
                 target: "aikit::serve::run",
@@ -514,74 +520,90 @@ pub fn make_production_run_fn() -> RunFn {
             let saw_delta_for_cb = Arc::clone(&saw_assistant_delta);
             let agent_for_cb = agent.clone();
 
-            let result = run_agent_events(&agent, &prompt, options, move |event| {
-                let payload_kind = payload_kind_name(&event.payload);
-                if let AgentEventPayload::StreamMessage(msg) = &event.payload {
-                    // B5: capture first session_id from turn_id.
-                    if let Some(ref tid) = msg.turn_id {
-                        let mut cap = captured_for_cb.lock().unwrap();
-                        if cap.is_none() {
-                            *cap = Some(tid.clone());
-                            drop(cap);
-                            let _ = tx_cb.blocking_send(StreamFrame::Session {
-                                session_id: tid.clone(),
-                            });
+            let result =
+                run_agent_events_cancellable(&agent, &prompt, options, &cancel, move |event| {
+                    let payload_kind = payload_kind_name(&event.payload);
+                    if let AgentEventPayload::StreamMessage(msg) = &event.payload {
+                        // B5: capture first session_id from turn_id.
+                        if let Some(ref tid) = msg.turn_id {
+                            let mut cap = captured_for_cb.lock().unwrap();
+                            if cap.is_none() {
+                                *cap = Some(tid.clone());
+                                drop(cap);
+                                let _ = tx_cb.blocking_send(StreamFrame::Session {
+                                    session_id: tid.clone(),
+                                });
+                            }
+                        }
+                        // Dedup Final-after-Delta for non-aikit assistant messages.
+                        if msg.role == MessageRole::Assistant && msg.kind == MessageKind::Message {
+                            if msg.phase == MessagePhase::Delta {
+                                *saw_delta_for_cb.lock().unwrap() = true;
+                            } else if msg.phase == MessagePhase::Final
+                                && *saw_delta_for_cb.lock().unwrap()
+                            {
+                                tracing::trace!(
+                                    target: "aikit::serve::run",
+                                    agent = %agent_for_cb,
+                                    payload = payload_kind,
+                                    "suppressing Final assistant StreamMessage"
+                                );
+                                return;
+                            }
                         }
                     }
-                    // Dedup Final-after-Delta for non-aikit assistant messages.
-                    if msg.role == MessageRole::Assistant && msg.kind == MessageKind::Message {
-                        if msg.phase == MessagePhase::Delta {
-                            *saw_delta_for_cb.lock().unwrap() = true;
-                        } else if msg.phase == MessagePhase::Final
-                            && *saw_delta_for_cb.lock().unwrap()
-                        {
+                    match agent_event_to_frame(&event, &agent_for_cb) {
+                        Some(frame) => {
+                            let frame_name = frame_kind_name(&frame);
+                            tracing::debug!(
+                                target: "aikit::serve::run",
+                                agent = %agent_for_cb,
+                                payload = payload_kind,
+                                frame = frame_name,
+                                "mapped SDK event to frame"
+                            );
+                            if let StreamFrame::Session { ref session_id } = frame {
+                                *captured_for_cb.lock().unwrap() = Some(session_id.clone());
+                            }
+                            if let Err(e) = tx_cb.blocking_send(frame) {
+                                tracing::warn!(
+                                    target: "aikit::serve::run",
+                                    agent = %agent_for_cb,
+                                    error = %e,
+                                    "frame channel send failed"
+                                );
+                            }
+                        }
+                        None => {
                             tracing::trace!(
                                 target: "aikit::serve::run",
                                 agent = %agent_for_cb,
                                 payload = payload_kind,
-                                "suppressing Final assistant StreamMessage"
-                            );
-                            return;
-                        }
-                    }
-                }
-                match agent_event_to_frame(&event, &agent_for_cb) {
-                    Some(frame) => {
-                        let frame_name = frame_kind_name(&frame);
-                        tracing::debug!(
-                            target: "aikit::serve::run",
-                            agent = %agent_for_cb,
-                            payload = payload_kind,
-                            frame = frame_name,
-                            "mapped SDK event to frame"
-                        );
-                        if let StreamFrame::Session { ref session_id } = frame {
-                            *captured_for_cb.lock().unwrap() = Some(session_id.clone());
-                        }
-                        if let Err(e) = tx_cb.blocking_send(frame) {
-                            tracing::warn!(
-                                target: "aikit::serve::run",
-                                agent = %agent_for_cb,
-                                error = %e,
-                                "frame channel send failed"
+                                "SDK event suppressed"
                             );
                         }
                     }
-                    None => {
-                        tracing::trace!(
-                            target: "aikit::serve::run",
-                            agent = %agent_for_cb,
-                            payload = payload_kind,
-                            "SDK event suppressed"
-                        );
-                    }
-                }
-            });
+                });
 
             let session_id = captured_session_id.lock().unwrap().clone();
             match result {
                 Ok(r) => {
-                    let exit_code = r.exit_code().unwrap_or(0);
+                    // BUG-3: `ExitStatus::code()` is `None` on signal death
+                    // (OOM-kill, `kill -9`, segfault) — never coerce that to
+                    // 0 (success). Map it to a distinct sentinel and surface
+                    // an error frame so abnormal termination is visible
+                    // rather than silently reported as a clean exit.
+                    let exit_code = match r.exit_code() {
+                        Some(code) => code,
+                        None => {
+                            let _ = tx.blocking_send(StreamFrame::Error {
+                                code: "abnormal_termination".to_string(),
+                                message: "Agent process terminated abnormally (signal or crash)"
+                                    .to_string(),
+                            });
+                            137
+                        }
+                    };
                     let stderr_tail = stderr_tail(&r.stderr);
                     tracing::info!(
                         target: "aikit::serve::run",
@@ -736,7 +758,44 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
         run_timeout_secs: args.run_timeout_secs,
         max_sessions: args.max_sessions,
         api_key: args.api_key,
+        insecure: args.insecure,
     };
+
+    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid address {}:{}: {}", config.host, config.port, e))?;
+
+    // SEC-2 / ADR 0012: the sandbox is the trust boundary for the agent
+    // itself (full toolset, `run_bash` included — see ADR 0012); the
+    // network perimeter is the *only* remaining in-app control, and it must
+    // fail closed. A non-loopback bind with no `--api-key` would let any
+    // network-reachable caller drive an unconstrained agent (including
+    // shell execution) with zero authentication, so refuse to start unless
+    // the operator either supplies a key or explicitly opts into
+    // `--insecure`. Loopback stays open by default (matches ADR 0012:
+    // existing local consumers — agentrt, the optimization loop, chat BFFs
+    // — are unaffected).
+    if !addr.ip().is_loopback() && config.api_key.is_none() && !config.insecure {
+        anyhow::bail!(
+            "refusing to start: {addr} is a non-loopback bind address and no --api-key was \
+             set. aikit serve has no host-safety sandboxing of its own (see ADR 0012 — the \
+             agent's full toolset, including shell execution, is left intact deliberately); \
+             the network perimeter is the only control standing between a network-reachable \
+             caller and an unauthenticated, unconstrained agent. Deploy aikit serve inside a \
+             disposable sandbox/container and either pass --api-key <KEY> to require \
+             `Authorization: Bearer <KEY>`, or bind to a loopback address (127.0.0.1) and put \
+             an auth-enforcing reverse proxy in front for remote access. Pass --insecure only \
+             if you understand and accept this exposure."
+        );
+    }
+    if !addr.ip().is_loopback() && config.api_key.is_none() && config.insecure {
+        eprintln!(
+            "SECURITY WARNING: serving on non-loopback address {addr} with NO --api-key \
+             (--insecure was set). Any network-reachable caller can drive this agent \
+             (including shell execution) with zero authentication. This is not recommended \
+             outside a fully disposable, network-isolated sandbox."
+        );
+    }
 
     let state = AppState {
         runs: Arc::new(Mutex::new(HashMap::new())),
@@ -745,10 +804,6 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
         run_fn,
         auth_cache: Arc::new(Mutex::new(None)),
     };
-
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid address {}:{}: {}", config.host, config.port, e))?;
 
     let domain_router = build_router(state.clone());
 
@@ -815,9 +870,15 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
     let server = builder.build();
 
     eprintln!("Listening on http://{}", addr);
-    if !addr.ip().is_loopback() {
+    if !addr.ip().is_loopback() && config.api_key.is_some() {
+        // The fail-closed check above already guarantees a non-loopback
+        // bind has *some* auth in place (a key, since --insecure without a
+        // key was warned about separately); this is just a deployment-
+        // hygiene reminder, not a security gap.
         eprintln!(
-            "Warning: server is bound to a non-loopback address. Set --api-key or restrict access via network ACLs."
+            "Note: server is bound to a non-loopback address with --api-key set. Also \
+             restrict access via network ACLs / a sandbox boundary per ADR 0012 — aikit \
+             serve does not sandbox the agent itself."
         );
     }
 

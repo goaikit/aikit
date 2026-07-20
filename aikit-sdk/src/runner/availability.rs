@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::argv::{is_runnable, runnable_agents};
 use super::backend::Backend;
@@ -8,6 +9,41 @@ use super::types::{AgentAvailabilityReason, AgentStatus, ChildTimeoutExt};
 
 /// Timeout for agent availability probing in milliseconds.
 pub(super) const PROBE_TIMEOUT_MS: u64 = 1500;
+
+/// BUG-5: how long a computed `get_agent_status()` snapshot stays valid
+/// before the next call re-probes every backend binary. Without this, a
+/// hot loop of callers (e.g. `aikit serve`'s `POST /messages`, which
+/// resolves the runnable-agent list on every request) re-spawns a
+/// `--version` probe per backend candidate on every call, stalling
+/// whichever executor drives it for up to ~1.5s per candidate.
+const STATUS_CACHE_TTL: Duration = Duration::from_secs(45);
+
+struct StatusCache {
+    at: Instant,
+    status: BTreeMap<String, AgentStatus>,
+}
+
+fn status_cache() -> &'static Mutex<Option<StatusCache>> {
+    static CACHE: OnceLock<Mutex<Option<StatusCache>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Test-only hook: force the next [`get_agent_status`] call to re-probe,
+/// regardless of TTL. Needed because the cache is a process-global static
+/// and test order/parallelism must not leak a stale snapshot between tests
+/// that assert on fresh probes.
+#[cfg(test)]
+pub(super) fn reset_status_cache_for_test() {
+    if let Ok(mut guard) = status_cache().lock() {
+        *guard = None;
+    }
+}
+
+/// Test-only hook: count of real `probe_binary_with_timeout` invocations,
+/// used to prove the TTL cache actually suppresses re-probing.
+#[cfg(test)]
+pub(super) static PROBE_CALL_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 /// Gets the binary candidates for an agent key. Empty for unknown keys and for
 /// the in-process `aikit` Backend.
@@ -24,6 +60,9 @@ pub(super) fn get_binary_candidates(agent_key: &str) -> &'static [&'static str] 
 /// Ok(false) if binary exists but --version fails,
 /// Err if binary not found or timeout occurs.
 pub(super) fn probe_binary_with_timeout(binary: &str) -> Result<bool, AgentAvailabilityReason> {
+    #[cfg(test)]
+    PROBE_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
     let resolved_binary = crate::command_resolve::resolve_command(binary);
     let mut cmd = Command::new(resolved_binary);
     cmd.arg("--version");
@@ -39,7 +78,10 @@ pub(super) fn probe_binary_with_timeout(binary: &str) -> Result<bool, AgentAvail
     match child.wait_timeout(timeout) {
         Ok(Some(status)) => Ok(status.success()),
         Ok(None) => {
+            // BUG-5: a timed-out probe must still be reaped, or it
+            // accumulates as a zombie for the lifetime of the server.
             let _ = child.kill();
+            let _ = child.wait();
             Err(AgentAvailabilityReason::TimedOut)
         }
         Err(_) => Err(AgentAvailabilityReason::BinaryNotFound),
@@ -86,7 +128,34 @@ pub fn get_installed_agents() -> Vec<String> {
 ///
 /// Returns BTreeMap for stable ordering. Includes all runnable agents
 /// with their availability status and reason if unavailable.
+///
+/// BUG-5: cached with a TTL (see [`STATUS_CACHE_TTL`]) so a hot caller
+/// (e.g. `aikit serve`'s `POST /messages`, which resolves the runnable-agent
+/// list on every request) does not re-spawn a `--version` probe per backend
+/// candidate on every call.
 pub fn get_agent_status() -> BTreeMap<String, AgentStatus> {
+    {
+        let guard = status_cache().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref cached) = *guard {
+            if cached.at.elapsed() < STATUS_CACHE_TTL {
+                return cached.status.clone();
+            }
+        }
+    }
+    let fresh = compute_agent_status();
+    let mut guard = status_cache().lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(StatusCache {
+        at: Instant::now(),
+        status: fresh.clone(),
+    });
+    fresh
+}
+
+/// The uncached probe pass — always spawns a `--version` check per backend
+/// candidate. Only [`get_agent_status`] (the cached wrapper) should be
+/// called from outside this module; kept `fn` (not inlined) so the caching
+/// logic above stays a thin, easily-audited wrapper.
+fn compute_agent_status() -> BTreeMap<String, AgentStatus> {
     let mut status = BTreeMap::new();
 
     for &agent_key in runnable_agents() {
@@ -136,6 +205,57 @@ pub fn get_agent_status() -> BTreeMap<String, AgentStatus> {
 mod tests {
     use super::*;
     use crate::runner::argv::runnable_agents;
+    use std::sync::atomic::Ordering;
+    use std::sync::Mutex as StdMutex;
+
+    /// Serializes tests that touch the process-global status cache /
+    /// probe-call counter so they don't race each other under `cargo test`'s
+    /// default parallel execution within this binary.
+    static CACHE_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    // --- BUG-5: availability is cached across calls within the TTL ---
+
+    #[test]
+    fn test_get_agent_status_is_cached_across_calls() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_status_cache_for_test();
+        PROBE_CALL_COUNT.store(0, Ordering::SeqCst);
+
+        let first = get_agent_status();
+        let probes_after_first = PROBE_CALL_COUNT.load(Ordering::SeqCst);
+        assert!(
+            probes_after_first > 0,
+            "the first call must actually probe at least one backend"
+        );
+
+        let second = get_agent_status();
+        let probes_after_second = PROBE_CALL_COUNT.load(Ordering::SeqCst);
+        assert_eq!(
+            probes_after_second, probes_after_first,
+            "a second call within the TTL must be served from cache, not re-probe"
+        );
+        assert_eq!(first, second, "cached snapshot must match the fresh one");
+    }
+
+    #[test]
+    fn test_get_agent_status_reprobes_after_cache_reset() {
+        let _guard = CACHE_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_status_cache_for_test();
+        PROBE_CALL_COUNT.store(0, Ordering::SeqCst);
+
+        let _ = get_agent_status();
+        let probes_after_first = PROBE_CALL_COUNT.load(Ordering::SeqCst);
+
+        // Simulate TTL expiry by forcing the cache to be treated as stale.
+        reset_status_cache_for_test();
+        let _ = get_agent_status();
+        let probes_after_second = PROBE_CALL_COUNT.load(Ordering::SeqCst);
+
+        assert!(
+            probes_after_second > probes_after_first,
+            "a cache-reset call must re-probe rather than reuse a stale snapshot"
+        );
+    }
 
     #[test]
     fn test_is_agent_available_false_for_non_runnable() {

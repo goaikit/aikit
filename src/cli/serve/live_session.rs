@@ -191,12 +191,37 @@ pub(super) async fn create_live_session_handler(
             "agent field is required",
         );
     }
-    if body.prompt.is_empty() {
+    // BUG-7: `.is_empty()` let whitespace-only prompts through.
+    if body.prompt.trim().is_empty() {
         return error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_request",
             "prompt must not be empty",
         );
+    }
+
+    // SEC-3: live sessions open a real bidirectional subprocess and, unlike
+    // one-shot runs, are never bounded by a run timeout — enforce the same
+    // `max_sessions` cap one-shot runs already have, or an unauthenticated
+    // (or merely careless) caller can open unbounded long-lived agent
+    // subprocesses (resource-exhaustion DoS). Checked before doing any of
+    // the expensive session-opening work below.
+    {
+        let live = state.live_sessions.lock().unwrap();
+        let active = live
+            .values()
+            .filter(|r| r.status == LiveSessionStatus::Active)
+            .count();
+        if active >= state.config.max_sessions {
+            return error_response(
+                StatusCode::TOO_MANY_REQUESTS,
+                "session_limit_reached",
+                &format!(
+                    "Maximum of {} concurrent live sessions reached",
+                    state.config.max_sessions
+                ),
+            );
+        }
     }
 
     let session_id = Uuid::new_v4().to_string();

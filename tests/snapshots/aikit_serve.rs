@@ -20,6 +20,7 @@ mod tests {
             "--run-timeout-secs",
             "--max-sessions",
             "--api-key",
+            "--insecure",
         ] {
             assert!(
                 stdout.contains(flag),

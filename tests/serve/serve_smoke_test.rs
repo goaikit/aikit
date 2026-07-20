@@ -22,6 +22,7 @@ fn make_args(port: u16) -> ServeArgs {
         run_timeout_secs: 30,
         max_sessions: 10,
         api_key: None,
+        insecure: false,
     }
 }
 
