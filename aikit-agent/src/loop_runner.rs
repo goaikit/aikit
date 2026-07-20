@@ -22,22 +22,54 @@ use crate::skills::FastskillSkillBackend;
 
 type LlmCallResult = (String, Vec<ToolCall>, Option<String>, Option<LlmUsage>);
 
+/// Run the agent to completion, collecting every [`AgentInternalEvent`] into a `Vec`
+/// that is returned once the run finishes.
+///
+/// This is a thin wrapper over [`run_streaming`] for callers that want the
+/// pre-BUG-6 "collect everything" contract; it does not duplicate the run loop.
 pub fn run(
     config: AgentConfig,
     prompt: &str,
     gateway: Box<dyn LlmGateway>,
 ) -> Result<Vec<AgentInternalEvent>, AgentError> {
-    let gateway: Arc<dyn LlmGateway> = Arc::from(gateway);
-    run_inner(config, prompt, gateway)
+    let mut events = Vec::new();
+    run_streaming(config, prompt, gateway, |e| events.push(e))?;
+    Ok(events)
 }
 
+/// Streaming variant of [`run`]: `on_event` is invoked immediately as each
+/// [`AgentInternalEvent`] is produced by the agent loop, instead of buffering
+/// the whole run in memory and replaying it once the run completes.
+pub fn run_streaming(
+    config: AgentConfig,
+    prompt: &str,
+    gateway: Box<dyn LlmGateway>,
+    mut on_event: impl FnMut(AgentInternalEvent),
+) -> Result<(), AgentError> {
+    let gateway: Arc<dyn LlmGateway> = Arc::from(gateway);
+    run_inner_streaming(config, prompt, gateway, &mut on_event)
+}
+
+/// Vec-collecting variant of [`run_inner_streaming`] used only by the fastskill-backed
+/// discovery tests below, which assert against a fully materialized event list.
+/// Production code goes through [`run`]/[`run_streaming`] instead.
+#[cfg(all(test, feature = "fastskill"))]
 pub(crate) fn run_inner(
     config: AgentConfig,
     prompt: &str,
     gateway: Arc<dyn LlmGateway>,
 ) -> Result<Vec<AgentInternalEvent>, AgentError> {
     let mut events = Vec::new();
+    run_inner_streaming(config, prompt, gateway, &mut |e| events.push(e))?;
+    Ok(events)
+}
 
+pub(crate) fn run_inner_streaming(
+    config: AgentConfig,
+    prompt: &str,
+    gateway: Arc<dyn LlmGateway>,
+    on_event: &mut impl FnMut(AgentInternalEvent),
+) -> Result<(), AgentError> {
     // 1. Discover skills using the appropriate backend.
     // AK-08 DEFERRED (issue #29): Remote-skills parity for embedded runs. The embedded path
     // already supports local skills via config.skills_dirs (set from AIKIT_SKILLS_DIR or
@@ -70,20 +102,37 @@ pub(crate) fn run_inner(
     );
 
     // 5. Main agent loop
-    run_loop(&config, &mut context, &tools, &gateway, &mut events)?;
+    run_loop(&config, &mut context, &tools, &gateway, on_event)?;
 
-    Ok(events)
+    Ok(())
 }
 
-/// Run the agent loop starting from an existing context seeded with prior conversation turns.
+/// Run the agent loop starting from an existing context seeded with prior conversation
+/// turns, collecting every event into a `Vec` returned once the run finishes.
+///
+/// Thin wrapper over [`run_with_context_streaming`]; see [`run`] for the equivalent
+/// relationship between the collecting and streaming entry points.
 pub fn run_with_context(
     config: AgentConfig,
     prior_turns: Vec<Turn>,
     new_prompt: &str,
     gateway: Box<dyn LlmGateway>,
 ) -> Result<Vec<AgentInternalEvent>, AgentError> {
-    let gateway: Arc<dyn LlmGateway> = Arc::from(gateway);
     let mut events = Vec::new();
+    run_with_context_streaming(config, prior_turns, new_prompt, gateway, |e| events.push(e))?;
+    Ok(events)
+}
+
+/// Streaming variant of [`run_with_context`]: `on_event` is invoked immediately as each
+/// event is produced.
+pub fn run_with_context_streaming(
+    config: AgentConfig,
+    prior_turns: Vec<Turn>,
+    new_prompt: &str,
+    gateway: Box<dyn LlmGateway>,
+    mut on_event: impl FnMut(AgentInternalEvent),
+) -> Result<(), AgentError> {
+    let gateway: Arc<dyn LlmGateway> = Arc::from(gateway);
 
     let (skills, provider) = discover_skills_for_run(&config)?;
 
@@ -111,17 +160,17 @@ pub fn run_with_context(
         Arc::clone(&provider),
     );
 
-    run_loop(&config, &mut context, &tools, &gateway, &mut events)?;
+    run_loop(&config, &mut context, &tools, &gateway, &mut on_event)?;
 
-    Ok(events)
+    Ok(())
 }
 
-fn run_loop(
+fn run_loop<F: FnMut(AgentInternalEvent)>(
     config: &AgentConfig,
     context: &mut ContextPacket,
     tools: &[Box<dyn Tool>],
     gateway: &Arc<dyn LlmGateway>,
-    events: &mut Vec<AgentInternalEvent>,
+    on_event: &mut F,
 ) -> Result<(), AgentError> {
     for iteration in 0..config.max_iterations {
         // Check context budget and compress if needed
@@ -130,7 +179,7 @@ fn run_loop(
                 message: e.to_string(),
             })?
         {
-            events.push(AgentInternalEvent::ContextCompressed {
+            on_event(AgentInternalEvent::ContextCompressed {
                 original_tokens: compression.original_tokens,
                 compressed_tokens: compression.compressed_tokens,
                 turns_summarized: compression.turns_summarized,
@@ -143,14 +192,14 @@ fn run_loop(
 
         // Call LLM
         let (response_text, tool_calls, finish_reason, usage) = if config.stream {
-            call_stream(gateway.as_ref(), req, events)?
+            call_stream(gateway.as_ref(), req, on_event)?
         } else {
-            call_complete(gateway.as_ref(), req, events)?
+            call_complete(gateway.as_ref(), req, on_event)?
         };
 
         // Emit usage event if present
         if let Some(u) = usage {
-            events.push(AgentInternalEvent::TokenUsage {
+            on_event(AgentInternalEvent::TokenUsage {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,
                 total_tokens: u.total_tokens,
@@ -189,7 +238,7 @@ fn run_loop(
                 let args: serde_json::Value =
                     serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
 
-                events.push(AgentInternalEvent::ToolUse {
+                on_event(AgentInternalEvent::ToolUse {
                     tool_name: tool_name.clone(),
                     tool_input: args.clone(),
                     call_id: call_id.clone(),
@@ -197,7 +246,7 @@ fn run_loop(
 
                 let output = execute_tool(tools, &tool_name, args, &tool_ctx);
 
-                events.push(AgentInternalEvent::ToolResult {
+                on_event(AgentInternalEvent::ToolResult {
                     call_id: call_id.clone(),
                     output: output.content.clone(),
                     is_error: output.is_error,
@@ -214,7 +263,7 @@ fn run_loop(
         }
 
         // Emit step finish
-        events.push(AgentInternalEvent::StepFinish {
+        on_event(AgentInternalEvent::StepFinish {
             iteration,
             finish_reason: finish_reason.unwrap_or_else(|| "unknown".to_string()),
         });
@@ -225,7 +274,7 @@ fn run_loop(
 
         // When we have exhausted iterations but still have pending tool calls, error
         if iteration + 1 >= config.max_iterations && !tool_calls.is_empty() {
-            events.push(AgentInternalEvent::Error {
+            on_event(AgentInternalEvent::Error {
                 code: "E_AIKIT_MAX_ITERATIONS".to_string(),
                 message: format!("exceeded max iterations ({})", config.max_iterations),
             });
@@ -457,20 +506,20 @@ fn build_llm_request(
     }
 }
 
-fn call_complete(
+fn call_complete<F: FnMut(AgentInternalEvent)>(
     gateway: &dyn LlmGateway,
     req: LlmRequest,
-    events: &mut Vec<AgentInternalEvent>,
+    on_event: &mut F,
 ) -> Result<LlmCallResult, AgentError> {
     let response = gateway.complete(req).map_err(|e| {
         let code = extract_error_code(&e);
         let msg = e.to_string();
-        events.push(AgentInternalEvent::Error { code, message: msg });
+        on_event(AgentInternalEvent::Error { code, message: msg });
         map_llm_error(e)
     })?;
 
     let content = response.content.unwrap_or_default();
-    events.push(AgentInternalEvent::TextFinal {
+    on_event(AgentInternalEvent::TextFinal {
         content: content.clone(),
         turn_id: None,
     });
@@ -483,15 +532,15 @@ fn call_complete(
     ))
 }
 
-fn call_stream(
+fn call_stream<F: FnMut(AgentInternalEvent)>(
     gateway: &dyn LlmGateway,
     req: LlmRequest,
-    events: &mut Vec<AgentInternalEvent>,
+    on_event: &mut F,
 ) -> Result<LlmCallResult, AgentError> {
     let handle = gateway.stream(req).map_err(|e| {
         let code = extract_error_code(&e);
         let msg = e.to_string();
-        events.push(AgentInternalEvent::Error { code, message: msg });
+        on_event(AgentInternalEvent::Error { code, message: msg });
         map_llm_error(e)
     })?;
 
@@ -506,7 +555,7 @@ fn call_stream(
             Ok(event) => match event {
                 LlmStreamEvent::TextDelta { content } => {
                     full_text.push_str(&content);
-                    events.push(AgentInternalEvent::TextDelta {
+                    on_event(AgentInternalEvent::TextDelta {
                         content,
                         turn_id: None,
                     });
@@ -545,7 +594,7 @@ fn call_stream(
                     }
                 }
                 LlmStreamEvent::ProviderError { code, message } => {
-                    events.push(AgentInternalEvent::Error {
+                    on_event(AgentInternalEvent::Error {
                         code: code.clone(),
                         message: message.clone(),
                     });
@@ -557,7 +606,7 @@ fn call_stream(
             Err(e) => {
                 let code = extract_error_code(&e);
                 let msg = e.to_string();
-                events.push(AgentInternalEvent::Error { code, message: msg });
+                on_event(AgentInternalEvent::Error { code, message: msg });
                 return Err(map_llm_error(e));
             }
         }
@@ -567,7 +616,7 @@ fn call_stream(
         tool_calls.push(tc.into_tool_call());
     }
 
-    events.push(AgentInternalEvent::TextFinal {
+    on_event(AgentInternalEvent::TextFinal {
         content: full_text.clone(),
         turn_id: None,
     });
@@ -847,6 +896,145 @@ mod tests {
         let gw = MockGateway::new(vec![MockResponse::text("hello world response text")]);
         let events = run(config, "test", Box::new(gw)).unwrap();
         assert!(!events.is_empty());
+    }
+
+    /// BUG-6: `run_streaming` must deliver events to `on_event` as they are produced,
+    /// not buffer the whole run and replay it at the end. This is driven with a
+    /// two-iteration tool-use scenario (LLM call #1 emits a tool call, LLM call #2 emits
+    /// the final text) and a gateway wrapper that timestamps each outbound LLM call into
+    /// a shared trace. If events were buffered until the run finished (the pre-fix
+    /// behavior: `aikit_agent::run` returns `Vec<AgentInternalEvent>` only once the whole
+    /// run completes), `on_event` would never fire between LLM call #1 and LLM call #2 —
+    /// every entry in the trace would be a `gateway_call` until the very end. With
+    /// incremental delivery, the `ToolUse`/`ToolResult`/`StepFinish` events from the first
+    /// LLM turn must land in the trace strictly before the second `gateway_call`.
+    #[test]
+    fn test_run_streaming_delivers_events_before_run_completes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Trace(Arc<Mutex<Vec<String>>>);
+        impl Trace {
+            fn log(&self, s: impl Into<String>) {
+                self.0.lock().unwrap().push(s.into());
+            }
+            fn snapshot(&self) -> Vec<String> {
+                self.0.lock().unwrap().clone()
+            }
+        }
+
+        struct TracingGateway {
+            trace: Trace,
+            inner: MockGateway,
+            call_count: AtomicUsize,
+        }
+
+        impl LlmGateway for TracingGateway {
+            fn complete(&self, req: LlmRequest) -> Result<LlmResponse, LlmError> {
+                let n = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+                self.trace.log(format!("gateway_call:{}", n));
+                self.inner.complete(req)
+            }
+            fn stream(&self, req: LlmRequest) -> Result<LlmStreamHandle, LlmError> {
+                let n = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+                self.trace.log(format!("gateway_call:{}", n));
+                self.inner.stream(req)
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let config = make_config(&tmp, false);
+
+        let trace = Trace::default();
+        let gw = TracingGateway {
+            trace: trace.clone(),
+            inner: MockGateway::new(vec![
+                MockResponse::tool_call("c1", "read_file", r#"{"path": "test.txt"}"#),
+                MockResponse::text("Done reading file"),
+            ]),
+            call_count: AtomicUsize::new(0),
+        };
+
+        let sink_trace = trace.clone();
+        run_streaming(config, "Read test.txt", Box::new(gw), move |event| {
+            sink_trace.log(format!("event:{:?}", event));
+        })
+        .unwrap();
+
+        let entries = trace.snapshot();
+        let second_call_idx = entries
+            .iter()
+            .position(|e| e == "gateway_call:2")
+            .expect("second LLM call should have happened (tool-use iteration then final text)");
+
+        assert!(
+            second_call_idx > 0,
+            "on_event should have fired at least once (SessionStarted-equivalent turn \
+             events) before the second LLM call, trace={:?}",
+            entries
+        );
+
+        let has_tool_use_before_second_call = entries[..second_call_idx]
+            .iter()
+            .any(|e| e.starts_with("event:ToolUse"));
+        assert!(
+            has_tool_use_before_second_call,
+            "ToolUse event from the first LLM turn must reach on_event BEFORE the agent \
+             loop starts the second LLM call — proves events are delivered incrementally \
+             as they are produced, not buffered until the whole run finishes. trace={:?}",
+            entries
+        );
+
+        let has_step_finish_before_second_call = entries[..second_call_idx]
+            .iter()
+            .any(|e| e.starts_with("event:StepFinish"));
+        assert!(
+            has_step_finish_before_second_call,
+            "StepFinish for iteration 0 must reach on_event before iteration 1's LLM call \
+             is made. trace={:?}",
+            entries
+        );
+    }
+
+    /// BUG-6: the collecting convenience wrapper (`run`) must be a thin wrapper over the
+    /// streaming primitive (`run_streaming`) that preserves the exact event sequence —
+    /// only the delivery *timing* changes between the two entry points, never the
+    /// ordering or content of events.
+    #[test]
+    fn test_collecting_wrapper_matches_streaming_event_sequence() {
+        let tmp = TempDir::new().unwrap();
+
+        let make_gw = || {
+            MockGateway::new(vec![
+                MockResponse::tool_call("c1", "read_file", r#"{"path": "test.txt"}"#),
+                MockResponse::text("Done reading file"),
+            ])
+        };
+
+        let config_a = make_config(&tmp, true);
+        let via_vec = run(config_a, "Read test.txt", Box::new(make_gw())).unwrap();
+        assert!(!via_vec.is_empty());
+
+        let config_b = make_config(&tmp, true);
+        let mut via_stream: Vec<AgentInternalEvent> = Vec::new();
+        run_streaming(config_b, "Read test.txt", Box::new(make_gw()), |e| {
+            via_stream.push(e)
+        })
+        .unwrap();
+
+        assert_eq!(
+            via_vec.len(),
+            via_stream.len(),
+            "run() and run_streaming() must produce the same number of events"
+        );
+        for (i, (a, b)) in via_vec.iter().zip(via_stream.iter()).enumerate() {
+            assert_eq!(
+                format!("{:?}", a),
+                format!("{:?}", b),
+                "event #{i} differs between run() and run_streaming(): {a:?} vs {b:?}"
+            );
+        }
     }
 
     #[test]
