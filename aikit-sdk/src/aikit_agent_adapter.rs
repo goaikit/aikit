@@ -210,26 +210,59 @@ where
 
         let prior_turns = session_turns_to_turns(&session.turns);
 
-        match aikit_agent::run_with_context(config, prior_turns, prompt, gateway) {
-            Ok(events) => {
-                let new_turns = internal_events_to_turns(prompt, &events);
+        // Forward each event to `on_event` the instant the agent loop produces it (BUG-6):
+        // `collected` mirrors the stream purely so the full transcript is available for
+        // session persistence once the run finishes — it is never used to (re)drive
+        // `on_event`, so there is no end-of-run replay and no unbounded unread buffer.
+        let mut collected: Vec<AgentInternalEvent> = Vec::new();
+        let mut state = EmitState::new();
+        let mut callback_panic: Option<Box<dyn std::any::Any + Send>> = None;
+        let run_result = aikit_agent::run_with_context_streaming(
+            config,
+            prior_turns,
+            prompt,
+            gateway,
+            |event| {
+                collected.push(event.clone());
+                if callback_panic.is_none() {
+                    if let Err(RunError::CallbackPanic(panic)) = state.emit(event, on_event) {
+                        callback_panic = Some(panic);
+                    }
+                }
+            },
+        );
+
+        match run_result {
+            Ok(()) => {
+                let new_turns = internal_events_to_turns(prompt, &collected);
                 let mut updated_session = session;
                 updated_session.turns.extend(new_turns);
                 updated_session.updated_at = now_rfc3339();
                 let _ = store.save(&updated_session);
                 let _ = store.update_index(&cwd_str, &updated_session.session_id);
-                emit_events(events, options, on_event, true)
+                if let Some(panic) = callback_panic {
+                    return Err(RunError::CallbackPanic(panic));
+                }
+                Ok(state.finish(true))
             }
             Err(err) => {
-                let mut result = emit_events(
-                    vec![AgentInternalEvent::Error {
-                        code: error_code(&err.to_string()),
-                        message: err.to_string(),
-                    }],
-                    options,
-                    on_event,
-                    false,
-                )?;
+                if callback_panic.is_none() && !state.had_error_event {
+                    // The run loop pushes an `Error` event onto the sink before returning
+                    // `Err` for almost every failure path; this only fires for the rare
+                    // gap (e.g. context-compression failure) where no event preceded it,
+                    // so a client always gets at least one error frame.
+                    let _ = state.emit(
+                        AgentInternalEvent::Error {
+                            code: error_code(&err.to_string()),
+                            message: err.to_string(),
+                        },
+                        on_event,
+                    );
+                }
+                if let Some(panic) = callback_panic {
+                    return Err(RunError::CallbackPanic(panic));
+                }
+                let mut result = state.finish(false);
                 result.stderr = err.to_string().into_bytes();
                 Ok(result)
             }
@@ -241,9 +274,21 @@ where
 
         emit_session_started(on_event, &session_id);
 
-        match aikit_agent::run(config, prompt, gateway) {
-            Ok(events) => {
-                let turns = internal_events_to_turns(prompt, &events);
+        let mut collected: Vec<AgentInternalEvent> = Vec::new();
+        let mut state = EmitState::new();
+        let mut callback_panic: Option<Box<dyn std::any::Any + Send>> = None;
+        let run_result = aikit_agent::run_streaming(config, prompt, gateway, |event| {
+            collected.push(event.clone());
+            if callback_panic.is_none() {
+                if let Err(RunError::CallbackPanic(panic)) = state.emit(event, on_event) {
+                    callback_panic = Some(panic);
+                }
+            }
+        });
+
+        match run_result {
+            Ok(()) => {
+                let turns = internal_events_to_turns(prompt, &collected);
                 let session = SessionFile {
                     session_id: session_id.clone(),
                     agent: "aikit".to_string(),
@@ -254,21 +299,28 @@ where
                 };
                 let _ = store.save(&session);
                 let _ = store.update_index(&cwd_str, &session_id);
-                let mut result = emit_events(events, options, on_event, true)?;
+                if let Some(panic) = callback_panic {
+                    return Err(RunError::CallbackPanic(panic));
+                }
+                let mut result = state.finish(true);
                 let session_line = format!("Session: {}\n", session_id);
                 result.stderr.extend_from_slice(session_line.as_bytes());
                 Ok(result)
             }
             Err(err) => {
-                let mut result = emit_events(
-                    vec![AgentInternalEvent::Error {
-                        code: error_code(&err.to_string()),
-                        message: err.to_string(),
-                    }],
-                    options,
-                    on_event,
-                    false,
-                )?;
+                if callback_panic.is_none() && !state.had_error_event {
+                    let _ = state.emit(
+                        AgentInternalEvent::Error {
+                            code: error_code(&err.to_string()),
+                            message: err.to_string(),
+                        },
+                        on_event,
+                    );
+                }
+                if let Some(panic) = callback_panic {
+                    return Err(RunError::CallbackPanic(panic));
+                }
+                let mut result = state.finish(false);
                 result.stderr = err.to_string().into_bytes();
                 Ok(result)
             }
@@ -442,6 +494,94 @@ where
     ))
 }
 
+/// Accumulates the pieces of a [`RunResult`] (stdout/stderr bytes, token usage, quota
+/// info, and the outbound `seq` counter) across a stream of [`AgentInternalEvent`]s that
+/// arrive one at a time.
+///
+/// BUG-6: this replaces the old pattern of collecting a `Vec<AgentInternalEvent>` for the
+/// *entire* run and converting+forwarding all of them in one pass after the run finishes.
+/// `emit` is now called once per event, immediately as the aikit-agent run loop produces
+/// it (see `run_with_config_and_gateway`), so an SSE client sees each frame as it happens
+/// instead of a single end-of-run burst.
+struct EmitState {
+    seq: u64,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    token_usage: Option<TokenUsage>,
+    quota_exceeded: Option<QuotaExceededInfo>,
+    /// Set once an `AgentInternalEvent::Error` has been converted and forwarded, so the
+    /// caller doesn't synthesize a second, duplicate error frame when the run
+    /// subsequently returns `Err`.
+    had_error_event: bool,
+}
+
+impl EmitState {
+    fn new() -> Self {
+        Self {
+            seq: 0,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            token_usage: None,
+            quota_exceeded: None,
+            had_error_event: false,
+        }
+    }
+
+    /// Convert one internal event, fold it into the accumulated result state, and
+    /// forward it to `on_event` immediately.
+    fn emit<F>(&mut self, event: AgentInternalEvent, on_event: &mut F) -> Result<(), RunError>
+    where
+        F: FnMut(AgentEvent) + Send,
+    {
+        if matches!(event, AgentInternalEvent::Error { .. }) {
+            self.had_error_event = true;
+        }
+
+        let (stream, payload, printable) = convert_event(event);
+
+        if let Some(text) = printable {
+            match stream {
+                AgentEventStream::Stdout => self.stdout.extend_from_slice(text.as_bytes()),
+                AgentEventStream::Stderr => self.stderr.extend_from_slice(text.as_bytes()),
+            }
+        }
+
+        if let AgentEventPayload::TokenUsageLine { usage, .. } = &payload {
+            self.token_usage = Some(usage.clone());
+        }
+
+        if let AgentEventPayload::QuotaExceeded { info, .. } = &payload {
+            self.quota_exceeded = Some(info.clone());
+        }
+
+        let agent_event = AgentEvent {
+            agent_key: "aikit".to_string(),
+            seq: self.seq,
+            stream,
+            payload,
+        };
+        self.seq += 1;
+
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            on_event(agent_event);
+        }))
+        .map_err(RunError::CallbackPanic)
+    }
+
+    fn finish(self, success: bool) -> RunResult {
+        RunResult {
+            status: exit_status(if success { 0 } else { 1 }),
+            stdout: self.stdout,
+            stderr: self.stderr,
+            token_usage: self.token_usage,
+            quota_exceeded: self.quota_exceeded,
+        }
+    }
+}
+
+/// Convert and forward a fixed, already-known batch of events in one pass. Only used for
+/// the pre-run error path ([`emit_error`]), which has a single synthetic event and no
+/// underlying agent run to stream from.
 fn emit_events<F>(
     events: Vec<AgentInternalEvent>,
     _options: &RunOptions,
@@ -451,51 +591,11 @@ fn emit_events<F>(
 where
     F: FnMut(AgentEvent) + Send,
 {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut token_usage = None;
-    let mut quota_exceeded = None;
-
-    for (seq, event) in events.into_iter().enumerate() {
-        let (stream, payload, printable) = convert_event(event);
-
-        if let Some(text) = printable {
-            match stream {
-                AgentEventStream::Stdout => stdout.extend_from_slice(text.as_bytes()),
-                AgentEventStream::Stderr => stderr.extend_from_slice(text.as_bytes()),
-            }
-        }
-
-        if let AgentEventPayload::TokenUsageLine { usage, .. } = &payload {
-            token_usage = Some(usage.clone());
-        }
-
-        if let AgentEventPayload::QuotaExceeded { info, .. } = &payload {
-            quota_exceeded = Some(info.clone());
-        }
-
-        let agent_event = AgentEvent {
-            agent_key: "aikit".to_string(),
-            seq: seq as u64,
-            stream,
-            payload,
-        };
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            on_event(agent_event);
-        }));
-        if let Err(panic) = result {
-            return Err(RunError::CallbackPanic(panic));
-        }
+    let mut state = EmitState::new();
+    for event in events {
+        state.emit(event, on_event)?;
     }
-
-    Ok(RunResult {
-        status: exit_status(if success { 0 } else { 1 }),
-        stdout,
-        stderr,
-        token_usage,
-        quota_exceeded,
-    })
+    Ok(state.finish(success))
 }
 
 fn convert_event(
