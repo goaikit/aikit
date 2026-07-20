@@ -368,8 +368,9 @@ pub fn install_template_from_source(
         ));
         fs::create_dir_all(&package_dir)?;
 
-        // Copy package files to packages_dir
-        copy_dir_recursive(&package_root, &package_dir)?;
+        // Copy package files to packages_dir (aikit_sdk::copy_dir — the
+        // single canonical recursive-copy implementation, ARCH-1).
+        crate::paths::copy_dir(&package_root, &package_dir)?;
 
         // Update package_root to the saved location
         let package_root = package_dir;
@@ -390,24 +391,6 @@ pub fn install_template_from_source(
         let _ = fs::remove_dir_all(fetch_dir);
     }
 
-    Ok(())
-}
-
-/// Recursively copy directory contents
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), InstallError> {
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if ty.is_dir() {
-            fs::create_dir_all(&dst_path)?;
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
     Ok(())
 }
 

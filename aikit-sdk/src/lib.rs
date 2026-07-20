@@ -499,7 +499,9 @@ pub mod manifest;
 pub mod mcp_deploy;
 pub mod paths;
 
-pub use paths::{is_safe_id, is_safe_relative_path, safe_join, PathError};
+pub use paths::{
+    copy_dir, copy_dir_excluding, is_safe_id, is_safe_relative_path, safe_join, PathError,
+};
 
 pub mod agent_runner;
 pub mod pipeline;
@@ -515,7 +517,7 @@ pub use report::ReportRenderer;
 pub use template::TemplateRenderer;
 pub use validation::{ResponseValidator, ValidatedResponse};
 
-pub use fetch::TemplateSource;
+pub use fetch::{extract_zip, parse_github_url, TemplateSource};
 pub use install::{
     copy_artifacts, install_template_from_source, install_template_to_path, installed_package_root,
     InstallError, InstallTemplateFromSourceOptions, InstallTemplateOptions,

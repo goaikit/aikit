@@ -583,80 +583,57 @@ fn install_from_local_directory(
     Ok((package, None))
 }
 
-/// Parse GitHub URL and extract owner, repo, and version
+/// Parse GitHub URL and extract owner, repo, and version.
+///
+/// Delegates the URL grammar to `aikit_sdk::parse_github_url` — the single
+/// canonical GitHub-source parser (ARCH-1; this function used to have its
+/// own, narrower, copy of the same grammar) — then re-validates
+/// owner/repo/version against this CLI's stricter charset checks (defense
+/// in depth) and applies this command's own default-version behavior
+/// (`"main"`).
 fn parse_github_url(
     source: &str,
     version: Option<&str>,
 ) -> Result<(String, String, String), AikError> {
-    // Handle various GitHub URL formats:
-    // https://github.com/owner/repo
-    // https://github.com/owner/repo/releases/download/v1.0.0/package.zip
-    // github.com/owner/repo
-    // owner/repo
-
-    let url = source
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-
-    let path = if url.starts_with("github.com/") {
-        url.strip_prefix("github.com/").unwrap()
-    } else if url.contains('/') && !url.contains("github.com") {
-        // Assume owner/repo format
-        url
-    } else {
-        return Err(AikError::InvalidGitHubUrl(
-            "Expected: github.com/owner/repo or owner/repo".to_string(),
-        ));
-    };
-
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() < 2 {
-        return Err(AikError::InvalidGitHubUrl(
-            "Invalid GitHub URL format".to_string(),
-        ));
-    }
-
-    let owner = parts[0].to_string();
-    let repo = parts[1].to_string();
-
-    // Validate owner and repo names
-    crate::core::validation::validate_github_owner_name(&owner)?;
-    crate::core::validation::validate_github_repo_name(&repo)?;
-
-    // Validate version if provided
+    // Validate an explicit `--version` flag up front, same as before.
     if let Some(v) = version {
         crate::core::validation::validate_version_format(v)?;
     }
 
-    let version = version.unwrap_or("main").to_string();
+    // The SDK grammar carries an explicit version as an `@version` suffix on
+    // the source string rather than as a separate parameter; fold this
+    // command's `--version` flag in that way (unless the source already has
+    // its own `@ref`) so both entry points share one parser.
+    let combined = match version {
+        Some(v) if !source.contains('@') => format!("{}@{}", source, v),
+        _ => source.to_string(),
+    };
 
-    Ok((owner, repo, version))
-}
+    let parsed = aikit_sdk::parse_github_url(&combined)
+        .map_err(|e| AikError::InvalidGitHubUrl(e.to_string()))?;
 
-/// Normalize a path by resolving `..` and `.` components in memory
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-    use std::path::Component;
-    let mut result = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir => {
-                result.push(component);
-            }
-            Component::CurDir => {
-                // Skip `.` - it doesn't change anything
-            }
-            Component::ParentDir => {
-                // Pop the last normal component if possible
-                if !result.pop() {
-                    // Can't pop past root - just skip
-                }
-            }
-            Component::Normal(c) => {
-                result.push(c);
-            }
-        }
-    }
-    result
+    let (owner, repo, parsed_version) = match parsed {
+        aikit_sdk::TemplateSource::GitHub {
+            owner,
+            repo,
+            version,
+            ..
+        } => (owner, repo, version),
+        // `aikit_sdk::parse_github_url` only ever returns the `GitHub`
+        // variant of `TemplateSource`.
+        _ => unreachable!("parse_github_url always returns TemplateSource::GitHub"),
+    };
+
+    // Validate owner and repo names (this CLI's stricter charset checks,
+    // defense in depth on top of the SDK parser's own non-empty check).
+    crate::core::validation::validate_github_owner_name(&owner)?;
+    crate::core::validation::validate_github_repo_name(&repo)?;
+
+    Ok((
+        owner,
+        repo,
+        parsed_version.unwrap_or_else(|| "main".to_string()),
+    ))
 }
 
 /// Install package from downloaded archive
@@ -666,13 +643,6 @@ fn install_package_from_archive(
     aik_dir: &crate::core::filesystem::AikDirectory,
     _args: &InstallArgs,
 ) -> Result<(), AikError> {
-    use std::fs::File;
-    use zip::ZipArchive;
-
-    let file = File::open(archive_path)
-        .map_err(|e| crate::error::io_context("Failed to open archive", archive_path, e))?;
-    let mut archive = ZipArchive::new(file)?;
-
     let install_path = aik_dir
         .install_package(
             &package.package.name,
@@ -681,71 +651,13 @@ fn install_package_from_archive(
         )
         .map_err(|e| AikError::Generic(e.to_string()))?;
 
-    // Canonicalize install_path once for comparison
-    let install_canonical = install_path
-        .canonicalize()
-        .map_err(|e| AikError::Generic(format!("Failed to canonicalize install_path: {}", e)))?;
-
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-
-        let entry_name = file.name();
-
-        // Check for path traversal in the entry name before any processing
-        if entry_name.contains("..") {
-            return Err(AikError::Generic(format!(
-                "Path traversal detected in zip entry: {}",
-                entry_name
-            )));
-        }
-
-        // Normalize the entry name to prevent path traversal (resolves . components)
-        let normalized = normalize_path(std::path::Path::new(entry_name));
-
-        // Validate that the normalized path is relative (prevents absolute paths like /etc/passwd)
-        if !normalized.is_relative() {
-            return Err(AikError::Generic(format!(
-                "Absolute path detected in zip entry: {}",
-                entry_name
-            )));
-        }
-
-        let outpath = install_path.join(&normalized);
-
-        // Validate that the output path is under install_path
-        // First try to canonicalize, if the path doesn't exist yet we compute the canonical form
-        // of the install_path and join it with the normalized relative path
-        let outpath_canonical = if outpath.exists() {
-            outpath.canonicalize().map_err(|e| {
-                AikError::Generic(format!("Failed to canonicalize output path: {}", e))
-            })?
-        } else {
-            install_canonical.join(&normalized)
-        };
-
-        if !outpath_canonical.starts_with(&install_canonical) {
-            return Err(AikError::Generic(format!(
-                "Path traversal detected in zip entry: {}",
-                entry_name
-            )));
-        }
-
-        if file.name().ends_with('/') {
-            std::fs::create_dir_all(&outpath)
-                .map_err(|e| crate::error::io_context("Failed to create directory", &outpath, e))?;
-        } else {
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    std::fs::create_dir_all(p).map_err(|e| {
-                        crate::error::io_context("Failed to create parent directory", p, e)
-                    })?;
-                }
-            }
-            let mut outfile = File::create(&outpath)
-                .map_err(|e| crate::error::io_context("Failed to create file", &outpath, e))?;
-            std::io::copy(&mut file, &mut outfile)?;
-        }
-    }
+    // Extraction — including all zip-slip / absolute-path / symlink
+    // hardening — is delegated to aikit_sdk::extract_zip, the single
+    // canonical zip extractor (ARCH-1; previously duplicated here).
+    let zip_bytes = std::fs::read(archive_path)
+        .map_err(|e| crate::error::io_context("Failed to read archive", archive_path, e))?;
+    aikit_sdk::extract_zip(&zip_bytes, &install_path)
+        .map_err(|e| AikError::Generic(format!("Failed to extract archive: {}", e)))?;
 
     Ok(())
 }
@@ -775,54 +687,31 @@ fn install_package_from_directory(
     Ok(())
 }
 
-/// Copy package files, excluding version control and build directories
+/// Directories to exclude when copying a whole project-shaped source tree
+/// (version control, build artifacts, dependency caches).
+const COPY_EXCLUDE_DIRS: &[&str] = &[
+    "target",
+    "build",
+    "out",
+    ".git",
+    ".aikit",
+    "node_modules",
+    ".next",
+    "dist",
+];
+
+/// Copy package files, excluding version control and build directories.
+///
+/// Delegates to `aikit_sdk::copy_dir_excluding`, the single canonical
+/// recursive-copy implementation (ARCH-1; previously duplicated here) —
+/// carries the same symlink-skip hardening as every other copy path in this
+/// workspace, which matters since `from` may be an untrusted
+/// downloaded/extracted package tree.
 fn copy_package_files(
     from: &std::path::Path,
     to: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::fs;
-    use walkdir::WalkDir;
-
-    // Directories to exclude
-    let exclude_dirs = [
-        "target",
-        "build",
-        "out",
-        ".git",
-        ".aikit",
-        "node_modules",
-        ".next",
-        "dist",
-    ];
-
-    for entry in WalkDir::new(from).into_iter().filter_map(|e| e.ok()) {
-        let source_path = entry.path();
-        let relative_path = source_path.strip_prefix(from)?;
-
-        // Skip excluded directories
-        if let Some(dir_name) = relative_path.iter().next() {
-            if let Some(dir_str) = dir_name.to_str() {
-                if exclude_dirs
-                    .iter()
-                    .any(|&excluded| excluded.eq_ignore_ascii_case(dir_str))
-                {
-                    continue;
-                }
-            }
-        }
-
-        let dest_path = to.join(relative_path);
-
-        if source_path.is_dir() {
-            fs::create_dir_all(&dest_path)?;
-        } else {
-            if let Some(parent) = dest_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(source_path, dest_path)?;
-        }
-    }
-
+    aikit_sdk::copy_dir_excluding(from, to, COPY_EXCLUDE_DIRS)?;
     Ok(())
 }
 
@@ -986,22 +875,6 @@ fn deploy_skills_for_agent(
     }
     let _ = agent_key;
     Ok(())
-}
-
-/// Copy artifact mappings from installed package root to project.
-///
-/// This function is deprecated in favor of using aikit_sdk::copy_artifacts directly.
-/// It is kept for backward compatibility but delegates to the SDK.
-#[allow(dead_code)]
-#[deprecated(note = "Use aikit_sdk::copy_artifacts directly")]
-fn copy_artifacts_to_project(
-    package: &crate::models::package::Package,
-    package_root: &std::path::Path,
-    project_root: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mappings = package.get_artifact_mappings(None);
-    aikit_sdk::copy_artifacts(package_root, project_root, &mappings)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
 }
 
 /// Execute update command
@@ -1558,43 +1431,59 @@ mod tests {
         );
     }
 
-    /// Test that normalize_path correctly resolves .. and . components
+    // -- ARCH-1: parse_github_url now delegates to aikit_sdk::parse_github_url
+    // ------------------------------------------------------------------------
+
     #[test]
-    fn test_normalize_path() {
-        use std::path::Path;
+    fn test_parse_github_url_short_form_defaults_to_main() {
+        let (owner, repo, version) = parse_github_url("owner/repo", None).unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+        assert_eq!(version, "main");
+    }
 
-        // Test basic normalization
-        assert_eq!(
-            normalize_path(Path::new("foo/../bar")),
-            PathBuf::from("bar")
-        );
-        assert_eq!(
-            normalize_path(Path::new("foo/./bar")),
-            PathBuf::from("foo/bar")
-        );
-        assert_eq!(
-            normalize_path(Path::new("foo/bar/../baz")),
-            PathBuf::from("foo/baz")
-        );
-        assert_eq!(normalize_path(Path::new("../foo")), PathBuf::from("foo"));
-        assert_eq!(normalize_path(Path::new("../../foo")), PathBuf::from("foo"));
-        assert_eq!(
-            normalize_path(Path::new("foo/bar/.")),
-            PathBuf::from("foo/bar")
-        );
+    #[test]
+    fn test_parse_github_url_github_com_prefix() {
+        let (owner, repo, version) = parse_github_url("github.com/owner/repo", None).unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+        assert_eq!(version, "main");
+    }
 
-        // Test multiple levels
-        assert_eq!(
-            normalize_path(Path::new("a/b/c/../../d")),
-            PathBuf::from("a/d")
-        );
-        assert_eq!(
-            normalize_path(Path::new("a/./b/./c/./d")),
-            PathBuf::from("a/b/c/d")
-        );
+    #[test]
+    fn test_parse_github_url_explicit_version_flag_is_applied() {
+        let (owner, repo, version) = parse_github_url("owner/repo", Some("1.2.3")).unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+        assert_eq!(version, "1.2.3");
+    }
 
-        // Test edge cases
-        assert_eq!(normalize_path(Path::new(".")), PathBuf::from(""));
-        assert_eq!(normalize_path(Path::new("..")), PathBuf::from(""));
+    #[test]
+    fn test_parse_github_url_release_asset_style_url_still_resolves_owner_repo() {
+        // The old parser silently dropped everything past owner/repo (e.g. a
+        // release-asset URL); the unified parser must still resolve the same
+        // owner/repo rather than erroring on the extra segments.
+        let (owner, repo, version) = parse_github_url(
+            "https://github.com/owner/repo/releases/download/v1.0.0/package.zip",
+            None,
+        )
+        .unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+        assert_eq!(version, "main");
+    }
+
+    #[test]
+    fn test_parse_github_url_rejects_invalid_owner_charset() {
+        // Defense-in-depth validation (validate_github_owner_name) must still
+        // reject an owner name the SDK's lighter-weight grammar would accept.
+        let result = parse_github_url("not valid owner/repo", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_github_url_rejects_invalid_explicit_version() {
+        let result = parse_github_url("owner/repo", Some("not-a-semver"));
+        assert!(result.is_err());
     }
 }
