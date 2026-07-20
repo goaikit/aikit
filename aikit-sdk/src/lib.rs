@@ -490,7 +490,7 @@ pub use runner::{
 };
 
 pub mod run_progress;
-pub use run_progress::{ProgressViewConfig, RunProgress};
+pub use run_progress::{usage_source_label, ProgressViewConfig, RunProgress};
 
 pub(crate) mod command_resolve;
 pub mod fetch;

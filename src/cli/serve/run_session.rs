@@ -16,12 +16,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use aikit_sdk::session_store::{SessionStore, SessionStoreError};
-use aikit_sdk::{get_agent_status, RunError, RunOptions};
+use aikit_sdk::{get_agent_status, AgentEvent, AgentEventPayload, RunError, RunOptions};
 
 use crate::core::agent::get_agent_configs;
 
 use super::{
-    error_response, spawn_frame_forwarder, sse_response_with_headers, AppState, StreamFrame,
+    error_response, spawn_frame_forwarder, sse_response_with_headers, AppState, ServeEvent,
 };
 
 // ── run record ────────────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ pub type RunFn = Arc<
             String,
             String,
             RunOptions,
-            tokio::sync::mpsc::Sender<StreamFrame>,
+            tokio::sync::mpsc::Sender<ServeEvent>,
             aikit_sdk::runner::RunCancelHandle,
         ) -> Result<RunFnOutcome, RunError>
         + Send
@@ -453,29 +453,29 @@ pub(super) fn classify_error_code(stderr_or_content: &str) -> &'static str {
     "agent_error"
 }
 
-fn run_error_to_frame(err: RunError) -> (StreamFrame, i32) {
-    let frame = match err {
-        RunError::TimedOut { .. } => StreamFrame::Error {
+fn run_error_to_serve_event(err: RunError) -> (ServeEvent, i32) {
+    let item = match err {
+        RunError::TimedOut { .. } => ServeEvent::Error {
             code: "run_timeout".to_string(),
             message: "Run exceeded timeout".to_string(),
         },
-        RunError::SessionNotFound(id) => StreamFrame::Error {
+        RunError::SessionNotFound(id) => ServeEvent::Error {
             code: "session_not_found".to_string(),
             message: format!("Session '{}' not found", id),
         },
-        RunError::AgentNotRunnable(msg) => StreamFrame::Error {
+        RunError::AgentNotRunnable(msg) => ServeEvent::Error {
             code: "agent_not_runnable".to_string(),
             message: msg,
         },
         e => {
             tracing::error!("run error: {}", e);
-            StreamFrame::Error {
+            ServeEvent::Error {
                 code: "internal_error".to_string(),
                 message: "Internal error".to_string(),
             }
         }
     };
-    (frame, 1)
+    (item, 1)
 }
 
 // ── spawn_run ─────────────────────────────────────────────────────────────────
@@ -490,7 +490,7 @@ fn run_error_to_frame(err: RunError) -> (StreamFrame, i32) {
 pub(super) fn spawn_run(
     state: &AppState,
     body: &SendMessageRequest,
-) -> Result<(tokio::sync::mpsc::Receiver<StreamFrame>, String), Response> {
+) -> Result<(tokio::sync::mpsc::Receiver<ServeEvent>, String), Response> {
     let now = Utc::now();
 
     // Stable server-assigned session id.  For new sessions we mint a UUID; for
@@ -592,35 +592,48 @@ pub(super) fn spawn_run(
     let run_fn = state.run_fn.clone();
     let runs_ref = Arc::clone(&state.runs);
 
-    let (inner_tx, mut inner_rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
-    let (outer_tx, rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
+    let (inner_tx, mut inner_rx) = tokio::sync::mpsc::channel::<ServeEvent>(64);
+    let (outer_tx, rx) = tokio::sync::mpsc::channel::<ServeEvent>(64);
 
-    // B5: emit the server-minted session id as the very first frame so clients
-    // have a stable, resolvable id before any backend frames arrive.
-    let _ = outer_tx.try_send(StreamFrame::Session {
-        session_id: server_session_id.clone(),
-    });
+    // B5: emit the server-minted session id as the very first event so
+    // clients have a stable, resolvable id before any backend events arrive.
+    // This is serve's own bookkeeping, expressed as the canonical
+    // `SessionStarted` payload (ARCH-4 / ADR 0016) rather than a serve-private
+    // frame shape.
+    let _ = outer_tx.try_send(ServeEvent::Agent(AgentEvent {
+        agent_key: body.agent.clone(),
+        seq: 0,
+        stream: aikit_sdk::AgentEventStream::Stdout,
+        payload: AgentEventPayload::SessionStarted {
+            session_id: server_session_id.clone(),
+        },
+    }));
 
-    // B11: relay so back-end `Session` frames (backend token) update the record
-    // without racing with the initial synthetic frame above.
+    // B11: relay so back-end `SessionStarted` events (backend token) update
+    // the record without racing with the initial synthetic event above.
     let relay_runs = Arc::clone(&runs_ref);
     let relay_sid = server_session_id.clone();
     let relay_outer_tx = outer_tx.clone();
     tokio::spawn(async move {
-        while let Some(frame) = inner_rx.recv().await {
-            // When the backend emits its own session id, store it as the resume
-            // token but do NOT forward another Session frame (we already sent one).
-            if let StreamFrame::Session { ref session_id } = frame {
+        while let Some(item) = inner_rx.recv().await {
+            // When the backend emits its own session id, store it as the
+            // resume token but do NOT forward another SessionStarted event
+            // (we already sent one).
+            if let ServeEvent::Agent(AgentEvent {
+                payload: AgentEventPayload::SessionStarted { ref session_id },
+                ..
+            }) = item
+            {
                 let mut runs = relay_runs.lock().unwrap();
                 if let Some(r) = runs.get_mut(&relay_sid) {
                     if r.backend_session_id.is_none() {
                         r.backend_session_id = Some(session_id.clone());
                     }
                 }
-                // Suppress the duplicate Session frame from the backend.
+                // Suppress the duplicate SessionStarted event from the backend.
                 continue;
             }
-            if relay_outer_tx.send(frame).await.is_err() {
+            if relay_outer_tx.send(item).await.is_err() {
                 break;
             }
         }
@@ -666,7 +679,7 @@ pub(super) fn spawn_run(
                         // await it — the response can close immediately
                         // while termination finishes in the background.
                         spawn_cancel(&cancel);
-                        let _ = tx.send(StreamFrame::Error {
+                        let _ = tx.send(ServeEvent::Error {
                             code: "run_timeout".to_string(),
                             message: "Run exceeded timeout".to_string(),
                         }).await;
@@ -739,7 +752,7 @@ pub(super) fn spawn_run(
                 if out.exit_code != 0 && !out.stderr_tail.is_empty() {
                     let code = classify_error_code(&out.stderr_tail).to_string();
                     let _ = tx
-                        .send(StreamFrame::Error {
+                        .send(ServeEvent::Error {
                             code,
                             message: out.stderr_tail.clone(),
                         })
@@ -748,8 +761,8 @@ pub(super) fn spawn_run(
                 out.exit_code
             }
             Err(err) => {
-                let (frame, code) = run_error_to_frame(err);
-                let _ = tx.send(frame).await;
+                let (item, code) = run_error_to_serve_event(err);
+                let _ = tx.send(item).await;
                 code
             }
         };
@@ -853,10 +866,12 @@ pub(super) async fn messages_handler(
 
 /// Drain the receiver and return a single JSON body.
 async fn sync_response(
-    mut rx: tokio::sync::mpsc::Receiver<StreamFrame>,
+    mut rx: tokio::sync::mpsc::Receiver<ServeEvent>,
     runs: Arc<Mutex<HashMap<String, RunRecord>>>,
     server_session_id: String,
 ) -> Response {
+    use aikit_sdk::{MessageKind, MessageRole};
+
     let mut session_id: Option<String> = None;
     let mut content = String::new();
     let mut error: Option<super::ErrorDetail> = None;
@@ -865,39 +880,50 @@ async fn sync_response(
     let mut output_tokens: u64 = 0;
     let mut cache_read_tokens: Option<u64> = None;
 
-    while let Some(frame) = rx.recv().await {
-        match frame {
-            StreamFrame::Session { session_id: id } => {
-                if session_id.is_none() {
-                    session_id = Some(id);
-                }
-            }
-            StreamFrame::Text { content: c } => content.push_str(&c),
-            StreamFrame::TokenUsage {
-                input_tokens: i,
-                output_tokens: o,
-                cache_read_tokens: c,
-                ..
-            } => {
-                usage_seen = true;
-                input_tokens = input_tokens.saturating_add(i);
-                output_tokens = output_tokens.saturating_add(o);
-                if let Some(c) = c {
-                    cache_read_tokens = Some(cache_read_tokens.unwrap_or(0).saturating_add(c));
-                }
-            }
-            StreamFrame::Error { code, message } => {
+    while let Some(item) = rx.recv().await {
+        match item {
+            ServeEvent::Error { code, message } => {
                 if error.is_none() {
                     error = Some(super::ErrorDetail { code, message });
                 }
             }
-            StreamFrame::Reasoning { .. }
-            | StreamFrame::ToolUse { .. }
-            | StreamFrame::ToolResult { .. }
-            | StreamFrame::SubagentSpawn { .. }
-            | StreamFrame::SubagentResult { .. }
-            | StreamFrame::ContextCompressed { .. }
-            | StreamFrame::StepFinish { .. } => {}
+            ServeEvent::Agent(event) => match event.payload {
+                AgentEventPayload::SessionStarted { session_id: id } => {
+                    if session_id.is_none() {
+                        session_id = Some(id);
+                    }
+                }
+                AgentEventPayload::StreamMessage(msg)
+                    if msg.role == MessageRole::Assistant && msg.kind == MessageKind::Message =>
+                {
+                    content.push_str(&msg.text);
+                }
+                AgentEventPayload::AikitTextDelta { content: c, .. } => content.push_str(&c),
+                // Mirrors the production run_fn's own Final-after-Delta dedup:
+                // AikitTextFinal repeats what AikitTextDelta already sent.
+                AgentEventPayload::AikitTextFinal { .. } => {}
+                AgentEventPayload::TokenUsageLine { usage, .. } => {
+                    usage_seen = true;
+                    input_tokens = input_tokens.saturating_add(usage.input_tokens);
+                    output_tokens = output_tokens.saturating_add(usage.output_tokens);
+                    if let Some(c) = usage.cache_read_tokens {
+                        cache_read_tokens = Some(cache_read_tokens.unwrap_or(0).saturating_add(c));
+                    }
+                }
+                AgentEventPayload::QuotaExceeded { info, .. } => {
+                    if error.is_none() {
+                        error = Some(super::ErrorDetail {
+                            code: "quota_exceeded".to_string(),
+                            message: info.raw_message,
+                        });
+                    }
+                }
+                // Everything else (tool use/result, reasoning, subagent,
+                // context compression, step finish, raw lines, …) has no
+                // representation in the accumulated sync-mode body; SSE mode
+                // is where full fidelity is available.
+                _ => {}
+            },
         }
     }
 
@@ -1056,23 +1082,34 @@ pub(super) async fn delete_run_handler(
 
 // ── test stub helpers ─────────────────────────────────────────────────────────
 
+/// Build a synthetic `SessionStarted` item, matching the shape the
+/// production `run_fn` emits for B5 (see `mod.rs::make_production_run_fn`).
+fn stub_session_started(agent: &str, session_id: &str) -> ServeEvent {
+    ServeEvent::Agent(AgentEvent {
+        agent_key: agent.to_string(),
+        seq: 0,
+        stream: aikit_sdk::AgentEventStream::Stdout,
+        payload: AgentEventPayload::SessionStarted {
+            session_id: session_id.to_string(),
+        },
+    })
+}
+
 #[allow(dead_code)]
 pub fn make_stub_run_fn_with_session(
-    frames: Vec<StreamFrame>,
+    items: Vec<ServeEvent>,
     session_id_for_new: Option<String>,
 ) -> RunFn {
-    Arc::new(move |_agent, _prompt, options, tx, _cancel| {
+    Arc::new(move |agent, _prompt, options, tx, _cancel| {
         let sid: Option<String> = options
             .session_id
             .clone()
             .or_else(|| session_id_for_new.clone());
         if let Some(ref id) = sid {
-            let _ = tx.blocking_send(StreamFrame::Session {
-                session_id: id.clone(),
-            });
+            let _ = tx.blocking_send(stub_session_started(&agent, id));
         }
-        for frame in &frames {
-            let _ = tx.blocking_send(frame.clone());
+        for item in &items {
+            let _ = tx.blocking_send(item.clone());
         }
         Ok(RunFnOutcome {
             exit_code: 0,
@@ -1089,11 +1126,9 @@ pub fn make_stub_run_fn() -> RunFn {
 
 #[allow(dead_code)]
 pub fn make_blocking_stub_run_fn(duration: std::time::Duration) -> RunFn {
-    Arc::new(move |_agent, _prompt, options, tx, _cancel| {
+    Arc::new(move |agent, _prompt, options, tx, _cancel| {
         if let Some(ref id) = options.session_id {
-            let _ = tx.blocking_send(StreamFrame::Session {
-                session_id: id.clone(),
-            });
+            let _ = tx.blocking_send(stub_session_started(&agent, id));
         }
         std::thread::sleep(duration);
         Ok(RunFnOutcome {

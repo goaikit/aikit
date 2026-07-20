@@ -1,18 +1,29 @@
 //! End-to-end test of the new implicit-session API:
-//!   1. POST /api/v1/messages with no session_id → server emits `event: session`
-//!      then streams content and `event: done`.
+//!   1. POST /api/v1/messages with no session_id → server emits
+//!      `event: session_started` then streams content and `event: done`.
 //!   2. POST /api/v1/messages with the returned session_id → resumes the same
-//!      conversation (session frame echoes the supplied id, no new id minted).
+//!      conversation (session event echoes the supplied id, no new id minted).
 //!   3. POST /api/v1/messages omitting session_id again → server mints a fresh,
 //!      different id (a wholly new conversation).
 //!
 //! Agent execution is fully stubbed — no LLM credentials required.
+//!
+//! ARCH-4 / ADR 0016: serve emits the canonical `aikit_sdk::AgentEventPayload`
+//! directly over SSE — the `event:` name is the payload's own snake_case
+//! variant tag (`aikit_text_delta`, `stream_message`, `token_usage_line`,
+//! `session_started`, …), not a serve-private frame shape. These tests build
+//! stub items with the canonical `ServeEvent`/`AgentEvent` types and assert
+//! on the canonical tag names.
 
 use std::time::Duration;
 
 use aikit::cli::serve::{
     execute_with_run_fn, make_failing_stub_run_fn, make_stub_run_fn_with_session, RunFn, ServeArgs,
-    StreamFrame,
+    ServeEvent,
+};
+use aikit_sdk::{
+    AgentEvent, AgentEventPayload, AgentEventStream, MessageKind, MessagePhase, MessageRole,
+    StreamMessage, TokenUsage, UsageSource,
 };
 
 fn make_args(port: u16) -> ServeArgs {
@@ -41,12 +52,72 @@ async fn start_server_with(run_fn: RunFn) -> u16 {
     port
 }
 
-/// Extract the `session_id` carried by the first `event: session` frame in an
-/// SSE response body. Returns None if no such frame is present.
+/// Build a canonical `AikitTextDelta` item — the shape the built-in `aikit`
+/// backend uses for assistant text (every test in this file targets
+/// `agent: "aikit"`).
+fn text_event(content: &str) -> ServeEvent {
+    ServeEvent::Agent(AgentEvent {
+        agent_key: "aikit".to_string(),
+        seq: 0,
+        stream: AgentEventStream::Stdout,
+        payload: AgentEventPayload::AikitTextDelta {
+            content: content.to_string(),
+            turn_id: None,
+        },
+    })
+}
+
+/// Build a canonical reasoning `StreamMessage` item. Reasoning has no
+/// dedicated top-level event tag — it's a `StreamMessage` whose `kind` is
+/// `Reasoning`, matching the SDK's actual vocabulary.
+fn reasoning_event(content: &str) -> ServeEvent {
+    ServeEvent::Agent(AgentEvent {
+        agent_key: "aikit".to_string(),
+        seq: 0,
+        stream: AgentEventStream::Stdout,
+        payload: AgentEventPayload::StreamMessage(StreamMessage {
+            text: content.to_string(),
+            phase: MessagePhase::Delta,
+            role: MessageRole::Assistant,
+            kind: MessageKind::Reasoning,
+            source: AgentEventStream::Stdout,
+            raw_line_seq: 0,
+            turn_id: None,
+        }),
+    })
+}
+
+/// Build a canonical `TokenUsageLine` item.
+fn token_usage_event(
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: Option<u64>,
+) -> ServeEvent {
+    ServeEvent::Agent(AgentEvent {
+        agent_key: "aikit".to_string(),
+        seq: 0,
+        stream: AgentEventStream::Stdout,
+        payload: AgentEventPayload::TokenUsageLine {
+            usage: TokenUsage {
+                input_tokens,
+                output_tokens,
+                total_tokens: None,
+                cache_read_tokens,
+                cache_creation_tokens: None,
+                reasoning_tokens: None,
+            },
+            source: UsageSource::Aikit,
+            raw_agent_line_seq: 0,
+        },
+    })
+}
+
+/// Extract the `session_id` carried by the first `event: session_started`
+/// item in an SSE response body. Returns None if no such item is present.
 fn parse_session_id(sse_body: &str) -> Option<String> {
     let mut is_session = false;
     for line in sse_body.lines() {
-        if line.trim() == "event: session" {
+        if line.trim() == "event: session_started" {
             is_session = true;
             continue;
         }
@@ -207,9 +278,7 @@ async fn test_new_then_resume_then_new_flow() {
     // *server* now mints its own stable UUID as the map key. Clients must use
     // the server-emitted session_id, not the backend token.
     let run_fn = make_stub_run_fn_with_session(
-        vec![StreamFrame::Text {
-            content: "hello".to_string(),
-        }],
+        vec![text_event("hello")],
         Some("stub-session-1".to_string()),
     );
     let port = start_server_with(run_fn).await;
@@ -233,11 +302,12 @@ async fn test_new_then_resume_then_new_flow() {
     );
     let text = resp.text().await.unwrap();
 
-    let sid1 = parse_session_id(&text).expect("first turn must emit an event: session frame");
+    let sid1 =
+        parse_session_id(&text).expect("first turn must emit an event: session_started item");
     assert!(!sid1.is_empty(), "server must mint a non-empty session_id");
     assert!(
-        text.contains("event: text"),
-        "stream must contain the stub text frame; got:\n{}",
+        text.contains("event: aikit_text_delta"),
+        "stream must contain the stub text event; got:\n{}",
         text
     );
     assert!(
@@ -297,14 +367,7 @@ async fn test_accept_application_json_returns_sync() {
     // Stub emits two text frames; sync mode concatenates them and returns
     // a single JSON body — no SSE. Selection is driven entirely by `Accept`.
     let run_fn = make_stub_run_fn_with_session(
-        vec![
-            StreamFrame::Text {
-                content: "Hello, ".to_string(),
-            },
-            StreamFrame::Text {
-                content: "world!".to_string(),
-            },
-        ],
+        vec![text_event("Hello, "), text_event("world!")],
         Some("sync-session-1".to_string()),
     );
     let port = start_server_with(run_fn).await;
@@ -350,12 +413,8 @@ async fn test_accept_application_json_resume() {
     // under the stub's mint id. The second call (with that session_id) is
     // allowed through the resume pre-flight because it's known in memory, and
     // the stub then echoes the supplied id. Both turns use the JSON shape.
-    let run_fn = make_stub_run_fn_with_session(
-        vec![StreamFrame::Text {
-            content: "ok".to_string(),
-        }],
-        Some("sync-resume-test".to_string()),
-    );
+    let run_fn =
+        make_stub_run_fn_with_session(vec![text_event("ok")], Some("sync-resume-test".to_string()));
     let port = start_server_with(run_fn).await;
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}", port);
@@ -398,12 +457,8 @@ async fn test_accept_application_json_resume() {
 
 #[tokio::test]
 async fn test_accept_event_stream_returns_sse() {
-    let run_fn = make_stub_run_fn_with_session(
-        vec![StreamFrame::Text {
-            content: "hi".to_string(),
-        }],
-        Some("sse-explicit".to_string()),
-    );
+    let run_fn =
+        make_stub_run_fn_with_session(vec![text_event("hi")], Some("sse-explicit".to_string()));
     let port = start_server_with(run_fn).await;
     let client = reqwest::Client::new();
 
@@ -427,7 +482,7 @@ async fn test_accept_event_stream_returns_sse() {
         ct
     );
     let text = resp.text().await.unwrap();
-    assert!(text.contains("event: session"));
+    assert!(text.contains("event: session_started"));
     assert!(text.contains("event: done"));
 }
 
@@ -435,12 +490,8 @@ async fn test_accept_event_stream_returns_sse() {
 async fn test_default_accept_is_sse() {
     // reqwest sends no explicit Accept (or `*/*`); the server must fall
     // back to SSE.
-    let run_fn = make_stub_run_fn_with_session(
-        vec![StreamFrame::Text {
-            content: "hi".to_string(),
-        }],
-        Some("sse-default".to_string()),
-    );
+    let run_fn =
+        make_stub_run_fn_with_session(vec![text_event("hi")], Some("sse-default".to_string()));
     let port = start_server_with(run_fn).await;
     let client = reqwest::Client::new();
 
@@ -591,9 +642,7 @@ async fn test_aikit_resume_with_unknown_id_returns_404() {
 #[tokio::test]
 async fn test_list_sessions_includes_completed_run() {
     let port = start_server_with(make_stub_run_fn_with_session(
-        vec![StreamFrame::Text {
-            content: "hi".to_string(),
-        }],
+        vec![text_event("hi")],
         Some("stub-list-test".to_string()),
     ))
     .await;
@@ -681,22 +730,15 @@ async fn test_not_found_route() {
 }
 
 #[tokio::test]
-async fn test_sse_emits_token_usage_and_reasoning_frames() {
-    // E1/B13: new frames reach the SSE stream as their own event names.
+async fn test_sse_emits_token_usage_and_reasoning_events() {
+    // ARCH-4 / ADR 0016: previously-dropped events now reach the SSE stream,
+    // each under its own canonical tag — `stream_message` (reasoning is a
+    // `kind`, not a distinct top-level tag) and `token_usage_line`.
     let run_fn = make_stub_run_fn_with_session(
         vec![
-            StreamFrame::Reasoning {
-                content: "let me think".to_string(),
-            },
-            StreamFrame::TokenUsage {
-                input_tokens: 10,
-                output_tokens: 20,
-                cache_read_tokens: Some(3),
-                source: "aikit".to_string(),
-            },
-            StreamFrame::Text {
-                content: "answer".to_string(),
-            },
+            reasoning_event("let me think"),
+            token_usage_event(10, 20, Some(3)),
+            text_event("answer"),
         ],
         Some("usage-sse-1".to_string()),
     );
@@ -714,16 +756,16 @@ async fn test_sse_emits_token_usage_and_reasoning_frames() {
     let text = resp.text().await.unwrap();
 
     assert!(
-        text.contains("event: reasoning"),
-        "stream must contain a reasoning event; got:\n{text}"
+        text.contains("event: stream_message") && text.contains("\"kind\":\"reasoning\""),
+        "stream must contain a reasoning stream_message event; got:\n{text}"
     );
     assert!(
-        text.contains("event: token_usage"),
-        "stream must contain a token_usage event; got:\n{text}"
+        text.contains("event: token_usage_line"),
+        "stream must contain a token_usage_line event; got:\n{text}"
     );
     assert!(
         text.contains("\"input_tokens\":10") && text.contains("\"output_tokens\":20"),
-        "token_usage frame must carry the token counts; got:\n{text}"
+        "token_usage_line event must carry the token counts; got:\n{text}"
     );
 }
 
@@ -732,21 +774,9 @@ async fn test_sync_aggregates_token_usage() {
     // E1/B13: sync body sums TokenUsage frames into a `usage` object.
     let run_fn = make_stub_run_fn_with_session(
         vec![
-            StreamFrame::TokenUsage {
-                input_tokens: 10,
-                output_tokens: 5,
-                cache_read_tokens: Some(2),
-                source: "aikit".to_string(),
-            },
-            StreamFrame::TokenUsage {
-                input_tokens: 4,
-                output_tokens: 6,
-                cache_read_tokens: Some(1),
-                source: "aikit".to_string(),
-            },
-            StreamFrame::Text {
-                content: "done".to_string(),
-            },
+            token_usage_event(10, 5, Some(2)),
+            token_usage_event(4, 6, Some(1)),
+            text_event("done"),
         ],
         Some("usage-sync-1".to_string()),
     );
@@ -771,12 +801,8 @@ async fn test_sync_aggregates_token_usage() {
 #[tokio::test]
 async fn test_sync_without_usage_omits_field() {
     // Backward-compat: runs with no TokenUsage frames omit `usage` entirely.
-    let run_fn = make_stub_run_fn_with_session(
-        vec![StreamFrame::Text {
-            content: "hi".to_string(),
-        }],
-        Some("no-usage-1".to_string()),
-    );
+    let run_fn =
+        make_stub_run_fn_with_session(vec![text_event("hi")], Some("no-usage-1".to_string()));
     let port = start_server_with(run_fn).await;
     let client = reqwest::Client::new();
 
