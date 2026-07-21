@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::paths::is_safe_id;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionFile {
     pub session_id: String,
@@ -70,6 +72,15 @@ impl SessionStore {
     }
 
     pub fn load(&self, id: &str) -> Result<SessionFile, SessionStoreError> {
+        // SEC-10: a client-supplied session_id like "../../somewhere/file" must never reach
+        // a file path. Reject unsafe ids before touching the filesystem, reusing the same
+        // `NotFound` outcome a well-formed-but-absent id would get — this closes the
+        // existence-probe oracle (an unsafe id never distinguishes found/not-found from a
+        // valid-but-missing one).
+        if !is_safe_id(id) {
+            return Err(SessionStoreError::NotFound(id.to_string()));
+        }
+
         let path = self.sessions_dir.join(format!("{}.json", id));
         let content = std::fs::read_to_string(&path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -85,10 +96,24 @@ impl SessionStore {
     }
 
     pub fn save(&self, file: &SessionFile) -> Result<(), SessionStoreError> {
+        // SEC-10: same guard on the write side — a malicious session_id must not be able to
+        // overwrite an arbitrary file via a crafted relative path.
+        if !is_safe_id(&file.session_id) {
+            return Err(SessionStoreError::NotFound(file.session_id.clone()));
+        }
+
+        // BUG-8: write to a temp file then rename into place (atomic on the same
+        // filesystem), matching the pattern already used by `update_index` below. A crash
+        // or a racing writer mid-write must never truncate `<id>.json`.
         let path = self.sessions_dir.join(format!("{}.json", file.session_id));
+        let tmp_path = self
+            .sessions_dir
+            .join(format!("{}.json.tmp", file.session_id));
         let content = serde_json::to_string_pretty(file)
             .map_err(|e| SessionStoreError::Io(std::io::Error::other(e.to_string())))?;
-        std::fs::write(&path, content).map_err(SessionStoreError::Io)
+        std::fs::write(&tmp_path, content).map_err(SessionStoreError::Io)?;
+        std::fs::rename(&tmp_path, &path).map_err(SessionStoreError::Io)?;
+        Ok(())
     }
 
     pub fn update_index(&self, cwd: &str, session_id: &str) -> Result<(), SessionStoreError> {
@@ -277,5 +302,84 @@ mod tests {
     fn test_unix_secs_to_rfc3339_known_date() {
         // 2024-01-01T00:00:00Z = 1704067200
         assert_eq!(unix_secs_to_rfc3339(1704067200), "2024-01-01T00:00:00Z");
+    }
+
+    // -- SEC-10: malicious session_id is rejected, never reaches a file path ---------------
+
+    #[test]
+    fn test_load_rejects_traversal_session_id() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+        let err = store.load("../../somewhere/file").unwrap_err();
+        assert!(matches!(err, SessionStoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_load_rejects_absolute_session_id() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+        let err = store.load("/etc/passwd").unwrap_err();
+        assert!(matches!(err, SessionStoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_save_rejects_traversal_session_id() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+        let session = make_session("../../escape");
+        let err = store.save(&session).unwrap_err();
+        assert!(matches!(err, SessionStoreError::NotFound(_)));
+        // Nothing was written outside the sessions dir.
+        assert!(!tmp.path().join("escape.json").exists());
+    }
+
+    #[test]
+    fn test_traversal_session_id_does_not_probe_filesystem() {
+        // An unsafe id is rejected uniformly as NotFound before any I/O — indistinguishable
+        // from a well-formed-but-absent id, so it can't be used as an existence-probe oracle.
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+        let err = store.load("../outside").unwrap_err();
+        assert!(matches!(err, SessionStoreError::NotFound(_)));
+    }
+
+    // -- BUG-8: SessionStore::save is atomic (tmp-file + rename) ----------------------------
+
+    #[test]
+    fn test_save_produces_complete_file_and_no_leftover_tmp() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+        let session = make_session("atomic-save-001");
+        store.save(&session).unwrap();
+
+        let final_path = store.sessions_dir.join("atomic-save-001.json");
+        assert!(final_path.exists());
+        let tmp_path = store.sessions_dir.join("atomic-save-001.json.tmp");
+        assert!(!tmp_path.exists());
+
+        // The file is fully readable/parseable, not partially written.
+        let loaded = store.load("atomic-save-001").unwrap();
+        assert_eq!(loaded.turns.len(), 1);
+        assert_eq!(loaded.turns[0].content, "hello");
+    }
+
+    #[test]
+    fn test_save_overwrite_is_atomic_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+        let mut session = make_session("overwrite-001");
+        store.save(&session).unwrap();
+
+        session.turns.push(SessionTurn {
+            role: "assistant".to_string(),
+            content: "world".to_string(),
+            tool_calls: None,
+            tool_results: None,
+        });
+        store.save(&session).unwrap();
+
+        let loaded = store.load("overwrite-001").unwrap();
+        assert_eq!(loaded.turns.len(), 2);
+        assert!(!store.sessions_dir.join("overwrite-001.json.tmp").exists());
     }
 }

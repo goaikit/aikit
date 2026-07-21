@@ -16,17 +16,17 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use aikit_sdk::session_store::{SessionStore, SessionStoreError};
-use aikit_sdk::{get_agent_status, RunError, RunOptions};
+use aikit_sdk::{get_agent_status, AgentEvent, AgentEventPayload, RunError, RunOptions};
 
 use crate::core::agent::get_agent_configs;
 
 use super::{
-    error_response, spawn_frame_forwarder, sse_response_with_headers, AppState, StreamFrame,
+    error_response, spawn_frame_forwarder, sse_response_with_headers, AppState, ServeEvent,
 };
 
 // ── run record ────────────────────────────────────────────────────────────────
 
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum RunStatus {
     Running,
@@ -46,6 +46,10 @@ pub(super) struct RunRecord {
     pub started_at: DateTime<Utc>,
     pub last_active_at: DateTime<Utc>,
     pub abort_handle: Option<tokio::task::AbortHandle>,
+    /// BUG-2 / ADR 0014: the cancel handle bound to this run's subprocess.
+    /// Held so a timeout, a client disconnect, or an explicit `DELETE` can
+    /// all terminate the same run through one mechanism.
+    pub cancel: Option<aikit_sdk::runner::RunCancelHandle>,
     /// Captured stderr tail, set after the run completes.
     pub stderr_tail: String,
     pub last_exit_code: Option<i32>,
@@ -63,13 +67,19 @@ pub struct RunFnOutcome {
 }
 
 /// Injectable agent-run function. The production implementation calls
-/// `run_agent_events`; test stubs inject canned frames.
+/// `run_agent_events_cancellable`; test stubs inject canned frames.
+///
+/// BUG-2 / ADR 0014: callers pass a [`aikit_sdk::runner::RunCancelHandle`]
+/// bound to this run so a timeout or client-disconnect on the serve side can
+/// terminate the underlying subprocess through the one shared cancellation
+/// mechanism rather than merely abandoning it.
 pub type RunFn = Arc<
     dyn Fn(
             String,
             String,
             RunOptions,
-            tokio::sync::mpsc::Sender<StreamFrame>,
+            tokio::sync::mpsc::Sender<ServeEvent>,
+            aikit_sdk::runner::RunCancelHandle,
         ) -> Result<RunFnOutcome, RunError>
         + Send
         + Sync,
@@ -211,7 +221,13 @@ pub(super) fn build_runnable_agents() -> Vec<AgentInfo> {
 }
 
 pub(super) async fn agents_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let mut agents = build_runnable_agents();
+    // BUG-5: `build_runnable_agents` probes every backend binary
+    // synchronously; run it on the blocking-thread pool so it can't stall
+    // the tokio worker driving this request (or any other request sharing
+    // the runtime) while a probe is in flight.
+    let mut agents = tokio::task::spawn_blocking(build_runnable_agents)
+        .await
+        .unwrap_or_default();
     let keys: Vec<String> = agents.iter().map(|a| a.key.clone()).collect();
     let statuses = auth_statuses(&state, &keys).await;
     for a in &mut agents {
@@ -269,6 +285,19 @@ pub(super) struct SendMessageRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub yolo: bool,
+    /// D2 / ADR 0012: opt-in least-privilege tool allowlist for this run.
+    /// Threaded through `RunOptions::session_persona` into the existing
+    /// `AgentPersona.tools` hard filter (`aikit-agent/src/loop_runner.rs`).
+    /// Absent (the default) leaves the full toolset unchanged — this is a
+    /// capability lever, not a security gate; the sandbox remains the trust
+    /// boundary. No-op for external CLI backends, which have no equivalent
+    /// tool-filter mechanism.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+    /// D2 / ADR 0012: opt-in tool denylist, same mechanism as `tools`
+    /// above (`AgentPersona.disallowed_tools`).
+    #[serde(default)]
+    pub disallowed_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,7 +366,11 @@ struct UsageSummary {
 
 // ── validation ────────────────────────────────────────────────────────────────
 
-pub(super) fn validate_request(body: &SendMessageRequest, state: &AppState) -> Option<Response> {
+pub(super) fn validate_request(
+    body: &SendMessageRequest,
+    state: &AppState,
+    runnable: &[AgentInfo],
+) -> Option<Response> {
     if body.agent.trim().is_empty() {
         return Some(error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -352,7 +385,19 @@ pub(super) fn validate_request(body: &SendMessageRequest, state: &AppState) -> O
             "content must not be empty",
         ));
     }
-    let runnable = build_runnable_agents();
+    // SEC-10: reject a session_id that isn't a safe flat identifier before
+    // it's ever used to build a filesystem path (SessionStore) or probed for
+    // existence — closes both the path-traversal write and the
+    // existence-probe oracle.
+    if let Some(ref sid) = body.session_id {
+        if !aikit_sdk::is_safe_id(sid) {
+            return Some(error_response(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_request",
+                "session_id must be a safe identifier (alphanumeric, '-', '_', '.', max 128 chars)",
+            ));
+        }
+    }
     if !runnable.iter().any(|a| a.key == body.agent) {
         return Some(error_response(
             StatusCode::NOT_FOUND,
@@ -421,29 +466,29 @@ pub(super) fn classify_error_code(stderr_or_content: &str) -> &'static str {
     "agent_error"
 }
 
-fn run_error_to_frame(err: RunError) -> (StreamFrame, i32) {
-    let frame = match err {
-        RunError::TimedOut { .. } => StreamFrame::Error {
+fn run_error_to_serve_event(err: RunError) -> (ServeEvent, i32) {
+    let item = match err {
+        RunError::TimedOut { .. } => ServeEvent::Error {
             code: "run_timeout".to_string(),
             message: "Run exceeded timeout".to_string(),
         },
-        RunError::SessionNotFound(id) => StreamFrame::Error {
+        RunError::SessionNotFound(id) => ServeEvent::Error {
             code: "session_not_found".to_string(),
             message: format!("Session '{}' not found", id),
         },
-        RunError::AgentNotRunnable(msg) => StreamFrame::Error {
+        RunError::AgentNotRunnable(msg) => ServeEvent::Error {
             code: "agent_not_runnable".to_string(),
             message: msg,
         },
         e => {
             tracing::error!("run error: {}", e);
-            StreamFrame::Error {
+            ServeEvent::Error {
                 code: "internal_error".to_string(),
                 message: "Internal error".to_string(),
             }
         }
     };
-    (frame, 1)
+    (item, 1)
 }
 
 // ── spawn_run ─────────────────────────────────────────────────────────────────
@@ -458,7 +503,7 @@ fn run_error_to_frame(err: RunError) -> (StreamFrame, i32) {
 pub(super) fn spawn_run(
     state: &AppState,
     body: &SendMessageRequest,
-) -> Result<(tokio::sync::mpsc::Receiver<StreamFrame>, String), Response> {
+) -> Result<(tokio::sync::mpsc::Receiver<ServeEvent>, String), Response> {
     let now = Utc::now();
 
     // Stable server-assigned session id.  For new sessions we mint a UUID; for
@@ -472,6 +517,12 @@ pub(super) fn spawn_run(
     // CLIs whose own session id is returned in the stream).
     let backend_session_id_for_run: Option<String>;
 
+    // BUG-2 / ADR 0014: one cancel handle for this run, shared by the
+    // production `run_fn` (which binds it to the actual child process), the
+    // server-level timeout branch below, and a client-disconnect. Whichever
+    // fires first wins; `cancel()` is idempotent.
+    let cancel = aikit_sdk::runner::RunCancelHandle::new();
+
     {
         let mut runs = state.runs.lock().unwrap();
 
@@ -482,6 +533,16 @@ pub(super) fn spawn_run(
                     StatusCode::CONFLICT,
                     "session_busy",
                     "Session is currently processing a message",
+                ));
+            }
+            // BUG-10: a deleted/timed-out session is terminal. Resuming it
+            // via POST must fail the same way GET/DELETE already do, or a
+            // session that looks gone everywhere else comes back to life.
+            if r.status == RunStatus::Closed {
+                return Err(error_response(
+                    StatusCode::NOT_FOUND,
+                    "session_not_found",
+                    &format!("Session '{}' not found", server_session_id),
                 ));
             }
             // For an in-memory resume turn use the recorded backend token.
@@ -524,12 +585,14 @@ pub(super) fn spawn_run(
                 started_at: now,
                 last_active_at: now,
                 abort_handle: None,
+                cancel: None,
                 stderr_tail: String::new(),
                 last_exit_code: None,
             });
         record.status = RunStatus::Running;
         record.last_active_at = now;
         record.abort_handle = None;
+        record.cancel = Some(cancel.clone());
         record.stderr_tail = String::new();
         record.last_exit_code = None;
     }
@@ -538,39 +601,56 @@ pub(super) fn spawn_run(
     let model = body.model.clone();
     let yolo = body.yolo;
     let agent = body.agent.clone();
+    // D2 / ADR 0012: opt-in tool policy, plumbed through the existing
+    // `session_persona` mechanism (see below) rather than a parallel one.
+    let tools = body.tools.clone();
+    let disallowed_tools = body.disallowed_tools.clone();
     let timeout = Duration::from_secs(state.config.run_timeout_secs);
     let run_fn = state.run_fn.clone();
     let runs_ref = Arc::clone(&state.runs);
 
-    let (inner_tx, mut inner_rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
-    let (outer_tx, rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
+    let (inner_tx, mut inner_rx) = tokio::sync::mpsc::channel::<ServeEvent>(64);
+    let (outer_tx, rx) = tokio::sync::mpsc::channel::<ServeEvent>(64);
 
-    // B5: emit the server-minted session id as the very first frame so clients
-    // have a stable, resolvable id before any backend frames arrive.
-    let _ = outer_tx.try_send(StreamFrame::Session {
-        session_id: server_session_id.clone(),
-    });
+    // B5: emit the server-minted session id as the very first event so
+    // clients have a stable, resolvable id before any backend events arrive.
+    // This is serve's own bookkeeping, expressed as the canonical
+    // `SessionStarted` payload (ARCH-4 / ADR 0016) rather than a serve-private
+    // frame shape.
+    let _ = outer_tx.try_send(ServeEvent::Agent(AgentEvent {
+        agent_key: body.agent.clone(),
+        seq: 0,
+        stream: aikit_sdk::AgentEventStream::Stdout,
+        payload: AgentEventPayload::SessionStarted {
+            session_id: server_session_id.clone(),
+        },
+    }));
 
-    // B11: relay so back-end `Session` frames (backend token) update the record
-    // without racing with the initial synthetic frame above.
+    // B11: relay so back-end `SessionStarted` events (backend token) update
+    // the record without racing with the initial synthetic event above.
     let relay_runs = Arc::clone(&runs_ref);
     let relay_sid = server_session_id.clone();
     let relay_outer_tx = outer_tx.clone();
     tokio::spawn(async move {
-        while let Some(frame) = inner_rx.recv().await {
-            // When the backend emits its own session id, store it as the resume
-            // token but do NOT forward another Session frame (we already sent one).
-            if let StreamFrame::Session { ref session_id } = frame {
+        while let Some(item) = inner_rx.recv().await {
+            // When the backend emits its own session id, store it as the
+            // resume token but do NOT forward another SessionStarted event
+            // (we already sent one).
+            if let ServeEvent::Agent(AgentEvent {
+                payload: AgentEventPayload::SessionStarted { ref session_id },
+                ..
+            }) = item
+            {
                 let mut runs = relay_runs.lock().unwrap();
                 if let Some(r) = runs.get_mut(&relay_sid) {
                     if r.backend_session_id.is_none() {
                         r.backend_session_id = Some(session_id.clone());
                     }
                 }
-                // Suppress the duplicate Session frame from the backend.
+                // Suppress the duplicate SessionStarted event from the backend.
                 continue;
             }
-            if relay_outer_tx.send(frame).await.is_err() {
+            if relay_outer_tx.send(item).await.is_err() {
                 break;
             }
         }
@@ -592,54 +672,106 @@ pub(super) fn spawn_run(
         if let Some(m) = model {
             options = options.with_model(m);
         }
+        // D2 / ADR 0012: when the request carries a tool policy, thread it
+        // into `RunOptions::session_persona` — the SAME mechanism
+        // `--session-persona` already uses (see `src/cli/run.rs`) to reach
+        // `aikit_agent_adapter::apply_session_options`, which deserializes
+        // this into `AgentPersona` and sets `AgentConfig.session_persona`,
+        // hard-filtered by `build_tools` in
+        // `aikit-agent/src/loop_runner.rs`. `name`/`description`/`prompt`
+        // are required by `AgentPersona`'s `Deserialize` impl but unused
+        // here beyond an empty (no-op) prompt — this is a tool-policy
+        // overlay, not a persona swap. Absent (both None), behavior is
+        // unchanged: full default toolset. This only affects the in-process
+        // `aikit` backend, which is the only one that reads
+        // `session_persona`; external CLI backends silently ignore it.
+        if tools.is_some() || disallowed_tools.is_some() {
+            options = options.with_session_persona(serde_json::json!({
+                "name": "",
+                "description": "",
+                "prompt": "",
+                "tools": tools,
+                "disallowed_tools": disallowed_tools,
+            }));
+        }
 
         let tx_inner = inner_tx.clone();
-        let blocking_handle =
-            tokio::task::spawn_blocking(move || run_fn(agent, content, options, tx_inner));
+        let cancel_for_blocking = cancel.clone();
+        let blocking_handle = tokio::task::spawn_blocking(move || {
+            run_fn(agent, content, options, tx_inner, cancel_for_blocking)
+        });
 
         // B12: server-level wall-clock timeout.
         let outcome: Result<RunFnOutcome, RunError> = tokio::select! {
             timed_out = tokio::time::timeout(timeout, blocking_handle) => {
                 match timed_out {
                     Err(_elapsed) => {
-                        let _ = tx.send(StreamFrame::Error {
+                        // BUG-2 / ADR 0014: actually cancel the run — kill
+                        // the child (SIGTERM -> grace -> SIGKILL over its
+                        // process group) rather than merely abandoning the
+                        // JoinHandle. `cancel()` is idempotent, so if the
+                        // run_fn's own internal watchdog gets there first
+                        // this is a harmless no-op. `cancel()` itself blocks
+                        // its calling thread for up to the ~3s grace period,
+                        // so it's dispatched onto the blocking pool rather
+                        // than run directly on this tokio worker; we don't
+                        // await it — the response can close immediately
+                        // while termination finishes in the background.
+                        spawn_cancel(&cancel);
+                        let _ = tx.send(ServeEvent::Error {
                             code: "run_timeout".to_string(),
                             message: "Run exceeded timeout".to_string(),
                         }).await;
                         let mut runs = runs_ref.lock().unwrap();
                         if let Some(r) = runs.get_mut(&sid_clone) {
-                            r.status = RunStatus::Idle;
+                            // BUG-2: terminal state, NOT Idle — Idle would
+                            // pass the busy check above and let a second
+                            // turn start a concurrent run on this session
+                            // while the first one may still be dying.
+                            r.status = RunStatus::Closed;
                             r.last_active_at = Utc::now();
                             r.abort_handle = None;
+                            r.cancel = None;
                             r.last_exit_code = Some(1);
                         }
+                        prune_closed_and_stale(&mut runs);
                         drop(tx);
                         return;
                     }
                     Ok(join_result) => match join_result {
                         Ok(r) => r,
                         Err(join_err) => {
+                            spawn_cancel(&cancel);
                             if !join_err.is_cancelled() {
                                 tracing::error!("spawn_blocking join error: {}", join_err);
                             }
                             let mut runs = runs_ref.lock().unwrap();
                             if let Some(r) = runs.get_mut(&sid_clone) {
-                                r.status = RunStatus::Idle;
+                                r.status = RunStatus::Closed;
                                 r.last_active_at = Utc::now();
                                 r.abort_handle = None;
+                                r.cancel = None;
                             }
+                            prune_closed_and_stale(&mut runs);
                             return;
                         }
                     },
                 }
             }
             _ = tx.closed() => {
+                // BUG-2/BUG-7: the client went away (SSE stream dropped or
+                // sync request cancelled) — cancel the underlying run
+                // instead of leaving it to finish unobserved, and close out
+                // the session terminally so it can't be resumed mid-flight.
+                spawn_cancel(&cancel);
                 let mut runs = runs_ref.lock().unwrap();
                 if let Some(r) = runs.get_mut(&sid_clone) {
-                    r.status = RunStatus::Idle;
+                    r.status = RunStatus::Closed;
                     r.last_active_at = Utc::now();
                     r.abort_handle = None;
+                    r.cancel = None;
                 }
+                prune_closed_and_stale(&mut runs);
                 return;
             }
         };
@@ -659,7 +791,7 @@ pub(super) fn spawn_run(
                 if out.exit_code != 0 && !out.stderr_tail.is_empty() {
                     let code = classify_error_code(&out.stderr_tail).to_string();
                     let _ = tx
-                        .send(StreamFrame::Error {
+                        .send(ServeEvent::Error {
                             code,
                             message: out.stderr_tail.clone(),
                         })
@@ -668,8 +800,8 @@ pub(super) fn spawn_run(
                 out.exit_code
             }
             Err(err) => {
-                let (frame, code) = run_error_to_frame(err);
-                let _ = tx.send(frame).await;
+                let (item, code) = run_error_to_serve_event(err);
+                let _ = tx.send(item).await;
                 code
             }
         };
@@ -680,13 +812,11 @@ pub(super) fn spawn_run(
                 r.status = RunStatus::Idle;
                 r.last_active_at = Utc::now();
                 r.abort_handle = None;
+                // The run completed on its own (or errored) without needing
+                // cancellation; nothing left to hold the handle for.
+                r.cancel = None;
             }
-            // B2: prune stale records after each run.
-            let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
-            runs.retain(|_, r| {
-                r.status != RunStatus::Closed
-                    && !(r.status == RunStatus::Idle && r.last_active_at < one_hour_ago)
-            });
+            prune_closed_and_stale(&mut runs);
         }
         drop(tx);
         let _ = _exit_code;
@@ -700,6 +830,31 @@ pub(super) fn spawn_run(
     }
     drop(task);
     Ok((rx, server_session_id))
+}
+
+/// Dispatch `cancel.cancel()` onto the blocking-thread pool without
+/// awaiting it. `RunCancelHandle::cancel()` blocks its calling thread for up
+/// to the ~3s SIGTERM->SIGKILL grace period (see
+/// `transport::subprocess::kill_process_group`); calling it directly from an
+/// async task would stall that tokio worker for the same span. Fire-and-
+/// forget is safe here because the handle's own `Drop` backstop guarantees
+/// the process group is reaped even if the spawned task were somehow never
+/// polled to completion.
+fn spawn_cancel(cancel: &aikit_sdk::runner::RunCancelHandle) {
+    let cancel = cancel.clone();
+    tokio::task::spawn_blocking(move || cancel.cancel());
+}
+
+/// B2: prune stale records after each run — `Closed` sessions are removed
+/// outright (deletion/terminal-timeout is final; BUG-10 also relies on
+/// `spawn_run` rejecting a `Closed` resume before a record is ever pruned
+/// away), and `Idle` sessions older than an hour are swept to bound memory.
+fn prune_closed_and_stale(runs: &mut HashMap<String, RunRecord>) {
+    let one_hour_ago = Utc::now() - chrono::Duration::hours(1);
+    runs.retain(|_, r| {
+        r.status != RunStatus::Closed
+            && !(r.status == RunStatus::Idle && r.last_active_at < one_hour_ago)
+    });
 }
 
 // ── handlers ──────────────────────────────────────────────────────────────────
@@ -717,7 +872,11 @@ pub(super) async fn messages_handler(
             "Accept must include text/event-stream or application/json",
         );
     }
-    if let Some(err) = validate_request(&body, &state) {
+    // BUG-5: resolve the runnable-agent list off the async worker thread.
+    let runnable = tokio::task::spawn_blocking(build_runnable_agents)
+        .await
+        .unwrap_or_default();
+    if let Some(err) = validate_request(&body, &state, &runnable) {
         return err;
     }
     let (rx, server_session_id) = match spawn_run(&state, &body) {
@@ -746,10 +905,12 @@ pub(super) async fn messages_handler(
 
 /// Drain the receiver and return a single JSON body.
 async fn sync_response(
-    mut rx: tokio::sync::mpsc::Receiver<StreamFrame>,
+    mut rx: tokio::sync::mpsc::Receiver<ServeEvent>,
     runs: Arc<Mutex<HashMap<String, RunRecord>>>,
     server_session_id: String,
 ) -> Response {
+    use aikit_sdk::{MessageKind, MessageRole};
+
     let mut session_id: Option<String> = None;
     let mut content = String::new();
     let mut error: Option<super::ErrorDetail> = None;
@@ -758,39 +919,50 @@ async fn sync_response(
     let mut output_tokens: u64 = 0;
     let mut cache_read_tokens: Option<u64> = None;
 
-    while let Some(frame) = rx.recv().await {
-        match frame {
-            StreamFrame::Session { session_id: id } => {
-                if session_id.is_none() {
-                    session_id = Some(id);
-                }
-            }
-            StreamFrame::Text { content: c } => content.push_str(&c),
-            StreamFrame::TokenUsage {
-                input_tokens: i,
-                output_tokens: o,
-                cache_read_tokens: c,
-                ..
-            } => {
-                usage_seen = true;
-                input_tokens = input_tokens.saturating_add(i);
-                output_tokens = output_tokens.saturating_add(o);
-                if let Some(c) = c {
-                    cache_read_tokens = Some(cache_read_tokens.unwrap_or(0).saturating_add(c));
-                }
-            }
-            StreamFrame::Error { code, message } => {
+    while let Some(item) = rx.recv().await {
+        match item {
+            ServeEvent::Error { code, message } => {
                 if error.is_none() {
                     error = Some(super::ErrorDetail { code, message });
                 }
             }
-            StreamFrame::Reasoning { .. }
-            | StreamFrame::ToolUse { .. }
-            | StreamFrame::ToolResult { .. }
-            | StreamFrame::SubagentSpawn { .. }
-            | StreamFrame::SubagentResult { .. }
-            | StreamFrame::ContextCompressed { .. }
-            | StreamFrame::StepFinish { .. } => {}
+            ServeEvent::Agent(event) => match event.payload {
+                AgentEventPayload::SessionStarted { session_id: id } => {
+                    if session_id.is_none() {
+                        session_id = Some(id);
+                    }
+                }
+                AgentEventPayload::StreamMessage(msg)
+                    if msg.role == MessageRole::Assistant && msg.kind == MessageKind::Message =>
+                {
+                    content.push_str(&msg.text);
+                }
+                AgentEventPayload::AikitTextDelta { content: c, .. } => content.push_str(&c),
+                // Mirrors the production run_fn's own Final-after-Delta dedup:
+                // AikitTextFinal repeats what AikitTextDelta already sent.
+                AgentEventPayload::AikitTextFinal { .. } => {}
+                AgentEventPayload::TokenUsageLine { usage, .. } => {
+                    usage_seen = true;
+                    input_tokens = input_tokens.saturating_add(usage.input_tokens);
+                    output_tokens = output_tokens.saturating_add(usage.output_tokens);
+                    if let Some(c) = usage.cache_read_tokens {
+                        cache_read_tokens = Some(cache_read_tokens.unwrap_or(0).saturating_add(c));
+                    }
+                }
+                AgentEventPayload::QuotaExceeded { info, .. } => {
+                    if error.is_none() {
+                        error = Some(super::ErrorDetail {
+                            code: "quota_exceeded".to_string(),
+                            message: info.raw_message,
+                        });
+                    }
+                }
+                // Everything else (tool use/result, reasoning, subagent,
+                // context compression, step finish, raw lines, …) has no
+                // representation in the accumulated sync-mode body; SSE mode
+                // is where full fidelity is available.
+                _ => {}
+            },
         }
     }
 
@@ -903,7 +1075,10 @@ pub(super) async fn delete_run_handler(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
 ) -> impl IntoResponse {
-    let abort_handle: Option<tokio::task::AbortHandle> = {
+    let (abort_handle, cancel): (
+        Option<tokio::task::AbortHandle>,
+        Option<aikit_sdk::runner::RunCancelHandle>,
+    ) = {
         let mut runs = state.runs.lock().unwrap();
         match runs.get_mut(&session_id) {
             None
@@ -919,10 +1094,16 @@ pub(super) async fn delete_run_handler(
             }
             Some(r) => {
                 r.status = RunStatus::Closed;
-                r.abort_handle.take()
+                (r.abort_handle.take(), r.cancel.take())
             }
         }
     };
+    // ADR 0014: DELETE terminates the underlying subprocess through the same
+    // cancel mechanism as a timeout or client disconnect, not just detaching
+    // the tokio task that was draining it.
+    if let Some(c) = cancel {
+        spawn_cancel(&c);
+    }
     if let Some(handle) = abort_handle {
         handle.abort();
     }
@@ -940,23 +1121,34 @@ pub(super) async fn delete_run_handler(
 
 // ── test stub helpers ─────────────────────────────────────────────────────────
 
+/// Build a synthetic `SessionStarted` item, matching the shape the
+/// production `run_fn` emits for B5 (see `mod.rs::make_production_run_fn`).
+fn stub_session_started(agent: &str, session_id: &str) -> ServeEvent {
+    ServeEvent::Agent(AgentEvent {
+        agent_key: agent.to_string(),
+        seq: 0,
+        stream: aikit_sdk::AgentEventStream::Stdout,
+        payload: AgentEventPayload::SessionStarted {
+            session_id: session_id.to_string(),
+        },
+    })
+}
+
 #[allow(dead_code)]
 pub fn make_stub_run_fn_with_session(
-    frames: Vec<StreamFrame>,
+    items: Vec<ServeEvent>,
     session_id_for_new: Option<String>,
 ) -> RunFn {
-    Arc::new(move |_agent, _prompt, options, tx| {
+    Arc::new(move |agent, _prompt, options, tx, _cancel| {
         let sid: Option<String> = options
             .session_id
             .clone()
             .or_else(|| session_id_for_new.clone());
         if let Some(ref id) = sid {
-            let _ = tx.blocking_send(StreamFrame::Session {
-                session_id: id.clone(),
-            });
+            let _ = tx.blocking_send(stub_session_started(&agent, id));
         }
-        for frame in &frames {
-            let _ = tx.blocking_send(frame.clone());
+        for item in &items {
+            let _ = tx.blocking_send(item.clone());
         }
         Ok(RunFnOutcome {
             exit_code: 0,
@@ -966,6 +1158,29 @@ pub fn make_stub_run_fn_with_session(
     })
 }
 
+/// D2 / ADR 0012: a stub `run_fn` that records the `RunOptions` each
+/// invocation was actually built with (in particular `session_persona`,
+/// which carries the tool policy) so a test can assert on what `spawn_run`
+/// constructed, not just on the resulting event stream.
+#[allow(dead_code)]
+pub fn make_capturing_stub_run_fn() -> (RunFn, Arc<Mutex<Vec<RunOptions>>>) {
+    let captured: Arc<Mutex<Vec<RunOptions>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured_for_closure = Arc::clone(&captured);
+    let run_fn: RunFn = Arc::new(move |agent, _prompt, options, tx, _cancel| {
+        captured_for_closure.lock().unwrap().push(options.clone());
+        let sid = options.session_id.clone();
+        if let Some(ref id) = sid {
+            let _ = tx.blocking_send(stub_session_started(&agent, id));
+        }
+        Ok(RunFnOutcome {
+            exit_code: 0,
+            session_id: sid,
+            stderr_tail: String::new(),
+        })
+    });
+    (run_fn, captured)
+}
+
 #[allow(dead_code)]
 pub fn make_stub_run_fn() -> RunFn {
     make_stub_run_fn_with_session(vec![], None)
@@ -973,11 +1188,9 @@ pub fn make_stub_run_fn() -> RunFn {
 
 #[allow(dead_code)]
 pub fn make_blocking_stub_run_fn(duration: std::time::Duration) -> RunFn {
-    Arc::new(move |_agent, _prompt, options, tx| {
+    Arc::new(move |agent, _prompt, options, tx, _cancel| {
         if let Some(ref id) = options.session_id {
-            let _ = tx.blocking_send(StreamFrame::Session {
-                session_id: id.clone(),
-            });
+            let _ = tx.blocking_send(stub_session_started(&agent, id));
         }
         std::thread::sleep(duration);
         Ok(RunFnOutcome {
@@ -991,7 +1204,7 @@ pub fn make_blocking_stub_run_fn(duration: std::time::Duration) -> RunFn {
 #[allow(dead_code)]
 pub fn make_failing_stub_run_fn(exit_code: i32, stderr_tail: &'static str) -> RunFn {
     let tail = stderr_tail.to_string();
-    Arc::new(move |_agent, _prompt, _options, _tx| {
+    Arc::new(move |_agent, _prompt, _options, _tx, _cancel| {
         Ok(RunFnOutcome {
             exit_code,
             session_id: None,
@@ -1002,7 +1215,7 @@ pub fn make_failing_stub_run_fn(exit_code: i32, stderr_tail: &'static str) -> Ru
 
 #[allow(dead_code)]
 pub fn make_timeout_stub_run_fn() -> RunFn {
-    Arc::new(|_agent, _prompt, _options, _tx| {
+    Arc::new(|_agent, _prompt, _options, _tx, _cancel| {
         Err(aikit_sdk::RunError::TimedOut {
             timeout: std::time::Duration::from_secs(1),
             stdout: vec![],
@@ -1057,12 +1270,14 @@ mod tests {
         let state = AppState {
             runs: Arc::new(Mutex::new(HashMap::new())),
             live_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             config: ServeConfig {
                 host: "127.0.0.1".into(),
                 port: 8787,
                 run_timeout_secs: 30,
                 max_sessions: 10,
                 api_key: None,
+                insecure: false,
             },
             run_fn: make_stub_run_fn(),
             auth_cache: Arc::new(Mutex::new(None)),
@@ -1075,12 +1290,161 @@ mod tests {
                 content: ws.into(),
                 model: None,
                 yolo: false,
+                tools: None,
+                disallowed_tools: None,
             };
             assert!(
-                validate_request(&body, &state).is_some(),
+                validate_request(&body, &state, &[]).is_some(),
                 "expected rejection for content={ws:?}"
             );
         }
+    }
+
+    // --- SEC-10: session_id must be a safe identifier ---
+
+    #[test]
+    fn malicious_session_id_is_rejected_by_validate_request() {
+        use crate::cli::serve::ServeConfig;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let state = AppState {
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            live_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            config: ServeConfig {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                run_timeout_secs: 30,
+                max_sessions: 10,
+                api_key: None,
+                insecure: false,
+            },
+            run_fn: make_stub_run_fn(),
+            auth_cache: Arc::new(Mutex::new(None)),
+        };
+
+        let runnable = vec![AgentInfo {
+            key: "aikit".to_string(),
+            name: "aikit".to_string(),
+            available: true,
+            auth: AuthStatus::Unknown,
+            capabilities: None,
+        }];
+
+        for malicious in [
+            "../../etc/passwd",
+            "../secret",
+            "a/b",
+            "/etc/passwd",
+            "..",
+            ".",
+            "",
+        ] {
+            let body = SendMessageRequest {
+                agent: "aikit".into(),
+                session_id: Some(malicious.to_string()),
+                content: "hi".into(),
+                model: None,
+                yolo: false,
+                tools: None,
+                disallowed_tools: None,
+            };
+            let resp = validate_request(&body, &state, &runnable);
+            assert!(
+                resp.is_some(),
+                "expected rejection for session_id={malicious:?}"
+            );
+        }
+
+        // A safe id with no matching in-memory record still fails (session
+        // not found in the persistent store), but for a *different* reason
+        // than the unsafe ids above — sanity check that the safe-id gate
+        // isn't over-broad and that we actually reach the lookup logic.
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("AIKIT_SESSIONS_DIR", tmp.path());
+        let body = SendMessageRequest {
+            agent: "aikit".into(),
+            session_id: Some("perfectly-safe_id.123".to_string()),
+            content: "hi".into(),
+            model: None,
+            yolo: false,
+            tools: None,
+            disallowed_tools: None,
+        };
+        let resp = validate_request(&body, &state, &runnable);
+        std::env::remove_var("AIKIT_SESSIONS_DIR");
+        assert!(resp.is_some(), "unknown-but-safe id must still 404");
+    }
+
+    // --- BUG-10: a Closed session must not be resurrectable via POST ---
+
+    #[test]
+    fn closed_session_rejects_resume_post() {
+        use crate::cli::serve::ServeConfig;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let state = AppState {
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            live_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            config: ServeConfig {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                run_timeout_secs: 30,
+                max_sessions: 10,
+                api_key: None,
+                insecure: false,
+            },
+            run_fn: make_stub_run_fn(),
+            auth_cache: Arc::new(Mutex::new(None)),
+        };
+
+        let session_id = "closed-session-id";
+        {
+            let mut runs = state.runs.lock().unwrap();
+            runs.insert(
+                session_id.to_string(),
+                RunRecord {
+                    backend_session_id: Some(session_id.to_string()),
+                    agent: "aikit".to_string(),
+                    status: RunStatus::Closed,
+                    started_at: Utc::now(),
+                    last_active_at: Utc::now(),
+                    abort_handle: None,
+                    cancel: None,
+                    stderr_tail: String::new(),
+                    last_exit_code: Some(0),
+                },
+            );
+        }
+
+        let body = SendMessageRequest {
+            agent: "aikit".into(),
+            session_id: Some(session_id.to_string()),
+            content: "resume me".into(),
+            model: None,
+            yolo: false,
+            tools: None,
+            disallowed_tools: None,
+        };
+
+        let err = spawn_run(&state, &body).expect_err("a Closed session must reject resume");
+        let (parts, _body) = err.into_parts();
+        assert_eq!(
+            parts.status,
+            StatusCode::NOT_FOUND,
+            "resuming a Closed session must 404, not silently resurrect it"
+        );
+
+        // The record must still be Closed afterward — spawn_run must not
+        // have mutated it back to Running as a side effect of the attempt.
+        let runs = state.runs.lock().unwrap();
+        assert_eq!(
+            runs.get(session_id).map(|r| r.status.clone()),
+            Some(RunStatus::Closed)
+        );
     }
 
     #[test]

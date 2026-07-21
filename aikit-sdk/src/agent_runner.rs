@@ -182,8 +182,9 @@ pub struct AgentDetector;
 impl AgentDetector {
     /// Probe all runnable agent keys and return their availability status.
     ///
-    /// Key name mapping:
-    /// - `"cursor"` → catalog key `"cursor-agent"` → name `"Cursor"`
+    /// Key name mapping (ADR 0015: `cursor` is the single canonical key
+    /// shared by the deploy-layout catalog and `runner::Backend` — no more
+    /// `cursor` → `cursor-agent` hop):
     /// - `"aikit"` → name `"aikit"` (fallback, not in catalog under that key)
     /// - all others → `crate::agent(key).name`
     pub fn detect() -> Vec<AgentInfo> {
@@ -210,22 +211,12 @@ impl AgentDetector {
 
     /// Resolve the human-readable name for a runnable key.
     fn resolve_name(key: &str) -> String {
-        match key {
-            "cursor" => {
-                // runner key "cursor" maps to deploy-catalog key "cursor-agent"
-                crate::agent("cursor-agent")
-                    .map(|c| c.name.to_string())
-                    .unwrap_or_else(|| "Cursor".to_string())
-            }
-            "aikit" => "aikit".to_string(),
-            other => {
-                if let Some(config) = crate::agent(other) {
-                    config.name.to_string()
-                } else {
-                    other.to_string()
-                }
-            }
+        if key == "aikit" {
+            return "aikit".to_string();
         }
+        crate::agent(key)
+            .map(|c| c.name.to_string())
+            .unwrap_or_else(|| key.to_string())
     }
 }
 

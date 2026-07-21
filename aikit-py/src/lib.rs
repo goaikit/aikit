@@ -72,6 +72,10 @@ impl From<PyDeployConcept> for DeployConcept {
 #[pyclass(from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyAgentConfig {
+    /// Canonical catalog key (ADR 0015: one key resolves consistently across
+    /// the deploy-layout registry and the Backend enum).
+    #[pyo3(get)]
+    pub key: String,
     #[pyo3(get)]
     pub name: String,
     #[pyo3(get)]
@@ -109,6 +113,7 @@ pub struct PyAgentStatus {
 impl From<AgentConfig> for PyAgentConfig {
     fn from(config: AgentConfig) -> Self {
         PyAgentConfig {
+            key: config.key,
             name: config.name,
             commands_dir: config.commands_dir,
             skills_dir: config.skills_dir,
@@ -125,22 +130,6 @@ impl From<AgentStatus> for PyAgentStatus {
             available: status.available,
             reason: status.reason.map(|r| r.to_string()),
         }
-    }
-}
-
-#[pymethods]
-impl PyAgentConfig {
-    #[pyo3(name = "key")]
-    fn py_key(&self) -> String {
-        aikit_sdk::AgentConfig {
-            name: self.name.clone(),
-            commands_dir: self.commands_dir.clone(),
-            skills_dir: self.skills_dir.clone(),
-            agents_dir: self.agents_dir.clone(),
-            scripts_dir: self.scripts_dir.clone(),
-            instruction_file: self.instruction_file.clone(),
-        }
-        .key()
     }
 }
 

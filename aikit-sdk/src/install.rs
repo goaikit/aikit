@@ -1,4 +1,5 @@
 use crate::fetch::TemplateSource;
+use crate::paths::{is_safe_id, safe_join, PathError};
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -17,6 +18,12 @@ pub enum InstallError {
     InvalidSource(String),
     /// Manifest parsing error (aikit.toml missing or invalid TOML)
     ManifestParse(String),
+    /// An `[artifacts]` destination mapping (or a per-file subpath derived from one) is
+    /// absolute, contains `..`, or escapes the target directory (SEC-1).
+    UnsafeArtifactDest(String),
+    /// A package `name`/`version` (or other flat identifier used to build a cache-dir /
+    /// filename segment) fails the strict id charset (SEC-4).
+    UnsafePackageId(String),
 }
 
 impl std::fmt::Display for InstallError {
@@ -27,6 +34,12 @@ impl std::fmt::Display for InstallError {
             InstallError::FetchFailed(msg) => write!(f, "Fetch failed: {}", msg),
             InstallError::InvalidSource(msg) => write!(f, "Invalid source: {}", msg),
             InstallError::ManifestParse(msg) => write!(f, "Manifest parse error: {}", msg),
+            InstallError::UnsafeArtifactDest(msg) => {
+                write!(f, "Unsafe artifact destination rejected: {}", msg)
+            }
+            InstallError::UnsafePackageId(msg) => {
+                write!(f, "Unsafe package identifier rejected: {}", msg)
+            }
         }
     }
 }
@@ -39,6 +52,8 @@ impl std::error::Error for InstallError {
             InstallError::FetchFailed(_) => None,
             InstallError::InvalidSource(_) => None,
             InstallError::ManifestParse(_) => None,
+            InstallError::UnsafeArtifactDest(_) => None,
+            InstallError::UnsafePackageId(_) => None,
         }
     }
 }
@@ -52,6 +67,12 @@ impl From<io::Error> for InstallError {
 impl From<zip::result::ZipError> for InstallError {
     fn from(err: zip::result::ZipError) -> Self {
         InstallError::Io(io::Error::other(err.to_string()))
+    }
+}
+
+impl From<PathError> for InstallError {
+    fn from(err: PathError) -> Self {
+        InstallError::UnsafeArtifactDest(err.to_string())
     }
 }
 
@@ -76,6 +97,16 @@ pub fn installed_package_root(
     package_name: &str,
     version: &str,
 ) -> Result<PathBuf, InstallError> {
+    // SEC-4: name/version are flat identifiers that become a cache-dir segment
+    // (`packages_dir.join("{name}-{version}")`); an unvalidated `..` or absolute-looking
+    // value would escape `packages_dir`. Reject before building the path.
+    if !is_safe_id(package_name) || !is_safe_id(version) {
+        return Err(InstallError::UnsafePackageId(format!(
+            "{}-{}",
+            package_name, version
+        )));
+    }
+
     let base = packages_dir.join(format!("{}-{}", package_name, version));
 
     // Check if base directory exists
@@ -150,13 +181,25 @@ pub fn copy_artifacts(
             pattern_str.clone()
         };
 
-        let dest_dir = project_root.join(dest_str.trim_end_matches('/'));
+        // SEC-1: the destination comes straight from an untrusted package manifest. An
+        // absolute value or a `..` component must never be allowed to write outside
+        // `project_root` (ADR 0013). Abort the whole install rather than skip one mapping.
+        let dest_dir = safe_join(project_root, dest_str.trim_end_matches('/'))?;
 
         for entry in WalkDir::new(package_root)
             .into_iter()
             .filter_map(|e| e.ok())
         {
             let path = entry.path();
+            // Do not follow symlinks inside the package tree. A symlink-to-file would
+            // otherwise have its *target's* content copied into the project (info
+            // disclosure — e.g. a local untrusted template planting a link to
+            // ~/.ssh/id_rsa). `WalkDir` already declines to recurse into symlinked dirs;
+            // this also drops symlinked files. (ADR 0013: the write side must not follow
+            // symlinks; the read side must not exfiltrate through them either.)
+            if entry.path_is_symlink() {
+                continue;
+            }
             if path.is_dir() {
                 continue;
             }
@@ -180,10 +223,41 @@ pub fn copy_artifacts(
             } else {
                 relative.to_path_buf()
             };
-            let dest_file = dest_dir.join(&subpath);
+            // Defense in depth: also validate the per-file source subpath so a crafted file
+            // *inside* the package tree can't walk out via its own relative path.
+            let subpath_str = subpath.to_string_lossy().into_owned();
+            let dest_file = safe_join(&dest_dir, &subpath_str)?;
+
             if let Some(p) = dest_file.parent() {
                 fs::create_dir_all(p)?;
+
+                // No-follow-symlinks on the write path (ADR 0013): after creating (or
+                // confirming) the parent directory, verify it still resolves under
+                // `project_root`. Closes the escape where an earlier artifact plants a
+                // symlink at an intermediate path segment and a later mapping targets
+                // through it — a lexical-only check would pass that.
+                if let Ok(canonical_parent) = p.canonicalize() {
+                    let canonical_root = project_root
+                        .canonicalize()
+                        .unwrap_or_else(|_| project_root.to_path_buf());
+                    if !canonical_parent.starts_with(&canonical_root) {
+                        return Err(InstallError::UnsafeArtifactDest(format!(
+                            "refusing to write outside project root via symlinked path: {}",
+                            p.display()
+                        )));
+                    }
+                }
             }
+
+            // Never write through a pre-existing symlink at the destination path.
+            if dest_file
+                .symlink_metadata()
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                fs::remove_file(&dest_file)?;
+            }
+
             fs::copy(path, &dest_file)?;
         }
     }
@@ -279,14 +353,24 @@ pub fn install_template_from_source(
 
     // If packages_dir is specified, copy the package there
     if let Some(ref packages_dir) = options.packages_dir {
+        // SEC-4 (defense in depth — the manifest is also validated at parse time in
+        // manifest.rs): name/version become a cache-dir segment, reject unsafe values
+        // before building the path.
+        if !is_safe_id(&manifest.package.name) || !is_safe_id(&manifest.package.version) {
+            return Err(InstallError::UnsafePackageId(format!(
+                "{}-{}",
+                manifest.package.name, manifest.package.version
+            )));
+        }
         let package_dir = packages_dir.join(format!(
             "{}-{}",
             manifest.package.name, manifest.package.version
         ));
         fs::create_dir_all(&package_dir)?;
 
-        // Copy package files to packages_dir
-        copy_dir_recursive(&package_root, &package_dir)?;
+        // Copy package files to packages_dir (aikit_sdk::copy_dir — the
+        // single canonical recursive-copy implementation, ARCH-1).
+        crate::paths::copy_dir(&package_root, &package_dir)?;
 
         // Update package_root to the saved location
         let package_root = package_dir;
@@ -307,24 +391,6 @@ pub fn install_template_from_source(
         let _ = fs::remove_dir_all(fetch_dir);
     }
 
-    Ok(())
-}
-
-/// Recursively copy directory contents
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), InstallError> {
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-
-        if ty.is_dir() {
-            fs::create_dir_all(&dst_path)?;
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
     Ok(())
 }
 
@@ -426,6 +492,44 @@ mod tests {
         let advisor = fs::read_to_string(project_root.join(".newton/scripts/advisor.sh"))
             .map_err(InstallError::Io)?;
         assert!(advisor.contains("echo advisor"));
+
+        Ok(())
+    }
+
+    // Read-side symlink guard: a symlink-to-file inside the package tree must NOT be followed
+    // and have its target's content copied into the project (info-disclosure vector — a local
+    // untrusted template planting a link to e.g. ~/.ssh/id_rsa).
+    #[cfg(unix)]
+    #[test]
+    fn test_copy_artifacts_skips_symlinked_files() -> Result<(), InstallError> {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().map_err(InstallError::Io)?;
+        let work = temp.path();
+
+        // A "secret" file living OUTSIDE the package that a symlink points at.
+        let secret = work.join("secret.txt");
+        fs::write(&secret, "TOP SECRET").map_err(InstallError::Io)?;
+
+        let package_root = work.join("package_root");
+        fs::create_dir_all(package_root.join("payload")).map_err(InstallError::Io)?;
+        fs::write(package_root.join("payload/real.txt"), "legit").map_err(InstallError::Io)?;
+        // Plant a symlink inside the package tree pointing at the external secret.
+        symlink(&secret, package_root.join("payload/leak.txt")).map_err(InstallError::Io)?;
+
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root).map_err(InstallError::Io)?;
+
+        let mut mappings = HashMap::new();
+        mappings.insert("payload/**".to_string(), ".dest".to_string());
+        copy_artifacts(&package_root, &project_root, &mappings)?;
+
+        // The regular file is copied; the symlink is skipped (its target never exfiltrated).
+        assert!(project_root.join(".dest/real.txt").exists());
+        assert!(
+            !project_root.join(".dest/leak.txt").exists(),
+            "symlinked file must not be copied — secret would leak into the project"
+        );
 
         Ok(())
     }
@@ -645,5 +749,179 @@ version = "2.0.0"
 
         let result = install_template_from_source(options);
         assert!(result.is_err());
+    }
+
+    // -- SEC-1: malicious [artifacts] destination is rejected, not written -----------------
+
+    #[test]
+    fn test_copy_artifacts_rejects_absolute_dest() {
+        let temp = TempDir::new().unwrap();
+        let work = temp.path();
+
+        let package_root = work.join("package_root");
+        fs::create_dir_all(&package_root).unwrap();
+        fs::write(package_root.join("payload.txt"), "evil").unwrap();
+
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root).unwrap();
+
+        // Attacker-controlled outside-the-project target.
+        let victim_dir = work.join("victim");
+
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "payload.txt".to_string(),
+            victim_dir.to_string_lossy().into_owned(),
+        );
+
+        let result = copy_artifacts(&package_root, &project_root, &mappings);
+        assert!(matches!(result, Err(InstallError::UnsafeArtifactDest(_))));
+        assert!(!victim_dir.exists());
+    }
+
+    #[test]
+    fn test_copy_artifacts_rejects_traversal_dest() {
+        let temp = TempDir::new().unwrap();
+        let work = temp.path();
+
+        let package_root = work.join("package_root");
+        fs::create_dir_all(&package_root).unwrap();
+        fs::write(package_root.join("payload.txt"), "evil").unwrap();
+
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root).unwrap();
+
+        let mut mappings = HashMap::new();
+        mappings.insert("payload.txt".to_string(), "../../../etc/cron.d".to_string());
+
+        let result = copy_artifacts(&package_root, &project_root, &mappings);
+        assert!(matches!(result, Err(InstallError::UnsafeArtifactDest(_))));
+        assert!(!work.join("etc").exists());
+    }
+
+    #[test]
+    fn test_copy_artifacts_valid_mapping_still_works() -> Result<(), InstallError> {
+        let temp = TempDir::new().map_err(InstallError::Io)?;
+        let work = temp.path();
+
+        let package_root = work.join("package_root");
+        fs::create_dir_all(package_root.join("sub")).map_err(InstallError::Io)?;
+        fs::write(package_root.join("sub/file.txt"), "content").map_err(InstallError::Io)?;
+
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root).map_err(InstallError::Io)?;
+
+        let mut mappings = HashMap::new();
+        mappings.insert("sub/*".to_string(), ".safe".to_string());
+
+        copy_artifacts(&package_root, &project_root, &mappings)?;
+        assert!(project_root.join(".safe/file.txt").exists());
+        Ok(())
+    }
+
+    // -- No-follow-symlinks on the write path (ADR 0013) ------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn test_copy_artifacts_refuses_to_write_through_preexisting_dest_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let work = temp.path();
+
+        let package_root = work.join("package_root");
+        fs::create_dir_all(package_root.join("sub")).unwrap();
+        fs::write(package_root.join("sub/payload.txt"), "attacker content").unwrap();
+
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root).unwrap();
+
+        // A file outside the project that a symlink at the destination would point to.
+        let victim = work.join("victim.txt");
+        fs::write(&victim, "original victim content").unwrap();
+
+        // Pre-existing symlink already sitting at the artifact's destination path,
+        // pointing outside project_root.
+        fs::create_dir_all(project_root.join("out")).unwrap();
+        let dest_link = project_root.join("out/payload.txt");
+        symlink(&victim, &dest_link).unwrap();
+
+        let mut mappings = HashMap::new();
+        mappings.insert("sub/*".to_string(), "out".to_string());
+
+        copy_artifacts(&package_root, &project_root, &mappings).unwrap();
+
+        // The symlink must have been removed and replaced with a real file *inside* the
+        // project, never written through to the victim file outside it.
+        assert!(!dest_link.is_symlink());
+        let victim_content = fs::read_to_string(&victim).unwrap();
+        assert_eq!(victim_content, "original victim content");
+        let dest_content = fs::read_to_string(&dest_link).unwrap();
+        assert_eq!(dest_content, "attacker content");
+    }
+
+    // -- SEC-4: malicious package name/version is rejected ---------------------------------
+
+    #[test]
+    fn test_installed_package_root_rejects_traversal_name() {
+        let temp = TempDir::new().unwrap();
+        let packages_dir = temp.path();
+
+        let result = installed_package_root(packages_dir, "../../etc", "1.0.0");
+        assert!(matches!(result, Err(InstallError::UnsafePackageId(_))));
+    }
+
+    #[test]
+    fn test_installed_package_root_rejects_traversal_version() {
+        let temp = TempDir::new().unwrap();
+        let packages_dir = temp.path();
+
+        let result = installed_package_root(packages_dir, "pkg", "../../etc");
+        assert!(matches!(result, Err(InstallError::UnsafePackageId(_))));
+    }
+
+    #[test]
+    fn test_installed_package_root_rejects_absolute_name() {
+        let temp = TempDir::new().unwrap();
+        let packages_dir = temp.path();
+
+        let result = installed_package_root(packages_dir, "/etc/passwd", "1.0.0");
+        assert!(matches!(result, Err(InstallError::UnsafePackageId(_))));
+    }
+
+    #[test]
+    fn test_install_template_from_source_rejects_unsafe_manifest_name() {
+        let temp = TempDir::new().unwrap();
+        let work = temp.path();
+
+        let source_dir = work.join("source");
+        fs::create_dir_all(source_dir.join("templates")).unwrap();
+
+        // Note: manifest.rs now rejects this at parse time too (SEC-4/SEC-1 belt & braces);
+        // this test exercises the end-to-end install path still refusing to write.
+        let aikit_toml_content = r#"
+[package]
+name = "my-pkg"
+version = "2.0.0"
+
+[artifacts]
+"templates/**" = ".templates"
+"#;
+        fs::write(source_dir.join("aikit.toml"), aikit_toml_content).unwrap();
+        fs::write(source_dir.join("templates/file.txt"), "content").unwrap();
+
+        let packages_dir = work.join("packages");
+        let project_root = work.join("project_root");
+        fs::create_dir_all(&project_root).unwrap();
+
+        let options = InstallTemplateFromSourceOptions {
+            source: TemplateSource::Path(source_dir.clone()),
+            project_root: project_root.clone(),
+            packages_dir: Some(packages_dir),
+        };
+        // Valid manifest still installs fine — this is the control case for the rejection
+        // tests above (manifest.rs has its own dedicated malicious-manifest tests).
+        assert!(install_template_from_source(options).is_ok());
+        assert!(project_root.join(".templates/file.txt").exists());
     }
 }

@@ -1,5 +1,6 @@
 use crate::install::InstallError;
 use crate::manifest::TemplateManifest;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -79,6 +80,11 @@ impl TemplateSource {
 
 /// Parse GitHub URL to extract owner, repo, optional version, and optional subdir.
 ///
+/// This is the **single canonical GitHub-source parser** for aikit (ARCH-1 —
+/// previously duplicated in `src/cli/commands/install.rs`, which accepted a
+/// narrower grammar). Every GitHub-source entry point, including the `aikit`
+/// CLI's own install command, parses through this function.
+///
 /// Supported forms:
 /// - `owner/repo`
 /// - `owner/repo/subdir/path`
@@ -87,7 +93,13 @@ impl TemplateSource {
 /// - `github.com/owner/repo/tree/<ref>/subdir`
 /// - `https://github.com/owner/repo`
 /// - `https://github.com/owner/repo/tree/<ref>/subdir`
-fn parse_github_url(s: &str) -> Result<TemplateSource, InstallError> {
+///
+/// Any extra path segments beyond `owner/repo` that don't follow the
+/// `/tree/<ref>/...` form (e.g. a GitHub release-asset URL like
+/// `.../releases/download/v1.0.0/package.zip`) are treated as `subdir` and
+/// otherwise ignored by callers that don't use it — this function never
+/// rejects them.
+pub fn parse_github_url(s: &str) -> Result<TemplateSource, InstallError> {
     let url = s
         .trim_start_matches("https://")
         .trim_start_matches("http://");
@@ -399,8 +411,18 @@ fn zip_entry_has_absolute_prefix(entry_name: &str) -> bool {
     )
 }
 
-/// Extract zip bytes to destination directory
-fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
+/// Extract zip bytes to destination directory.
+///
+/// This is the **single canonical zip extractor** for aikit (ARCH-1 —
+/// previously duplicated in `src/core/template.rs`). It rejects zip-slip
+/// (`..`) and absolute-path entries and never materializes an entry as an
+/// OS-level symlink regardless of the archive's stored metadata — every
+/// entry is written as plain bytes into a regular file at the validated,
+/// computed destination path. Callers that also need to flatten a single
+/// common top-level wrapping directory (GitHub-zipball style) do so as a
+/// post-processing step on top of this function (see
+/// `aikit::core::template::extract_and_flatten_zip`).
+pub fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
     use std::io::Cursor;
 
     // Create dest_dir if it doesn't exist
@@ -473,6 +495,18 @@ fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError> {
     }
 
     Ok(())
+}
+
+/// SHA-256 hex digest of raw bytes (SEC-7 / FEAT-4: archive integrity).
+///
+/// Used by callers that fetch a package archive (e.g. a GitHub zipball) to
+/// compute a checksum for the lock file (`src/core/lock.rs`) so a later
+/// re-install/update at the same recorded version can detect that the
+/// content behind a mutable ref (branch/tag) changed underneath it.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
 }
 
 /// Find package root: directory containing aikit.toml
@@ -694,6 +728,119 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // -- ARCH-1: grammar parity with the deleted `src/cli/commands/install.rs`
+    // `parse_github_url` (kept `github.com/...` and `owner/repo` forms; this
+    // parser is now the single canonical implementation both entry points
+    // share) --------------------------------------------------------------
+
+    #[test]
+    fn test_parse_github_url_github_com_prefix_no_scheme() {
+        // The old CLI parser explicitly special-cased the bare (schemeless)
+        // `github.com/owner/repo` form.
+        let source = parse_github_url("github.com/owner/repo").unwrap();
+        match source {
+            TemplateSource::GitHub {
+                owner,
+                repo,
+                version,
+                subdir,
+            } => {
+                assert_eq!(owner, "owner");
+                assert_eq!(repo, "repo");
+                assert!(version.is_none());
+                assert!(subdir.is_none());
+            }
+            _ => panic!("Expected GitHub source"),
+        }
+    }
+
+    #[test]
+    fn test_parse_github_url_extra_segments_beyond_owner_repo_are_ignored() {
+        // The old CLI parser only ever read parts[0]/parts[1] as owner/repo
+        // and silently dropped anything after — e.g. a GitHub release-asset
+        // URL like `.../releases/download/v1.0.0/package.zip`. The unified
+        // parser must not *reject* this shape; it captures the extra
+        // segments as `subdir` instead of erroring, so callers that only
+        // want owner/repo (like the CLI) see identical behavior.
+        let source =
+            parse_github_url("https://github.com/owner/repo/releases/download/v1.0.0/package.zip")
+                .unwrap();
+        match source {
+            TemplateSource::GitHub {
+                owner,
+                repo,
+                version,
+                subdir,
+            } => {
+                assert_eq!(owner, "owner");
+                assert_eq!(repo, "repo");
+                assert!(version.is_none());
+                assert_eq!(
+                    subdir,
+                    Some("releases/download/v1.0.0/package.zip".to_string())
+                );
+            }
+            _ => panic!("Expected GitHub source"),
+        }
+    }
+
+    #[test]
+    fn test_parse_github_url_short_owner_repo_no_version() {
+        // The old CLI parser's plain `owner/repo` (no scheme, no version).
+        let source = parse_github_url("owner/repo").unwrap();
+        match source {
+            TemplateSource::GitHub {
+                owner,
+                repo,
+                version,
+                ..
+            } => {
+                assert_eq!(owner, "owner");
+                assert_eq!(repo, "repo");
+                assert!(version.is_none());
+            }
+            _ => panic!("Expected GitHub source"),
+        }
+    }
+
+    #[test]
+    fn test_parse_github_url_rejects_missing_repo_segment() {
+        // Matches the old CLI parser's "Invalid GitHub URL format" rejection
+        // for a source with no `/` at all once the github.com prefix (if
+        // any) is stripped.
+        let result = parse_github_url("github.com/onlyowner");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_zip_is_the_canonical_extractor_public_api() {
+        // ARCH-1: `extract_zip` must be reachable from outside this module
+        // (`src/core/template.rs` routes its flatten step through it)
+        // without needing its own duplicate extraction loop.
+        use std::fs::File;
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let temp_dir = TempDir::new().unwrap();
+        let zip_path = temp_dir.path().join("test.zip");
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        zip.start_file("hello.txt", options).unwrap();
+        zip.write_all(b"world").unwrap();
+        zip.finish().unwrap();
+
+        let zip_bytes = fs::read(&zip_path).unwrap();
+        let dest_dir = temp_dir.path().join("dest");
+        extract_zip(&zip_bytes, &dest_dir).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dest_dir.join("hello.txt")).unwrap(),
+            "world"
+        );
+    }
+
     #[test]
     fn test_fetch_from_path() {
         let temp_dir = TempDir::new().unwrap();
@@ -849,6 +996,34 @@ mod tests {
 
         // Verify that safe.txt was created in dest_dir
         assert!(dest_dir.join("safe.txt").exists());
+    }
+
+    #[test]
+    fn test_sha256_hex_deterministic() {
+        let a = sha256_hex(b"hello world");
+        let b = sha256_hex(b"hello world");
+        assert_eq!(a, b);
+        // Known SHA-256 of "hello world"
+        assert_eq!(
+            a,
+            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
+        );
+    }
+
+    #[test]
+    fn test_sha256_hex_different_for_different_inputs() {
+        assert_ne!(sha256_hex(b"hello"), sha256_hex(b"world"));
+    }
+
+    #[test]
+    fn test_sha256_hex_matches_archive_bytes() {
+        // Regression guard: the checksum must be over the raw archive bytes,
+        // not e.g. a text/UTF-8 reinterpretation, so it stays stable across
+        // Read implementations that hand back a Vec<u8> zipball body.
+        let bytes: Vec<u8> = vec![0, 159, 146, 150, 255, 0, 1, 2];
+        let digest = sha256_hex(&bytes);
+        assert_eq!(digest.len(), 64);
+        assert!(digest.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]

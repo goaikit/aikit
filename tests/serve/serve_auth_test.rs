@@ -15,6 +15,7 @@ async fn start_auth_server(api_key: &str) -> u16 {
         run_timeout_secs: 30,
         max_sessions: 10,
         api_key: Some(api_key.to_string()),
+        insecure: false,
     };
     let stub = make_stub_run_fn_with_session(vec![], None);
 

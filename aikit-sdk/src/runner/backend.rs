@@ -100,6 +100,15 @@ impl Backend {
         matches!(self, Backend::Aikit)
     }
 
+    /// Whether this Backend requires an external CLI binary to run.
+    ///
+    /// ADR 0015: `requires_cli` is never stored — it is implied by Backend
+    /// membership. Every external Backend spawns a real CLI; the in-process
+    /// [`Backend::Aikit`] does not.
+    pub fn requires_cli(self) -> bool {
+        !self.is_in_process()
+    }
+
     /// Binary candidates to probe for availability. Empty for in-process.
     pub fn binary_candidates(self) -> &'static [&'static str] {
         match self {
@@ -259,6 +268,20 @@ mod tests {
             assert_eq!(b.is_in_process(), b == Backend::Aikit);
         }
         assert!(Backend::Aikit.binary_candidates().is_empty());
+    }
+
+    #[test]
+    fn requires_cli_true_for_every_external_backend_false_for_aikit() {
+        for &b in ALL {
+            assert_eq!(
+                b.requires_cli(),
+                b != Backend::Aikit,
+                "requires_cli for {b:?}"
+            );
+        }
+        assert!(Backend::Claude.requires_cli());
+        assert!(Backend::Cursor.requires_cli());
+        assert!(!Backend::Aikit.requires_cli());
     }
 
     // ---- shared invariant harness over every Backend (spec 006 §6) ----

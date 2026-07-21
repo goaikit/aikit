@@ -98,7 +98,6 @@ impl InstallArgs {
 #[derive(Debug)]
 pub struct UpdateArgs {
     pub package: String,
-    #[allow(dead_code)]
     pub breaking: bool,
 }
 
@@ -252,6 +251,193 @@ impl FromArgValueMap for ListArgs {
     }
 }
 
+/// Directory the package lock file (`packages.lock`) lives in — the `.aikit`
+/// directory itself. `AikDirectory` doesn't expose its base path directly, so
+/// this derives it from another public accessor rather than adding one.
+fn lock_dir_for(aik_dir: &crate::core::filesystem::AikDirectory) -> std::path::PathBuf {
+    aik_dir
+        .registry_path()
+        .parent()
+        .expect("registry_path() is always <aikit_dir>/registry.toml")
+        .to_path_buf()
+}
+
+/// Minimal semantic-version comparator (major.minor.patch only — the same
+/// grammar `validate_version_format` already enforces), just enough for
+/// `aikit update`'s version-compare needs (FEAT-2 / spec 001 T047) without
+/// pulling in a full semver crate dependency.
+mod semver_lite {
+    use std::cmp::Ordering;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SemVer {
+        pub major: u64,
+        pub minor: u64,
+        pub patch: u64,
+    }
+
+    impl SemVer {
+        /// Parse `"1.2.3"` or `"v1.2.3"`. Rejects anything with a different
+        /// shape (pre-release/build metadata, fewer/more segments) — this
+        /// mirrors `validate_version_format`'s strict `^v?\d+\.\d+\.\d+$`.
+        pub fn parse(s: &str) -> Option<Self> {
+            let s = s.strip_prefix('v').unwrap_or(s);
+            let mut parts = s.split('.');
+            let major = parts.next()?.parse().ok()?;
+            let minor = parts.next()?.parse().ok()?;
+            let patch = parts.next()?.parse().ok()?;
+            if parts.next().is_some() {
+                return None;
+            }
+            Some(Self {
+                major,
+                minor,
+                patch,
+            })
+        }
+    }
+
+    impl PartialOrd for SemVer {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
+    impl Ord for SemVer {
+        fn cmp(&self, other: &Self) -> Ordering {
+            (self.major, self.minor, self.patch).cmp(&(other.major, other.minor, other.patch))
+        }
+    }
+
+    /// Result of comparing an installed version against a candidate version.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum VersionComparison {
+        /// `candidate` is newer than `current`. `major_bump` is set when the
+        /// major component increased (a `--breaking`-gated change).
+        Newer {
+            major_bump: bool,
+        },
+        Same,
+        Older,
+    }
+
+    /// Compare `current` (installed) against `candidate` (latest available).
+    /// Returns `None` if either string isn't a parseable `major.minor.patch`
+    /// version.
+    pub fn compare(current: &str, candidate: &str) -> Option<VersionComparison> {
+        let cur = SemVer::parse(current)?;
+        let cand = SemVer::parse(candidate)?;
+        Some(match cand.cmp(&cur) {
+            Ordering::Greater => VersionComparison::Newer {
+                major_bump: cand.major > cur.major,
+            },
+            Ordering::Equal => VersionComparison::Same,
+            Ordering::Less => VersionComparison::Older,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn test_parse_plain() {
+            let v = SemVer::parse("1.2.3").unwrap();
+            assert_eq!(
+                v,
+                SemVer {
+                    major: 1,
+                    minor: 2,
+                    patch: 3
+                }
+            );
+        }
+
+        #[test]
+        fn test_parse_v_prefixed() {
+            let v = SemVer::parse("v1.2.3").unwrap();
+            assert_eq!(
+                v,
+                SemVer {
+                    major: 1,
+                    minor: 2,
+                    patch: 3
+                }
+            );
+        }
+
+        #[test]
+        fn test_parse_rejects_extra_segments() {
+            assert!(SemVer::parse("1.2.3.4").is_none());
+        }
+
+        #[test]
+        fn test_parse_rejects_malformed() {
+            assert!(SemVer::parse("not-a-version").is_none());
+            assert!(SemVer::parse("1.2").is_none());
+            assert!(SemVer::parse("").is_none());
+        }
+
+        #[test]
+        fn test_compare_newer_patch() {
+            assert_eq!(
+                compare("1.0.0", "1.0.1"),
+                Some(VersionComparison::Newer { major_bump: false })
+            );
+        }
+
+        #[test]
+        fn test_compare_newer_minor() {
+            assert_eq!(
+                compare("1.0.0", "1.1.0"),
+                Some(VersionComparison::Newer { major_bump: false })
+            );
+        }
+
+        #[test]
+        fn test_compare_newer_major_is_flagged() {
+            assert_eq!(
+                compare("1.9.9", "2.0.0"),
+                Some(VersionComparison::Newer { major_bump: true })
+            );
+        }
+
+        #[test]
+        fn test_compare_same() {
+            assert_eq!(compare("1.2.3", "1.2.3"), Some(VersionComparison::Same));
+        }
+
+        #[test]
+        fn test_compare_older() {
+            assert_eq!(compare("2.0.0", "1.9.9"), Some(VersionComparison::Older));
+        }
+
+        #[test]
+        fn test_compare_v_prefix_mixed_with_plain() {
+            assert_eq!(
+                compare("v1.0.0", "1.1.0"),
+                Some(VersionComparison::Newer { major_bump: false })
+            );
+        }
+
+        #[test]
+        fn test_compare_unparseable_returns_none() {
+            assert_eq!(compare("not-a-version", "1.0.0"), None);
+            assert_eq!(compare("1.0.0", "also-not-a-version"), None);
+        }
+
+        #[test]
+        fn test_ordering_is_numeric_not_lexicographic() {
+            // "9" < "10" numerically but ">" lexicographically as strings —
+            // guards against a naive string-compare implementation.
+            assert_eq!(
+                compare("1.9.0", "1.10.0"),
+                Some(VersionComparison::Newer { major_bump: false })
+            );
+        }
+    }
+}
+
 /// Execute install command
 pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     use crate::core::filesystem::AikDirectory;
@@ -297,10 +483,14 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
     spinner.finish_with_message("Source type detected");
 
     // Keep temp dir alive for GitHub installs until after extraction (avoid "No such file or directory")
-    let (_temp_guard, package, archive_path): (
+    // `resolved_commit_sha` (SEC-7): the mutable ref (e.g. "main") pinned to an
+    // immutable commit at fetch time, for the lock file — `None` for local
+    // installs or if resolution failed (best-effort, non-fatal).
+    let (_temp_guard, package, archive_path, resolved_commit_sha): (
         Option<tempfile::TempDir>,
         crate::models::package::Package,
         Option<std::path::PathBuf>,
+        Option<String>,
     ) = match source_type {
         SourceType::LocalFolder(path) => {
             let install_spinner = create_spinner(&format!(
@@ -310,7 +500,7 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
             let result = install_from_local_directory(&path);
             install_spinner.finish_with_message("Local package loaded");
             let (pkg, path_opt) = result?;
-            (None, pkg, path_opt)
+            (None, pkg, path_opt, None)
         }
         SourceType::GitHubRepo {
             owner,
@@ -342,6 +532,21 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
             let package = crate::models::package::Package::from_toml_str(&manifest_toml)
                 .map_err(|e| AikError::Generic(format!("Failed to parse manifest: {}", e)))?;
 
+            // SEC-7: pin the mutable ref to an immutable commit SHA for the lock
+            // file. Best-effort — a resolution failure (e.g. rate limit) doesn't
+            // block install, it just means the lock entry has no commit_sha.
+            let resolved_commit_sha = match github.resolve_ref_to_sha(&owner, &repo, &version).await
+            {
+                Ok(sha) => Some(sha),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: could not resolve '{}' to a commit SHA: {}",
+                        version, e
+                    );
+                    None
+                }
+            };
+
             // Download package archive (temp_dir must outlive install_package_from_archive)
             let download_spinner = create_spinner(&format!(
                 "Downloading package {} v{}...",
@@ -356,13 +561,23 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
                 package.package.name, package.package.version
             ));
 
+            // Download the exact commit we just resolved (not the mutable ref), so the
+            // archive bytes match the recorded commit_sha and there is no TOCTOU window
+            // where the ref moves between resolution and download. Fall back to the ref
+            // only when resolution failed (in which case no commit_sha is recorded anyway).
+            let download_ref = resolved_commit_sha.as_deref().unwrap_or(&version);
             github
-                .download_archive(&owner, &repo, Some(&version), &archive_path)
+                .download_archive(&owner, &repo, Some(download_ref), &archive_path)
                 .await
                 .map_err(|e| AikError::Generic(e.to_string()))?;
             download_spinner.finish_with_message("Package downloaded");
 
-            (Some(temp_dir), package, Some(archive_path))
+            (
+                Some(temp_dir),
+                package,
+                Some(archive_path),
+                resolved_commit_sha,
+            )
         }
     };
 
@@ -380,6 +595,34 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
         } else {
             show_warning("Installation cancelled by user");
             return Ok(());
+        }
+    }
+
+    // SEC-7: hash the downloaded archive and verify it against any existing
+    // lock entry for this exact package+version *before* extracting anything.
+    // A mismatch means the ref this was fetched from now points at different
+    // content than what was locked at this version — refuse rather than
+    // silently extract possibly-tampered/moved content.
+    let resolved_checksum = match &archive_path {
+        Some(path) => {
+            let bytes = std::fs::read(path).map_err(|e| {
+                crate::error::io_context("Failed to read downloaded archive", path, e)
+            })?;
+            Some(aikit_sdk::fetch::sha256_hex(&bytes))
+        }
+        None => None,
+    };
+
+    let lock_dir = lock_dir_for(&aik_dir);
+    if let Some(checksum) = &resolved_checksum {
+        let lock_manager = crate::core::lock::LockManager::new(&lock_dir);
+        if let Err(mismatch) =
+            lock_manager.verify_checksum(&package.package.name, &package.package.version, checksum)
+        {
+            return Err(AikError::Generic(format!(
+                "Refusing to install '{}': {}",
+                package.package.name, mismatch
+            )));
         }
     }
 
@@ -413,10 +656,20 @@ pub async fn execute_install(args: InstallArgs) -> Result<(), AikError> {
         ),
     };
 
-    registry.add_package(installed);
+    registry.add_package(installed.clone());
     registry
         .save_to_file(&registry_path)
         .map_err(|e| AikError::Generic(e.to_string()))?;
+
+    // Wire the lock file (FEAT-4): record the resolved commit SHA + archive
+    // checksum now that install has fully succeeded. Re-verifies against the
+    // pre-extraction check above (cheap, and covers the local-folder path
+    // which has no checksum at all — `add_package_with_integrity` with both
+    // `None` is equivalent to the old dead `add_package`).
+    let mut lock_manager = crate::core::lock::LockManager::new(&lock_dir);
+    lock_manager
+        .lock_package_with_integrity(&installed, resolved_commit_sha, resolved_checksum)
+        .map_err(|e| AikError::Generic(format!("Failed to update lock file: {}", e)))?;
 
     // Handle .gitignore
     // Note: skip_gitignore field doesn't exist in InstallArgs, always prompt
@@ -539,7 +792,7 @@ fn resolve_agent_selection(ai: Option<&str>) -> Result<Vec<String>, AikError> {
     // Non-interactive: require --ai flag
     Err(AikError::InvalidSource(
         "AI agent not specified. Use --ai <agent> to specify an agent, or run in interactive mode.\n\
-         Available agents: claude, copilot, cursor-agent, gemini, qwen, opencode, codex, windsurf, kilocode, auggie, roo, codebuddy, qoder, amp, shai, q, bob".to_string(),
+         Available agents: claude, copilot, cursor, gemini, qwen, opencode, codex, windsurf, kilocode, auggie, roo, codebuddy, qoder, amp, shai, q, bob".to_string(),
     ))
 }
 
@@ -583,80 +836,57 @@ fn install_from_local_directory(
     Ok((package, None))
 }
 
-/// Parse GitHub URL and extract owner, repo, and version
+/// Parse GitHub URL and extract owner, repo, and version.
+///
+/// Delegates the URL grammar to `aikit_sdk::parse_github_url` — the single
+/// canonical GitHub-source parser (ARCH-1; this function used to have its
+/// own, narrower, copy of the same grammar) — then re-validates
+/// owner/repo/version against this CLI's stricter charset checks (defense
+/// in depth) and applies this command's own default-version behavior
+/// (`"main"`).
 fn parse_github_url(
     source: &str,
     version: Option<&str>,
 ) -> Result<(String, String, String), AikError> {
-    // Handle various GitHub URL formats:
-    // https://github.com/owner/repo
-    // https://github.com/owner/repo/releases/download/v1.0.0/package.zip
-    // github.com/owner/repo
-    // owner/repo
-
-    let url = source
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
-
-    let path = if url.starts_with("github.com/") {
-        url.strip_prefix("github.com/").unwrap()
-    } else if url.contains('/') && !url.contains("github.com") {
-        // Assume owner/repo format
-        url
-    } else {
-        return Err(AikError::InvalidGitHubUrl(
-            "Expected: github.com/owner/repo or owner/repo".to_string(),
-        ));
-    };
-
-    let parts: Vec<&str> = path.split('/').collect();
-    if parts.len() < 2 {
-        return Err(AikError::InvalidGitHubUrl(
-            "Invalid GitHub URL format".to_string(),
-        ));
-    }
-
-    let owner = parts[0].to_string();
-    let repo = parts[1].to_string();
-
-    // Validate owner and repo names
-    crate::core::validation::validate_github_owner_name(&owner)?;
-    crate::core::validation::validate_github_repo_name(&repo)?;
-
-    // Validate version if provided
+    // Validate an explicit `--version` flag up front, same as before.
     if let Some(v) = version {
         crate::core::validation::validate_version_format(v)?;
     }
 
-    let version = version.unwrap_or("main").to_string();
+    // The SDK grammar carries an explicit version as an `@version` suffix on
+    // the source string rather than as a separate parameter; fold this
+    // command's `--version` flag in that way (unless the source already has
+    // its own `@ref`) so both entry points share one parser.
+    let combined = match version {
+        Some(v) if !source.contains('@') => format!("{}@{}", source, v),
+        _ => source.to_string(),
+    };
 
-    Ok((owner, repo, version))
-}
+    let parsed = aikit_sdk::parse_github_url(&combined)
+        .map_err(|e| AikError::InvalidGitHubUrl(e.to_string()))?;
 
-/// Normalize a path by resolving `..` and `.` components in memory
-fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
-    use std::path::Component;
-    let mut result = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir => {
-                result.push(component);
-            }
-            Component::CurDir => {
-                // Skip `.` - it doesn't change anything
-            }
-            Component::ParentDir => {
-                // Pop the last normal component if possible
-                if !result.pop() {
-                    // Can't pop past root - just skip
-                }
-            }
-            Component::Normal(c) => {
-                result.push(c);
-            }
-        }
-    }
-    result
+    let (owner, repo, parsed_version) = match parsed {
+        aikit_sdk::TemplateSource::GitHub {
+            owner,
+            repo,
+            version,
+            ..
+        } => (owner, repo, version),
+        // `aikit_sdk::parse_github_url` only ever returns the `GitHub`
+        // variant of `TemplateSource`.
+        _ => unreachable!("parse_github_url always returns TemplateSource::GitHub"),
+    };
+
+    // Validate owner and repo names (this CLI's stricter charset checks,
+    // defense in depth on top of the SDK parser's own non-empty check).
+    crate::core::validation::validate_github_owner_name(&owner)?;
+    crate::core::validation::validate_github_repo_name(&repo)?;
+
+    Ok((
+        owner,
+        repo,
+        parsed_version.unwrap_or_else(|| "main".to_string()),
+    ))
 }
 
 /// Install package from downloaded archive
@@ -666,13 +896,6 @@ fn install_package_from_archive(
     aik_dir: &crate::core::filesystem::AikDirectory,
     _args: &InstallArgs,
 ) -> Result<(), AikError> {
-    use std::fs::File;
-    use zip::ZipArchive;
-
-    let file = File::open(archive_path)
-        .map_err(|e| crate::error::io_context("Failed to open archive", archive_path, e))?;
-    let mut archive = ZipArchive::new(file)?;
-
     let install_path = aik_dir
         .install_package(
             &package.package.name,
@@ -681,71 +904,13 @@ fn install_package_from_archive(
         )
         .map_err(|e| AikError::Generic(e.to_string()))?;
 
-    // Canonicalize install_path once for comparison
-    let install_canonical = install_path
-        .canonicalize()
-        .map_err(|e| AikError::Generic(format!("Failed to canonicalize install_path: {}", e)))?;
-
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)?;
-
-        let entry_name = file.name();
-
-        // Check for path traversal in the entry name before any processing
-        if entry_name.contains("..") {
-            return Err(AikError::Generic(format!(
-                "Path traversal detected in zip entry: {}",
-                entry_name
-            )));
-        }
-
-        // Normalize the entry name to prevent path traversal (resolves . components)
-        let normalized = normalize_path(std::path::Path::new(entry_name));
-
-        // Validate that the normalized path is relative (prevents absolute paths like /etc/passwd)
-        if !normalized.is_relative() {
-            return Err(AikError::Generic(format!(
-                "Absolute path detected in zip entry: {}",
-                entry_name
-            )));
-        }
-
-        let outpath = install_path.join(&normalized);
-
-        // Validate that the output path is under install_path
-        // First try to canonicalize, if the path doesn't exist yet we compute the canonical form
-        // of the install_path and join it with the normalized relative path
-        let outpath_canonical = if outpath.exists() {
-            outpath.canonicalize().map_err(|e| {
-                AikError::Generic(format!("Failed to canonicalize output path: {}", e))
-            })?
-        } else {
-            install_canonical.join(&normalized)
-        };
-
-        if !outpath_canonical.starts_with(&install_canonical) {
-            return Err(AikError::Generic(format!(
-                "Path traversal detected in zip entry: {}",
-                entry_name
-            )));
-        }
-
-        if file.name().ends_with('/') {
-            std::fs::create_dir_all(&outpath)
-                .map_err(|e| crate::error::io_context("Failed to create directory", &outpath, e))?;
-        } else {
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    std::fs::create_dir_all(p).map_err(|e| {
-                        crate::error::io_context("Failed to create parent directory", p, e)
-                    })?;
-                }
-            }
-            let mut outfile = File::create(&outpath)
-                .map_err(|e| crate::error::io_context("Failed to create file", &outpath, e))?;
-            std::io::copy(&mut file, &mut outfile)?;
-        }
-    }
+    // Extraction — including all zip-slip / absolute-path / symlink
+    // hardening — is delegated to aikit_sdk::extract_zip, the single
+    // canonical zip extractor (ARCH-1; previously duplicated here).
+    let zip_bytes = std::fs::read(archive_path)
+        .map_err(|e| crate::error::io_context("Failed to read archive", archive_path, e))?;
+    aikit_sdk::extract_zip(&zip_bytes, &install_path)
+        .map_err(|e| AikError::Generic(format!("Failed to extract archive: {}", e)))?;
 
     Ok(())
 }
@@ -775,54 +940,31 @@ fn install_package_from_directory(
     Ok(())
 }
 
-/// Copy package files, excluding version control and build directories
+/// Directories to exclude when copying a whole project-shaped source tree
+/// (version control, build artifacts, dependency caches).
+const COPY_EXCLUDE_DIRS: &[&str] = &[
+    "target",
+    "build",
+    "out",
+    ".git",
+    ".aikit",
+    "node_modules",
+    ".next",
+    "dist",
+];
+
+/// Copy package files, excluding version control and build directories.
+///
+/// Delegates to `aikit_sdk::copy_dir_excluding`, the single canonical
+/// recursive-copy implementation (ARCH-1; previously duplicated here) —
+/// carries the same symlink-skip hardening as every other copy path in this
+/// workspace, which matters since `from` may be an untrusted
+/// downloaded/extracted package tree.
 fn copy_package_files(
     from: &std::path::Path,
     to: &std::path::Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::fs;
-    use walkdir::WalkDir;
-
-    // Directories to exclude
-    let exclude_dirs = [
-        "target",
-        "build",
-        "out",
-        ".git",
-        ".aikit",
-        "node_modules",
-        ".next",
-        "dist",
-    ];
-
-    for entry in WalkDir::new(from).into_iter().filter_map(|e| e.ok()) {
-        let source_path = entry.path();
-        let relative_path = source_path.strip_prefix(from)?;
-
-        // Skip excluded directories
-        if let Some(dir_name) = relative_path.iter().next() {
-            if let Some(dir_str) = dir_name.to_str() {
-                if exclude_dirs
-                    .iter()
-                    .any(|&excluded| excluded.eq_ignore_ascii_case(dir_str))
-                {
-                    continue;
-                }
-            }
-        }
-
-        let dest_path = to.join(relative_path);
-
-        if source_path.is_dir() {
-            fs::create_dir_all(&dest_path)?;
-        } else {
-            if let Some(parent) = dest_path.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(source_path, dest_path)?;
-        }
-    }
-
+    aikit_sdk::copy_dir_excluding(from, to, COPY_EXCLUDE_DIRS)?;
     Ok(())
 }
 
@@ -925,7 +1067,15 @@ fn deploy_subagents_for_agent(
     };
     let _ = agents_dir; // used by deploy_subagent via aikit-sdk
     for (name, def) in &package.subagents {
-        let src_path = package_root.join(&def.source);
+        // SEC-5: `source` is an attacker-controlled manifest field; `Package::validate`
+        // already rejects absolute/`..` values at parse time, but re-validate at the join
+        // site (defense in depth — this is where the read actually happens).
+        let src_path = aikit_sdk::safe_join(package_root, &def.source).map_err(|e| {
+            format!(
+                "Subagent '{}' has an unsafe source path '{}': {}",
+                name, def.source, e
+            )
+        })?;
         let content = std::fs::read_to_string(&src_path).map_err(|e| {
             format!(
                 "Failed to read subagent '{}' from {}: {}",
@@ -954,7 +1104,15 @@ fn deploy_skills_for_agent(
     };
     let dest_base = project_root.join(skills_dir);
     for (name, def) in &package.skills {
-        let src_dir = package_root.join(&def.source);
+        // SEC-5: same defense-in-depth re-validation as subagents, for both the
+        // attacker-controlled `source` (read side) and `name` (write side — becomes a
+        // directory segment under the agent's skills_dir).
+        let src_dir = aikit_sdk::safe_join(package_root, &def.source).map_err(|e| {
+            format!(
+                "Skill '{}' has an unsafe source path '{}': {}",
+                name, def.source, e
+            )
+        })?;
         if !src_dir.is_dir() {
             return Err(format!(
                 "Skill '{}' source is not a directory: {}",
@@ -963,7 +1121,8 @@ fn deploy_skills_for_agent(
             )
             .into());
         }
-        let dest_dir = dest_base.join(name);
+        let dest_dir = aikit_sdk::safe_join(&dest_base, name)
+            .map_err(|e| format!("Skill '{}' has an unsafe name: {}", name, e))?;
         std::fs::create_dir_all(&dest_dir)?;
         copy_package_files(&src_dir, &dest_dir)?;
     }
@@ -971,60 +1130,267 @@ fn deploy_skills_for_agent(
     Ok(())
 }
 
-/// Copy artifact mappings from installed package root to project.
-///
-/// This function is deprecated in favor of using aikit_sdk::copy_artifacts directly.
-/// It is kept for backward compatibility but delegates to the SDK.
-#[allow(dead_code)]
-#[deprecated(note = "Use aikit_sdk::copy_artifacts directly")]
-fn copy_artifacts_to_project(
-    package: &crate::models::package::Package,
-    package_root: &std::path::Path,
-    project_root: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let mappings = package.get_artifact_mappings(None);
-    aikit_sdk::copy_artifacts(package_root, project_root, &mappings)
-        .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-}
-
 /// Execute update command
+///
+/// Real flow (FEAT-2): parse the installed package's stored `source_url` →
+/// fetch the manifest at the tracked ref from GitHub → compare the manifest's
+/// declared version against what's installed → if newer (and not gated by a
+/// major-version bump without `--breaking`), download, verify integrity
+/// (SEC-7), extract, and update the registry + lock file; otherwise report
+/// up to date honestly. This never claims an update happened when it didn't.
+///
+/// Known limitation: unlike `install`, this does not re-run per-agent
+/// command/subagent/skill deployment (that needs an `--ai` selection this
+/// command doesn't take); it does refresh agent-agnostic `[artifacts]`
+/// mappings, matching `install`'s default (unscoped) artifact copy.
 pub async fn execute_update(args: UpdateArgs) -> Result<(), AikError> {
     use crate::core::filesystem::AikDirectory;
+
+    let github = GitHubClient::new(GitHubClient::resolve_token(None))
+        .map_err(|e| AikError::Generic(e.to_string()))?;
+    let aik_dir = AikDirectory::find().map_err(|_| {
+        AikError::Installation("No packages installed (.aikit directory not found)".to_string())
+    })?;
+    execute_update_with_client(args, github, aik_dir).await
+}
+
+/// The actual `update` implementation, taking a [`GitHubClient`] and an
+/// already-resolved [`AikDirectory`](crate::core::filesystem::AikDirectory)
+/// so tests can inject a mocked client (see `GitHubClient::for_test`) and a
+/// directly-constructed directory — avoiding both real network access *and*
+/// `AikDirectory::find()`'s dependence on the process-global current
+/// directory (which would otherwise race against every other test in this
+/// binary that also changes it). [`execute_update`] is the production entry
+/// point and always builds a real client + discovers `.aikit` from the CWD.
+async fn execute_update_with_client(
+    args: UpdateArgs,
+    github: GitHubClient,
+    aik_dir: crate::core::filesystem::AikDirectory,
+) -> Result<(), AikError> {
+    use crate::core::lock::LockManager;
+    use crate::core::ux::show_info;
+    use crate::models::package::InstalledPackage;
     use crate::models::registry::LocalRegistry;
+    use semver_lite::{compare, VersionComparison};
 
     // Validate package name
     crate::core::validation::validate_package_name(&args.package)?;
 
-    let aik_dir = AikDirectory::find().map_err(|_| {
-        AikError::Installation("No packages installed (.aikit directory not found)".to_string())
-    })?;
-
     let registry_path = aik_dir.registry_path();
-    let registry =
+    let mut registry =
         LocalRegistry::load_from_file(&registry_path).unwrap_or_else(|_| LocalRegistry::new());
 
     // Check if package is installed
     let installed_package = registry
         .get_package(&args.package)
-        .ok_or_else(|| AikError::PackageNotFound(args.package.clone()))?;
+        .ok_or_else(|| AikError::PackageNotFound(args.package.clone()))?
+        .clone();
 
     println!(
         "Checking for updates to '{}' (current: {})...",
         args.package, installed_package.package.version
     );
 
-    // For now, we need the GitHub URL to check for updates
-    // In a full implementation, we'd query the registry or GitHub API
-    // For this demo, we'll assume no update is available
+    // Reuse `InstallArgs::detect_source_type` (the same logic `aikit install`
+    // uses) on the recorded source_url so local-folder vs GitHub sources are
+    // told apart identically. Only GitHub sources have a remote authority to
+    // check for updates against.
+    let synthetic_args = InstallArgs {
+        source: installed_package.source_url.clone(),
+        install_version: None,
+        token: None,
+        force: false,
+        yes: false,
+        ai: None,
+    };
+    let (owner, repo, ref_) = match synthetic_args.detect_source_type() {
+        Ok(SourceType::GitHubRepo {
+            owner,
+            repo,
+            version,
+        }) => (owner, repo, version),
+        Ok(SourceType::LocalFolder(_)) => {
+            return Err(AikError::InvalidSource(format!(
+                "Package '{}' was installed from a local directory ('{}'); `aikit update` only \
+                 supports GitHub-sourced packages.",
+                args.package, installed_package.source_url
+            )));
+        }
+        Err(_) => {
+            return Err(AikError::InvalidSource(format!(
+                "Package '{}' has an unrecognized source ('{}'); `aikit update` only supports \
+                 GitHub-sourced packages.",
+                args.package, installed_package.source_url
+            )));
+        }
+    };
 
-    println!("No updates available for package '{}'", args.package);
-    println!("Current version: {}", installed_package.package.version);
+    let spinner = crate::core::ux::create_spinner(&format!(
+        "Fetching latest manifest from {}/{}@{}...",
+        owner, repo, ref_
+    ));
+    let manifest = github
+        .get_package_manifest(&owner, &repo, Some(&ref_))
+        .await
+        .map_err(|e| AikError::Generic(format!("Failed to check for updates: {}", e)))?;
+    spinner.finish_and_clear();
 
-    // In a real implementation, this would:
-    // 1. Parse the source URL from installed_package.source_url
-    // 2. Query GitHub API for latest release
-    // 3. Compare versions
-    // 4. Download and install if newer version available
+    let latest_version = manifest.package.version.clone();
+
+    let comparison =
+        compare(&installed_package.package.version, &latest_version).ok_or_else(|| {
+            AikError::InvalidVersion(format!(
+                "Cannot compare versions '{}' (installed) and '{}' (from {}/{}@{}): expected \
+             semantic versions (e.g. 1.2.3)",
+                installed_package.package.version, latest_version, owner, repo, ref_
+            ))
+        })?;
+
+    match comparison {
+        VersionComparison::Same | VersionComparison::Older => {
+            let lock_dir = lock_dir_for(&aik_dir);
+            let lock_manager = LockManager::new(&lock_dir);
+            match lock_manager.get_locked_version(&args.package) {
+                Some(locked_version) => println!(
+                    "Package '{}' is already up to date (version {}, locked at {}).",
+                    args.package, installed_package.package.version, locked_version
+                ),
+                None => println!(
+                    "Package '{}' is already up to date (version {}).",
+                    args.package, installed_package.package.version
+                ),
+            }
+            return Ok(());
+        }
+        VersionComparison::Newer { major_bump } => {
+            if major_bump && !args.breaking {
+                return Err(AikError::Generic(format!(
+                    "Update for '{}' is a major version bump ({} -> {}); pass --breaking to \
+                     allow it.",
+                    args.package, installed_package.package.version, latest_version
+                )));
+            }
+            show_info(&format!(
+                "Updating '{}': {} -> {}",
+                args.package, installed_package.package.version, latest_version
+            ));
+        }
+    }
+
+    // SEC-7: pin the tracked ref to an immutable commit SHA for the lock
+    // file. Best-effort — doesn't block the update if resolution fails.
+    let resolved_commit_sha = match github.resolve_ref_to_sha(&owner, &repo, &ref_).await {
+        Ok(sha) => Some(sha),
+        Err(e) => {
+            eprintln!(
+                "Warning: could not resolve '{}' to a commit SHA: {}",
+                ref_, e
+            );
+            None
+        }
+    };
+
+    // Convert the fetched manifest into a Package the same way `install` does.
+    let manifest_toml = toml::to_string(&manifest)?;
+    let package = crate::models::package::Package::from_toml_str(&manifest_toml)
+        .map_err(|e| AikError::Generic(format!("Failed to parse manifest: {}", e)))?;
+
+    // Download the new version's archive.
+    let temp_dir = tempfile::tempdir()
+        .map_err(|e| AikError::Generic(format!("Failed to create temp directory: {}", e)))?;
+    let archive_path = temp_dir
+        .path()
+        .join(format!("{}-{}.zip", package.package.name, latest_version));
+    // Download the exact resolved commit (not the mutable ref) so the archive bytes
+    // match the recorded commit_sha — no TOCTOU window between resolve and download.
+    let download_ref = resolved_commit_sha.as_deref().unwrap_or(&ref_);
+    github
+        .download_archive(&owner, &repo, Some(download_ref), &archive_path)
+        .await
+        .map_err(|e| AikError::Generic(e.to_string()))?;
+
+    // SEC-7: verify archive integrity against any existing lock entry for
+    // this exact package+version *before* extracting anything. This mostly
+    // matters for `aikit update` run twice against the same latest version
+    // (or a re-run after a partial failure): if the ref's content changed
+    // underneath an unchanged manifest version, refuse rather than extract
+    // possibly-tampered content.
+    let zip_bytes = std::fs::read(&archive_path).map_err(|e| {
+        crate::error::io_context("Failed to read downloaded archive", &archive_path, e)
+    })?;
+    let checksum = aikit_sdk::fetch::sha256_hex(&zip_bytes);
+
+    let lock_dir = lock_dir_for(&aik_dir);
+    let lock_manager_check = LockManager::new(&lock_dir);
+    if let Err(mismatch) =
+        lock_manager_check.verify_checksum(&package.package.name, &latest_version, &checksum)
+    {
+        return Err(AikError::Generic(format!(
+            "Refusing to update '{}': {}",
+            package.package.name, mismatch
+        )));
+    }
+
+    // Extract the new version alongside (not over) the old one.
+    let install_path = aik_dir
+        .install_package(
+            &package.package.name,
+            &latest_version,
+            archive_path.parent().unwrap_or(std::path::Path::new(".")),
+        )
+        .map_err(|e| AikError::Generic(e.to_string()))?;
+    aikit_sdk::extract_zip(&zip_bytes, &install_path)
+        .map_err(|e| AikError::Generic(format!("Failed to extract archive: {}", e)))?;
+
+    // Refresh agent-agnostic `[artifacts]` mappings from the new version
+    // (matches `install`'s default/unscoped artifact copy).
+    if let Ok(package_root) = aikit_sdk::installed_package_root(
+        &aik_dir.packages_path(),
+        &package.package.name,
+        &latest_version,
+    ) {
+        let project_root = aik_dir.project_root();
+        let mappings = package.get_artifact_mappings(None);
+        if let Err(e) = aikit_sdk::copy_artifacts(&package_root, &project_root, &mappings) {
+            eprintln!("Warning: Failed to refresh artifacts: {}", e);
+        }
+    }
+
+    // Update the registry to point at the new version.
+    let old_version = installed_package.package.version.clone();
+    let updated = InstalledPackage {
+        package: package.package.clone(),
+        installed_at: chrono::Utc::now(),
+        source_url: installed_package.source_url.clone(),
+        install_path: format!("packages/{}-{}", package.package.name, latest_version),
+    };
+    registry.add_package(updated.clone());
+    registry
+        .save_to_file(&registry_path)
+        .map_err(|e| AikError::Generic(e.to_string()))?;
+
+    // Wire the lock file (FEAT-4): record the resolved commit SHA + checksum
+    // now that the update fully succeeded.
+    let mut lock_manager = LockManager::new(&lock_dir);
+    lock_manager
+        .lock_package_with_integrity(&updated, resolved_commit_sha, Some(checksum))
+        .map_err(|e| AikError::Generic(format!("Failed to update lock file: {}", e)))?;
+
+    // Best-effort cleanup of the old version's package directory — failing
+    // to clean up doesn't make the update itself unsuccessful.
+    if old_version != latest_version {
+        if let Err(e) = aik_dir.remove_package(&package.package.name, &old_version) {
+            eprintln!(
+                "Warning: Failed to remove old version {} of '{}': {}",
+                old_version, package.package.name, e
+            );
+        }
+    }
+
+    println!(
+        "✅ Package '{}' updated: {} -> {}",
+        package.package.name, old_version, latest_version
+    );
 
     Ok(())
 }
@@ -1077,6 +1443,19 @@ pub async fn execute_remove(args: RemoveArgs) -> Result<(), AikError> {
     registry
         .save_to_file(&registry_path)
         .map_err(|e| AikError::Generic(e.to_string()))?;
+
+    // Remove from the lock file (FEAT-4) — an uninstalled package has no
+    // integrity record to keep around, and leaving a stale entry would make
+    // a future reinstall's SEC-7 checksum comparison meaningless.
+    {
+        let lock_dir = lock_dir_for(&aik_dir);
+        let mut lock_manager = crate::core::lock::LockManager::new(&lock_dir);
+        if lock_manager.is_locked(&args.package) {
+            lock_manager
+                .unlock_package(&args.package)
+                .map_err(|e| AikError::Generic(format!("Failed to update lock file: {}", e)))?;
+        }
+    }
 
     // Remove agent commands
     remove_agent_commands(&args.package).map_err(|e| AikError::Generic(e.to_string()))?;
@@ -1180,6 +1559,76 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // Note: `execute_update_with_client` takes an already-resolved
+    // `AikDirectory` rather than calling `AikDirectory::find()` itself
+    // (unlike `execute_install`/`execute_remove`), specifically so these
+    // tests never need to touch the process-global current directory — no
+    // CWD guard/lock needed here.
+
+    /// Build a minimal `.aikit/registry.toml` fixture recording one
+    /// GitHub-sourced installed package, for `execute_update_with_client`
+    /// tests. Returns the `AikDirectory`.
+    fn fixture_installed_package(
+        project_root: &std::path::Path,
+        name: &str,
+        version: &str,
+        source_url: &str,
+    ) -> crate::core::filesystem::AikDirectory {
+        use crate::models::package::{InstalledPackage, PackageMetadata};
+        use crate::models::registry::LocalRegistry;
+
+        let aik_dir = crate::core::filesystem::AikDirectory::new(project_root.join(".aikit"));
+        aik_dir.create().unwrap();
+
+        let mut registry = LocalRegistry::new();
+        registry.add_package(InstalledPackage {
+            package: PackageMetadata {
+                name: name.to_string(),
+                version: version.to_string(),
+                description: "Fixture package".to_string(),
+                authors: vec![],
+                license: None,
+                homepage: None,
+                repository: None,
+            },
+            installed_at: chrono::Utc::now(),
+            source_url: source_url.to_string(),
+            install_path: format!("packages/{}-{}", name, version),
+        });
+        registry.save_to_file(&aik_dir.registry_path()).unwrap();
+
+        aik_dir
+    }
+
+    /// Minimal `aikit.toml`-shaped manifest body for a mocked
+    /// raw.githubusercontent.com response.
+    fn manifest_toml_body(name: &str, version: &str) -> String {
+        format!(
+            "[package]\nname = \"{}\"\nversion = \"{}\"\ndescription = \"Fixture package\"\nauthors = []\n",
+            name, version
+        )
+    }
+
+    /// A minimal valid zip archive (single file) for mocked
+    /// `.../zipball/...` responses — extraction doesn't need `aikit.toml`
+    /// since `execute_update` builds its `Package` from the already-fetched
+    /// manifest, not from re-reading the extracted archive.
+    fn minimal_zip_bytes() -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::FileOptions;
+        use zip::ZipWriter;
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            let options = FileOptions::default();
+            zip.start_file("README.md", options).unwrap();
+            zip.write_all(b"hello").unwrap();
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
 
     #[test]
     fn test_detect_source_type_local_directory() {
@@ -1541,43 +1990,391 @@ mod tests {
         );
     }
 
-    /// Test that normalize_path correctly resolves .. and . components
+    // -- ARCH-1: parse_github_url now delegates to aikit_sdk::parse_github_url
+    // ------------------------------------------------------------------------
+
     #[test]
-    fn test_normalize_path() {
-        use std::path::Path;
+    fn test_parse_github_url_short_form_defaults_to_main() {
+        let (owner, repo, version) = parse_github_url("owner/repo", None).unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+        assert_eq!(version, "main");
+    }
 
-        // Test basic normalization
+    #[test]
+    fn test_parse_github_url_github_com_prefix() {
+        let (owner, repo, version) = parse_github_url("github.com/owner/repo", None).unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+        assert_eq!(version, "main");
+    }
+
+    #[test]
+    fn test_parse_github_url_explicit_version_flag_is_applied() {
+        let (owner, repo, version) = parse_github_url("owner/repo", Some("1.2.3")).unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+        assert_eq!(version, "1.2.3");
+    }
+
+    #[test]
+    fn test_parse_github_url_release_asset_style_url_still_resolves_owner_repo() {
+        // The old parser silently dropped everything past owner/repo (e.g. a
+        // release-asset URL); the unified parser must still resolve the same
+        // owner/repo rather than erroring on the extra segments.
+        let (owner, repo, version) = parse_github_url(
+            "https://github.com/owner/repo/releases/download/v1.0.0/package.zip",
+            None,
+        )
+        .unwrap();
+        assert_eq!(owner, "owner");
+        assert_eq!(repo, "repo");
+        assert_eq!(version, "main");
+    }
+
+    #[test]
+    fn test_parse_github_url_rejects_invalid_owner_charset() {
+        // Defense-in-depth validation (validate_github_owner_name) must still
+        // reject an owner name the SDK's lighter-weight grammar would accept.
+        let result = parse_github_url("not valid owner/repo", None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_github_url_rejects_invalid_explicit_version() {
+        let result = parse_github_url("owner/repo", Some("not-a-semver"));
+        assert!(result.is_err());
+    }
+
+    // -- execute_update (FEAT-2 real flow), mocked GitHub, no real network --
+
+    #[tokio::test]
+    async fn test_execute_update_reports_up_to_date_honestly() {
+        let temp = TempDir::new().unwrap();
+        let aik_dir = fixture_installed_package(temp.path(), "demo", "1.0.0", "owner/repo");
+
+        let mut server = mockito::Server::new_async().await;
+        let _m = server
+            .mock("GET", "/owner/repo/main/aikit.toml")
+            .with_status(200)
+            .with_body(manifest_toml_body("demo", "1.0.0"))
+            .create_async()
+            .await;
+
+        let github = GitHubClient::for_test(server.url());
+        let result = execute_update_with_client(
+            UpdateArgs {
+                package: "demo".to_string(),
+                breaking: false,
+            },
+            github,
+            crate::core::filesystem::AikDirectory::new(temp.path().join(".aikit")),
+        )
+        .await;
+
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
+
+        // Must NOT have touched the registry — same version in, same out.
+        let registry =
+            crate::models::registry::LocalRegistry::load_from_file(&aik_dir.registry_path())
+                .unwrap();
         assert_eq!(
-            normalize_path(Path::new("foo/../bar")),
-            PathBuf::from("bar")
+            registry.get_package("demo").unwrap().package.version,
+            "1.0.0"
         );
+    }
+
+    #[tokio::test]
+    async fn test_execute_update_installs_when_newer() {
+        let temp = TempDir::new().unwrap();
+        let aik_dir = fixture_installed_package(temp.path(), "demo", "1.0.0", "owner/repo");
+
+        // Pre-existing old-version package dir, to prove cleanup happens.
+        let old_pkg_dir = aik_dir.packages_path().join("demo-1.0.0");
+        fs::create_dir_all(&old_pkg_dir).unwrap();
+        fs::write(old_pkg_dir.join("marker.txt"), "old").unwrap();
+
+        let mut server = mockito::Server::new_async().await;
+        let _manifest = server
+            .mock("GET", "/owner/repo/main/aikit.toml")
+            .with_status(200)
+            .with_body(manifest_toml_body("demo", "1.1.0"))
+            .create_async()
+            .await;
+        let _commit = server
+            .mock("GET", "/repos/owner/repo/commits/main")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"sha": "resolved-sha-123"}"#)
+            .create_async()
+            .await;
+        // Download is now keyed by the resolved commit SHA (not the mutable ref),
+        // so the archive bytes match the recorded commit_sha (TOCTOU fix).
+        let _zip = server
+            .mock("GET", "/repos/owner/repo/zipball/resolved-sha-123")
+            .with_status(200)
+            .with_body(minimal_zip_bytes())
+            .create_async()
+            .await;
+
+        let github = GitHubClient::for_test(server.url());
+        let result = execute_update_with_client(
+            UpdateArgs {
+                package: "demo".to_string(),
+                breaking: false,
+            },
+            github,
+            crate::core::filesystem::AikDirectory::new(temp.path().join(".aikit")),
+        )
+        .await;
+
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
+
+        // Registry now points at the new version.
+        let registry_path = aik_dir.registry_path();
+        let registry =
+            crate::models::registry::LocalRegistry::load_from_file(&registry_path).unwrap();
         assert_eq!(
-            normalize_path(Path::new("foo/./bar")),
-            PathBuf::from("foo/bar")
-        );
-        assert_eq!(
-            normalize_path(Path::new("foo/bar/../baz")),
-            PathBuf::from("foo/baz")
-        );
-        assert_eq!(normalize_path(Path::new("../foo")), PathBuf::from("foo"));
-        assert_eq!(normalize_path(Path::new("../../foo")), PathBuf::from("foo"));
-        assert_eq!(
-            normalize_path(Path::new("foo/bar/.")),
-            PathBuf::from("foo/bar")
+            registry.get_package("demo").unwrap().package.version,
+            "1.1.0"
         );
 
-        // Test multiple levels
+        // New version extracted to disk.
+        assert!(aik_dir.packages_path().join("demo-1.1.0").exists());
+
+        // Old version cleaned up.
+        assert!(!old_pkg_dir.exists());
+
+        // Lock file recorded the resolved commit SHA + a checksum for the
+        // new version (SEC-7 / FEAT-4).
+        let lock_dir = lock_dir_for(&aik_dir);
+        let lock_manager = crate::core::lock::LockManager::new(&lock_dir);
+        assert_eq!(lock_manager.get_locked_version("demo"), Some("1.1.0"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_update_major_bump_without_breaking_is_rejected() {
+        let temp = TempDir::new().unwrap();
+        let aik_dir = fixture_installed_package(temp.path(), "demo", "1.0.0", "owner/repo");
+
+        let mut server = mockito::Server::new_async().await;
+        let _manifest = server
+            .mock("GET", "/owner/repo/main/aikit.toml")
+            .with_status(200)
+            .with_body(manifest_toml_body("demo", "2.0.0"))
+            .create_async()
+            .await;
+
+        let github = GitHubClient::for_test(server.url());
+        let result = execute_update_with_client(
+            UpdateArgs {
+                package: "demo".to_string(),
+                breaking: false,
+            },
+            github,
+            crate::core::filesystem::AikDirectory::new(temp.path().join(".aikit")),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("--breaking"));
+
+        // Registry must be untouched — a rejected major bump is not an update.
+        let registry =
+            crate::models::registry::LocalRegistry::load_from_file(&aik_dir.registry_path())
+                .unwrap();
         assert_eq!(
-            normalize_path(Path::new("a/b/c/../../d")),
-            PathBuf::from("a/d")
+            registry.get_package("demo").unwrap().package.version,
+            "1.0.0"
         );
+    }
+
+    #[tokio::test]
+    async fn test_execute_update_major_bump_with_breaking_succeeds() {
+        let temp = TempDir::new().unwrap();
+        let aik_dir = fixture_installed_package(temp.path(), "demo", "1.0.0", "owner/repo");
+
+        let mut server = mockito::Server::new_async().await;
+        let _manifest = server
+            .mock("GET", "/owner/repo/main/aikit.toml")
+            .with_status(200)
+            .with_body(manifest_toml_body("demo", "2.0.0"))
+            .create_async()
+            .await;
+        let _commit = server
+            .mock("GET", "/repos/owner/repo/commits/main")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"sha": "resolved-sha-456"}"#)
+            .create_async()
+            .await;
+        let _zip = server
+            .mock("GET", "/repos/owner/repo/zipball/resolved-sha-456")
+            .with_status(200)
+            .with_body(minimal_zip_bytes())
+            .create_async()
+            .await;
+
+        let github = GitHubClient::for_test(server.url());
+        let result = execute_update_with_client(
+            UpdateArgs {
+                package: "demo".to_string(),
+                breaking: true,
+            },
+            github,
+            crate::core::filesystem::AikDirectory::new(temp.path().join(".aikit")),
+        )
+        .await;
+
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
+
+        let registry =
+            crate::models::registry::LocalRegistry::load_from_file(&aik_dir.registry_path())
+                .unwrap();
         assert_eq!(
-            normalize_path(Path::new("a/./b/./c/./d")),
-            PathBuf::from("a/b/c/d")
+            registry.get_package("demo").unwrap().package.version,
+            "2.0.0"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_execute_update_rejects_on_checksum_mismatch() {
+        // SEC-7: pre-seed the lock file with a checksum for the *target*
+        // version that does NOT match what the mocked zip will hash to —
+        // simulating a mutable ref whose content changed underneath an
+        // unchanged manifest version. `execute_update` must refuse rather
+        // than silently overwrite.
+        let temp = TempDir::new().unwrap();
+        let aik_dir = fixture_installed_package(temp.path(), "demo", "1.0.0", "owner/repo");
+
+        {
+            use crate::models::package::{InstalledPackage, PackageMetadata};
+            let lock_dir = lock_dir_for(&aik_dir);
+            let mut lock_manager = crate::core::lock::LockManager::new(&lock_dir);
+            lock_manager
+                .lock_package_with_integrity(
+                    &InstalledPackage {
+                        package: PackageMetadata {
+                            name: "demo".to_string(),
+                            version: "1.1.0".to_string(),
+                            description: "Fixture package".to_string(),
+                            authors: vec![],
+                            license: None,
+                            homepage: None,
+                            repository: None,
+                        },
+                        installed_at: chrono::Utc::now(),
+                        source_url: "owner/repo".to_string(),
+                        install_path: "packages/demo-1.1.0".to_string(),
+                    },
+                    Some("some-other-sha".to_string()),
+                    Some("THIS-WILL-NOT-MATCH-THE-FRESH-ARCHIVE-CHECKSUM".to_string()),
+                )
+                .unwrap();
+        }
+
+        let mut server = mockito::Server::new_async().await;
+        let _manifest = server
+            .mock("GET", "/owner/repo/main/aikit.toml")
+            .with_status(200)
+            .with_body(manifest_toml_body("demo", "1.1.0"))
+            .create_async()
+            .await;
+        let _commit = server
+            .mock("GET", "/repos/owner/repo/commits/main")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"sha": "some-other-sha"}"#)
+            .create_async()
+            .await;
+        let _zip = server
+            .mock("GET", "/repos/owner/repo/zipball/some-other-sha")
+            .with_status(200)
+            .with_body(minimal_zip_bytes())
+            .create_async()
+            .await;
+
+        let github = GitHubClient::for_test(server.url());
+        let result = execute_update_with_client(
+            UpdateArgs {
+                package: "demo".to_string(),
+                breaking: false,
+            },
+            github,
+            crate::core::filesystem::AikDirectory::new(temp.path().join(".aikit")),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("checksum mismatch"));
+
+        // Registry must remain at the old version — the update was refused.
+        let registry =
+            crate::models::registry::LocalRegistry::load_from_file(&aik_dir.registry_path())
+                .unwrap();
+        assert_eq!(
+            registry.get_package("demo").unwrap().package.version,
+            "1.0.0"
         );
 
-        // Test edge cases
-        assert_eq!(normalize_path(Path::new(".")), PathBuf::from(""));
-        assert_eq!(normalize_path(Path::new("..")), PathBuf::from(""));
+        // Nothing extracted to disk for the rejected version.
+        assert!(!aik_dir.packages_path().join("demo-1.1.0").exists());
+    }
+
+    #[tokio::test]
+    async fn test_execute_update_local_folder_source_is_rejected() {
+        let temp = TempDir::new().unwrap();
+        // A source_url that looks like a local (nonexistent) absolute path,
+        // not a GitHub source.
+        fixture_installed_package(
+            temp.path(),
+            "demo",
+            "1.0.0",
+            "/some/local/path/that/is/gone",
+        );
+
+        let github = GitHubClient::for_test("http://127.0.0.1:1".to_string());
+        let result = execute_update_with_client(
+            UpdateArgs {
+                package: "demo".to_string(),
+                breaking: false,
+            },
+            github,
+            crate::core::filesystem::AikDirectory::new(temp.path().join(".aikit")),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("only supports GitHub-sourced packages"));
+    }
+
+    #[tokio::test]
+    async fn test_execute_update_package_not_found() {
+        let temp = TempDir::new().unwrap();
+        let aik_dir = crate::core::filesystem::AikDirectory::new(temp.path().join(".aikit"));
+        aik_dir.create().unwrap();
+
+        let github = GitHubClient::for_test("http://127.0.0.1:1".to_string());
+        let result = execute_update_with_client(
+            UpdateArgs {
+                package: "does-not-exist".to_string(),
+                breaking: false,
+            },
+            github,
+            aik_dir,
+        )
+        .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            AikError::PackageNotFound(name) => assert_eq!(name, "does-not-exist"),
+            other => panic!("expected PackageNotFound, got {:?}", other),
+        }
     }
 }

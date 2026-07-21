@@ -8,7 +8,7 @@
 //! directory used for global path resolution (not used in normal library builds).
 //!
 //! Supported targets (see [`mcp_supported_agents`]):
-//! - **cursor-agent**: `.cursor/mcp.json` / `~/.cursor/mcp.json` — `mcpServers`
+//! - **cursor**: `.cursor/mcp.json` / `~/.cursor/mcp.json` — `mcpServers`
 //! - **claude**: `.mcp.json` / `~/.claude.json` — `mcpServers`
 //! - **gemini**: `.gemini/settings.json` / `~/.gemini/settings.json` — `mcpServers` inside settings
 //! - **copilot**: `.vscode/mcp.json` / VS Code user `mcp.json` — `servers` (VS Code shape)
@@ -64,14 +64,8 @@ pub struct AddMcpServerOptions {
 }
 
 /// Agent keys that support MCP config deployment through this module.
-pub const MCP_SUPPORTED_AGENT_KEYS: &[&str] = &[
-    "cursor-agent",
-    "claude",
-    "gemini",
-    "copilot",
-    "opencode",
-    "codex",
-];
+pub const MCP_SUPPORTED_AGENT_KEYS: &[&str] =
+    &["cursor", "claude", "gemini", "copilot", "opencode", "codex"];
 
 /// Human-oriented row for [`mcp_supported_agents`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,7 +80,7 @@ pub struct McpAgentSupportRow {
 pub fn mcp_supported_agents() -> Vec<McpAgentSupportRow> {
     vec![
         McpAgentSupportRow {
-            agent_key: "cursor-agent",
+            agent_key: "cursor",
             display_name: "Cursor",
             project_config_path: ".cursor/mcp.json",
             global_config_path: "~/.cursor/mcp.json",
@@ -125,9 +119,12 @@ pub fn mcp_supported_agents() -> Vec<McpAgentSupportRow> {
 }
 
 /// Normalize CLI aliases to catalog keys.
+///
+/// ADR 0015: `cursor` is now the single canonical catalog key (no more
+/// `cursor` → `cursor-agent` translation); `vscode` remains a genuine alias
+/// for `copilot`'s MCP target.
 pub fn normalize_mcp_agent_key(key: &str) -> &str {
     match key.trim() {
-        "cursor" => "cursor-agent",
         "vscode" => "copilot",
         other => other,
     }
@@ -263,8 +260,8 @@ pub fn mcp_config_path(
 
     let home = home_dir_for_mcp()?;
     let path = match (key, scope) {
-        ("cursor-agent", McpScope::Project) => project_root.join(".cursor/mcp.json"),
-        ("cursor-agent", McpScope::Global) => home.join(".cursor/mcp.json"),
+        ("cursor", McpScope::Project) => project_root.join(".cursor/mcp.json"),
+        ("cursor", McpScope::Global) => home.join(".cursor/mcp.json"),
         ("claude", McpScope::Project) => project_root.join(".mcp.json"),
         ("claude", McpScope::Global) => home.join(".claude.json"),
         ("gemini", McpScope::Project) => project_root.join(".gemini/settings.json"),
@@ -572,7 +569,7 @@ pub fn add_mcp_server(opts: AddMcpServerOptions) -> Result<PathBuf, McpDeployErr
             let out = serde_json::to_string_pretty(&merged)?;
             fs::write(&path, out)?;
         }
-        "cursor-agent" | "claude" | "gemini" => {
+        "cursor" | "claude" | "gemini" => {
             let existing = read_or_empty_json_object(&path)?;
             let server_json = transport_to_mcp_servers_json(&opts.transport);
             let merged = merge_json_bucket(
@@ -611,7 +608,7 @@ mod tests {
     fn merge_new_file_cursor_project() {
         let tmp = TempDir::new().unwrap();
         let path = add_mcp_server(AddMcpServerOptions {
-            agent_key: "cursor-agent".to_string(),
+            agent_key: "cursor".to_string(),
             scope: McpScope::Project,
             project_root: tmp.path().to_path_buf(),
             server_name: "demo".to_string(),
@@ -641,7 +638,7 @@ mod tests {
         )
         .unwrap();
         add_mcp_server(AddMcpServerOptions {
-            agent_key: "cursor-agent".to_string(),
+            agent_key: "cursor".to_string(),
             scope: McpScope::Project,
             project_root: tmp.path().to_path_buf(),
             server_name: "new".to_string(),
@@ -876,7 +873,7 @@ mod tests {
 
     #[test]
     fn normalize_agent_aliases() {
-        assert_eq!(normalize_mcp_agent_key("cursor"), "cursor-agent");
+        assert_eq!(normalize_mcp_agent_key("cursor"), "cursor");
         assert_eq!(normalize_mcp_agent_key("vscode"), "copilot");
         assert_eq!(normalize_mcp_agent_key("claude"), "claude");
     }

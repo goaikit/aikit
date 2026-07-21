@@ -15,6 +15,7 @@ async fn start_server() -> u16 {
         run_timeout_secs: 30,
         max_sessions: 10,
         api_key: None,
+        insecure: false,
     };
     let stub = make_blocking_stub_run_fn(Duration::from_secs(3));
 

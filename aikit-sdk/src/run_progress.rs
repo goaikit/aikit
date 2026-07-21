@@ -20,6 +20,22 @@ pub struct ProgressViewConfig {
     pub max_tool_output_chars: usize,
 }
 
+/// Human-readable label for a [`UsageSource`].
+///
+/// Single source of truth for the `UsageSource` → string mapping (ARCH-4 /
+/// ADR 0016): previously duplicated verbatim between this module and
+/// `aikit-cli`'s serve layer.
+pub fn usage_source_label(source: &UsageSource) -> &'static str {
+    match source {
+        UsageSource::Codex => "codex",
+        UsageSource::Claude => "claude",
+        UsageSource::Gemini => "gemini",
+        UsageSource::OpenCode => "opencode",
+        UsageSource::Cursor => "cursor",
+        UsageSource::Aikit => "aikit",
+    }
+}
+
 impl Default for ProgressViewConfig {
     fn default() -> Self {
         Self {
@@ -197,14 +213,7 @@ impl RunProgress {
             return None;
         }
         let (usage, source) = self.latest_token_usage.as_ref()?;
-        let source_label = match source {
-            UsageSource::Codex => "codex",
-            UsageSource::Claude => "claude",
-            UsageSource::Gemini => "gemini",
-            UsageSource::OpenCode => "opencode",
-            UsageSource::Cursor => "cursor",
-            UsageSource::Aikit => "aikit",
-        };
+        let source_label = usage_source_label(source);
         let computed_total = usage.input_tokens + usage.output_tokens;
         let agent_total_suffix = match usage.total_tokens {
             Some(t) if t != computed_total => format!(" agent_total={}", t),

@@ -588,19 +588,19 @@ description = "Test package with invalid name"
             .assert()
             .success();
 
-        // Now test updating the package
+        // `aikit update` on a package installed from a LOCAL folder now errors
+        // honestly: only GitHub-sourced packages have a remote authority to check
+        // against. The old command was a no-op that falsely printed "No updates
+        // available" for every package regardless of source (FEAT-2 / D7 — never
+        // ship a command that misreports state).
         cargo_bin_cmd!("aikit")
             .current_dir(work)
             .args(["update", "update-test-pkg"])
             .assert()
-            .success()
-            .stdout(predicate::str::contains(
-                "Checking for updates to 'update-test-pkg'",
-            ))
-            .stdout(predicate::str::contains(
-                "No updates available for package 'update-test-pkg'",
-            ))
-            .stdout(predicate::str::contains("Current version: 0.1.0"));
+            .failure()
+            .stderr(predicate::str::contains(
+                "was installed from a local directory",
+            ));
 
         Ok(())
     }

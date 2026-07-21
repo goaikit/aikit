@@ -2,6 +2,14 @@
 //!
 //! This module contains types and functions for managing AI agent configurations,
 //! including agent selection, validation, and tool checking.
+//!
+//! ADR 0015: this module carries no agent data of its own. It is a thin
+//! translation layer over aikit-sdk's canonical deploy-layout registry
+//! (`aikit_sdk::{AgentConfig, all_agents, agent}`) plus the runnable-backend
+//! derivation (`aikit_sdk::requires_cli`). The former `EXTRAS` table here
+//! (install_url/requires_cli/arg_placeholder/folder overrides, keyed
+//! separately from the SDK catalog) has been folded into that canonical
+//! registry and deleted.
 
 /// Script variant (bash or PowerShell)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -24,6 +32,10 @@ impl ScriptVariant {
 }
 
 /// Output format for command files
+///
+/// Mirrors `aikit_sdk::DeployOutputFormat` one-to-one (see `From` impl
+/// below); kept as a distinct local type so this crate's public API is
+/// insulated from the SDK's internal naming.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum OutputFormat {
@@ -35,21 +47,34 @@ pub enum OutputFormat {
     AgentMd,
 }
 
+impl From<aikit_sdk::DeployOutputFormat> for OutputFormat {
+    fn from(value: aikit_sdk::DeployOutputFormat) -> Self {
+        match value {
+            aikit_sdk::DeployOutputFormat::Markdown => OutputFormat::Markdown,
+            aikit_sdk::DeployOutputFormat::Toml => OutputFormat::Toml,
+            aikit_sdk::DeployOutputFormat::AgentMd => OutputFormat::AgentMd,
+        }
+    }
+}
+
 /// Agent configuration
 ///
 /// Represents an AI agent configuration with all metadata needed for
-/// initialization and tool checking.
+/// initialization and tool checking. Every field here is sourced from
+/// aikit-sdk's canonical deploy-layout registry (ADR 0015); `requires_cli` is
+/// the one exception — it is never stored anywhere, and is derived fresh
+/// from `runner::Backend` membership via `aikit_sdk::requires_cli`.
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
-    /// Executable name (e.g., "claude", "gemini")
+    /// Canonical catalog key (e.g., "claude", "gemini", "cursor")
     pub key: String,
     /// Display name (e.g., "Claude", "Google Gemini")
     pub name: String,
-    /// Project directory (e.g., ".claude", ".gemini")
+    /// Project directory (e.g., ".claude", ".gemini") — the parent of `output_dir`
     pub folder: String,
     /// Optional installation URL
     pub install_url: Option<String>,
-    /// Whether agent requires CLI tool check
+    /// Whether agent requires CLI tool check (derived from Backend membership)
     pub requires_cli: bool,
     /// Command file format
     pub output_format: OutputFormat,
@@ -63,248 +88,57 @@ pub struct AgentConfig {
     pub arg_placeholder: String,
 }
 
-struct AgentExtra {
-    install_url: Option<&'static str>,
-    requires_cli: bool,
-    arg_placeholder: &'static str,
-    folder: &'static str,
+/// Derives an agent's base config folder (e.g. `.claude`) from its commands
+/// directory (e.g. `.claude/commands`).
+///
+/// Every agent in the canonical catalog places its commands directory one
+/// level under its base folder, so `folder` does not need to be a separately
+/// stored field — it is always the parent of `commands_dir`. (Deriving it
+/// this way also fixes a latent bug: agents absent from the old `EXTRAS`
+/// table, e.g. `newton`, previously got the raw catalog key as their
+/// `folder` instead of a real path.)
+fn folder_from_commands_dir(commands_dir: &str) -> String {
+    std::path::Path::new(commands_dir)
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| commands_dir.to_string())
 }
 
-/// Extras table for agent-specific configuration
-static EXTRAS: &[(&str, AgentExtra)] = &[
-    (
-        "claude",
-        AgentExtra {
-            install_url: Some("https://claude.ai/code"),
-            requires_cli: true,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".claude",
-        },
-    ),
-    (
-        "gemini",
-        AgentExtra {
-            install_url: Some("https://ai.google.dev/"),
-            requires_cli: true,
-            arg_placeholder: "{{args}}",
-            folder: ".gemini",
-        },
-    ),
-    (
-        "copilot",
-        AgentExtra {
-            install_url: None,
-            requires_cli: false,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".github",
-        },
-    ),
-    (
-        "cursor-agent",
-        AgentExtra {
-            install_url: Some("https://cursor.sh/"),
-            requires_cli: true,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".cursor",
-        },
-    ),
-    (
-        "qwen",
-        AgentExtra {
-            install_url: Some("https://qwenlm.github.io/"),
-            requires_cli: true,
-            arg_placeholder: "{{args}}",
-            folder: ".qwen",
-        },
-    ),
-    (
-        "opencode",
-        AgentExtra {
-            install_url: Some("https://opencode.dev/"),
-            requires_cli: true,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".opencode",
-        },
-    ),
-    (
-        "codex",
-        AgentExtra {
-            install_url: Some("https://codex.ai/"),
-            requires_cli: true,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".codex",
-        },
-    ),
-    (
-        "windsurf",
-        AgentExtra {
-            install_url: None,
-            requires_cli: false,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".windsurf",
-        },
-    ),
-    (
-        "kilocode",
-        AgentExtra {
-            install_url: None,
-            requires_cli: false,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".kilocode",
-        },
-    ),
-    (
-        "auggie",
-        AgentExtra {
-            install_url: Some("https://auggie.ai/"),
-            requires_cli: true,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".augment",
-        },
-    ),
-    (
-        "roo",
-        AgentExtra {
-            install_url: None,
-            requires_cli: false,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".roo",
-        },
-    ),
-    (
-        "codebuddy",
-        AgentExtra {
-            install_url: Some("https://codebuddy.ai/"),
-            requires_cli: true,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".codebuddy",
-        },
-    ),
-    (
-        "qoder",
-        AgentExtra {
-            install_url: Some("https://qoder.ai/"),
-            requires_cli: true,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".qoder",
-        },
-    ),
-    (
-        "amp",
-        AgentExtra {
-            install_url: Some("https://amp.dev/"),
-            requires_cli: true,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".agents",
-        },
-    ),
-    (
-        "shai",
-        AgentExtra {
-            install_url: Some("https://shai.ai/"),
-            requires_cli: true,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".shai",
-        },
-    ),
-    (
-        "q",
-        AgentExtra {
-            install_url: Some("https://aws.amazon.com/q/"),
-            requires_cli: true,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".amazonq",
-        },
-    ),
-    (
-        "bob",
-        AgentExtra {
-            install_url: None,
-            requires_cli: false,
-            arg_placeholder: "$ARGUMENTS",
-            folder: ".bob",
-        },
-    ),
-];
-
-fn find_extra(key: &str) -> Option<&'static AgentExtra> {
-    EXTRAS.iter().find(|(k, _)| *k == key).map(|(_, e)| e)
+fn from_deploy_config(deploy_config: aikit_sdk::AgentConfig) -> AgentConfig {
+    let requires_cli = aikit_sdk::requires_cli(&deploy_config.key);
+    AgentConfig {
+        folder: folder_from_commands_dir(&deploy_config.commands_dir),
+        key: deploy_config.key,
+        name: deploy_config.name,
+        install_url: deploy_config.install_url,
+        requires_cli,
+        output_format: deploy_config.output_format.into(),
+        output_dir: deploy_config.commands_dir,
+        skills_dir: deploy_config.skills_dir,
+        agents_dir: deploy_config.agents_dir,
+        arg_placeholder: deploy_config.arg_placeholder,
+    }
 }
 
 /// Get the agent configuration list
 ///
-/// This is the single source of truth for all supported AI agents.
-/// Delegates to aikit-sdk for catalog data and uses extras table for aikit-specific fields.
+/// This is the single source of truth for all supported AI agents: it
+/// delegates entirely to aikit-sdk's canonical deploy-layout registry (ADR
+/// 0015). `requires_cli` is derived per agent from `runner::Backend`
+/// membership, not stored.
 pub fn get_agent_configs() -> Vec<AgentConfig> {
-    use aikit_sdk::all_agents;
-
-    all_agents()
+    aikit_sdk::all_agents()
         .into_iter()
-        .map(|deploy_config| {
-            let extra = find_extra(&deploy_config.key());
-
-            let (install_url, requires_cli, arg_placeholder, folder) = match extra {
-                Some(e) => (
-                    e.install_url.map(|s| s.to_string()),
-                    e.requires_cli,
-                    e.arg_placeholder.to_string(),
-                    e.folder.to_string(),
-                ),
-                None => (
-                    None,
-                    true,
-                    "$ARGUMENTS".to_string(),
-                    deploy_config.key().clone(),
-                ),
-            };
-
-            AgentConfig {
-                key: deploy_config.name.to_lowercase(),
-                name: deploy_config.name,
-                folder,
-                install_url,
-                requires_cli,
-                output_format: OutputFormat::Markdown,
-                output_dir: deploy_config.commands_dir.clone(),
-                skills_dir: deploy_config.skills_dir.clone(),
-                agents_dir: deploy_config.agents_dir.clone(),
-                arg_placeholder,
-            }
-        })
+        .map(from_deploy_config)
         .collect()
 }
 
 /// Get agent configuration by key
 ///
-/// Delegates to aikit-sdk for catalog data and uses extras table for aikit-specific fields.
+/// Delegates to aikit-sdk's canonical deploy-layout registry (ADR 0015).
 pub fn get_agent_config(key: &str) -> Option<AgentConfig> {
-    use aikit_sdk::agent;
-
-    let deploy_config = agent(key)?;
-    let extra = find_extra(key);
-
-    let (install_url, requires_cli, arg_placeholder, folder) = match extra {
-        Some(e) => (
-            e.install_url.map(|s| s.to_string()),
-            e.requires_cli,
-            e.arg_placeholder.to_string(),
-            e.folder.to_string(),
-        ),
-        None => (None, true, "$ARGUMENTS".to_string(), key.to_string()),
-    };
-
-    Some(AgentConfig {
-        key: deploy_config.name.to_lowercase(),
-        name: deploy_config.name,
-        folder,
-        install_url,
-        requires_cli,
-        output_format: OutputFormat::Markdown,
-        output_dir: deploy_config.commands_dir.clone(),
-        skills_dir: deploy_config.skills_dir.clone(),
-        agents_dir: deploy_config.agents_dir.clone(),
-        arg_placeholder,
-    })
+    aikit_sdk::agent(key).map(from_deploy_config)
 }
 
 /// Validate agent key
@@ -420,9 +254,73 @@ mod tests {
         let configs = get_agent_configs();
         assert_eq!(configs.len(), 18);
 
-        // Verify extras table covers all agents
+        // Every agent now resolves through the canonical SDK registry.
         let keys: Vec<_> = configs.iter().map(|c| c.key.as_str()).collect();
         assert!(keys.contains(&"opencode"));
         assert!(keys.contains(&"newton"));
+    }
+
+    // ---- ADR 0015: single canonical registry (deploy-layout ⟂ Backend) ----
+
+    #[test]
+    fn test_single_canonical_key_cursor_not_cursor_agent() {
+        // The historical `cursor` vs `cursor-agent` split is gone: only the
+        // canonical `cursor` key resolves, in both this crate and the SDK.
+        assert!(get_agent_config("cursor-agent").is_none());
+        let cursor = get_agent_config("cursor").expect("cursor must resolve");
+        assert_eq!(cursor.key, "cursor");
+    }
+
+    #[test]
+    fn test_agent_config_key_matches_lookup_key_for_every_agent() {
+        // Regression guard for the old bug where `.key` was derived from
+        // `name.to_lowercase()` (e.g. "claude code") instead of the
+        // canonical catalog key, silently breaking every `.key`-keyed lookup
+        // for multi-word agent names.
+        for config in get_agent_configs() {
+            let by_key = get_agent_config(&config.key);
+            assert!(
+                by_key.is_some(),
+                "agent config key '{}' must round-trip through get_agent_config",
+                config.key
+            );
+            assert_eq!(by_key.unwrap().key, config.key);
+        }
+    }
+
+    #[test]
+    fn test_divergent_values_now_single_and_correct() {
+        // gemini: EXTRAS said requires_cli=true (Gemini CLI is genuinely
+        // required); the deleted models/config.rs table said false. Now
+        // derived from Backend membership instead of stored at all.
+        let gemini = get_agent_config("gemini").unwrap();
+        assert!(gemini.requires_cli);
+
+        // cursor: EXTRAS said arg_placeholder "$ARGUMENTS" (matches Cursor's
+        // actual command-file substitution syntax); the deleted
+        // models/config.rs table said "{args}".
+        let cursor = get_agent_config("cursor").unwrap();
+        assert_eq!(cursor.arg_placeholder, "$ARGUMENTS");
+
+        // copilot: output dir now comes solely from the SDK catalog
+        // (".github/agents"), not the deleted models/config.rs table's stale
+        // ".github/copilot-instructions".
+        let copilot = get_agent_config("copilot").unwrap();
+        assert_eq!(copilot.output_dir, ".github/agents");
+        assert_eq!(copilot.folder, ".github");
+    }
+
+    #[test]
+    fn test_requires_cli_derived_for_runnable_deploy_only_and_aikit() {
+        // Runnable external agent (a Backend): requires its CLI.
+        assert!(get_agent_config("claude").unwrap().requires_cli);
+        // Deploy-only agent (never a Backend, e.g. Copilot): no CLI to require.
+        assert!(!get_agent_config("copilot").unwrap().requires_cli);
+        // `aikit` itself is not in this deploy-layout catalog (it has no
+        // deploy layout — it's the in-process runnable backend), so it is
+        // correctly absent here; its requires_cli=false is asserted directly
+        // against the SDK in aikit-sdk's own test suite.
+        assert!(get_agent_config("aikit").is_none());
+        assert!(!aikit_sdk::requires_cli("aikit"));
     }
 }

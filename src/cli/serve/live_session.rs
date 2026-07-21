@@ -19,8 +19,7 @@ use aikit_sdk::{
 use uuid::Uuid;
 
 use super::{
-    agent_event_to_frame, error_response, spawn_frame_forwarder, sse_response_with_headers,
-    AppState, StreamFrame,
+    error_response, spawn_frame_forwarder, sse_response_with_headers, AppState, ServeEvent,
 };
 
 // ── control abstraction ───────────────────────────────────────────────────────
@@ -124,6 +123,38 @@ pub(super) struct LiveSessionRecord {
 
 pub(super) type LiveSessions = Arc<Mutex<HashMap<String, LiveSessionRecord>>>;
 
+/// RAII guard for a reserved live-session slot (SEC-3). Incrementing happens under the
+/// `live_sessions` lock together with the capacity check; this guard releases the reservation
+/// on every exit path (including the many early `return`s in the open path) via `Drop`. On the
+/// success path the inserted `Active` record supersedes the reservation.
+struct PendingReservation(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for PendingReservation {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Reserve one live-session slot if capacity allows, returning a guard that releases it on
+/// drop. Returns `None` when `active` (existing sessions) plus already-reserved in-flight
+/// opens would meet or exceed `max`.
+///
+/// The caller MUST hold the `live_sessions` lock across this call: that lock is what makes the
+/// load-check-increment atomic, so concurrent opens cannot all observe spare capacity and
+/// overshoot `max` (SEC-3 TOCTOU).
+fn try_reserve_live_slot(
+    active: usize,
+    pending: &Arc<std::sync::atomic::AtomicUsize>,
+    max: usize,
+) -> Option<PendingReservation> {
+    use std::sync::atomic::Ordering;
+    if active + pending.load(Ordering::Relaxed) >= max {
+        return None;
+    }
+    pending.fetch_add(1, Ordering::Relaxed);
+    Some(PendingReservation(pending.clone()))
+}
+
 // ── HTTP body types ───────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -191,13 +222,51 @@ pub(super) async fn create_live_session_handler(
             "agent field is required",
         );
     }
-    if body.prompt.is_empty() {
+    // BUG-7: `.is_empty()` let whitespace-only prompts through.
+    if body.prompt.trim().is_empty() {
         return error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "invalid_request",
             "prompt must not be empty",
         );
     }
+
+    // SEC-3: live sessions open a real bidirectional subprocess and, unlike
+    // one-shot runs, are never bounded by a run timeout — enforce the same
+    // `max_sessions` cap one-shot runs already have, or an unauthenticated
+    // (or merely careless) caller can open unbounded long-lived agent
+    // subprocesses (resource-exhaustion DoS).
+    //
+    // The check and the slot reservation happen under a single `live_sessions`
+    // lock: counting active records plus already-reserved (in-flight) opens, then
+    // incrementing the reservation before releasing the lock. Without this, N
+    // concurrent requests could all pass the check while the lock is dropped for
+    // the expensive open below, then each insert its record — overshooting the cap
+    // (a TOCTOU race). `_reservation` releases the slot on every exit path.
+    let _reservation = {
+        let live = state.live_sessions.lock().unwrap();
+        let active = live
+            .values()
+            .filter(|r| r.status == LiveSessionStatus::Active)
+            .count();
+        match try_reserve_live_slot(
+            active,
+            &state.pending_live_sessions,
+            state.config.max_sessions,
+        ) {
+            Some(guard) => guard,
+            None => {
+                return error_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "session_limit_reached",
+                    &format!(
+                        "Maximum of {} concurrent live sessions reached",
+                        state.config.max_sessions
+                    ),
+                );
+            }
+        }
+    };
 
     let session_id = Uuid::new_v4().to_string();
 
@@ -279,26 +348,35 @@ pub(super) async fn create_live_session_handler(
         );
     }
 
-    // Blocking forwarder: sync event channel → tokio frame channel → SSE.
-    let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<StreamFrame>(64);
+    // Blocking forwarder: sync event channel → tokio item channel → SSE.
+    // ARCH-4 / ADR 0016: every canonical `AgentEvent` from the underlying
+    // session engine is forwarded as-is — no serve-side re-map — so
+    // tool/reasoning/usage/subagent/compression/step-finish events reach the
+    // client with their native shape instead of being lossily squashed or
+    // dropped.
+    let (item_tx, item_rx) = tokio::sync::mpsc::channel::<ServeEvent>(64);
     let agent_key = body.agent.clone();
     let live_ref = Arc::clone(&state.live_sessions);
     let sid_for_cleanup = session_id.clone();
-    let sid_for_frame = session_id.clone();
+    let sid_for_session_event = session_id.clone();
     tokio::task::spawn_blocking(move || {
-        if frame_tx
-            .blocking_send(StreamFrame::Session {
-                session_id: sid_for_frame,
-            })
-            .is_err()
-        {
+        // Synthetic first event: the locally-minted live-session id, so
+        // clients have a stable, resolvable id before any backend events
+        // arrive (mirrors the one-shot run path's B5 behaviour).
+        let synthetic = aikit_sdk::AgentEvent {
+            agent_key,
+            seq: 0,
+            stream: aikit_sdk::AgentEventStream::Stdout,
+            payload: aikit_sdk::AgentEventPayload::SessionStarted {
+                session_id: sid_for_session_event,
+            },
+        };
+        if item_tx.blocking_send(ServeEvent::Agent(synthetic)).is_err() {
             return;
         }
         while let Ok(event) = events_rx.recv() {
-            if let Some(frame) = agent_event_to_frame(&event, &agent_key) {
-                if frame_tx.blocking_send(frame).is_err() {
-                    break;
-                }
+            if item_tx.blocking_send(ServeEvent::Agent(event)).is_err() {
+                break;
             }
         }
         if let Ok(mut live) = live_ref.lock() {
@@ -308,7 +386,7 @@ pub(super) async fn create_live_session_handler(
         }
     });
 
-    let stream = spawn_frame_forwarder(frame_rx, |_| 0);
+    let stream = spawn_frame_forwarder(item_rx, |_| 0);
     sse_response_with_headers(stream, Some(("x-session-id", &session_id)))
 }
 
@@ -435,4 +513,94 @@ fn ok_action(action: &'static str) -> Response {
         body,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn try_reserve_live_slot_respects_capacity() {
+        let pending = Arc::new(AtomicUsize::new(0));
+        // active=0, max=2: first two reservations succeed, third is refused.
+        let g1 = try_reserve_live_slot(0, &pending, 2);
+        let g2 = try_reserve_live_slot(0, &pending, 2);
+        assert!(g1.is_some() && g2.is_some());
+        assert_eq!(pending.load(Ordering::Relaxed), 2);
+        assert!(try_reserve_live_slot(0, &pending, 2).is_none());
+        // Dropping a guard frees its slot.
+        drop(g1);
+        assert_eq!(pending.load(Ordering::Relaxed), 1);
+        assert!(try_reserve_live_slot(0, &pending, 2).is_some());
+    }
+
+    #[test]
+    fn try_reserve_live_slot_counts_existing_active_sessions() {
+        let pending = Arc::new(AtomicUsize::new(0));
+        // One session already Active, max=1 → no spare capacity.
+        assert!(try_reserve_live_slot(1, &pending, 1).is_none());
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
+    }
+
+    // SEC-3: the TOCTOU fix. Many threads race to reserve a slot; the reservation must be
+    // performed while holding the same lock as the capacity check (here a stand-in Mutex for
+    // `live_sessions`). The number of slots simultaneously held must never exceed `max`.
+    #[test]
+    fn concurrent_reservations_never_exceed_capacity() {
+        const MAX: usize = 3;
+        const THREADS: usize = 64;
+
+        let pending = Arc::new(AtomicUsize::new(0));
+        let lock = Arc::new(StdMutex::new(())); // stands in for the live_sessions lock
+        let live_held = Arc::new(AtomicUsize::new(0)); // slots currently held
+        let peak = Arc::new(AtomicUsize::new(0)); // max simultaneously held
+        let granted = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+        for _ in 0..THREADS {
+            let (pending, lock, live_held, peak, granted) = (
+                pending.clone(),
+                lock.clone(),
+                live_held.clone(),
+                peak.clone(),
+                granted.clone(),
+            );
+            handles.push(std::thread::spawn(move || {
+                // Check-and-reserve under the lock, exactly like the handler does.
+                let reservation = {
+                    let _guard = lock.lock().unwrap();
+                    try_reserve_live_slot(0, &pending, MAX)
+                };
+                if let Some(_r) = reservation {
+                    granted.fetch_add(1, Ordering::SeqCst);
+                    let held = live_held.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(held, Ordering::SeqCst);
+                    // Hold the slot briefly to widen the race window.
+                    std::thread::yield_now();
+                    live_held.fetch_sub(1, Ordering::SeqCst);
+                    // `_r` drops here, releasing the reservation.
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert!(
+            peak.load(Ordering::SeqCst) <= MAX,
+            "held {} slots at once, exceeds max {MAX}",
+            peak.load(Ordering::SeqCst)
+        );
+        assert!(
+            granted.load(Ordering::SeqCst) >= MAX,
+            "no reservations granted"
+        );
+        assert_eq!(
+            pending.load(Ordering::SeqCst),
+            0,
+            "all reservations should be released"
+        );
+    }
 }

@@ -53,7 +53,7 @@ import aikit_py
 from tempfile import TemporaryDirectory
 
 # Catalog
-print([a.key() for a in aikit_py.all_agents()])
+print([a.key for a in aikit_py.all_agents()])
 aikit_py.validate_agent_key("claude")
 
 with TemporaryDirectory() as root:

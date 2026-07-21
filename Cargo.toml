@@ -154,6 +154,26 @@ path = "tests/serve/serve_timeout_test.rs"
 name = "serve_disconnect_test"
 path = "tests/serve/serve_disconnect_test.rs"
 
+[[test]]
+name = "serve_fail_closed_test"
+path = "tests/serve/serve_fail_closed_test.rs"
+
+[[test]]
+name = "serve_timeout_cancel_test"
+path = "tests/serve/serve_timeout_cancel_test.rs"
+
+[[test]]
+name = "serve_live_session_limits_test"
+path = "tests/serve/serve_live_session_limits_test.rs"
+
+[[test]]
+name = "serve_signal_kill_test"
+path = "tests/serve/serve_signal_kill_test.rs"
+
+[[test]]
+name = "serve_tool_policy_test"
+path = "tests/serve/serve_tool_policy_test.rs"
+
 [features]
 tools = ["dep:aikit-magictool"]
 # Session capture (spec 010): on-disk adapter parsing for AI coding tools.

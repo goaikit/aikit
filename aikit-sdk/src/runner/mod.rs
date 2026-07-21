@@ -38,11 +38,132 @@ pub use codex_session::{
 pub use approval::{PermissionCallback, ToolApprovalRequest, ToolDecision};
 pub use usage::aggregate_token_usage;
 
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::{panic, thread};
 
 use types::ReaderMsg;
+
+/// A cancellation handle for a run started via [`run_agent_events_cancellable`].
+///
+/// This is the single trigger point ADR 0014 requires for terminating a
+/// running agent subprocess, in place of separate ad-hoc kill paths: the
+/// same [`cancel`](RunCancelHandle::cancel) method is called internally by
+/// the run's timeout watchdog, and can also be called by an external caller
+/// (e.g. a `serve` client-disconnect handler, or a future explicit interrupt)
+/// holding a clone of the handle on another thread. Cloning is cheap — all
+/// clones share the same underlying state. Whichever caller cancels first
+/// wins; later calls are no-ops.
+///
+/// Cancelling escalates `SIGTERM` -> (~3s grace) -> `SIGKILL` over the
+/// agent's whole process group (see
+/// [`transport::subprocess::kill_process_group`]), which reaps any
+/// grandchildren the agent spawned and guarantees the run's stdout/stderr
+/// reader threads observe EOF — so a cancelled/timed-out run always returns
+/// rather than hanging (BUG-1/BUG-4).
+///
+/// A fresh, unbound handle can be created and cancelled before the run it
+/// will be attached to has even spawned; the pending cancellation is applied
+/// as soon as the run binds its child process.
+///
+/// Today, a run terminated via this handle surfaces as
+/// [`RunError::TimedOut`] (the closest existing terminal variant); a
+/// dedicated `RunError::Cancelled` is natural follow-up once external
+/// cancellation is wired through `serve`, but is out of scope here. This
+/// handle is deliberately forward-compatible with the future
+/// `Session`/`ControlHandle` seam (ADR 0014 consequences): cancellation is
+/// meant to become one control op among several (interrupt, set-permission,
+/// disconnect) over that seam.
+#[derive(Clone)]
+pub struct RunCancelHandle {
+    inner: Arc<CancelInner>,
+}
+
+struct CancelInner {
+    triggered: AtomicBool,
+    child: Mutex<Option<Arc<Mutex<Child>>>>,
+}
+
+impl RunCancelHandle {
+    /// Create a fresh, unbound cancel handle.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(CancelInner {
+                triggered: AtomicBool::new(false),
+                child: Mutex::new(None),
+            }),
+        }
+    }
+
+    /// Request cancellation of the bound run. Idempotent: the first caller
+    /// wins and performs the process-group kill escalation; subsequent
+    /// calls (from a racing watchdog vs. external caller, for example) are
+    /// no-ops. If called before a child has been bound yet, the request is
+    /// still recorded and applied immediately once the run binds its child.
+    pub fn cancel(&self) {
+        if self
+            .inner
+            .triggered
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            if let Ok(guard) = self.inner.child.lock() {
+                if let Some(child) = guard.as_ref() {
+                    transport::subprocess::kill_process_group(child);
+                }
+            }
+        }
+    }
+
+    /// True once cancellation has been requested (the child may still be in
+    /// the process of exiting).
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.triggered.load(Ordering::SeqCst)
+    }
+
+    /// Bind the handle to a live child, right after the subprocess spawns.
+    /// If `cancel()` already raced ahead of the bind, kill immediately
+    /// rather than leaving the just-spawned child running unattended.
+    fn bind(&self, child: Arc<Mutex<Child>>) {
+        {
+            let mut guard = self.inner.child.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(Arc::clone(&child));
+        }
+        if self.inner.triggered.load(Ordering::SeqCst) {
+            transport::subprocess::kill_process_group(&child);
+        }
+    }
+
+    /// Detach the bound child once the run has reaped it, so a later `Drop`
+    /// backstop does not act on a handle whose pid may since have been
+    /// reused by an unrelated process.
+    fn unbind(&self) {
+        if let Ok(mut guard) = self.inner.child.lock() {
+            *guard = None;
+        }
+    }
+}
+
+impl Default for RunCancelHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for CancelInner {
+    fn drop(&mut self) {
+        // Backstop for a handle dropped (e.g. a `serve` session cleaned up)
+        // while still bound to a live child: kill the group rather than
+        // leaking it. A no-op if the run already reaped and unbound.
+        if let Ok(mut guard) = self.child.lock() {
+            if let Some(child) = guard.take() {
+                transport::subprocess::kill_process_group(&child);
+            }
+        }
+    }
+}
 
 /// Decode one inbound JSON line into canonical [`StreamMessage`]s for the given
 /// agent key. Unknown keys yield `[]` (with a warning). Thin wrapper over
@@ -197,17 +318,46 @@ fn parse_payload(raw: &[u8]) -> AgentEventPayload {
 /// `RunError::ReaderFailed`. If `options.timeout` is set and the child
 /// exceeds it, the child is killed and `RunError::TimedOut` is returned
 /// with the partial output collected so far.
+///
+/// Thin wrapper over [`run_agent_events_cancellable`] with a fresh,
+/// internal-only [`RunCancelHandle`] — equivalent to before except that
+/// termination (on timeout) now escalates over the whole process group
+/// rather than only the direct child (ADR 0014 / BUG-4). Callers that need
+/// to cancel a run from another thread (e.g. on client disconnect) should
+/// call [`run_agent_events_cancellable`] directly and hold on to the handle.
 pub fn run_agent_events<F>(
     agent_key: &str,
     prompt: &str,
     options: RunOptions,
+    on_event: F,
+) -> Result<RunResult, RunError>
+where
+    F: FnMut(AgentEvent) + Send,
+{
+    run_agent_events_cancellable(
+        agent_key,
+        prompt,
+        options,
+        &RunCancelHandle::new(),
+        on_event,
+    )
+}
+
+/// Same as [`run_agent_events`], but the caller supplies a [`RunCancelHandle`]
+/// that can be triggered from another thread to terminate the run early —
+/// the seam ADR 0014 introduces so a future `serve` layer can cancel a run on
+/// client disconnect (or an explicit interrupt) without duplicating the
+/// process-group kill logic.
+pub fn run_agent_events_cancellable<F>(
+    agent_key: &str,
+    prompt: &str,
+    options: RunOptions,
+    cancel: &RunCancelHandle,
     mut on_event: F,
 ) -> Result<RunResult, RunError>
 where
     F: FnMut(AgentEvent) + Send,
 {
-    use std::sync::Arc;
-
     tracing::debug!(
         target: "aikit_sdk::runner",
         agent_key = %agent_key,
@@ -219,7 +369,8 @@ where
     );
 
     // The built-in aikit Backend is in-process: it emits canonical events
-    // directly rather than over a subprocess Transport (ADR 0009).
+    // directly rather than over a subprocess Transport (ADR 0009). It has no
+    // subprocess for `cancel` to act on.
     if agent_key == "aikit" {
         return crate::aikit_agent_adapter::run_aikit_agent(prompt, &options, None, on_event);
     }
@@ -227,46 +378,47 @@ where
     let backend = Backend::from_key(agent_key)
         .ok_or_else(|| RunError::AgentNotRunnable(agent_key.to_string()))?;
 
-    // Establish the subprocess-stdout-lines Transport: spawn, write+close stdin,
-    // start reader threads. Returns the shared child, the inbound channel, and
-    // the reader-thread handles.
+    // Establish the subprocess-stdout-lines Transport: spawn (in its own
+    // process group), start the stdout/stderr reader threads, start the
+    // stdin writer thread. See `transport::subprocess::connect` for why the
+    // prompt write does not happen on this thread (BUG-1).
     let transport::subprocess::SubprocessConnection {
         child,
         rx,
         stdout_thread,
         stderr_thread,
+        stdin_thread,
         argv: _argv,
     } = transport::subprocess::connect(backend, prompt, &options, true)?;
 
+    // Bind the cancel handle to the live child immediately — before the
+    // timeout watchdog and before draining begins — so an external cancel()
+    // racing in from another thread always has a child to act on.
+    cancel.bind(Arc::clone(&child));
+
     // Watchdog: if timeout is configured, spawn a dedicated thread. It blocks
-    // on a cancel channel for the configured duration. On timeout it kills the
-    // child and sets the `killed` flag. The kill causes pipe EOF → reader
-    // threads finish → tx senders drop → rx closes → drain loop exits.
+    // on a done channel for the configured duration. On timeout it calls
+    // `cancel.cancel()`, which escalates SIGTERM -> SIGKILL over the child's
+    // process group (ADR 0014 / BUG-4) and closes the pipes -> reader
+    // threads finish -> tx senders drop -> rx closes -> drain loop exits.
     //
     // The watchdog does NOT hold a tx sender. This avoids a deadlock where the
     // watchdog's tx would keep rx alive on the natural-exit path (blocking the
     // drain loop until the full timeout elapses).
-    let killed = Arc::new(AtomicBool::new(false));
-    let watchdog_cancel: Option<mpsc::Sender<()>> = if let Some(timeout_duration) = options.timeout
-    {
-        let (cancel_tx, cancel_rx) = mpsc::channel::<()>();
-        let child_watchdog = Arc::clone(&child);
-        let killed_watchdog = Arc::clone(&killed);
+    let watchdog_done: Option<mpsc::Sender<()>> = if let Some(timeout_duration) = options.timeout {
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let cancel_watchdog = cancel.clone();
         thread::spawn(move || {
-            match cancel_rx.recv_timeout(timeout_duration) {
+            match done_rx.recv_timeout(timeout_duration) {
                 Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    // Natural exit signaled or cancel_tx dropped — do nothing.
+                    // Natural exit signaled or done_tx dropped — do nothing.
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Timeout elapsed: mark killed, then kill child.
-                    // The kill closes pipes → reader threads get EOF and exit →
-                    // rx drains → main thread checks `killed` flag after loop.
-                    killed_watchdog.store(true, Ordering::SeqCst);
-                    let _ = child_watchdog.lock().unwrap().kill();
+                    cancel_watchdog.cancel();
                 }
             }
         });
-        Some(cancel_tx)
+        Some(done_tx)
     } else {
         None
     };
@@ -434,7 +586,23 @@ where
                     }
                     _ => {
                         let source_seq = seq;
-                        let quota_signal = backend.extract_quota(&payload);
+                        // BUG-11: for Claude, a non-JSON stdout line is
+                        // ordinary assistant text (e.g. `--output-format
+                        // text`), not a structured error channel — matching
+                        // "usage limit"/"rate limit" substrings there is a
+                        // false-positive quota-exceeded trap (the assistant
+                        // merely discussing rate limits ends the run). Only
+                        // treat it as a quota signal on stderr (or via the
+                        // JSON-error branch above, which is already
+                        // structurally gated). Other backends are unaffected.
+                        let quota_signal = if backend == Backend::Claude
+                            && stream == AgentEventStream::Stdout
+                            && matches!(payload, AgentEventPayload::RawLine(_))
+                        {
+                            None
+                        } else {
+                            backend.extract_quota(&payload)
+                        };
                         let event = AgentEvent {
                             agent_key: agent_key.to_string(),
                             seq,
@@ -495,21 +663,38 @@ where
     );
 
     // Signal watchdog on natural exit path (no-op if it already fired).
-    if let Some(cancel_tx) = watchdog_cancel {
-        let _ = cancel_tx.send(());
+    if let Some(done_tx) = watchdog_done {
+        let _ = done_tx.send(());
     }
 
     // Join reader threads before wait() to prevent pipe deadlock.
     let _ = stdout_thread.join();
     let _ = stderr_thread.join();
 
-    let timed_out = killed.load(Ordering::SeqCst);
+    // The stdin writer thread is independent of the drain loop (it may have
+    // finished long ago, or — for a child that never reads its input to
+    // completion — be blocked until the child exits/closes stdin, which the
+    // timeout/cancel path below guarantees). A non-BrokenPipe write failure
+    // is recorded but does not preempt a `timed_out`/panic/reader-error
+    // outcome, which take precedence below.
+    let stdin_error = match stdin_thread.join() {
+        Ok(Ok(())) => None,
+        Ok(Err(e)) => Some(RunError::StdinFailed(e)),
+        Err(_) => None, // writer thread panicked; treat like other thread panics (ignored)
+    };
+
+    let timed_out = cancel.is_cancelled();
 
     if timed_out {
-        // child.wait() reaps the zombie even after kill(); ignore status.
-        let _ = child.lock().unwrap().wait();
+        // child.wait() reaps the zombie even after the process-group kill;
+        // ignore status. Unbind so a later Drop backstop is a no-op.
+        let _ = child.lock().unwrap_or_else(|e| e.into_inner()).wait();
+        cancel.unbind();
         return Err(RunError::TimedOut {
-            timeout: options.timeout.unwrap(),
+            // `options.timeout` is `None` when cancellation came from an
+            // external caller rather than the watchdog; there is no
+            // meaningful duration to report, so fall back to zero.
+            timeout: options.timeout.unwrap_or_default(),
             stdout: stdout_bytes,
             stderr: stderr_bytes,
         });
@@ -517,17 +702,22 @@ where
 
     let status = child
         .lock()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .wait()
         .map_err(RunError::OutputFailed)?;
+    cancel.unbind();
 
     if let Some(p) = callback_panic {
-        let _ = child.lock().unwrap().kill();
+        transport::subprocess::kill_process_group(&child);
         return Err(RunError::CallbackPanic(p));
     }
 
     if let Some(err) = reader_error {
-        let _ = child.lock().unwrap().kill();
+        transport::subprocess::kill_process_group(&child);
+        return Err(err);
+    }
+
+    if let Some(err) = stdin_error {
         return Err(err);
     }
 
@@ -1004,7 +1194,9 @@ mod tests {
         std::env::set_var("PATH", &new_path);
 
         let opts = RunOptions::new().with_timeout(Duration::from_millis(500));
+        let start = std::time::Instant::now();
         let result = run_agent_events("cursor", "hi", opts, |_| {});
+        let elapsed = start.elapsed();
 
         std::env::set_var("PATH", orig_path);
 
@@ -1012,6 +1204,14 @@ mod tests {
             matches!(result, Err(RunError::TimedOut { .. })),
             "Expected TimedOut, got {:?}",
             result.map(|_| ())
+        );
+        // The stub sleeps for 60s; the call must return promptly after the
+        // 500ms timeout (well under the SIGTERM->3s grace->SIGKILL ceiling),
+        // not hang until the child's sleep completes (ADR 0014 / BUG-1).
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "run_agent_events should return promptly after timeout, took {:?}",
+            elapsed
         );
     }
 
@@ -1153,6 +1353,273 @@ mod tests {
             }
             other => panic!(
                 "Expected TimedOut with partial output, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+    }
+
+    // --- ADR 0014 / BUG-1: stdin write must not deadlock against readers ---
+
+    #[cfg(unix)]
+    #[test]
+    fn test_large_prompt_does_not_deadlock_stdin_write() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // A stub that fills its OWN stdout pipe (comfortably past a typical
+        // 64KiB OS pipe buffer) BEFORE it reads any stdin, then drains
+        // stdin, then exits. If the harness wrote the prompt synchronously
+        // on the calling thread before any reader was draining stdout (the
+        // pre-fix behaviour), this reproduces the BUG-1 deadlock: the child
+        // blocks writing output into a full pipe while the harness blocks
+        // writing input into a child that isn't reading — and with no
+        // watchdog armed yet, nothing breaks the standoff.
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("agent");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(
+            f,
+            "#!/bin/sh\nyes x | head -c 200000\ncat >/dev/null\necho done"
+        )
+        .unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        // A prompt larger than a typical pipe buffer, to be written on the
+        // stdin side while the child is simultaneously producing its own
+        // >64KiB burst of stdout.
+        let big_prompt = "p".repeat(200_000);
+        // A generous but finite safety-net timeout: this test asserts the
+        // run completes well within it (real deadlock would hang past 60s).
+        let opts = RunOptions::new().with_timeout(Duration::from_secs(15));
+
+        let start = std::time::Instant::now();
+        let result = run_agent_events("cursor", &big_prompt, opts, |_| {});
+        let elapsed = start.elapsed();
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(
+            result.is_ok(),
+            "large prompt + large stdout burst must not deadlock: {:?}",
+            result.err()
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "run should complete quickly, not hang on a stdin/stdout standoff: took {:?}",
+            elapsed
+        );
+    }
+
+    // --- ADR 0014 / BUG-4: process-group kill reaps grandchildren ---
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_process_group_kill_reaps_grandchild() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let pidfile = dir.path().join("grandchild.pid");
+        let stub_path = dir.path().join("agent");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        // The direct child backgrounds a long-sleeping grandchild, records
+        // its pid, then itself sleeps well past the configured timeout.
+        writeln!(
+            f,
+            "#!/bin/sh\nsleep 60 &\necho $! > {}\necho started\nsleep 60",
+            pidfile.display()
+        )
+        .unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let opts = RunOptions::new().with_timeout(Duration::from_millis(500));
+        let result = run_agent_events("cursor", "hi", opts, |_| {});
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(
+            matches!(result, Err(RunError::TimedOut { .. })),
+            "Expected TimedOut, got {:?}",
+            result.map(|_| ())
+        );
+
+        // Give the OS a brief moment to finish reaping after SIGKILL.
+        std::thread::sleep(Duration::from_millis(300));
+
+        let pid_str = std::fs::read_to_string(&pidfile)
+            .expect("grandchild pid file should have been written");
+        let pid: i32 = pid_str.trim().parse().expect("grandchild pid recorded");
+        let proc_path = format!("/proc/{}", pid);
+        assert!(
+            !std::path::Path::new(&proc_path).exists(),
+            "grandchild pid {} should have been reaped by the process-group kill, not orphaned",
+            pid
+        );
+    }
+
+    // --- ADR 0014: first-class external cancel mechanism ---
+
+    #[cfg(unix)]
+    #[test]
+    fn test_external_cancel_terminates_run_and_returns() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("agent");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(f, "#!/bin/sh\necho 'before sleep'\nsleep 60").unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        // No timeout configured: only an external caller can end this run —
+        // simulating a `serve` client-disconnect handler cancelling a
+        // session from a different thread than the one running the agent.
+        let cancel = RunCancelHandle::new();
+        let cancel_for_run = cancel.clone();
+        let run_thread = thread::spawn(move || {
+            run_agent_events_cancellable(
+                "cursor",
+                "hi",
+                RunOptions::default(),
+                &cancel_for_run,
+                |_| {},
+            )
+        });
+
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!cancel.is_cancelled(), "should not be cancelled yet");
+        cancel.cancel();
+
+        let start = std::time::Instant::now();
+        let result = run_thread.join().expect("run thread should not panic");
+        let elapsed = start.elapsed();
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(
+            matches!(result, Err(RunError::TimedOut { .. })),
+            "external cancel should terminate the run, got {:?}",
+            result.map(|_| ())
+        );
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "external cancel should return promptly, took {:?}",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn test_cancel_handle_cancel_before_bind_is_recorded() {
+        let cancel = RunCancelHandle::new();
+        assert!(!cancel.is_cancelled());
+        cancel.cancel();
+        assert!(cancel.is_cancelled());
+        // Calling cancel again is a harmless no-op.
+        cancel.cancel();
+        assert!(cancel.is_cancelled());
+    }
+
+    // --- BUG-11: plain assistant text must not be mistaken for quota errors ---
+
+    #[cfg(unix)]
+    #[test]
+    fn test_bug11_claude_stdout_rawline_rate_limit_not_quota() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Plain (non-JSON) stdout, as claude emits with `--output-format
+        // text`. The assistant's own answer happens to discuss rate limits —
+        // this must NOT be mistaken for a structured quota-exceeded signal.
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("claude");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(
+            f,
+            "#!/bin/sh\necho 'To avoid a 429, back off when you hit a rate limit or usage limit.'"
+        )
+        .unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result = run_agent("claude", "explain rate limits", RunOptions::default());
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(
+            result.is_ok(),
+            "plain assistant text mentioning 'rate limit'/'usage limit' must not be \
+             treated as quota exceeded: {:?}",
+            result.err()
+        );
+        assert!(result.unwrap().quota_exceeded.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_bug11_claude_stderr_rawline_rate_limit_still_detected() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // A genuine CLI-emitted rate-limit line on stderr — the structured
+        // error channel — must still be detected (regression guard: BUG-11's
+        // fix must not blanket-disable quota detection for Claude).
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("claude");
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        writeln!(
+            f,
+            "#!/bin/sh\necho 'rate limit exceeded, try again later' >&2"
+        )
+        .unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result = run_agent("claude", "hi", RunOptions::default());
+
+        std::env::set_var("PATH", orig_path);
+
+        match result {
+            Err(RunError::QuotaExceeded(_)) => {}
+            other => panic!(
+                "expected QuotaExceeded from a stderr rate-limit line, got {:?}",
                 other.map(|_| ())
             ),
         }

@@ -110,9 +110,18 @@ mod tests {
             gate_epsilon: 0.01,
             slow_update_mode: SlowUpdateMode::ForceAccept,
             protected_soft_cap_chars: 500,
-            target_agent: "cursor-agent".to_string(),
+            // These are orchestration smoke tests: they verify train_skill/resume_skill wire
+            // up state, checkpoints, and best_skill.md — NOT a live optimization against a real
+            // agent. `windsurf` supports skill deployment (`skills: Some(".windsurf/skills")`, so
+            // materialize resolves a skill dir) but is NOT a runnable Backend, so the eval runner
+            // fails fast without spawning any subprocess: the loop is a deterministic no-op and
+            // best_skill.md == best_text. Previously these used "cursor-agent", which passed for
+            // the same reason (skill-capable, not runnable); ARCH-2's canonical "cursor" key
+            // turned them into slow (~10min), nondeterministic real-CLI runs. A follow-up should
+            // give train_skill an injectable mock EvalRunner for genuine loop coverage.
+            target_agent: "windsurf".to_string(),
             target_model: None,
-            optimizer_agent: "cursor-agent".to_string(),
+            optimizer_agent: "windsurf".to_string(),
             optimizer_model: None,
             timeout_seconds: 30,
             parallel: Some(1),
