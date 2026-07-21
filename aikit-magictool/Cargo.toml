@@ -13,7 +13,7 @@ agent = ["dep:aikit-sdk"]
 axum = { version = "0.8", features = ["macros"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-jsonschema = "0.46"
+jsonschema = "0.48"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync"] }
 tokio-stream = "0.1"
@@ -26,4 +26,4 @@ optional = true
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
-jsonschema = "0.46"
+jsonschema = "0.48"
