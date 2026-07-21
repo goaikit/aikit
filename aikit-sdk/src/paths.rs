@@ -56,7 +56,13 @@ impl Error for PathError {}
 /// is known) as well as inside `safe_join` itself.
 fn reject_unsafe_components(untrusted: &str) -> Result<(), PathError> {
     let candidate = Path::new(untrusted);
-    if candidate.is_absolute() {
+    // `Path::is_absolute()` is host-specific: a POSIX-absolute `/etc/passwd` is
+    // NOT "absolute" on Windows, yet `Path::join` still resolves it to the drive
+    // root (an escape), and a leading `\` is drive-relative there too. Reject a
+    // leading path separator regardless of host so validation is identical on
+    // every platform and closes that Windows-only escape.
+    let leading_sep = matches!(untrusted.as_bytes().first(), Some(b'/') | Some(b'\\'));
+    if candidate.is_absolute() || leading_sep {
         return Err(PathError::Absolute(untrusted.to_string()));
     }
     if candidate
@@ -199,7 +205,11 @@ mod tests {
     fn safe_join_accepts_simple_relative_path() {
         let tmp = TempDir::new().unwrap();
         let result = safe_join(tmp.path(), "sub/dir/file.txt").unwrap();
-        assert_eq!(result, tmp.path().join("sub/dir/file.txt"));
+        // safe_join joins onto the *canonicalized* base (so a symlinked base like
+        // macOS's `/var` -> `/private/var` doesn't spuriously fail); compare against
+        // the canonical form, not the raw temp path.
+        let canonical = tmp.path().canonicalize().unwrap();
+        assert_eq!(result, canonical.join("sub/dir/file.txt"));
     }
 
     #[test]
@@ -207,7 +217,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         // base itself exists (so canonicalize succeeds) but the target subdir does not yet.
         let result = safe_join(tmp.path(), "not/yet/created.txt").unwrap();
-        assert_eq!(result, tmp.path().join("not/yet/created.txt"));
+        let canonical = tmp.path().canonicalize().unwrap();
+        assert_eq!(result, canonical.join("not/yet/created.txt"));
     }
 
     #[test]
@@ -291,6 +302,11 @@ mod tests {
         assert!(!is_safe_relative_path("/etc/passwd"));
         assert!(!is_safe_relative_path("../../etc/passwd"));
         assert!(!is_safe_relative_path("a/../../b"));
+        // Rejected on every platform, not just the host: a leading `/` or `\`
+        // escapes to the drive root via `Path::join` on Windows even though
+        // `Path::is_absolute()` is false there (POSIX-absolute / drive-relative).
+        assert!(!is_safe_relative_path("\\windows\\system32"));
+        assert!(!is_safe_relative_path("/root/.ssh"));
     }
 
     // -- is_safe_id ---------------------------------------------------------
