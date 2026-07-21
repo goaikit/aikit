@@ -221,3 +221,23 @@ pub fn save_config(config: &AikConfig) -> Result<(), Box<dyn std::error::Error>>
 
     config.save(&config_path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // F8 (ARCH-2 follow-up): ARCH-2 removed `AikConfig.agents`. An older on-disk
+    // config that still carries an `[agents.*]` table must still load — `AikConfig`
+    // has no `#[serde(deny_unknown_fields)]`, so unknown keys are ignored rather
+    // than erroring. This guards against a field deletion silently breaking an
+    // existing user's config on upgrade.
+    #[test]
+    fn aik_config_ignores_removed_agents_field() {
+        let mut toml_str = toml::to_string(&AikConfig::default()).unwrap();
+        toml_str.push_str("\n[agents.claude]\nname = \"Claude\"\nrequires_cli = true\n");
+        let parsed: AikConfig =
+            toml::from_str(&toml_str).expect("old config with an [agents] table must still load");
+        assert_eq!(parsed.version, AikConfig::default().version);
+        assert_eq!(parsed.install_dir, AikConfig::default().install_dir);
+    }
+}

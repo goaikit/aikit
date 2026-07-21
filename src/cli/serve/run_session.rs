@@ -408,6 +408,23 @@ pub(super) fn validate_request(
             ),
         ));
     }
+    // D2 (follow-up F2): a tool policy is only enforced by the in-process `aikit`
+    // backend (via AgentPersona.tools/disallowed_tools). For external CLI backends
+    // there is no honoring path, so accepting `tools`/`disallowed_tools` silently
+    // would let a caller believe it constrained the agent when it did not. Fail
+    // loud instead — a dropped least-privilege request must never look accepted.
+    let has_tool_policy = body.tools.is_some() || body.disallowed_tools.is_some();
+    if has_tool_policy && body.agent != "aikit" {
+        return Some(error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "unsupported_tool_policy",
+            &format!(
+                "tools/disallowed_tools are only enforced for the in-process 'aikit' backend; \
+                 agent '{}' cannot apply a tool policy. Omit the field or use agent 'aikit'.",
+                body.agent
+            ),
+        ));
+    }
     if let Some(ref sid) = body.session_id {
         let in_memory = state.runs.lock().unwrap().contains_key(sid.as_str());
         if !in_memory {
@@ -1375,6 +1392,88 @@ mod tests {
         let resp = validate_request(&body, &state, &runnable);
         std::env::remove_var("AIKIT_SESSIONS_DIR");
         assert!(resp.is_some(), "unknown-but-safe id must still 404");
+    }
+
+    // --- F2 (D2 follow-up): tool policy on a non-aikit agent is rejected ---
+
+    #[test]
+    fn tool_policy_on_external_agent_is_rejected() {
+        use crate::cli::serve::ServeConfig;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        let state = AppState {
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            live_sessions: Arc::new(Mutex::new(HashMap::new())),
+            pending_live_sessions: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            config: ServeConfig {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                run_timeout_secs: 30,
+                max_sessions: 10,
+                api_key: None,
+                insecure: false,
+            },
+            run_fn: make_stub_run_fn(),
+            auth_cache: Arc::new(Mutex::new(None)),
+        };
+        let runnable = vec![
+            AgentInfo {
+                key: "aikit".to_string(),
+                name: "aikit".to_string(),
+                available: true,
+                auth: AuthStatus::Unknown,
+                capabilities: None,
+            },
+            AgentInfo {
+                key: "claude".to_string(),
+                name: "claude".to_string(),
+                available: true,
+                auth: AuthStatus::Unknown,
+                capabilities: None,
+            },
+        ];
+
+        let make = |agent: &str, tools: Option<Vec<String>>| SendMessageRequest {
+            agent: agent.into(),
+            session_id: None,
+            content: "hi".into(),
+            model: None,
+            yolo: false,
+            tools,
+            disallowed_tools: None,
+        };
+
+        // A tool policy on an external CLI backend is rejected loud (422), not
+        // silently dropped.
+        let rejected = validate_request(
+            &make("claude", Some(vec!["read_file".into()])),
+            &state,
+            &runnable,
+        );
+        assert!(
+            rejected.is_some(),
+            "tool policy on 'claude' must be rejected"
+        );
+
+        // The same policy on the in-process aikit backend is NOT rejected on
+        // tool-policy grounds (it's the one backend that enforces it).
+        let accepted = validate_request(
+            &make("aikit", Some(vec!["read_file".into()])),
+            &state,
+            &runnable,
+        );
+        assert!(
+            accepted.is_none(),
+            "tool policy on 'aikit' must be accepted"
+        );
+
+        // No tool policy → external agent is fine.
+        let no_policy = validate_request(&make("claude", None), &state, &runnable);
+        assert!(
+            no_policy.is_none(),
+            "external agent without a tool policy is fine"
+        );
     }
 
     // --- BUG-10: a Closed session must not be resurrectable via POST ---

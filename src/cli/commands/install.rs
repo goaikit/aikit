@@ -1143,6 +1143,15 @@ fn deploy_skills_for_agent(
 /// command/subagent/skill deployment (that needs an `--ai` selection this
 /// command doesn't take); it does refresh agent-agnostic `[artifacts]`
 /// mappings, matching `install`'s default (unscoped) artifact copy.
+/// A source ref is "pinned" when it is not one of the mutable default branches —
+/// i.e. a tag, version, or commit the package was deliberately installed at. An
+/// unpinned `owner/repo` install resolves to `main`, so those never trip this.
+/// (F5: `update` only tracks the installed ref; this tells `update` when to warn
+/// that a pin means it won't see newer releases.)
+fn is_pinned_ref(ref_: &str) -> bool {
+    !matches!(ref_, "main" | "master" | "HEAD" | "develop" | "trunk")
+}
+
 pub async fn execute_update(args: UpdateArgs) -> Result<(), AikError> {
     use crate::core::filesystem::AikDirectory;
 
@@ -1259,6 +1268,18 @@ async fn execute_update_with_client(
                     "Package '{}' is already up to date (version {}).",
                     args.package, installed_package.package.version
                 ),
+            }
+            // F5: a version/tag/commit-pinned install only ever re-checks THAT ref,
+            // so a newer upstream release will never be seen here. Honor the pin,
+            // but say so explicitly — "up to date" must never quietly mean "pinned"
+            // (D7: never misreport state).
+            if is_pinned_ref(&ref_) {
+                println!(
+                    "Note: this install is pinned to '{}', so `update` only tracks that ref. \
+                     To follow the latest release, reinstall from an unpinned source \
+                     (e.g. `owner/repo` without a version).",
+                    ref_
+                );
             }
             return Ok(());
         }
@@ -1559,6 +1580,18 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    // F5: pinned refs (tag/version/commit) trip the "won't track newer releases"
+    // note; the default branches an unpinned `owner/repo` resolves to do not.
+    #[test]
+    fn is_pinned_ref_distinguishes_pins_from_default_branches() {
+        assert!(is_pinned_ref("1.2.3"));
+        assert!(is_pinned_ref("v2.0.0"));
+        assert!(is_pinned_ref("a1b2c3d")); // commit sha
+        assert!(!is_pinned_ref("main"));
+        assert!(!is_pinned_ref("master"));
+        assert!(!is_pinned_ref("HEAD"));
+    }
 
     // Note: `execute_update_with_client` takes an already-resolved
     // `AikDirectory` rather than calling `AikDirectory::find()` itself
