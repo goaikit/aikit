@@ -474,6 +474,8 @@ pub use runner::{
 pub use runner::{
     open_codex_session, CodexControlHandle, CodexSession, CodexSessionError, CodexSessionOptions,
 };
+#[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
+pub use runner::{ControlError, LiveSession};
 
 // Re-export host tool types so cli-framework can depend on aikit-sdk alone.
 pub use aikit_agent::{HostToolDefinition, HostToolProvider};

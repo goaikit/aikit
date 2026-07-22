@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 
 use aikit_sdk::{
     open_claude_session, open_codex_session, ClaudeSessionError, ClaudeSessionOptions,
-    CodexControlHandle, CodexSessionError, CodexSessionOptions, ControlHandle,
+    CodexSessionError, CodexSessionOptions, ControlError, LiveSession,
 };
 use uuid::Uuid;
 
@@ -22,91 +22,31 @@ use super::{
     error_response, spawn_frame_forwarder, sse_response_with_headers, AppState, ServeEvent,
 };
 
-// ── control abstraction ───────────────────────────────────────────────────────
+// ── control-error mapping ─────────────────────────────────────────────────────
 
-/// Wraps either a [`ControlHandle`] (Claude) or [`CodexControlHandle`] (Codex)
-/// so both can be stored in a unified registry.
-pub(super) enum LiveSessionControl {
-    Claude(ControlHandle),
-    Codex(CodexControlHandle),
-}
-
-impl LiveSessionControl {
-    pub(super) fn interrupt(&self) {
-        match self {
-            LiveSessionControl::Claude(h) => {
-                let _ = h.interrupt();
-            }
-            LiveSessionControl::Codex(h) => {
-                let _ = h.interrupt();
-            }
-        }
-    }
-
-    pub(super) fn disconnect(&self) {
-        match self {
-            LiveSessionControl::Claude(h) => {
-                let _ = h.disconnect();
-            }
-            LiveSessionControl::Codex(h) => {
-                let _ = h.disconnect();
-            }
-        }
-    }
-
-    /// Switch model mid-session. Returns `Err(response)` for backends that
-    /// do not support this action.
-    #[allow(clippy::result_large_err)]
-    pub(super) fn try_set_model(&self, model: Option<String>) -> Result<(), Response> {
-        match self {
-            LiveSessionControl::Claude(h) => {
-                let _ = h.set_model(model);
-                Ok(())
-            }
-            LiveSessionControl::Codex(_) => Err(error_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "not_supported",
-                "set_model is only supported for Claude sessions",
-            )),
-        }
-    }
-
-    /// Send a follow-up turn on the same session. Both backends support this.
-    pub(super) fn send_turn(&self, text: String) {
-        match self {
-            LiveSessionControl::Claude(h) => {
-                let _ = h.send_turn(text);
-            }
-            LiveSessionControl::Codex(h) => {
-                let _ = h.send_turn(text);
-            }
-        }
-    }
-
-    /// Get context-window usage (Claude only). Returns `Err(response)` for
-    /// backends that do not support this action.
-    #[allow(clippy::result_large_err)]
-    pub(super) fn try_get_context_usage(&self) -> Result<serde_json::Value, Response> {
-        match self {
-            LiveSessionControl::Claude(h) => h.get_context_usage().map_err(|e| {
-                error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "context_usage_error",
-                    &e.to_string(),
-                )
-            }),
-            LiveSessionControl::Codex(_) => Err(error_response(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "not_supported",
-                "get_context_usage is only supported for Claude sessions",
-            )),
+/// Map a [`ControlError`] from a [`LiveSession`] operation onto an HTTP response.
+///
+/// `Unsupported` (e.g. `set_model` on Codex) → 422 `not_supported`; a backend
+/// error → 500 with the caller-supplied `backend_code`. The per-backend match
+/// this replaced is gone: the `LiveSession` trait already reports "unsupported"
+/// uniformly via its default methods.
+#[allow(clippy::result_large_err)]
+fn control_error_response(e: ControlError, backend_code: &'static str) -> Response {
+    match e {
+        ControlError::Unsupported(op) => error_response(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "not_supported",
+            &format!("{op} is not supported by this agent"),
+        ),
+        ControlError::Backend(msg) => {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, backend_code, &msg)
         }
     }
 }
 
 // ── registry types ────────────────────────────────────────────────────────────
 
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(super) enum LiveSessionStatus {
     Active,
@@ -116,7 +56,7 @@ pub(super) enum LiveSessionStatus {
 pub(super) struct LiveSessionRecord {
     pub session_id: String,
     pub agent_key: String,
-    pub control: LiveSessionControl,
+    pub control: Box<dyn LiveSession>,
     pub status: LiveSessionStatus,
     pub created_at: DateTime<Utc>,
 }
@@ -270,7 +210,7 @@ pub(super) async fn create_live_session_handler(
 
     let session_id = Uuid::new_v4().to_string();
 
-    let (control, events_rx) = match body.agent.as_str() {
+    let (control, events_rx): (Box<dyn LiveSession>, _) = match body.agent.as_str() {
         "claude" => {
             let opts = ClaudeSessionOptions {
                 model: body.model.clone(),
@@ -282,7 +222,7 @@ pub(super) async fn create_live_session_handler(
             match open_claude_session(&body.prompt, opts) {
                 Ok(s) => {
                     let (ctrl, evts) = s.into_parts();
-                    (LiveSessionControl::Claude(ctrl), evts)
+                    (Box::new(ctrl), evts)
                 }
                 Err(ClaudeSessionError::Connect(msg)) => {
                     return error_response(
@@ -307,7 +247,7 @@ pub(super) async fn create_live_session_handler(
             match open_codex_session(&body.prompt, opts) {
                 Ok(s) => {
                     let (ctrl, evts) = s.into_parts();
-                    (LiveSessionControl::Codex(ctrl), evts)
+                    (Box::new(ctrl), evts)
                 }
                 Err(CodexSessionError::Connect(msg)) => {
                     return error_response(
@@ -414,16 +354,16 @@ pub(super) async fn live_session_control_handler(
 
     match body.action.as_str() {
         "interrupt" => {
-            record.control.interrupt();
+            let _ = record.control.interrupt();
             ok_action("interrupt")
         }
         "disconnect" => {
-            record.control.disconnect();
+            let _ = record.control.disconnect();
             ok_action("disconnect")
         }
-        "set_model" => match record.control.try_set_model(body.model.clone()) {
+        "set_model" => match record.control.set_model(body.model.clone()) {
             Ok(_) => ok_action("set_model"),
-            Err(resp) => resp,
+            Err(e) => control_error_response(e, "session_error"),
         },
         "send_turn" => {
             let text = body.text.as_deref().unwrap_or("").trim().to_string();
@@ -434,17 +374,17 @@ pub(super) async fn live_session_control_handler(
                     "send_turn requires a non-empty 'text' field",
                 );
             }
-            record.control.send_turn(text);
+            let _ = record.control.send_turn(text);
             ok_action("send_turn")
         }
-        "get_context_usage" => match record.control.try_get_context_usage() {
+        "get_context_usage" => match record.control.get_context_usage() {
             Ok(usage) => (
                 StatusCode::OK,
                 [(axum::http::header::CONTENT_TYPE, "application/json")],
                 usage.to_string(),
             )
                 .into_response(),
-            Err(resp) => resp,
+            Err(e) => control_error_response(e, "context_usage_error"),
         },
         other => error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -489,7 +429,7 @@ pub(super) async fn delete_live_session_handler(
             "Live session not found",
         );
     };
-    record.control.disconnect();
+    let _ = record.control.disconnect();
     record.status = LiveSessionStatus::Closed;
     let resp = DeleteLiveSessionResponse {
         session_id,
@@ -601,6 +541,264 @@ mod tests {
             pending.load(Ordering::SeqCst),
             0,
             "all reservations should be released"
+        );
+    }
+
+    // ── ARCH-3: control-endpoint & lifecycle coverage via a fake session ────────
+    //
+    // Before ARCH-3 the registry held concrete `ControlHandle`/`CodexControlHandle`
+    // values, each backed by a real `claude`/`codex` subprocess — so the control
+    // and eviction handlers were untestable without a live binary. With
+    // `Box<dyn LiveSession>` we insert a `FakeSession` record directly and drive
+    // the handlers.
+
+    #[derive(Default)]
+    struct Counters {
+        turns: AtomicUsize,
+        interrupts: AtomicUsize,
+        disconnects: AtomicUsize,
+        set_models: AtomicUsize,
+    }
+
+    struct FakeSession {
+        c: Arc<Counters>,
+        supports_set_model: bool,
+    }
+
+    impl LiveSession for FakeSession {
+        fn send_turn(&self, _text: String) -> Result<(), ControlError> {
+            self.c.turns.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), ControlError> {
+            self.c.interrupts.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn disconnect(&self) -> Result<(), ControlError> {
+            self.c.disconnects.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        fn set_model(&self, _model: Option<String>) -> Result<(), ControlError> {
+            if self.supports_set_model {
+                self.c.set_models.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            } else {
+                Err(ControlError::Unsupported("set_model"))
+            }
+        }
+        fn get_context_usage(&self) -> Result<serde_json::Value, ControlError> {
+            Ok(serde_json::json!({ "used_tokens": 1 }))
+        }
+    }
+
+    fn state_with_session(
+        control: Box<dyn LiveSession>,
+        status: LiveSessionStatus,
+    ) -> (crate::cli::serve::AppState, String) {
+        use crate::cli::serve::ServeConfig;
+        let sid = "sess-1".to_string();
+        let live: LiveSessions = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        live.lock().unwrap().insert(
+            sid.clone(),
+            LiveSessionRecord {
+                session_id: sid.clone(),
+                agent_key: "claude".into(),
+                control,
+                status,
+                created_at: Utc::now(),
+            },
+        );
+        let state = crate::cli::serve::AppState {
+            runs: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            live_sessions: live,
+            pending_live_sessions: Arc::new(AtomicUsize::new(0)),
+            config: ServeConfig {
+                host: "127.0.0.1".into(),
+                port: 8787,
+                run_timeout_secs: 30,
+                max_sessions: 10,
+                api_key: None,
+                insecure: false,
+            },
+            run_fn: crate::cli::serve::run_session::make_stub_run_fn(),
+            auth_cache: Arc::new(std::sync::Mutex::new(None)),
+        };
+        (state, sid)
+    }
+
+    fn control_req(action: &str, text: Option<&str>) -> LiveSessionControlRequest {
+        LiveSessionControlRequest {
+            action: action.into(),
+            model: None,
+            text: text.map(Into::into),
+        }
+    }
+
+    async fn control_status(
+        state: &crate::cli::serve::AppState,
+        sid: &str,
+        req: LiveSessionControlRequest,
+    ) -> StatusCode {
+        live_session_control_handler(State(state.clone()), Path(sid.to_string()), Json(req))
+            .await
+            .into_response()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn control_dispatches_core_ops_to_the_session() {
+        let c = Arc::new(Counters::default());
+        let (state, sid) = state_with_session(
+            Box::new(FakeSession {
+                c: Arc::clone(&c),
+                supports_set_model: true,
+            }),
+            LiveSessionStatus::Active,
+        );
+
+        assert_eq!(
+            control_status(&state, &sid, control_req("interrupt", None)).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            control_status(&state, &sid, control_req("send_turn", Some("hello"))).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            control_status(&state, &sid, control_req("set_model", None)).await,
+            StatusCode::OK
+        );
+
+        assert_eq!(c.interrupts.load(Ordering::SeqCst), 1);
+        assert_eq!(c.turns.load(Ordering::SeqCst), 1);
+        assert_eq!(c.set_models.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn send_turn_with_blank_text_is_422_and_never_reaches_the_session() {
+        let c = Arc::new(Counters::default());
+        let (state, sid) = state_with_session(
+            Box::new(FakeSession {
+                c: Arc::clone(&c),
+                supports_set_model: true,
+            }),
+            LiveSessionStatus::Active,
+        );
+        assert_eq!(
+            control_status(&state, &sid, control_req("send_turn", Some("   "))).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(c.turns.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn set_model_on_unsupported_backend_is_422_not_supported() {
+        let c = Arc::new(Counters::default());
+        let (state, sid) = state_with_session(
+            Box::new(FakeSession {
+                c: Arc::clone(&c),
+                supports_set_model: false,
+            }),
+            LiveSessionStatus::Active,
+        );
+        assert_eq!(
+            control_status(&state, &sid, control_req("set_model", None)).await,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(c.set_models.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn get_context_usage_returns_200_json_from_the_session() {
+        let c = Arc::new(Counters::default());
+        let (state, sid) = state_with_session(
+            Box::new(FakeSession {
+                c,
+                supports_set_model: true,
+            }),
+            LiveSessionStatus::Active,
+        );
+        assert_eq!(
+            control_status(&state, &sid, control_req("get_context_usage", None)).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn control_on_unknown_session_is_404() {
+        let c = Arc::new(Counters::default());
+        let (state, _sid) = state_with_session(
+            Box::new(FakeSession {
+                c,
+                supports_set_model: true,
+            }),
+            LiveSessionStatus::Active,
+        );
+        assert_eq!(
+            control_status(&state, "does-not-exist", control_req("interrupt", None)).await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn control_on_closed_session_is_410_gone() {
+        let c = Arc::new(Counters::default());
+        let (state, sid) = state_with_session(
+            Box::new(FakeSession {
+                c: Arc::clone(&c),
+                supports_set_model: true,
+            }),
+            LiveSessionStatus::Closed,
+        );
+        assert_eq!(
+            control_status(&state, &sid, control_req("interrupt", None)).await,
+            StatusCode::GONE
+        );
+        assert_eq!(c.interrupts.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn delete_disconnects_evicts_and_hides_from_list() {
+        let c = Arc::new(Counters::default());
+        let (state, sid) = state_with_session(
+            Box::new(FakeSession {
+                c: Arc::clone(&c),
+                supports_set_model: true,
+            }),
+            LiveSessionStatus::Active,
+        );
+
+        // Session shows in the listing while Active.
+        let listed = list_live_sessions_handler(State(state.clone()))
+            .await
+            .into_response();
+        assert_eq!(listed.status(), StatusCode::OK);
+
+        // Delete → disconnect called once, record marked Closed.
+        let del = delete_live_session_handler(State(state.clone()), Path(sid.clone()))
+            .await
+            .into_response();
+        assert_eq!(del.status(), StatusCode::OK);
+        assert_eq!(c.disconnects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state.live_sessions.lock().unwrap()[&sid].status,
+            LiveSessionStatus::Closed
+        );
+
+        // A closed session is filtered out of the listing.
+        let listed_after = list_live_sessions_handler(State(state.clone()))
+            .await
+            .into_response();
+        let bytes = axum::body::to_bytes(listed_after.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["sessions"].as_array().unwrap().len(), 0);
+
+        // And further control on it is 410 Gone.
+        assert_eq!(
+            control_status(&state, &sid, control_req("send_turn", Some("x"))).await,
+            StatusCode::GONE
         );
     }
 }
