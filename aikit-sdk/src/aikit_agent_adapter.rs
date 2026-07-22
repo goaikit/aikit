@@ -746,3 +746,48 @@ fn error_code(message: &str) -> String {
         .unwrap_or("E_AIKIT_LLM_REQUEST_FAILED")
         .to_string()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // F3 (D2 follow-up): the previously-untested middle link of the tool-policy
+    // chain. serve builds `RunOptions.session_persona` from
+    // `SendMessageRequest.tools`/`disallowed_tools` (tested serve-side); this
+    // must land on `AgentConfig.session_persona`, which `loop_runner::build_tools`
+    // then hard-filters (tested in aikit-agent). This closes the gap between "the
+    // request carries the JSON" and "the agent actually filters the tool".
+    #[test]
+    fn disallowed_tools_flow_from_run_options_into_agent_config_persona() {
+        let tmp = tempfile::tempdir().unwrap();
+        let persona = serde_json::json!({
+            "name": "",
+            "description": "",
+            "prompt": "",
+            "tools": null,
+            "disallowed_tools": ["run_bash"],
+        });
+        let options = RunOptions::default().with_session_persona(persona);
+        let mut config = config_for_injected_gateway(tmp.path().to_path_buf(), &options);
+
+        apply_session_options(&options, &mut config);
+
+        let sp = config
+            .session_persona
+            .expect("session persona should be applied onto AgentConfig");
+        assert_eq!(sp.disallowed_tools, Some(vec!["run_bash".to_string()]));
+        assert!(sp.tools.is_none());
+    }
+
+    #[test]
+    fn no_tool_policy_leaves_persona_unset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let options = RunOptions::default();
+        let mut config = config_for_injected_gateway(tmp.path().to_path_buf(), &options);
+        apply_session_options(&options, &mut config);
+        assert!(
+            config.session_persona.is_none(),
+            "no tool policy → persona unset → full toolset (ADR 0012 default)"
+        );
+    }
+}

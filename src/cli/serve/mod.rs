@@ -149,6 +149,32 @@ pub(super) fn error_response(status: StatusCode, code: &str, message: &str) -> R
         .into_response()
 }
 
+// ── bind address / fail-closed policy ───────────────────────────────────────────
+
+/// Build the `SocketAddr` to bind, bracketing a bare IPv6 host.
+///
+/// `format!("{host}:{port}")` is ambiguous for IPv6 — `--host ::1` yields the
+/// unparseable `"::1:8787"`. If `host` parses as a bare `Ipv6Addr` (no brackets),
+/// wrap it as `[host]` so `--host ::1` / `--host ::` work without the caller
+/// having to know the bracket syntax.
+fn build_bind_addr(host: &str, port: u16) -> anyhow::Result<SocketAddr> {
+    let host_part = if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    format!("{host_part}:{port}")
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid address {host}:{port}: {e}"))
+}
+
+/// SEC-2 / ADR 0012: refuse to start when bound to a non-loopback address with
+/// no `--api-key`, unless the operator explicitly passed `--insecure`. Works for
+/// both IPv4 and IPv6 (`Ipv6Addr::is_loopback` covers `::1`).
+fn startup_should_fail_closed(addr: &SocketAddr, has_api_key: bool, insecure: bool) -> bool {
+    !addr.ip().is_loopback() && !has_api_key && !insecure
+}
+
 // ── ServeEvent → SSE ──────────────────────────────────────────────────────────
 
 /// Serialize one [`ServeEvent`] to an SSE `Event`.
@@ -582,9 +608,7 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
         insecure: args.insecure,
     };
 
-    let addr: SocketAddr = format!("{}:{}", config.host, config.port)
-        .parse()
-        .map_err(|e| anyhow::anyhow!("invalid address {}:{}: {}", config.host, config.port, e))?;
+    let addr = build_bind_addr(&config.host, config.port)?;
 
     // SEC-2 / ADR 0012: the sandbox is the trust boundary for the agent
     // itself (full toolset, `run_bash` included — see ADR 0012); the
@@ -596,7 +620,7 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
     // `--insecure`. Loopback stays open by default (matches ADR 0012:
     // existing local consumers — agentrt, the optimization loop, chat BFFs
     // — are unaffected).
-    if !addr.ip().is_loopback() && config.api_key.is_none() && !config.insecure {
+    if startup_should_fail_closed(&addr, config.api_key.is_some(), config.insecure) {
         anyhow::bail!(
             "refusing to start: {addr} is a non-loopback bind address and no --api-key was \
              set. aikit serve has no host-safety sandboxing of its own (see ADR 0012 — the \
@@ -739,6 +763,46 @@ mod tests {
             stream: AgentEventStream::Stdout,
             payload,
         }
+    }
+
+    // -- F1: IPv6 bind address + fail-closed policy ------------------------
+
+    #[test]
+    fn build_bind_addr_brackets_bare_ipv6() {
+        // The reported bug: `--host ::1` built `"::1:8787"`, which does not parse.
+        let addr = build_bind_addr("::1", 8787).expect("bare IPv6 loopback should parse");
+        assert!(addr.is_ipv6());
+        assert!(addr.ip().is_loopback());
+        assert_eq!(addr.port(), 8787);
+
+        let any = build_bind_addr("::", 8787).expect("bare IPv6 any-addr should parse");
+        assert!(any.is_ipv6() && !any.ip().is_loopback());
+
+        // Already-bracketed and IPv4 forms still work unchanged.
+        assert!(build_bind_addr("[::1]", 8787).is_ok());
+        assert!(build_bind_addr("127.0.0.1", 8787)
+            .unwrap()
+            .ip()
+            .is_loopback());
+        assert!(!build_bind_addr("0.0.0.0", 8787).unwrap().ip().is_loopback());
+    }
+
+    #[test]
+    fn startup_fail_closed_covers_ipv4_and_ipv6() {
+        let v6_loop = build_bind_addr("::1", 8787).unwrap();
+        let v6_any = build_bind_addr("::", 8787).unwrap();
+        let v4_loop = build_bind_addr("127.0.0.1", 8787).unwrap();
+        let v4_any = build_bind_addr("0.0.0.0", 8787).unwrap();
+
+        // Loopback (v4 or v6) stays open with no key.
+        assert!(!startup_should_fail_closed(&v6_loop, false, false));
+        assert!(!startup_should_fail_closed(&v4_loop, false, false));
+        // Non-loopback with no key and no --insecure fails closed (v4 and v6).
+        assert!(startup_should_fail_closed(&v6_any, false, false));
+        assert!(startup_should_fail_closed(&v4_any, false, false));
+        // A key, or explicit --insecure, allows a non-loopback bind.
+        assert!(!startup_should_fail_closed(&v6_any, true, false));
+        assert!(!startup_should_fail_closed(&v4_any, false, true));
     }
 
     /// Extract `(tag, inner_json)` the same way `serve_event_to_sse` does,
