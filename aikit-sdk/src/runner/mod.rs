@@ -8,6 +8,8 @@ pub mod capabilities;
 pub mod claude_session;
 #[cfg(feature = "codex-app-server")]
 pub mod codex_session;
+#[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
+pub mod live_session;
 pub mod transport;
 pub mod types;
 pub mod usage;
@@ -36,6 +38,8 @@ pub use codex_session::{
 // Shared approval types; available when at least one session feature is enabled.
 #[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
 pub use approval::{PermissionCallback, ToolApprovalRequest, ToolDecision};
+#[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
+pub use live_session::{ControlError, LiveSession};
 pub use usage::aggregate_token_usage;
 
 use std::process::Child;
