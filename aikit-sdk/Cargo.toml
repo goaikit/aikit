@@ -48,7 +48,7 @@ aikit-agent = { path = "../aikit-agent", version = "0.1.0" }
 claude-agent-sdk = { git = "https://github.com/aroff/claude-agent-sdk-rust", rev = "717eacf", optional = true }
 aikit-agent-codex = { path = "../aikit-agent-codex", version = "0.1.0", optional = true }
 tokio = { version = "1", features = ["rt", "sync", "macros"], optional = true }
-jsonschema = "0.46"
+jsonschema = "0.48"
 aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", optional = true }
 
 # Process-group signal escalation for run cancellation/timeout (ADR 0014,
