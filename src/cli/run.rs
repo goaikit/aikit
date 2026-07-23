@@ -157,6 +157,25 @@ pub fn execute(args: RunArgs) -> Result<()> {
         }
     }
 
+    // D2 / ADR 0012: a session persona carries a least-privilege tool policy
+    // (AgentPersona.tools/disallowed_tools). Only the in-process `aikit` backend enforces it;
+    // handing it to an external backend would silently drop the tool policy while the caller
+    // believes it was applied. Fail loud — matches serve's F2 422 `unsupported_tool_policy`.
+    // Unknown agent keys are left to the existing dispatch error path below.
+    if session_persona_json.is_some() {
+        if let Some(backend) = aikit_sdk::runner::Backend::from_key(&agent) {
+            if !backend.capabilities().supports_tool_policy {
+                eprintln!(
+                    "error: --session-persona: session personas are only enforced by the \
+                     in-process 'aikit' backend; agent '{}' cannot apply a persona/tool policy. \
+                     Omit --session-persona or use --agent aikit.",
+                    agent
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Serialize session_agents for RunOptions.
     let session_agents_json: std::collections::HashMap<String, serde_json::Value> =
         session_agents_map

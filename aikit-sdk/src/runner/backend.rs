@@ -262,6 +262,19 @@ mod tests {
         );
     }
 
+    // ---- D2: tool-policy enforcement is a per-Backend capability ----
+
+    #[test]
+    fn only_aikit_supports_tool_policy() {
+        for &b in ALL {
+            assert_eq!(
+                b.capabilities().supports_tool_policy,
+                b == Backend::Aikit,
+                "supports_tool_policy for {b:?}"
+            );
+        }
+    }
+
     #[test]
     fn only_aikit_is_in_process() {
         for &b in ALL {
