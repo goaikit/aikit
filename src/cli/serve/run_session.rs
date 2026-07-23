@@ -413,8 +413,13 @@ pub(super) fn validate_request(
     // there is no honoring path, so accepting `tools`/`disallowed_tools` silently
     // would let a caller believe it constrained the agent when it did not. Fail
     // loud instead — a dropped least-privilege request must never look accepted.
+    // Consult BackendCapabilities::supports_tool_policy (shared with the `aikit run`
+    // CLI check) rather than a hardcoded key comparison, so the two call sites can't drift.
     let has_tool_policy = body.tools.is_some() || body.disallowed_tools.is_some();
-    if has_tool_policy && body.agent != "aikit" {
+    let supports_tool_policy = aikit_sdk::runner::Backend::from_key(&body.agent)
+        .map(|b| b.capabilities().supports_tool_policy)
+        .unwrap_or(false);
+    if has_tool_policy && !supports_tool_policy {
         return Some(error_response(
             StatusCode::UNPROCESSABLE_ENTITY,
             "unsupported_tool_policy",

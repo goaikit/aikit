@@ -46,6 +46,11 @@ pub struct BackendCapabilities {
     /// `false` ⇒ no adapter is registered for this Backend; passive capture
     /// is unavailable, not merely empty. Spec 010.
     pub passive_capture: bool,
+    /// Enforces `AgentPersona.tools` / `disallowed_tools` (D2 / ADR 0012 least-privilege tool
+    /// policy) as a hard filter. `false` ⇒ a tool policy handed to this Backend is silently
+    /// unenforceable — callers threading a persona/tool-policy through `RunOptions` must reject
+    /// rather than accept-and-drop it. Currently only the in-process `aikit` Backend enforces it.
+    pub supports_tool_policy: bool,
 }
 
 impl BackendCapabilities {
@@ -63,6 +68,7 @@ impl BackendCapabilities {
         subagents: false,
         context_compression: false,
         passive_capture: false,
+        supports_tool_policy: false,
     };
 
     pub const fn with_bidirectional(mut self) -> Self {
@@ -113,6 +119,11 @@ impl BackendCapabilities {
     /// when the matching `aikit-session-capture` feature is on.
     pub const fn with_passive_capture(mut self) -> Self {
         self.passive_capture = true;
+        self
+    }
+    /// Declare that this Backend enforces `AgentPersona.tools` / `disallowed_tools` (D2).
+    pub const fn with_supports_tool_policy(mut self) -> Self {
+        self.supports_tool_policy = true;
         self
     }
 }

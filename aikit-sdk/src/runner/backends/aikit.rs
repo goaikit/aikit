@@ -25,7 +25,8 @@ pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_resumable_sessions()
     .with_mcp_routing()
     .with_subagents()
-    .with_context_compression();
+    .with_context_compression()
+    .with_supports_tool_policy();
 
 /// aikit emits canonical events directly; there is no line Dialect to decode.
 pub(crate) fn decode(
