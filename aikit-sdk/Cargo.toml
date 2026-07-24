@@ -55,7 +55,7 @@ aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", 
 # BUG-4): SIGTERM -> SIGKILL over the whole process group, not just the
 # direct child. Unix-only; Windows job-object equivalent is noted follow-up.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", default-features = false, features = ["signal", "process"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 
 [dev-dependencies]
 insta = { version = "1.39", features = ["json"] }
