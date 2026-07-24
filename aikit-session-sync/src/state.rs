@@ -160,12 +160,30 @@ mod tests {
         assert!(tmp.path().join(".aikit").join("session-sync").is_dir());
     }
 
+    // Exercise the public open() entry point (home resolution + dir create).
+    //
+    // Unix only, and deliberately so: dirs::home_dir() honors $HOME on unix, so
+    // we can redirect it to a temp dir and keep the test hermetic. On Windows
+    // home_dir() ignores env vars and resolves the real user profile, so calling
+    // open() there would create `%USERPROFILE%\.aikit` on the shared CI runner —
+    // which cli_integration_test then discovers via its walk-up `.aikit` lookup
+    // (Windows temp dirs are nested under the user profile), breaking that
+    // suite's per-test isolation. Compiling this out on Windows keeps open()
+    // covered on the (ubuntu-only) coverage job without polluting $HOME anywhere.
+    #[cfg(unix)]
     #[test]
-    fn open_uses_real_home() {
-        // Exercise the public open() entry point (home resolution + dir create).
+    fn open_uses_home_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
         let store = JsonSyncStateStore::open().unwrap();
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
         assert!(store.path.ends_with("state.json"));
         assert!(store.path.parent().unwrap().ends_with("session-sync"));
+        assert!(tmp.path().join(".aikit").join("session-sync").is_dir());
     }
 
     #[tokio::test]
