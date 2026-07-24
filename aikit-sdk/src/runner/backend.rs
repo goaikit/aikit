@@ -8,6 +8,7 @@
 //! Backend; an unknown key fails to parse.
 
 use std::ffi::OsString;
+use std::path::Path;
 
 use super::backends::argv_spec::ArgvCtx;
 use super::backends::{aikit, claude, codex, cursor, gemini, opencode};
@@ -130,6 +131,32 @@ impl Backend {
             Backend::OpenCode => opencode::CAPABILITIES,
             Backend::Cursor => cursor::CAPABILITIES,
             Backend::Aikit => aikit::CAPABILITIES,
+        }
+    }
+
+    /// Discover the newest locally resumable session id for this Backend.
+    pub fn discover_resumable_session(self, home: &Path) -> Option<String> {
+        match self {
+            Backend::Claude => {
+                let home_pattern = glob::Pattern::escape(&home.to_string_lossy());
+                let pattern = format!("{home_pattern}/.claude/projects/*/*.jsonl");
+                glob::glob(&pattern)
+                    .ok()?
+                    .filter_map(Result::ok)
+                    .filter_map(|path| {
+                        let modified = path.metadata().ok()?.modified().ok()?;
+                        let session_id = path.file_stem()?.to_str()?.to_string();
+                        Some((modified, session_id))
+                    })
+                    .max_by_key(|(modified, _)| *modified)
+                    .map(|(_, session_id)| session_id)
+            }
+            // TODO(per-backend): add on-disk resume discovery for other CLIs.
+            Backend::Codex
+            | Backend::Gemini
+            | Backend::OpenCode
+            | Backend::Cursor
+            | Backend::Aikit => None,
         }
     }
 
@@ -259,6 +286,52 @@ mod tests {
         assert_eq!(
             Backend::Cursor.binary_candidates(),
             &["cursor-agent", "agent"]
+        );
+    }
+
+    #[test]
+    fn claude_discovers_resumable_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join(".claude/projects/example");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        std::fs::write(session_dir.join("sess-1.jsonl"), "{}\n").unwrap();
+
+        assert_eq!(
+            Backend::Claude.discover_resumable_session(dir.path()),
+            Some("sess-1".to_string())
+        );
+    }
+
+    #[test]
+    fn claude_discovery_returns_none_when_empty_or_absent() {
+        let absent = tempfile::tempdir().unwrap();
+        assert_eq!(
+            Backend::Claude.discover_resumable_session(absent.path()),
+            None
+        );
+
+        let empty = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(empty.path().join(".claude/projects/example")).unwrap();
+        assert_eq!(
+            Backend::Claude.discover_resumable_session(empty.path()),
+            None
+        );
+    }
+
+    #[test]
+    fn claude_discovery_uses_newest_modified_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_dir = dir.path().join(".claude/projects/first");
+        let second_dir = dir.path().join(".claude/projects/second");
+        std::fs::create_dir_all(&first_dir).unwrap();
+        std::fs::create_dir_all(&second_dir).unwrap();
+        std::fs::write(first_dir.join("older.jsonl"), "{}\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        std::fs::write(second_dir.join("newer.jsonl"), "{}\n").unwrap();
+
+        assert_eq!(
+            Backend::Claude.discover_resumable_session(dir.path()),
+            Some("newer".to_string())
         );
     }
 
