@@ -11,3 +11,4 @@ pub(crate) mod codex;
 pub(crate) mod cursor;
 pub(crate) mod gemini;
 pub(crate) mod opencode;
+pub(crate) mod pi;

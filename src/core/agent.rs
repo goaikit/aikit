@@ -246,13 +246,13 @@ mod tests {
 
     #[test]
     fn test_all_17_agents_present() {
-        assert_eq!(get_agent_configs().len(), 18);
+        assert_eq!(get_agent_configs().len(), 19);
     }
 
     #[test]
     fn test_extras_table_populated() {
         let configs = get_agent_configs();
-        assert_eq!(configs.len(), 18);
+        assert_eq!(configs.len(), 19);
 
         // Every agent now resolves through the canonical SDK registry.
         let keys: Vec<_> = configs.iter().map(|c| c.key.as_str()).collect();

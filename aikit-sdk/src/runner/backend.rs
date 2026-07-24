@@ -10,7 +10,7 @@
 use std::ffi::OsString;
 
 use super::backends::argv_spec::ArgvCtx;
-use super::backends::{aikit, claude, codex, cursor, gemini, opencode};
+use super::backends::{aikit, claude, codex, cursor, gemini, opencode, pi};
 use super::capabilities::BackendCapabilities;
 use super::types::{
     AgentEventPayload, AgentEventStream, QuotaExceededInfo, StreamMessage, TokenUsage, UsageSource,
@@ -49,6 +49,9 @@ pub enum Backend {
     OpenCode,
     /// The Cursor Agent CLI (runner key `cursor`; see ADR 0006).
     Cursor,
+    /// The Pi coding agent, driven over RPC as a bidirectional session
+    /// (`pi --mode rpc`; see ADR 0017 / spec 014).
+    Pi,
     /// The built-in in-process agent (ADR 0009).
     Aikit,
 }
@@ -61,6 +64,7 @@ pub const ALL: &[Backend] = &[
     Backend::Gemini,
     Backend::OpenCode,
     Backend::Cursor,
+    Backend::Pi,
     Backend::Aikit,
 ];
 
@@ -78,6 +82,7 @@ impl Backend {
             gemini::KEY => Some(Backend::Gemini),
             opencode::KEY => Some(Backend::OpenCode),
             cursor::KEY => Some(Backend::Cursor),
+            pi::KEY => Some(Backend::Pi),
             aikit::KEY => Some(Backend::Aikit),
             _ => None,
         }
@@ -91,6 +96,7 @@ impl Backend {
             Backend::Gemini => gemini::KEY,
             Backend::OpenCode => opencode::KEY,
             Backend::Cursor => cursor::KEY,
+            Backend::Pi => pi::KEY,
             Backend::Aikit => aikit::KEY,
         }
     }
@@ -117,6 +123,7 @@ impl Backend {
             Backend::Gemini => gemini::BINARY_CANDIDATES,
             Backend::OpenCode => opencode::BINARY_CANDIDATES,
             Backend::Cursor => cursor::BINARY_CANDIDATES,
+            Backend::Pi => pi::BINARY_CANDIDATES,
             Backend::Aikit => aikit::BINARY_CANDIDATES,
         }
     }
@@ -129,6 +136,7 @@ impl Backend {
             Backend::Gemini => gemini::CAPABILITIES,
             Backend::OpenCode => opencode::CAPABILITIES,
             Backend::Cursor => cursor::CAPABILITIES,
+            Backend::Pi => pi::CAPABILITIES,
             Backend::Aikit => aikit::CAPABILITIES,
         }
     }
@@ -151,6 +159,7 @@ impl Backend {
             Backend::Gemini => wrap(gemini::decode(value, stream, raw_line_seq)),
             Backend::OpenCode => wrap(opencode::decode(value, stream, raw_line_seq)),
             Backend::Cursor => wrap(cursor::decode(value, stream, raw_line_seq)),
+            Backend::Pi => pi::decode(value, stream, raw_line_seq),
             Backend::Aikit => wrap(aikit::decode(value, stream, raw_line_seq)),
         };
         decoded
@@ -176,6 +185,7 @@ impl Backend {
             Backend::Gemini => gemini::extract_usage(line),
             Backend::OpenCode => opencode::extract_usage(line),
             Backend::Cursor => cursor::extract_usage(line),
+            Backend::Pi => pi::extract_usage(line),
             Backend::Aikit => aikit::extract_usage(line),
         }
     }
@@ -188,6 +198,7 @@ impl Backend {
             Backend::Gemini => gemini::extract_quota(payload),
             Backend::OpenCode => opencode::extract_quota(payload),
             Backend::Cursor => cursor::extract_quota(payload),
+            Backend::Pi => pi::extract_quota(payload),
             Backend::Aikit => aikit::extract_quota(payload),
         }
     }
@@ -215,8 +226,33 @@ impl Backend {
             Backend::Gemini => gemini::argv(ctx),
             Backend::OpenCode => opencode::argv(ctx),
             Backend::Cursor => cursor::argv(ctx),
+            Backend::Pi => pi::argv(ctx),
             Backend::Aikit => unreachable!("aikit is in-process and is never spawned via argv"),
         }
+    }
+
+    /// The bytes to write to the spawned Backend's stdin to issue `prompt`.
+    ///
+    /// Subprocess-lines Backends take the raw prompt text; Pi RPC frames it
+    /// as a newline-terminated JSON-RPC `prompt` command (no ARG_MAX ceiling,
+    /// since the prompt rides stdin rather than argv — ADR 0017 / spec 014).
+    pub(crate) fn stdin_prompt_bytes(self, prompt: &str) -> Vec<u8> {
+        match self {
+            Backend::Pi => pi::prompt_command(prompt).into_bytes(),
+            _ => prompt.as_bytes().to_vec(),
+        }
+    }
+
+    /// Whether a decoded JSON line signals the run is fully settled and the
+    /// process should be torn down. Only Pi (an RPC server that does not exit
+    /// after one prompt) signals this — via `agent_settled` / `agent_end`. For
+    /// every other Backend the drain reads until natural EOF, so this returns
+    /// `false` (spec 014).
+    pub(crate) fn is_terminal_event(self, value: &serde_json::Value) -> bool {
+        if !matches!(self, Backend::Pi) {
+            return false;
+        }
+        pi::is_settled_event(value)
     }
 }
 

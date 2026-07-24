@@ -137,12 +137,15 @@ pub(crate) fn connect(
     // Prompt write happens on its own thread, off the calling thread. A
     // child that exits (or closes stdin) before reading the full prompt
     // yields BrokenPipe — that is not a failure: its output is still
-    // captured, so the thread reports success rather than an error.
+    // captured, so the thread reports success rather than an error. The
+    // prompt is framed per-Backend (`Backend::stdin_prompt_bytes`) so a
+    // session Backend like Pi can send a JSON-RPC command rather than raw
+    // text (spec 014).
     let agent_key = backend.key();
-    let prompt_owned = prompt.to_string();
+    let stdin_bytes = backend.stdin_prompt_bytes(prompt);
     let stdin_thread = thread::spawn(move || -> io::Result<()> {
         let mut stdin = stdin_pipe;
-        let result = match stdin.write_all(prompt_owned.as_bytes()) {
+        let result = match stdin.write_all(&stdin_bytes) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::BrokenPipe => {
                 tracing::debug!(

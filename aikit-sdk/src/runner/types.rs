@@ -87,6 +87,8 @@ pub enum UsageSource {
     OpenCode,
     /// Cursor Agent (`result.usage` camelCase fields)
     Cursor,
+    /// Pi coding agent (RPC `AssistantMessage.usage`)
+    Pi,
     /// Built-in aikit agent
     Aikit,
 }
@@ -310,7 +312,7 @@ impl std::fmt::Display for RunError {
             RunError::AgentNotRunnable(key) => {
                 write!(
                     f,
-                    "Agent '{}' is not runnable. Supported: codex, claude, gemini, opencode, agent, aikit",
+                    "Agent '{}' is not runnable. Supported: codex, claude, gemini, opencode, cursor, pi, aikit",
                     key
                 )
             }
