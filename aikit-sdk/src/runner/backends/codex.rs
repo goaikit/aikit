@@ -11,7 +11,7 @@ use crate::runner::backends::quota_match::{match_quota, JsonPat, RawPat};
 use crate::runner::capabilities::BackendCapabilities;
 use crate::runner::types::{
     AgentEventPayload, AgentEventStream, MessageKind, MessagePhase, MessageRole, QuotaExceededInfo,
-    StreamMessage, TokenUsage, UsageSource,
+    SandboxPolicy, StreamMessage, TokenUsage, UsageSource,
 };
 
 pub(crate) const KEY: &str = "codex";
@@ -265,11 +265,54 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
         None => vec![OsString::from(SPEC.binary), OsString::from("exec")],
     };
     SPEC.push_model(&mut argv, ctx.model);
-    SPEC.push_yolo(&mut argv, ctx.yolo);
+
+    // spec 013 D1: an explicit `--sandbox` subsumes `--yolo` — codex's
+    // workspace-write / danger-full-access already auto-approve within bounds.
+    // When no envelope sandbox is requested, preserve the legacy `--yolo` path
+    // (every existing argv test exercises this branch).
+    let explicit_sandbox = ctx.envelope.and_then(|e| e.sandbox);
+    if let Some(policy) = explicit_sandbox {
+        argv.push(OsString::from("--sandbox"));
+        argv.push(OsString::from(codex_sandbox_token(policy)));
+    } else {
+        SPEC.push_yolo(&mut argv, ctx.yolo);
+    }
+
+    // spec 013 D2/D6: honored knobs → native flags.
+    if let Some(e) = ctx.envelope {
+        if let Some(dir) = e.working_dir.as_deref() {
+            argv.push(OsString::from("--cd"));
+            argv.push(dir.as_os_str().to_owned());
+        }
+        for root in &e.extra_writable_roots {
+            argv.push(OsString::from("--add-dir"));
+            argv.push(root.as_os_str().to_owned());
+        }
+        if e.skip_git_repo_check {
+            argv.push(OsString::from("--skip-git-repo-check"));
+        }
+        if e.ephemeral {
+            argv.push(OsString::from("--ephemeral"));
+        }
+        if e.bare {
+            argv.push(OsString::from("--ignore-user-config"));
+        }
+    }
+
     argv.extend_from_slice(&[
         OsString::from("--json"),
         OsString::from("--"),
         OsString::from("-"),
     ]);
     argv
+}
+
+/// Map a common [`SandboxPolicy`] onto codex's native `--sandbox` vocabulary
+/// (spec 013 D1 sandbox-mapping table).
+fn codex_sandbox_token(policy: SandboxPolicy) -> &'static str {
+    match policy {
+        SandboxPolicy::ReadOnly => "read-only",
+        SandboxPolicy::BoundedWrite => "workspace-write",
+        SandboxPolicy::Unrestricted => "danger-full-access",
+    }
 }

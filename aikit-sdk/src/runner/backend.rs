@@ -12,6 +12,7 @@ use std::ffi::OsString;
 use super::backends::argv_spec::ArgvCtx;
 use super::backends::{aikit, claude, codex, cursor, gemini, opencode};
 use super::capabilities::BackendCapabilities;
+use super::invocation::InvocationEnvelope;
 use super::types::{
     AgentEventPayload, AgentEventStream, QuotaExceededInfo, StreamMessage, TokenUsage, UsageSource,
 };
@@ -192,15 +193,18 @@ impl Backend {
         }
     }
 
-    /// Build the subprocess argv. Panics for the in-process [`Backend::Aikit`],
-    /// which is never spawned.
-    pub(crate) fn build_argv(
+    /// Build the subprocess argv carrying a spec-013 [`InvocationEnvelope`].
+    /// Each Backend's `argv` maps the honored knobs onto its native flags; an
+    /// `envelope` of `None` is the identity (legacy) argv. Panics for the
+    /// in-process [`Backend::Aikit`], which is never spawned.
+    pub(crate) fn build_argv_envelope(
         self,
         model: Option<&String>,
         yolo: bool,
         stream: bool,
         events_mode: bool,
         session_id: Option<&str>,
+        envelope: Option<&InvocationEnvelope>,
     ) -> Vec<OsString> {
         let ctx = ArgvCtx {
             model,
@@ -208,6 +212,7 @@ impl Backend {
             stream,
             events_mode,
             session_id,
+            envelope,
         };
         match self {
             Backend::Claude => claude::argv(ctx),

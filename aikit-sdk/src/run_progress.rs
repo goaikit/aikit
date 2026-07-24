@@ -198,6 +198,16 @@ impl RunProgress {
                 self.add_row(format!("step> {} {}", iteration, finish_reason));
             }
             AgentEventPayload::RawTransportLine { .. } => {}
+            AgentEventPayload::Result { text, .. } => {
+                let t = text.replace('\n', " ").replace('\r', "");
+                let t = t.trim();
+                if !t.is_empty() {
+                    self.add_row(format!(
+                        "result> {}",
+                        truncate(t, self.config.max_text_width)
+                    ));
+                }
+            }
             AgentEventPayload::SessionStarted { .. } => {}
         }
     }
@@ -313,6 +323,41 @@ mod tests {
             payload: AgentEventPayload::JsonLine(val),
         };
         progress.push("opencode", &event);
+        assert_eq!(progress.formatted_lines().count(), 0);
+    }
+
+    #[test]
+    fn test_result_payload_renders_final_answer() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let event = AgentEvent {
+            agent_key: "codex".to_string(),
+            seq: 0,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::Result {
+                text: "the fix is applied".to_string(),
+                structured: None,
+                session_id: None,
+            },
+        };
+        progress.push("codex", &event);
+        let lines: Vec<_> = progress.formatted_lines().collect();
+        assert_eq!(lines, vec!["result> the fix is applied"]);
+    }
+
+    #[test]
+    fn test_result_payload_empty_text_is_suppressed() {
+        let mut progress = RunProgress::new(ProgressViewConfig::default());
+        let event = AgentEvent {
+            agent_key: "codex".to_string(),
+            seq: 0,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::Result {
+                text: "   ".to_string(),
+                structured: None,
+                session_id: None,
+            },
+        };
+        progress.push("codex", &event);
         assert_eq!(progress.formatted_lines().count(), 0);
     }
 

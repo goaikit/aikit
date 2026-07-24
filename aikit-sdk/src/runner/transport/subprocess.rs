@@ -62,13 +62,25 @@ pub(crate) fn connect(
     );
 
     let sid = options.session_id.as_deref();
-    let argv = crate::runner::argv::build_argv(
+    // spec 013: derive the invocation envelope, fail closed on any security
+    // knob this Backend cannot honor (ADR 0012), then build the envelope-aware
+    // argv. An inactive envelope (no spec-013 knobs set) yields the identical
+    // legacy argv.
+    let envelope = crate::runner::invocation::InvocationEnvelope::from_options(options);
+    crate::runner::invocation::resolve_envelope(backend, &envelope)
+        .map_err(RunError::InvocationUnsupported)?;
+    let argv = crate::runner::argv::build_argv_envelope(
         backend.key(),
         options.model.as_ref(),
         options.yolo,
         options.stream,
         events_mode,
         sid,
+        if envelope.is_active() {
+            Some(&envelope)
+        } else {
+            None
+        },
     );
 
     let argv_display: Vec<String> = argv

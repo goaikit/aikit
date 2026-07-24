@@ -346,6 +346,13 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
         OsString::from("--dangerously-skip-permissions"),
     ];
     SPEC.push_model(&mut argv, ctx.model);
+    // spec 013 D6: claude's reproducible-run flag. claude's sandbox (AppLevel)
+    // is enforced via the session persona / tool-policy layer, not an argv flag.
+    if let Some(e) = ctx.envelope {
+        if e.bare {
+            argv.push(OsString::from("--bare"));
+        }
+    }
     let fmt = if ctx.events_mode {
         if ctx.stream {
             "stream-json"
