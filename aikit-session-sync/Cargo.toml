@@ -1,0 +1,43 @@
+[package]
+name = "aikit-session-sync"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Raw scrubbed session transcript sync to S3-compatible blob storage. Spec 012."
+repository = "https://github.com/goaikit/aikit"
+keywords = ["ai", "agents", "sync", "sessions", "s3"]
+categories = ["development-tools"]
+
+[features]
+default = ["claudecode", "codex"]
+claudecode = ["aikit-session-capture/claudecode"]
+codex = ["aikit-session-capture/codex"]
+watcher = ["aikit-session-capture/watcher"]
+
+[dependencies]
+aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", default-features = false }
+async-trait = "0.1"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+hex = "0.4"
+object_store = { version = "0.14.1", default-features = false, features = ["aws"] }
+percent-encoding = "2"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["fs", "macros", "rt", "sync", "time"] }
+tracing = "0.1"
+walkdir = "2"
+
+[dev-dependencies]
+aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", default-features = false, features = ["claudecode", "codex"] }
+async-trait = "0.1"
+bytes = "1"
+futures = "0.3"
+object_store = { version = "0.14.1", default-features = false, features = ["aws"] }
+tempfile = "3"
+testcontainers = "0.27"
+tokio = { version = "1", features = ["fs", "macros", "rt-multi-thread", "time"] }

@@ -10,6 +10,7 @@ members = [
     "aikit-textgrad",
     "aikit-skillopt",
     "aikit-session-capture",
+    "aikit-session-sync",
 ]
 
 [package]
@@ -70,6 +71,7 @@ which = "8.0"
 # Session capture (spec 010): on-disk adapter parsing for AI coding tools.
 # Optional — pulled when `agent-adapters` feature is on.
 aikit-session-capture = { path = "aikit-session-capture", version = "0.1.0", optional = true }
+aikit-session-sync = { path = "aikit-session-sync", version = "0.1.0", optional = true }
 # SQLite for the production EventStore/CursorStore (capture serve surface).
 rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 # async trait for the EventStore/CursorStore impls.
@@ -180,15 +182,16 @@ tools = ["dep:aikit-magictool"]
 # Pulls the adapter crate + SQLite storage + flips aikit-sdk capabilities.
 agent-adapters = [
     "dep:aikit-session-capture",
+    "dep:aikit-session-sync",
     "dep:rusqlite",
     "dep:async-trait",
     "aikit-sdk/agent-adapters",
 ]
-claudecode = ["agent-adapters", "aikit-sdk/claudecode", "aikit-session-capture/claudecode"]
-codex = ["agent-adapters", "aikit-sdk/codex", "aikit-session-capture/codex"]
+claudecode = ["agent-adapters", "aikit-sdk/claudecode", "aikit-session-capture/claudecode", "aikit-session-sync/claudecode"]
+codex = ["agent-adapters", "aikit-sdk/codex", "aikit-session-capture/codex", "aikit-session-sync/codex"]
 opencode = ["agent-adapters", "aikit-sdk/opencode", "aikit-session-capture/opencode"]
 # Watcher (spec 010 §14.5): notify-based fs watcher for automated capture.
-watcher = ["aikit-session-capture/watcher"]
+watcher = ["aikit-session-capture/watcher", "aikit-session-sync/watcher"]
 # MCP tools (spec 010 §15): registers check_file_freshness etc.
 mcp-tools = ["aikit-session-capture/mcp-tools"]
 # Crossmount (spec 010 §8/§19.3): WSL2 ↔ Windows home enumeration.

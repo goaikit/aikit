@@ -224,6 +224,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_session_sync_dry_run_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("CLAUDE_HOME", tmp.path().join("claude"));
+        std::env::set_var("CODEX_HOME", tmp.path().join("codex"));
+        let mut h = harness();
+        let out = h
+            .run(&[
+                "aikit",
+                "session",
+                "sync",
+                "--dry-run",
+                "--owner",
+                "owner",
+                "--format",
+                "json",
+            ])
+            .await;
+        assert_eq!(
+            out.exit_code, 0,
+            "session sync dry-run should succeed; stderr: {}",
+            out.stderr
+        );
+    }
+
     /// aikit agent run --dry-run works under new namespace
     #[tokio::test]
     async fn test_agent_run_dry_run() {

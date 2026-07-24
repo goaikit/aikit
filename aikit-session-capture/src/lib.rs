@@ -57,4 +57,4 @@ pub use models::{
     ActionKind, ActionStatus, CacheObservation, CaptureSource, TokenEvent, ToolEvent, ToolKind,
 };
 pub use registry::Registry;
-pub use scrub::SecretScrubber;
+pub use scrub::{SecretScrubber, SCRUBBER_PATTERN_VERSION};
