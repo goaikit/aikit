@@ -109,6 +109,90 @@ pub struct QuotaExceededInfo {
     pub raw_message: String,
 }
 
+/// Vendor-neutral filesystem-trust policy for a sub-agent run (spec 013 D1).
+///
+/// Named for the property, not any one CLI's vocabulary. Mapped per-Backend to
+/// its native sandbox mechanism; see
+/// [`Backend::sandbox_support`](crate::runner::Backend::sandbox_support).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxPolicy {
+    /// No writes.
+    ReadOnly,
+    /// Writes confined to the working root (`current_dir`) plus any
+    /// `extra_writable_roots`.
+    BoundedWrite,
+    /// No filesystem boundary.
+    Unrestricted,
+}
+
+impl SandboxPolicy {
+    /// All policies, in canonical order.
+    pub const ALL: &[SandboxPolicy] = &[
+        SandboxPolicy::ReadOnly,
+        SandboxPolicy::BoundedWrite,
+        SandboxPolicy::Unrestricted,
+    ];
+
+    /// The kebab-case wire identifier (e.g. `read-only`).
+    pub fn as_kebab_str(self) -> &'static str {
+        match self {
+            SandboxPolicy::ReadOnly => "read-only",
+            SandboxPolicy::BoundedWrite => "bounded-write",
+            SandboxPolicy::Unrestricted => "unrestricted",
+        }
+    }
+}
+
+impl std::str::FromStr for SandboxPolicy {
+    type Err = ();
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "read-only" | "readonly" => Ok(SandboxPolicy::ReadOnly),
+            "bounded-write" | "workspace-write" => Ok(SandboxPolicy::BoundedWrite),
+            "unrestricted" | "danger-full-access" | "full-access" => {
+                Ok(SandboxPolicy::Unrestricted)
+            }
+            _ => Err(()),
+        }
+    }
+}
+
+impl std::fmt::Display for SandboxPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_kebab_str())
+    }
+}
+
+/// How a Backend honors an invocation knob (spec 013 D5).
+///
+/// For the security knob (`--sandbox`) the variants are a *fidelity* ladder:
+/// only [`KnobSupport::SupportedOsEnforced`] (or [`KnobSupport::Emulated`]) is a
+/// real trust boundary; [`KnobSupport::SupportedAppLevel`] is cooperative and is
+/// reported honestly so a caller can decide whether it suffices. A knob that is
+/// [`KnobSupport::Unsupported`] fails closed for security knobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KnobSupport {
+    /// Backend enforces via OS primitives (codex Landlock/seatbelt, gemini
+    /// seatbelt/gVisor, or the process cwd for `working_dir`).
+    SupportedOsEnforced,
+    /// Backend enforces via cooperative tool/permission policy (claude
+    /// `--permission-mode`, opencode permissions, the in-process aikit policy).
+    SupportedAppLevel,
+    /// aikit enforces/emulates itself (a future aikit-side sandbox wrapper, or
+    /// post-hoc `--output-schema` validation).
+    Emulated,
+    /// No mechanism exists; a security knob with this value fails closed.
+    Unsupported,
+}
+
+impl KnobSupport {
+    /// Anything other than [`KnobSupport::Unsupported`] can be honored.
+    pub fn is_available(self) -> bool {
+        !matches!(self, KnobSupport::Unsupported)
+    }
+}
+
 /// Options for running an agent.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -144,6 +228,29 @@ pub struct RunOptions {
     pub session_agents: std::collections::HashMap<String, serde_json::Value>,
     /// Session ID for resume. None = new session (default, preserves existing behaviour).
     pub session_id: Option<String>,
+    // ── spec 013: common invocation envelope ─────────────────────────────────
+    /// Filesystem-trust policy (`--sandbox`). `None` = backend default. Maps
+    /// per-Backend to its native sandbox (spec 013 D1).
+    pub sandbox: Option<SandboxPolicy>,
+    /// Tool-approval axis: auto-approve every tool call without prompting
+    /// (`--auto-approve`). Independent of `sandbox` on most backends; coupled
+    /// into `--sandbox` on codex (spec 013 D1).
+    pub auto_approve: bool,
+    /// Extra writable roots beyond `current_dir` (`--add-dir`, spec 013 D2).
+    pub extra_writable_roots: Vec<std::path::PathBuf>,
+    /// Write the agent's final message to this file (`--output-result` / `-o`,
+    /// spec 013 D3).
+    pub result_file: Option<std::path::PathBuf>,
+    /// JSON Schema for typed final output (`--output-schema`); validated by
+    /// aikit when the Backend cannot enforce it natively (spec 013 D4).
+    pub output_schema: Option<serde_json::Value>,
+    /// Skip auto-discovery of user config/hooks/skills/MCP for reproducible
+    /// runs (`--bare`; codex `--ignore-user-config`, claude `--bare`, spec 013 D6).
+    pub bare: bool,
+    /// Do not persist the session (`--ephemeral`; codex `--ephemeral`, spec 013 D6).
+    pub ephemeral: bool,
+    /// Skip the headless git-repository guard (`--skip-git-repo-check`, spec 013 D6).
+    pub skip_git_repo_check: bool,
 }
 
 impl Default for RunOptions {
@@ -159,6 +266,14 @@ impl Default for RunOptions {
             session_persona: None,
             session_agents: std::collections::HashMap::new(),
             session_id: None,
+            sandbox: None,
+            auto_approve: false,
+            extra_writable_roots: Vec::new(),
+            result_file: None,
+            output_schema: None,
+            bare: false,
+            ephemeral: false,
+            skip_git_repo_check: false,
         }
     }
 }
@@ -225,6 +340,54 @@ impl RunOptions {
     /// Set the session ID for resume. None (default) starts a new session.
     pub fn with_session_id(mut self, id: impl Into<String>) -> Self {
         self.session_id = Some(id.into());
+        self
+    }
+
+    /// Set the filesystem-trust policy (spec 013 D1).
+    pub fn with_sandbox(mut self, policy: SandboxPolicy) -> Self {
+        self.sandbox = Some(policy);
+        self
+    }
+
+    /// Auto-approve every tool call (spec 013 D1 approval axis).
+    pub fn with_auto_approve(mut self, auto_approve: bool) -> Self {
+        self.auto_approve = auto_approve;
+        self
+    }
+
+    /// Add an extra writable root (spec 013 D2 `--add-dir`).
+    pub fn with_extra_writable_root(mut self, root: std::path::PathBuf) -> Self {
+        self.extra_writable_roots.push(root);
+        self
+    }
+
+    /// Set the result-file path (spec 013 D3 `--output-result` / `-o`).
+    pub fn with_result_file(mut self, path: std::path::PathBuf) -> Self {
+        self.result_file = Some(path);
+        self
+    }
+
+    /// Set the output JSON Schema (spec 013 D4 `--output-schema`).
+    pub fn with_output_schema(mut self, schema: serde_json::Value) -> Self {
+        self.output_schema = Some(schema);
+        self
+    }
+
+    /// Skip user config/hooks/MCP discovery (spec 013 D6 `--bare`).
+    pub fn with_bare(mut self, bare: bool) -> Self {
+        self.bare = bare;
+        self
+    }
+
+    /// Do not persist the session (spec 013 D6 `--ephemeral`).
+    pub fn with_ephemeral(mut self, ephemeral: bool) -> Self {
+        self.ephemeral = ephemeral;
+        self
+    }
+
+    /// Skip the git-repo guard (spec 013 D6 `--skip-git-repo-check`).
+    pub fn with_skip_git_repo_check(mut self, skip: bool) -> Self {
+        self.skip_git_repo_check = skip;
         self
     }
 }
@@ -302,6 +465,9 @@ pub enum RunError {
     SessionNotFound(String),
     /// Session file exists but could not be loaded or deserialized.
     SessionLoadFailed { id: String, reason: String },
+    /// A requested security knob cannot be honored by the backend (spec 013 D5,
+    /// fail-closed pre-flight). Carries the structured reason.
+    InvocationUnsupported(crate::runner::invocation::UnsupportedKnob),
 }
 
 impl std::fmt::Display for RunError {
@@ -350,6 +516,7 @@ impl std::fmt::Display for RunError {
             RunError::SessionLoadFailed { id, reason } => {
                 write!(f, "error: session '{}' could not be loaded: {}", id, reason)
             }
+            RunError::InvocationUnsupported(err) => write!(f, "{}", err),
         }
     }
 }
@@ -368,7 +535,8 @@ impl std::error::Error for RunError {
             | RunError::MissingProgressSink
             | RunError::WrongAgentKey(_)
             | RunError::SessionNotFound(_)
-            | RunError::SessionLoadFailed { .. } => None,
+            | RunError::SessionLoadFailed { .. }
+            | RunError::InvocationUnsupported(_) => None,
         }
     }
 }
@@ -529,6 +697,16 @@ pub enum AgentEventPayload {
     AikitStepFinish {
         iteration: u32,
         finish_reason: String,
+    },
+    /// Terminal result handle (spec 013 D3). Emitted once at run end. The
+    /// `--output-result`/`-o` flag writes `text` (and `structured` when
+    /// `--output-schema` was honored) to a file; streaming callers get the same
+    /// handle from this event without a temp file. Additive — existing
+    /// consumers' `_` arm absorbs it.
+    Result {
+        text: String,
+        structured: Option<serde_json::Value>,
+        session_id: Option<String>,
     },
     /// Emitted once per run as the first event when the SDK has assigned (or
     /// been given) a session_id. Useful for callers that mint a session

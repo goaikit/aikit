@@ -7,6 +7,8 @@
 
 use std::ffi::OsString;
 
+use crate::runner::invocation::InvocationEnvelope;
+
 #[derive(Clone, Copy)]
 pub(crate) enum SessionMode {
     /// Session id is appended as a positional argument (handled per-Backend).
@@ -63,4 +65,9 @@ pub(crate) struct ArgvCtx<'a> {
     pub stream: bool,
     pub events_mode: bool,
     pub session_id: Option<&'a str>,
+    /// Spec-013 invocation envelope (`None` ⇒ legacy/identity behavior: no
+    /// sandbox/working-root/approval flags are emitted, preserving every
+    /// existing argv test). When `Some`, each Backend's `argv` maps the
+    /// honored knobs onto its native flags.
+    pub envelope: Option<&'a InvocationEnvelope>,
 }
