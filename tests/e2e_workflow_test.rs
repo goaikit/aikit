@@ -10,11 +10,25 @@ use predicates::prelude::*;
 mod tests {
     use super::*;
 
+    /// Pre-create `<work>/.aikit/` so `AikDirectory::find()` short-circuits in the
+    /// test's tempdir instead of walking up and discovering an unrelated `.aikit/`
+    /// left somewhere above. On the Windows CI runner tempdirs are nested under the
+    /// user profile, so a stray home-level `.aikit/` up the tree would otherwise be
+    /// found and install would write artifacts there, leaving `work` empty. Mirrors
+    /// the guard in newton_template_install_test.rs.
+    fn isolate_aikit(work: &std::path::Path) {
+        let dir = work.join(".aikit");
+        if !dir.exists() {
+            std::fs::create_dir_all(&dir).expect("pre-create .aikit/ in tempdir");
+        }
+    }
+
     /// Test complete package creation workflow: init -> build -> install -> list
     #[test]
     fn test_complete_package_workflow() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let work = temp.path();
+        isolate_aikit(work);
 
         // Step 1: Initialize package
         cargo_bin_cmd!("aikit")
@@ -83,6 +97,7 @@ mod tests {
     fn test_package_installation_workflow() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let work = temp.path();
+        isolate_aikit(work);
 
         // Create a package to install
         cargo_bin_cmd!("aikit")
@@ -147,6 +162,7 @@ mod tests {
     fn test_package_update_workflow() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let work = temp.path();
+        isolate_aikit(work);
 
         // Step 1: Create and install initial package v1.0.0
         cargo_bin_cmd!("aikit")
@@ -251,6 +267,7 @@ mod tests {
     fn test_multiple_package_workflow() -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let work = temp.path();
+        isolate_aikit(work);
 
         // Create multiple packages
         let package_names = vec!["package-a", "package-b", "package-c"];
