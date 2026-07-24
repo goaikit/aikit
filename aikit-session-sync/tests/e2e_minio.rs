@@ -16,7 +16,7 @@ use std::sync::Arc;
 use aikit_session_capture::{Adapter, AdapterError, ParseResult, ToolKind};
 use aikit_session_sync::state::InMemorySyncStateStore;
 use aikit_session_sync::{
-    S3Sink, S3SinkConfig, SyncConfig, SyncEngine, SyncOutcome, SyncSink, SyncStateStore,
+    S3Sink, S3SinkConfig, SyncConfig, SyncEngine, SyncObject, SyncOutcome, SyncSink, SyncStateStore,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -249,5 +249,28 @@ async fn e2e_sync_round_trips_content_scrubbed_and_envelope_via_minio() {
     assert_eq!(
         jsonl_versions, 2,
         "both transcript versions must be retained"
+    );
+
+    // S3Sink error path: a PUT to a bucket that does not exist returns a fast
+    // NoSuchBucket error, which must surface as SyncError::Backend (not panic).
+    let bad_sink = S3Sink::new(S3SinkConfig {
+        bucket: "no-such-bucket".to_string(),
+        endpoint: endpoint.clone(),
+        region: "us-east-1".to_string(),
+        allow_http: true,
+        endpoint_ca_bundle: None,
+        path_style: true,
+    })
+    .expect("build bad S3Sink");
+    let err = bad_sink
+        .put(SyncObject {
+            key: "sessions/x/claude_code/s/hash.jsonl".to_string(),
+            content: bytes::Bytes::from_static(b"x"),
+            envelope: env,
+        })
+        .await;
+    assert!(
+        matches!(err, Err(aikit_session_sync::SyncError::Backend(_))),
+        "PUT to a missing bucket must map to SyncError::Backend, got: {err:?}"
     );
 }

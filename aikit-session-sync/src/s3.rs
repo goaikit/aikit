@@ -94,6 +94,21 @@ mod tests {
     }
 
     #[test]
+    fn valid_ca_bundle_builds() {
+        // Covers the custom-CA success path: a well-formed PEM bundle is parsed
+        // and each cert added as a client root. The cert is a throwaway
+        // self-signed fixture; from_pem_bundle validates structure, not trust.
+        std::env::set_var("AWS_ACCESS_KEY_ID", "x");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "y");
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("ca.pem");
+        std::fs::write(&bundle, include_str!("testdata/test-ca.pem")).unwrap();
+        let mut cfg = base_cfg();
+        cfg.endpoint_ca_bundle = Some(bundle);
+        assert!(S3Sink::new(cfg).is_ok());
+    }
+
+    #[test]
     fn malformed_ca_bundle_is_backend_error() {
         let tmp = tempfile::tempdir().unwrap();
         let bundle = tmp.path().join("bad.pem");

@@ -161,3 +161,30 @@ jobs:
 
     - name: Run integration tests
       run: cargo test --workspace --test '*' -- --test-threads=1
+
+  # Enforces the session-sync coverage bar (spec 012). The e2e test spins up a
+  # real MinIO via testcontainers (Docker is available on ubuntu runners), so
+  # the S3 write path is exercised end-to-end and counted toward coverage.
+  coverage-session-sync:
+    name: Coverage (session-sync >= 95%)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.1"
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Coverage gate (fail under 95% lines)
+        run: cargo llvm-cov -p aikit-session-sync --fail-under-lines 95 -- --test-threads=1
