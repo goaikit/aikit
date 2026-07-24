@@ -57,6 +57,15 @@ impl Adapter for TempDirAdapter {
 }
 
 fn docker_available() -> bool {
+    // MinIO is a Linux container; testcontainers needs a Linux Docker daemon.
+    // GitHub's macOS/Windows runners don't provide one — and on Windows the
+    // docker CLI is present (so `docker version` succeeds) but only serves
+    // Windows containers, so the guard must also require a Linux target or the
+    // container start panics. The coverage job that needs this test runs on
+    // ubuntu, so gating to Linux keeps s3.rs coverage intact.
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
     std::process::Command::new("docker")
         .arg("version")
         .stdout(std::process::Stdio::null())
