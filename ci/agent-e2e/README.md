@@ -28,25 +28,45 @@ exits 0, a `*.jsonl` transcript appears under `~/.claude/projects`, and
 
 ## Required repo secrets
 
+The gateway is reached **over the Tailnet**, not a public endpoint. The nightly
+workflow joins the Tailnet as an ephemeral, tagged node, then runs the smoke
+container with `--network host` so it can resolve/reach the internal gateway.
+
 | Secret | Meaning |
 |--------|---------|
-| `LLM_GATEWAY_URL` | The gateway's Anthropic-compatible base URL (public HTTPS). |
+| `TS_OAUTH_CLIENT_ID` | Tailscale OAuth client id, authorized for `tag:ci`. |
+| `TS_OAUTH_SECRET` | Tailscale OAuth client secret. |
+| `LLM_GATEWAY_URL` | Gateway Anthropic-compatible base URL **on the Tailnet** — a MagicDNS name or `100.x` tailnet IP, e.g. `http://gateway.<tailnet>.ts.net:4000`. |
 | `LLM_GATEWAY_KEY` | The gateway API key. |
 
-The workflow **skips cleanly** (green, no-op) when these are unset — so forks
-and secret-less environments don't fail.
+The workflow **skips cleanly** (green, no-op) when any of these are unset — so
+forks and secret-less environments don't fail.
+
+### Tailscale setup (one-time)
+
+1. In the Tailscale admin console → **Settings → OAuth clients**, create a client
+   with the **`auth_keys`** scope and attach the tag **`tag:ci`**.
+2. In the **ACL policy**, define `tag:ci` under `tagOwners` (e.g.
+   `"tag:ci": ["autogroup:admin"]`) and grant it access to the gateway node/port
+   (an ACL rule allowing `tag:ci` → the gateway's `:4000`).
+3. Add the client id/secret as the `TS_OAUTH_*` repo secrets above.
+
+Ephemeral nodes created by the action auto-remove when the job ends.
 
 ## Run it
 
 - **CI:** Actions → *Nightly Agent E2E* → *Run workflow* (or wait for the nightly).
-- **Locally:**
+- **Locally** (on a machine already on the Tailnet):
   ```bash
   docker build -f ci/agent-e2e/Dockerfile.agent-e2e -t aikit-agent-e2e .
-  docker run --rm \
-    -e ANTHROPIC_BASE_URL="https://your-gateway.example.com" \
+  docker run --rm --network host \
+    -e ANTHROPIC_BASE_URL="http://gateway.<tailnet>.ts.net:4000" \
     -e ANTHROPIC_AUTH_TOKEN="your-gateway-key" \
     aikit-agent-e2e
   ```
+  `--network host` lets the container use the host's Tailnet connectivity and
+  MagicDNS. If MagicDNS isn't available, use the gateway's `100.x` tailnet IP in
+  `ANTHROPIC_BASE_URL` instead of the MagicDNS name.
 
 ## Extending
 
