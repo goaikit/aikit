@@ -7,6 +7,9 @@
 
 use regex::Regex;
 
+/// Bump when `SecretScrubber::default_patterns()` changes.
+pub const SCRUBBER_PATTERN_VERSION: u32 = 1;
+
 /// Replaces credential matches in adapter output with `[REDACTED:<label>]`.
 ///
 /// Cloning is cheap (patterns are shared via `Arc`). The same scrubber

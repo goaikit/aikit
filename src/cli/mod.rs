@@ -351,6 +351,31 @@ pub fn build_app() -> Result<AikitApp> {
         },
     )?;
 
+    builder = builder.register(
+        path!["session", "sync"],
+        |_ctx, args: SessionSyncArgs| async move {
+            let code = session::execute_sync(session::SyncSessionsArgs {
+                bucket: args.bucket,
+                endpoint: args.endpoint,
+                region: args.region,
+                owner: args.owner,
+                key_prefix: args.key_prefix,
+                tools: args.tool,
+                watch: args.watch,
+                dry_run: args.dry_run,
+                allow_http: args.allow_http,
+                format: args.format,
+                log_level: args.log_level,
+            })
+            .await?;
+            if code == 0 {
+                Ok(())
+            } else {
+                std::process::exit(code);
+            }
+        },
+    )?;
+
     #[cfg(all(feature = "agent-adapters", feature = "mcp-tools"))]
     {
         let conn = serve::storage::schema::open(&serve::capture_db_path())?;
@@ -1226,6 +1251,80 @@ impl FromArgValueMap for SessionListArgs {
     fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
         SessionListArgs {
             serve_url: get_opt_val(map, "serve-url"),
+        }
+    }
+}
+
+struct SessionSyncArgs {
+    bucket: Option<String>,
+    endpoint: Option<String>,
+    region: Option<String>,
+    owner: Option<String>,
+    key_prefix: Option<String>,
+    tool: Vec<String>,
+    watch: bool,
+    dry_run: bool,
+    allow_http: bool,
+    format: String,
+    log_level: Option<String>,
+}
+
+impl IntoCommandSpec for SessionSyncArgs {
+    fn command_spec() -> CommandSpec {
+        CommandSpec {
+            summary: "Sync raw scrubbed session transcripts to S3-compatible storage",
+            syntax: Some("session sync --bucket <BUCKET> --endpoint <URL>"),
+            category: Some("agents"),
+            args: vec![
+                opt_spec("bucket", "S3 bucket (or AIKIT_SYNC_BUCKET)"),
+                opt_spec(
+                    "endpoint",
+                    "S3-compatible endpoint (or AIKIT_SYNC_ENDPOINT)",
+                ),
+                opt_spec("region", "S3 region (default: us-east-1)"),
+                opt_spec("owner", "Owner prefix (or AIKIT_SYNC_OWNER)"),
+                opt_spec("key-prefix", "Object key prefix (default: sessions/)"),
+                ArgSpec {
+                    name: "tool",
+                    short: None,
+                    long: Some("tool"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Repeated,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Tool to sync; repeatable: claude_code or codex",
+                    ..Default::default()
+                },
+                flag_spec("watch", "Continuously watch for session changes"),
+                flag_spec(
+                    "dry-run",
+                    "Detect, scrub, hash, and summarize without uploading",
+                ),
+                flag_spec("allow-http", "Allow plain HTTP endpoints for local MinIO"),
+                opt_spec("format", "Output format: default or json"),
+                opt_spec("log-level", "Log level (default: info or RUST_LOG)"),
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for SessionSyncArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        Self {
+            bucket: get_opt_val(map, "bucket"),
+            endpoint: get_opt_val(map, "endpoint"),
+            region: get_opt_val(map, "region"),
+            owner: get_opt_val(map, "owner"),
+            key_prefix: get_opt_val(map, "key-prefix"),
+            tool: get_repeated_val(map, "tool"),
+            watch: get_bool_val(map, "watch"),
+            dry_run: get_bool_val(map, "dry-run"),
+            allow_http: get_bool_val(map, "allow-http"),
+            format: get_str_default(map, "format", "default"),
+            log_level: get_opt_val(map, "log-level"),
         }
     }
 }
