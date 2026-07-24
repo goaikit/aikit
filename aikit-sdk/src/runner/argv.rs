@@ -549,6 +549,31 @@ mod tests {
     }
 
     #[test]
+    fn spec013_claude_read_only_restricts_tools() {
+        let env = InvocationEnvelope {
+            sandbox: Some(SandboxPolicy::ReadOnly),
+            ..Default::default()
+        };
+        let argv = build_argv_envelope("claude", None, false, false, false, None, Some(&env));
+        let read_pos = argv.iter().position(|a| a == "--allowedTools").unwrap();
+        assert_eq!(argv[read_pos + 1], OsString::from("Read"));
+        // bounded-write / unrestricted do not restrict the toolset
+        let bw = build_argv_envelope(
+            "claude",
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(&InvocationEnvelope {
+                sandbox: Some(SandboxPolicy::BoundedWrite),
+                ..Default::default()
+            }),
+        );
+        assert!(!bw.contains(&OsString::from("--allowedTools")));
+    }
+
+    #[test]
     fn spec013_gemini_sandbox_toggle() {
         // restrictive policy ⇒ `-s`; unrestricted/none ⇒ no `-s`
         let on = build_argv_envelope(

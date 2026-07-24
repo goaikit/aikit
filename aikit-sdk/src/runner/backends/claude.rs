@@ -346,9 +346,14 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
         OsString::from("--dangerously-skip-permissions"),
     ];
     SPEC.push_model(&mut argv, ctx.model);
-    // spec 013 D6: claude's reproducible-run flag. claude's sandbox (AppLevel)
-    // is enforced via the session persona / tool-policy layer, not an argv flag.
+    // spec 013 D1/D6: claude honors read-only cooperatively via --allowedTools
+    // (AppLevel fidelity — claude has no OS sandbox), and --bare for
+    // reproducible runs.
     if let Some(e) = ctx.envelope {
+        if matches!(e.sandbox, Some(p) if p.as_kebab_str() == "read-only") {
+            argv.push(OsString::from("--allowedTools"));
+            argv.push(OsString::from("Read"));
+        }
         if e.bare {
             argv.push(OsString::from("--bare"));
         }

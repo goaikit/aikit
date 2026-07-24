@@ -38,7 +38,8 @@ pub use codex_session::{
     open_codex_session, CodexControlHandle, CodexSession, CodexSessionError, CodexSessionOptions,
 };
 pub use invocation::{
-    exit_code_for, format_capabilities, resolve_envelope, InvocationEnvelope, UnsupportedKnob,
+    exit_code_for, format_capabilities, resolve_envelope, sandbox_env_for, InvocationEnvelope,
+    UnsupportedKnob,
 };
 // Shared approval types; available when at least one session feature is enabled.
 #[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
@@ -445,6 +446,10 @@ where
     let mut json_lines_seen: u64 = 0;
     let mut stream_messages_emitted: u64 = 0;
     let mut json_lines_unmapped: u64 = 0;
+    // spec 013 D3: track the final assistant message so a terminal Result
+    // event can be emitted once the run completes (canonical for every event
+    // consumer: serve, agentrt, the CLI).
+    let mut last_result_text: Option<String> = None;
 
     let emit_raw = options.emit_raw_transport;
 
@@ -506,6 +511,11 @@ where
                             let payload = match frame {
                                 backend::Decoded::Stream(m) => {
                                     stream_messages_emitted += 1;
+                                    if matches!(m.role, types::MessageRole::Assistant)
+                                        && !m.text.trim().is_empty()
+                                    {
+                                        last_result_text = Some(m.text.clone());
+                                    }
                                     AgentEventPayload::StreamMessage(m)
                                 }
                                 backend::Decoded::ToolUse {
@@ -735,6 +745,26 @@ where
         .first()
         .map(|(_, source)| source.clone())
         .and_then(|source| aggregate_token_usage(&usage_entries, source));
+
+    // spec 013 D3: emit one terminal Result event (the final assistant message)
+    // so every event consumer gets a canonical result handle without scraping
+    // the stream. Best-effort: a panicking callback here must not discard the
+    // already-determined RunResult.
+    if let Some(text) = last_result_text {
+        let result_event = AgentEvent {
+            agent_key: agent_key.to_string(),
+            seq,
+            stream: types::AgentEventStream::Stdout,
+            payload: AgentEventPayload::Result {
+                text,
+                structured: None,
+                session_id: options.session_id.clone(),
+            },
+        };
+        let _ = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            on_event(result_event);
+        }));
+    }
 
     Ok(RunResult {
         status,
@@ -1024,6 +1054,51 @@ mod tests {
             result.is_ok(),
             "codex with a supported sandbox should run: {:?}",
             result.err()
+        );
+    }
+
+    /// spec 013 D3: the SDK run loop emits one terminal `Result` event carrying
+    /// the final assistant message, so every event consumer (serve, agentrt,
+    /// CLI) gets a canonical result handle without scraping the stream.
+    #[cfg(unix)]
+    #[test]
+    fn test_spec013_result_event_emitted_at_run_end() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // A codex stub whose single line decodes to an assistant StreamMessage.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("codex");
+        let mut f = std::fs::File::create(&stub).unwrap();
+        writeln!(
+            f,
+            "#!/bin/sh\necho '{{\"type\":\"item.completed\",\"item\":{{\"type\":\"agent_message\",\"text\":\"final answer\"}}}}'"
+        )
+        .unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), orig_path));
+
+        let mut got_result = false;
+        let result = run_agent_events("codex", "hi", RunOptions::default(), |ev| {
+            if matches!(
+                ev.payload,
+                AgentEventPayload::Result { ref text, .. } if text == "final answer"
+            ) {
+                got_result = true;
+            }
+        });
+
+        std::env::set_var("PATH", orig_path);
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert!(
+            got_result,
+            "expected a terminal Result event with the final assistant text"
         );
     }
 

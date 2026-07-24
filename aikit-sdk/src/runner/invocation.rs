@@ -267,6 +267,32 @@ pub fn exit_code_for(status_code: Option<i32>, run_error: Option<&super::types::
     status_code.unwrap_or(1)
 }
 
+/// Env vars to apply to the spawned agent Command for the envelope's sandbox
+/// knobs (spec 013 D1/D2). gemini configures its OS sandbox via env
+/// (`SEATBELT_PROFILE` / `SANDBOX_MOUNTS`) rather than argv; other backends
+/// return empty (their sandbox knobs are argv-mapped or unsupported).
+pub fn sandbox_env_for(backend: Backend, env: &InvocationEnvelope) -> Vec<(String, String)> {
+    if !matches!(backend, Backend::Gemini) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // read-only ⇒ strict profile (read+write restrictions); bounded-write uses
+    // gemini's default permissive-open (writes confined to the workspace);
+    // unrestricted leaves the sandbox off (no `-s`).
+    if matches!(env.sandbox, Some(SandboxPolicy::ReadOnly)) {
+        out.push(("SEATBELT_PROFILE".to_string(), "strict-open".to_string()));
+    }
+    if !env.extra_writable_roots.is_empty() {
+        let mounts: Vec<String> = env
+            .extra_writable_roots
+            .iter()
+            .map(|r| format!("{}:{}:rw", r.display(), r.display()))
+            .collect();
+        out.push(("SANDBOX_MOUNTS".to_string(), mounts.join(",")));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,5 +659,59 @@ mod tests {
             stderr: vec![],
         };
         assert_eq!(exit_code_for(None, Some(&timed_out)), 124);
+    }
+
+    // ── gemini sandbox env (follow-up 2) ───────────────────────────────────────
+
+    #[test]
+    fn sandbox_env_only_gemini_emits() {
+        let env = InvocationEnvelope {
+            sandbox: Some(SandboxPolicy::ReadOnly),
+            ..Default::default()
+        };
+        assert!(sandbox_env_for(Backend::Codex, &env).is_empty());
+        assert!(sandbox_env_for(Backend::Claude, &env).is_empty());
+        assert!(!sandbox_env_for(Backend::Gemini, &env).is_empty());
+    }
+
+    #[test]
+    fn gemini_sandbox_env_read_only_sets_strict_profile() {
+        let env = InvocationEnvelope {
+            sandbox: Some(SandboxPolicy::ReadOnly),
+            ..Default::default()
+        };
+        assert_eq!(
+            sandbox_env_for(Backend::Gemini, &env),
+            vec![("SEATBELT_PROFILE".to_string(), "strict-open".to_string())]
+        );
+    }
+
+    #[test]
+    fn gemini_sandbox_env_bounded_write_no_profile_override() {
+        // bounded-write uses gemini's default profile (writes confined to the
+        // workspace); unrestricted leaves the sandbox off.
+        let bw = InvocationEnvelope {
+            sandbox: Some(SandboxPolicy::BoundedWrite),
+            ..Default::default()
+        };
+        assert!(sandbox_env_for(Backend::Gemini, &bw).is_empty());
+        let un = InvocationEnvelope {
+            sandbox: Some(SandboxPolicy::Unrestricted),
+            ..Default::default()
+        };
+        assert!(sandbox_env_for(Backend::Gemini, &un).is_empty());
+    }
+
+    #[test]
+    fn gemini_sandbox_env_mounts_extra_roots() {
+        let env = InvocationEnvelope {
+            extra_writable_roots: vec![PathBuf::from("/a"), PathBuf::from("/b")],
+            ..Default::default()
+        };
+        let e = sandbox_env_for(Backend::Gemini, &env);
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].0, "SANDBOX_MOUNTS");
+        assert!(e[0].1.contains("/a:/a:rw"), "{}", e[0].1);
+        assert!(e[0].1.contains("/b:/b:rw"), "{}", e[0].1);
     }
 }

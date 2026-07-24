@@ -326,9 +326,9 @@ pub fn execute(args: RunArgs) -> Result<()> {
         options = options.with_skip_git_repo_check(true);
     }
 
-    // spec 013 D3: capture the result-handle inputs before `options` is moved.
+    // spec 013 D3: capture the result-file path before `options` is moved; the
+    // SDK now emits the terminal Result event canonically.
     let result_file = options.result_file.clone();
-    let result_session_id = options.session_id.clone();
 
     let is_builtin = agent == "aikit" || agent == "agent";
 
@@ -369,15 +369,12 @@ pub fn execute(args: RunArgs) -> Result<()> {
             }
         }
     } else if args.events {
-        // spec 013 D3: track the final assistant text for the Result handle.
-        let mut last_text: Option<String> = None;
+        // spec 013 D3: the SDK emits a terminal Result event; capture its text
+        // for --output-result. No duplicate CLI emission.
+        let mut result_text: Option<String> = None;
         match run_agent_events(&agent, &prompt, options, |event: AgentEvent| {
-            if let aikit_sdk::runner::AgentEventPayload::StreamMessage(sm) = &event.payload {
-                if matches!(sm.role, aikit_sdk::runner::MessageRole::Assistant)
-                    && !sm.text.trim().is_empty()
-                {
-                    last_text = Some(sm.text.clone());
-                }
+            if let aikit_sdk::runner::AgentEventPayload::Result { text, .. } = &event.payload {
+                result_text = Some(text.clone());
             }
             if let Ok(line) = serde_json::to_string(&event) {
                 println!("{}", line);
@@ -385,24 +382,8 @@ pub fn execute(args: RunArgs) -> Result<()> {
         }) {
             Ok(result) => {
                 let _ = io::stderr().write_all(&result.stderr);
-                // spec 013 D3: emit one terminal Result event, then --output-result.
-                if let Some(t) = last_text.as_deref() {
-                    let res = AgentEvent {
-                        agent_key: agent.clone(),
-                        seq: 0,
-                        stream: aikit_sdk::runner::AgentEventStream::Stdout,
-                        payload: aikit_sdk::runner::AgentEventPayload::Result {
-                            text: t.to_string(),
-                            structured: None,
-                            session_id: result_session_id.clone(),
-                        },
-                    };
-                    if let Ok(line) = serde_json::to_string(&res) {
-                        println!("{}", line);
-                    }
-                    if let Some(p) = result_file.as_deref() {
-                        write_result_file(p, t);
-                    }
+                if let (Some(p), Some(t)) = (result_file.as_deref(), result_text.as_deref()) {
+                    write_result_file(p, t);
                 }
                 std::process::exit(exit_code_for(result.exit_code(), None));
             }
@@ -419,24 +400,18 @@ pub fn execute(args: RunArgs) -> Result<()> {
         let mut progress = RunProgress::new(ProgressViewConfig::default());
         let mut renderer = ProgressRenderer::new().unwrap_or_else(|_| ProgressRenderer::non_tty());
         let agent_key = agent.clone();
-        let mut last_text: Option<String> = None;
+        let mut result_text: Option<String> = None;
         match run_agent_events(&agent, &prompt, options, |event: AgentEvent| {
-            if let aikit_sdk::runner::AgentEventPayload::StreamMessage(sm) = &event.payload {
-                if matches!(sm.role, aikit_sdk::runner::MessageRole::Assistant)
-                    && !sm.text.trim().is_empty()
-                {
-                    last_text = Some(sm.text.clone());
-                }
+            if let aikit_sdk::runner::AgentEventPayload::Result { text, .. } = &event.payload {
+                result_text = Some(text.clone());
             }
             progress.push(&agent_key, &event);
             let _ = renderer.render(&progress);
         }) {
             Ok(result) => {
                 let exit_code = exit_code_for(result.exit_code(), None);
-                if let Some(t) = last_text.as_deref() {
-                    if let Some(p) = result_file.as_deref() {
-                        write_result_file(p, t);
-                    }
+                if let (Some(p), Some(t)) = (result_file.as_deref(), result_text.as_deref()) {
+                    write_result_file(p, t);
                 }
                 let _ = renderer.finalize(exit_code, progress.token_footer());
                 std::process::exit(exit_code);
