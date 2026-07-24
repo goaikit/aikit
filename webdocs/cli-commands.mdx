@@ -19,6 +19,7 @@ AIKit organizes functionality into logical command groups:
 - **`mcp list`** - List supported agents and their project/global config paths
 - **`agent mcp`** - List supported agents or merge one MCP server into agent config files
 - **`serve`** - Start an HTTP server for multi-turn agent sessions ([dedicated page](/serve))
+- **`session sync`** - Sync raw, secret-scrubbed Claude Code / Codex session transcripts to S3-compatible blob storage
 - **`llm`** - Invoke an LLM via OpenAI-compatible API (supports streaming and JSON output)
 - **`check`** / **`agent check`** - Validate installed tools and AI agent CLIs
 - **`version`** - Display version information
@@ -65,6 +66,7 @@ aikit <command> --help
 | `mcp list` | List agents + config paths | `aikit mcp list` |
 | `agent mcp` | MCP config merge | `aikit agent mcp list` / `aikit agent mcp add --agent claude ...` |
 | `serve` | Multi-turn HTTP API | `aikit serve --port 8787` |
+| `session sync` | Sync sessions to blob | `aikit session sync --owner me --bucket b --endpoint https://…` |
 | `llm` | Invoke an LLM | `aikit llm -m gpt-4o -p "Hello"` |
 | `check` | Validate environment | `aikit check` |
 | `install` | Install package | `aikit install owner/repo` |
@@ -291,6 +293,81 @@ curl -s -X POST http://127.0.0.1:8787/api/v1/messages \
 Any other explicit `Accept` returns `406 Not Acceptable`. See the
 [serve API reference](/serve) for full request/response schemas, SSE event
 names, session lifecycle, and error codes.
+
+### session sync
+
+Sync **raw, secret-scrubbed** session transcripts from local AI coding tools to
+S3-compatible blob storage. Sync is a **write-only producer**: it reads the
+JSONL files each tool already wrote to disk, scrubs credentials, and uploads
+content-addressed snapshots plus a JSON metadata sidecar. It never launches the
+tool and never reads back — analysis/search is a separate downstream tool.
+
+Only the two flat-file JSONL tools are supported today: **Claude Code** and
+**Codex**. OpenCode (SQLite) is out of scope for v1.
+
+Every object lands under a deterministic key inside the bucket:
+
+```
+<key-prefix>/<owner>/<tool>/<session-id>/<sha256>.jsonl       # scrubbed transcript
+<key-prefix>/<owner>/<tool>/<session-id>/<sha256>.meta.json   # envelope: host, hash, timestamps, versions
+```
+
+```bash
+# Credentials come from the standard AWS environment, never flags.
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+
+# One-shot: sync all detected Claude Code sessions to a MinIO bucket
+aikit session sync \
+  --owner alice \
+  --bucket my-sessions \
+  --endpoint https://minio.internal:9000 \
+  --tool claude_code
+
+# Preview only — detect, scrub, hash, summarize; upload nothing
+aikit session sync --owner alice --bucket my-sessions \
+  --endpoint https://minio.internal:9000 --dry-run --format json
+
+# Continuously watch and sync on every change (laptop daemon / pod sidecar)
+aikit session sync --owner alice --bucket my-sessions \
+  --endpoint https://minio.internal:9000 --watch
+```
+
+**Options:**
+
+| Flag | Env | Default | Description |
+|------|-----|---------|-------------|
+| `--bucket` | `AIKIT_SYNC_BUCKET` | — (required) | Target S3 bucket |
+| `--endpoint` | `AIKIT_SYNC_ENDPOINT` | — (required) | S3-compatible endpoint URL |
+| `--region` | `AIKIT_SYNC_REGION` | `us-east-1` | Region (a sentinel value is fine for MinIO) |
+| `--owner` | `AIKIT_SYNC_OWNER` | credential-derived | Owner prefix; required (see fail-closed rule below) |
+| `--key-prefix` | `AIKIT_SYNC_PREFIX` | `sessions/` | Root key prefix — the top-level "folder" in the bucket |
+| `--tool` | — | all JSONL tools | Repeatable; `claude_code` or `codex` |
+| `--watch` | — | off | Continuous mode: sync on filesystem change |
+| `--dry-run` | — | off | Detect + scrub + hash + summarize, upload nothing |
+| `--allow-http` | `AIKIT_SYNC_ALLOW_HTTP` | `false` | Permit plain-HTTP endpoints (local MinIO dev) |
+| `--format` | — | `default` | `default` (human) or `json` (machine-readable summary) |
+| `--log-level` | `RUST_LOG` | `info` | Log verbosity |
+
+**Credentials** are read from the standard AWS environment
+(`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or a workload-identity chain) and
+are **never** accepted as flags. Two additional env-only knobs:
+
+- `AIKIT_SYNC_CREDENTIAL_OWNER` — the owner identity derived from the credential.
+  If it is set **and** disagrees with `--owner`, sync **fails closed** (exit `2`)
+  rather than guessing. If neither is set, sync also refuses to start — an owner
+  is always required.
+- `AIKIT_SYNC_ENDPOINT_CA_BUNDLE` — path to a custom CA PEM bundle for a
+  self-signed MinIO/S3 endpoint.
+
+**Idempotency & retention:** the object key is the SHA-256 of the scrubbed
+bytes, so re-syncing unchanged content is a no-op; a grown transcript produces a
+new version object and **all versions are retained** (v1 keeps everything).
+
+**Exit codes:** `0` everything synced or already current · `1` one or more files
+failed after retries · `2` configuration/auth error before any upload (missing
+bucket/endpoint, or an owner mismatch).
+
+Requires a build with the `agent-adapters` feature (plus `watcher` for `--watch`).
 
 ### agent mcp
 

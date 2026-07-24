@@ -19,6 +19,9 @@ built-in `aikit` agent, or anything else in the catalog.
   schema-driven form-fill endpoints on `aikit serve` (`/api/v1/aitools/…`),
   including `agents/draft_definition` to draft an agent definition from plain
   English. See [`aikit-magictool`](aikit-magictool/README.md).
+- **Session sync (optional)** — `aikit session sync` uploads the transcripts
+  Claude Code and Codex already write to disk, secret-scrubbed and
+  content-addressed, to S3-compatible blob storage (one-shot or `--watch`).
 - **Templates and package management** — `aikit init` scaffolds a
   Spec-Driven Development project; `aikit install/update/remove/list` manage
   packaged commands, skills, and agent definitions from GitHub or a local
@@ -229,7 +232,40 @@ feature. When enabled, `aikit serve` also exposes magic-tool routes under
 Built-in tool: `agents/draft_definition` — draft an `AgentDefinition` from a
 description. Reusable library: [`aikit-magictool`](aikit-magictool/README.md).
 
-## 4. Packages
+## 4. Session sync (`aikit session sync`)
+
+Sync the session transcripts your local AI coding tools already write to disk —
+**Claude Code** and **Codex** — up to S3-compatible blob storage, with secrets
+scrubbed before anything leaves the machine. It's a write-only producer: read
+the JSONL, scrub, upload content-addressed snapshots plus a `.meta.json`
+envelope. It never launches the tool and never reads back.
+
+```bash
+# Credentials come from the AWS environment, never flags.
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...
+
+# One-shot sync of Claude Code sessions to a MinIO bucket
+aikit session sync --owner alice --bucket my-sessions \
+  --endpoint https://minio.internal:9000 --tool claude_code
+
+# Preview without uploading
+aikit session sync --owner alice --bucket my-sessions \
+  --endpoint https://minio.internal:9000 --dry-run --format json
+
+# Watch continuously (laptop daemon / pod sidecar)
+aikit session sync --owner alice --bucket my-sessions \
+  --endpoint https://minio.internal:9000 --watch
+```
+
+Objects land at
+`<key-prefix>/<owner>/<tool>/<session-id>/<sha256>.jsonl` (default prefix
+`sessions/`). Same content → same key (idempotent); grown transcripts create new
+versions and all versions are retained. See the
+[`session sync` command reference](webdocs/cli-commands.mdx) for the full flag
+and environment table. Requires the `agent-adapters` feature (`watcher` for
+`--watch`).
+
+## 5. Packages
 
 Distribute commands, skills, and agent definitions as `aikit.toml`
 packages. Install them per project for whichever assistant you use.
@@ -272,7 +308,7 @@ A package's `aikit.toml` describes name, version, description, and an
 package can target multiple assistants because the artifacts mapping is
 per-agent.
 
-## 5. MCP server registration (`aikit agent mcp`)
+## 6. MCP server registration (`aikit agent mcp`)
 
 Merge one MCP server entry into whichever agent's config file is
 appropriate (`mcpServers` for Cursor/Claude, VS Code `servers`, OpenCode
@@ -296,7 +332,7 @@ Six catalog keys are supported: `cursor-agent` (alias `cursor`), `claude`,
 `--overwrite` to replace an existing server id. Full reference:
 [webdocs/mcp.mdx](webdocs/mcp.mdx).
 
-## 6. Programmatic use
+## 7. Programmatic use
 
 Both crates expose the same capabilities as the CLI:
 
