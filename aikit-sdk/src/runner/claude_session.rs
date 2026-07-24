@@ -419,42 +419,7 @@ async fn run_session(
                         if ty == "control_request" || ty == "control_response" {
                             continue;
                         }
-                        // Emit SessionStarted on the first result message that
-                        // carries a session_id so callers can observe it and
-                        // use it for a subsequent `resume`.
-                        if ty == "result" {
-                            if let Some(sid) =
-                                value.get("session_id").and_then(|v| v.as_str())
-                            {
-                                let _ = event_tx.send(AgentEvent {
-                                    agent_key: "claude".to_string(),
-                                    seq,
-                                    stream: AgentEventStream::Stdout,
-                                    payload: AgentEventPayload::SessionStarted {
-                                        session_id: sid.to_string(),
-                                    },
-                                });
-                                seq += 1;
-                            }
-                        }
-                        if let Ok(Some(msg)) = parse_message(&value) {
-                            for frame in map_message(msg, AgentEventStream::Stdout, seq) {
-                                let payload = decoded_to_payload(frame);
-                                if event_tx
-                                    .send(AgentEvent {
-                                        agent_key: "claude".to_string(),
-                                        seq,
-                                        stream: AgentEventStream::Stdout,
-                                        payload,
-                                    })
-                                    .is_err()
-                                {
-                                    closed = true;
-                                    break;
-                                }
-                                seq += 1;
-                            }
-                        }
+                        emit_inbound_value_events(&event_tx, &value, ty, &mut seq, &mut closed);
                     }
                     Some(Err(e)) => {
                         emit_error(&event_tx, format!("stream error: {e}"));
@@ -522,6 +487,73 @@ fn decoded_to_payload(frame: Decoded) -> AgentEventPayload {
     }
 }
 
+fn send_stdout_event(
+    event_tx: &mpsc::Sender<AgentEvent>,
+    seq: &mut u64,
+    payload: AgentEventPayload,
+) -> bool {
+    if event_tx
+        .send(AgentEvent {
+            agent_key: "claude".to_string(),
+            seq: *seq,
+            stream: AgentEventStream::Stdout,
+            payload,
+        })
+        .is_err()
+    {
+        return false;
+    }
+    *seq += 1;
+    true
+}
+
+fn emit_inbound_value_events(
+    event_tx: &mpsc::Sender<AgentEvent>,
+    value: &serde_json::Value,
+    ty: &str,
+    seq: &mut u64,
+    closed: &mut bool,
+) {
+    // Emit SessionStarted on the first result message that carries a session_id
+    // so callers can observe it and use it for a subsequent `resume`.
+    if ty == "result" {
+        if let Some(sid) = value.get("session_id").and_then(|v| v.as_str()) {
+            if !send_stdout_event(
+                event_tx,
+                seq,
+                AgentEventPayload::SessionStarted {
+                    session_id: sid.to_string(),
+                },
+            ) {
+                *closed = true;
+                return;
+            }
+        }
+    }
+
+    if let Ok(Some(msg)) = parse_message(value) {
+        for frame in map_message(msg, AgentEventStream::Stdout, *seq) {
+            if !send_stdout_event(event_tx, seq, decoded_to_payload(frame)) {
+                *closed = true;
+                return;
+            }
+        }
+    }
+
+    if ty == "result"
+        && !send_stdout_event(
+            event_tx,
+            seq,
+            AgentEventPayload::AikitStepFinish {
+                iteration: 0,
+                finish_reason: "turn_completed".into(),
+            },
+        )
+    {
+        *closed = true;
+    }
+}
+
 fn emit_error(event_tx: &mpsc::Sender<AgentEvent>, message: String) {
     let _ = event_tx.send(AgentEvent {
         agent_key: "claude".to_string(),
@@ -581,6 +613,47 @@ mod tests {
         // Callback present → CLI routes permission prompts via "stdio".
         assert_eq!(opts.permission_prompt_tool_name.as_deref(), Some("stdio"));
         assert!(build_query_config(&with_cb).can_use_tool.is_some());
+    }
+
+    #[test]
+    fn result_message_emits_turn_completed_after_final_frame() {
+        let value = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 1,
+            "duration_api_ms": 1,
+            "is_error": false,
+            "num_turns": 1,
+            "session_id": "sess-9",
+            "result": "done"
+        });
+        let (tx, rx) = mpsc::channel();
+        let mut seq = 0;
+        let mut closed = false;
+
+        emit_inbound_value_events(&tx, &value, "result", &mut seq, &mut closed);
+        drop(tx);
+
+        let events: Vec<_> = rx.into_iter().collect();
+        assert!(!closed);
+        assert_eq!(seq, 3);
+        assert!(matches!(
+            events[0].payload,
+            AgentEventPayload::SessionStarted { ref session_id } if session_id == "sess-9"
+        ));
+        assert!(matches!(
+            events[1].payload,
+            AgentEventPayload::StreamMessage(ref message)
+                if message.phase == crate::runner::types::MessagePhase::Final
+                    && message.text == "done"
+        ));
+        assert!(matches!(
+            events[2].payload,
+            AgentEventPayload::AikitStepFinish {
+                iteration: 0,
+                ref finish_reason
+            } if finish_reason == "turn_completed"
+        ));
     }
 
     #[test]
