@@ -1,0 +1,62 @@
+name: Nightly Agent E2E
+
+# Runs ACTUAL agents (Claude Code via aikit) against a custom LLM gateway and
+# asserts the capture + sync pipeline end-to-end. Kept OFF the PR path on
+# purpose: it needs gateway secrets, takes minutes, and shouldn't gate every PR
+# or run on forks. Nightly on main + manual dispatch.
+#
+# Required repo secrets:
+#   LLM_GATEWAY_URL — the gateway's Anthropic-compatible base URL (public HTTPS)
+#   LLM_GATEWAY_KEY — the gateway API key
+#
+# This is the reusable harness for real-agent testing: extend ci/agent-e2e/
+# (more agents, more cases) as agentic features grow.
+
+on:
+  schedule:
+    # 06:00 UTC nightly.
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-agent-e2e
+  cancel-in-progress: true
+
+jobs:
+  claude-smoke:
+    name: Claude smoke (real agent → gateway)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Verify gateway secrets are configured
+        id: guard
+        env:
+          LLM_GATEWAY_URL: ${{ secrets.LLM_GATEWAY_URL }}
+          LLM_GATEWAY_KEY: ${{ secrets.LLM_GATEWAY_KEY }}
+        run: |
+          if [ -z "${LLM_GATEWAY_URL}" ] || [ -z "${LLM_GATEWAY_KEY}" ]; then
+            echo "gateway secrets not configured — skipping the real-agent smoke."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the agent-e2e image
+        if: steps.guard.outputs.run == 'true'
+        run: docker build -f ci/agent-e2e/Dockerfile.agent-e2e -t aikit-agent-e2e .
+
+      - name: Run Claude smoke against the gateway
+        if: steps.guard.outputs.run == 'true'
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.LLM_GATEWAY_URL }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LLM_GATEWAY_KEY }}
+        run: |
+          docker run --rm \
+            -e ANTHROPIC_BASE_URL \
+            -e ANTHROPIC_AUTH_TOKEN \
+            aikit-agent-e2e
