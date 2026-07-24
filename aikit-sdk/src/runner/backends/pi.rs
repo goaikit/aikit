@@ -662,6 +662,7 @@ mod tests {
             stream: true,
             events_mode: true,
             session_id: None,
+            envelope: None,
         });
         let s: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(s, vec!["pi", "--mode", "rpc"]);
@@ -675,6 +676,7 @@ mod tests {
             stream: false,
             events_mode: false,
             session_id: Some("sess-9"),
+            envelope: None,
         });
         let s: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(
@@ -699,6 +701,7 @@ mod tests {
             stream: false,
             events_mode: false,
             session_id: None,
+            envelope: None,
         });
         let s: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(s, vec!["pi", "--mode", "rpc"]);

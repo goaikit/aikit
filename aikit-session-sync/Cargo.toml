@@ -33,7 +33,7 @@ tracing = "0.1"
 walkdir = "2"
 
 [dev-dependencies]
-aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", default-features = false, features = ["claudecode", "codex"] }
+aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", default-features = false, features = ["claudecode", "codex", "watcher"] }
 async-trait = "0.1"
 bytes = "1"
 futures = "0.3"

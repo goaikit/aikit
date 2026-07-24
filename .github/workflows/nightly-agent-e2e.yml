@@ -1,0 +1,87 @@
+name: Nightly Agent E2E
+
+# Runs ACTUAL agents (Claude Code via aikit) against our LLM gateway over the
+# Tailnet, and asserts the capture + sync pipeline end-to-end. Kept OFF the PR
+# path on purpose: it needs secrets + Tailnet access, takes minutes, and
+# shouldn't gate every PR or run on forks. Nightly on main + manual dispatch.
+#
+# The gateway is reached over the Tailnet (not a public endpoint): the runner
+# joins the Tailnet with an ephemeral, tagged node, and the smoke container uses
+# the host network so it can resolve/reach the internal gateway address.
+#
+# Required repo secrets:
+#   TS_OAUTH_CLIENT_ID  — Tailscale OAuth client id (scoped to a tag, e.g. tag:ci)
+#   TS_OAUTH_SECRET     — Tailscale OAuth client secret
+#   LLM_GATEWAY_URL     — the gateway's Anthropic-compatible base URL on the
+#                         Tailnet (MagicDNS name or 100.x tailnet IP, e.g.
+#                         http://gateway.<tailnet>.ts.net:4000)
+#   LLM_GATEWAY_KEY     — the gateway API key
+#
+# This is the reusable harness for real-agent testing: extend ci/agent-e2e/
+# (more agents, more cases) as agentic features grow.
+
+on:
+  schedule:
+    # 06:00 UTC nightly.
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  # Required by tailscale/github-action to mint an OIDC token for OAuth.
+  id-token: write
+
+concurrency:
+  group: nightly-agent-e2e
+  cancel-in-progress: true
+
+jobs:
+  claude-smoke:
+    name: Claude smoke (real agent → gateway over Tailnet)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Verify secrets are configured
+        id: guard
+        env:
+          LLM_GATEWAY_URL: ${{ secrets.LLM_GATEWAY_URL }}
+          LLM_GATEWAY_KEY: ${{ secrets.LLM_GATEWAY_KEY }}
+          TS_OAUTH_CLIENT_ID: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          TS_OAUTH_SECRET: ${{ secrets.TS_OAUTH_SECRET }}
+        run: |
+          if [ -z "${LLM_GATEWAY_URL}" ] || [ -z "${LLM_GATEWAY_KEY}" ] \
+             || [ -z "${TS_OAUTH_CLIENT_ID}" ] || [ -z "${TS_OAUTH_SECRET}" ]; then
+            echo "gateway/Tailscale secrets not configured — skipping the real-agent smoke."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Connect to the Tailnet
+        if: steps.guard.outputs.run == 'true'
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          # The OAuth client must be authorized for this tag in the Tailscale
+          # ACLs; the node is ephemeral and auto-removed when the job ends.
+          tags: tag:ci
+
+      - name: Build the agent-e2e image
+        if: steps.guard.outputs.run == 'true'
+        run: docker build -f ci/agent-e2e/Dockerfile.agent-e2e -t aikit-agent-e2e .
+
+      - name: Run Claude smoke against the gateway over the Tailnet
+        if: steps.guard.outputs.run == 'true'
+        env:
+          ANTHROPIC_BASE_URL: ${{ secrets.LLM_GATEWAY_URL }}
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.LLM_GATEWAY_KEY }}
+        run: |
+          # --network host lets the container use the runner's Tailnet
+          # connectivity and MagicDNS resolution to reach the internal gateway.
+          docker run --rm --network host \
+            -e ANTHROPIC_BASE_URL \
+            -e ANTHROPIC_AUTH_TOKEN \
+            aikit-agent-e2e

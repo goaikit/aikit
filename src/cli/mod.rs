@@ -169,6 +169,16 @@ pub fn build_app() -> Result<AikitApp> {
             session_persona: args.session_persona,
             resume: args.resume,
             resume_last: args.resume_last,
+            sandbox: args.sandbox,
+            auto_approve: args.auto_approve,
+            cd: args.cd,
+            add_dir: args.add_dir,
+            output_result: args.output_result,
+            output_schema: args.output_schema,
+            bare: args.bare,
+            ephemeral: args.ephemeral,
+            skip_git_repo_check: args.skip_git_repo_check,
+            capabilities: args.capabilities,
         };
         // run::execute is synchronous and creates its own tokio runtime internally
         // (via block_on_async in aikit-agent). Using spawn_blocking avoids a
@@ -809,6 +819,17 @@ struct RunArgs {
     session_persona: Option<String>,
     resume: Option<String>,
     resume_last: bool,
+    // spec 013 (slice 2): common invocation envelope
+    sandbox: Option<String>,
+    auto_approve: bool,
+    cd: Option<String>,
+    add_dir: Vec<String>,
+    output_result: Option<String>,
+    output_schema: Option<String>,
+    bare: bool,
+    ephemeral: bool,
+    skip_git_repo_check: bool,
+    capabilities: bool,
 }
 
 impl IntoCommandSpec for RunArgs {
@@ -854,6 +875,71 @@ impl IntoCommandSpec for RunArgs {
                     help: "Display live human-readable progress on stderr",
                     ..Default::default()
                 },
+                // ── spec 013 (slice 2): common invocation envelope ───────────────
+                ArgSpec {
+                    name: "sandbox",
+                    short: None,
+                    long: Some("sandbox"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::Enum(vec![
+                        "read-only",
+                        "bounded-write",
+                        "unrestricted",
+                    ]),
+                    cardinality: Cardinality::Optional,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Filesystem-trust policy: read-only|bounded-write|unrestricted (spec 013 D1)",
+                    ..Default::default()
+                },
+                flag_spec(
+                    "auto-approve",
+                    "Auto-approve every tool call without prompting (spec 013 D1)",
+                ),
+                opt_short_spec(
+                    "cd",
+                    'C',
+                    "Working root for the agent (spec 013 D2; default: cwd)",
+                ),
+                ArgSpec {
+                    name: "add-dir",
+                    short: None,
+                    long: Some("add-dir"),
+                    kind: ArgKind::Option,
+                    value_type: ArgValueType::String,
+                    cardinality: Cardinality::Repeated,
+                    default: None,
+                    conflicts_with: vec![],
+                    requires: vec![],
+                    help: "Extra writable root; repeatable (spec 013 D2)",
+                    ..Default::default()
+                },
+                opt_short_spec(
+                    "output-result",
+                    'o',
+                    "Write the agent's final message to <file> (spec 013 D3)",
+                ),
+                opt_spec(
+                    "output-schema",
+                    "JSON Schema file for typed final output (spec 013 D4)",
+                ),
+                flag_spec(
+                    "bare",
+                    "Skip user config/hooks/MCP for reproducible runs (spec 013 D6)",
+                ),
+                flag_spec(
+                    "ephemeral",
+                    "Do not persist the session (spec 013 D6)",
+                ),
+                flag_spec(
+                    "skip-git-repo-check",
+                    "Skip the headless git-repo guard (spec 013 D6)",
+                ),
+                flag_spec(
+                    "capabilities",
+                    "Print the resolved spec-013 capability matrix for --agent and exit",
+                ),
                 ArgSpec {
                     name: "dry-run",
                     short: None,
@@ -928,6 +1014,16 @@ impl FromArgValueMap for RunArgs {
             session_persona: get_opt_val(map, "session-persona"),
             resume: get_opt_val(map, "resume"),
             resume_last: get_bool_val(map, "resume-last"),
+            sandbox: get_opt_val(map, "sandbox"),
+            auto_approve: get_bool_val(map, "auto-approve"),
+            cd: get_opt_val(map, "cd"),
+            add_dir: get_repeated_val(map, "add-dir"),
+            output_result: get_opt_val(map, "output-result"),
+            output_schema: get_opt_val(map, "output-schema"),
+            bare: get_bool_val(map, "bare"),
+            ephemeral: get_bool_val(map, "ephemeral"),
+            skip_git_repo_check: get_bool_val(map, "skip-git-repo-check"),
+            capabilities: get_bool_val(map, "capabilities"),
         }
     }
 }

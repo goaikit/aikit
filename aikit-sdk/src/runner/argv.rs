@@ -8,6 +8,7 @@
 use std::ffi::OsString;
 
 use super::backend::Backend;
+use super::invocation::InvocationEnvelope;
 
 /// The runnable agent keys, in canonical order. Kept in lockstep with
 /// [`Backend::ALL`] (enforced by a test below).
@@ -21,26 +22,48 @@ pub fn is_runnable(agent_key: &str) -> bool {
     Backend::from_key(agent_key).is_some()
 }
 
-/// Build the spawn argv for an agent key. Delegates to the typed
-/// [`Backend::build_argv`].
-///
-/// Panics if `agent_key` is not a known Backend (callers gate with
-/// [`is_runnable`]) or if it is the in-process `aikit` Backend.
-pub(super) fn build_argv(
+/// Build the spawn argv carrying a spec-013 [`InvocationEnvelope`]. Each
+/// Backend maps honored knobs onto its native flags; the runner resolves the
+/// envelope (fail-closed for unsupported security knobs) before calling this.
+pub(crate) fn build_argv_envelope(
     agent_key: &str,
     model: Option<&String>,
     yolo: bool,
     stream: bool,
     events_mode: bool,
     session_id: Option<&str>,
+    envelope: Option<&InvocationEnvelope>,
 ) -> Vec<OsString> {
     let backend = Backend::from_key(agent_key).expect("unknown agent key for build_argv");
-    backend.build_argv(model, yolo, stream, events_mode, session_id)
+    backend.build_argv_envelope(model, yolo, stream, events_mode, session_id, envelope)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Legacy no-envelope builder, retained as a test helper so the historical
+    // argv assertions run unchanged against the envelope path (envelope = None
+    // ⇒ identical argv). Production goes through `build_argv_envelope`.
+    #[allow(dead_code)]
+    fn build_argv(
+        agent_key: &str,
+        model: Option<&String>,
+        yolo: bool,
+        stream: bool,
+        events_mode: bool,
+        session_id: Option<&str>,
+    ) -> Vec<OsString> {
+        build_argv_envelope(
+            agent_key,
+            model,
+            yolo,
+            stream,
+            events_mode,
+            session_id,
+            None,
+        )
+    }
 
     #[test]
     fn test_is_runnable_true_for_supported_false_for_others() {
@@ -428,5 +451,181 @@ mod tests {
         assert!(argv.contains(&OsString::from("test-id-def")));
         let resume_pos = argv.iter().position(|a| a == "--resume").unwrap();
         assert_eq!(argv[resume_pos + 1], OsString::from("test-id-def"));
+    }
+
+    // ── spec 013: invocation-envelope argv mapping ───────────────────────────
+
+    use crate::runner::{InvocationEnvelope, SandboxPolicy};
+    use std::path::PathBuf;
+
+    fn env_with(sandbox: Option<SandboxPolicy>) -> InvocationEnvelope {
+        InvocationEnvelope {
+            sandbox,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn spec013_codex_sandbox_maps_to_native_token_and_suppresses_yolo() {
+        let env = env_with(Some(SandboxPolicy::BoundedWrite));
+        let argv = build_argv_envelope("codex", None, false, false, false, None, Some(&env));
+        assert!(argv.contains(&OsString::from("--sandbox")));
+        assert!(argv.contains(&OsString::from("workspace-write")));
+        assert!(
+            !argv.contains(&OsString::from("--yolo")),
+            "explicit sandbox subsumes --yolo; got {:?}",
+            argv
+        );
+
+        let ro = build_argv_envelope(
+            "codex",
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(&env_with(Some(SandboxPolicy::ReadOnly))),
+        );
+        assert!(ro.contains(&OsString::from("read-only")));
+
+        let un = build_argv_envelope(
+            "codex",
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(&env_with(Some(SandboxPolicy::Unrestricted))),
+        );
+        assert!(un.contains(&OsString::from("danger-full-access")));
+    }
+
+    #[test]
+    fn spec013_codex_inactive_envelope_is_identical_to_legacy() {
+        // No knobs set ⇒ identical to the historical argv (yolo honored).
+        let env = InvocationEnvelope::default();
+        let with_env = build_argv_envelope("codex", None, true, false, false, None, Some(&env));
+        let legacy = build_argv("codex", None, true, false, false, None);
+        assert_eq!(with_env, legacy);
+        assert!(with_env.contains(&OsString::from("--yolo")));
+    }
+
+    #[test]
+    fn spec013_codex_envelope_emits_d2_d6_native_flags() {
+        let env = InvocationEnvelope {
+            working_dir: Some(PathBuf::from("/repo")),
+            extra_writable_roots: vec![PathBuf::from("/shared"), PathBuf::from("/cache")],
+            bare: true,
+            ephemeral: true,
+            skip_git_repo_check: true,
+            ..Default::default()
+        };
+        let argv = build_argv_envelope("codex", None, false, false, false, None, Some(&env));
+        assert!(argv.contains(&OsString::from("--cd")));
+        assert!(argv.contains(&OsString::from("/repo")));
+        assert!(argv.contains(&OsString::from("--add-dir")));
+        assert!(argv.contains(&OsString::from("/shared")));
+        assert!(argv.contains(&OsString::from("/cache")));
+        assert!(argv.contains(&OsString::from("--ignore-user-config")));
+        assert!(argv.contains(&OsString::from("--ephemeral")));
+        assert!(argv.contains(&OsString::from("--skip-git-repo-check")));
+    }
+
+    #[test]
+    fn spec013_claude_bare_emits_native_flag() {
+        let env = InvocationEnvelope {
+            bare: true,
+            ..Default::default()
+        };
+        let argv = build_argv_envelope("claude", None, false, false, false, None, Some(&env));
+        assert!(argv.contains(&OsString::from("--bare")));
+        // without bare, the flag is absent
+        let plain = build_argv_envelope(
+            "claude",
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(&InvocationEnvelope::default()),
+        );
+        assert!(!plain.contains(&OsString::from("--bare")));
+    }
+
+    #[test]
+    fn spec013_gemini_sandbox_toggle() {
+        // restrictive policy ⇒ `-s`; unrestricted/none ⇒ no `-s`
+        let on = build_argv_envelope(
+            "gemini",
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(&env_with(Some(SandboxPolicy::BoundedWrite))),
+        );
+        assert!(on.contains(&OsString::from("-s")));
+
+        let ro = build_argv_envelope(
+            "gemini",
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(&env_with(Some(SandboxPolicy::ReadOnly))),
+        );
+        assert!(ro.contains(&OsString::from("-s")));
+
+        let off = build_argv_envelope(
+            "gemini",
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(&env_with(Some(SandboxPolicy::Unrestricted))),
+        );
+        assert!(!off.contains(&OsString::from("-s")));
+
+        let none = build_argv_envelope(
+            "gemini",
+            None,
+            false,
+            false,
+            false,
+            None,
+            Some(&InvocationEnvelope::default()),
+        );
+        assert!(!none.contains(&OsString::from("-s")));
+    }
+
+    #[test]
+    fn spec013_opencode_working_dir_emits_dir_flag() {
+        let env = InvocationEnvelope {
+            working_dir: Some(PathBuf::from("/repo")),
+            ..Default::default()
+        };
+        let argv = build_argv_envelope("opencode", None, false, false, false, None, Some(&env));
+        assert!(argv.contains(&OsString::from("--dir")));
+        assert!(argv.contains(&OsString::from("/repo")));
+        // run subcommand precedes the stdin marker
+        let run_pos = argv.iter().position(|a| a == "run").unwrap();
+        let dash_pos = argv.iter().position(|a| a == "-").unwrap();
+        assert!(run_pos < dash_pos);
+    }
+
+    #[test]
+    fn spec013_cursor_envelope_adds_no_native_flags() {
+        // cursor has no native spec-013 knobs; an (already-resolved) envelope
+        // must not add flags. Security requests fail closed before argv.
+        let env = InvocationEnvelope {
+            bare: true,
+            ephemeral: true,
+            ..Default::default()
+        };
+        let with_env = build_argv_envelope("cursor", None, false, false, false, None, Some(&env));
+        let legacy = build_argv("cursor", None, false, false, false, None);
+        assert_eq!(with_env, legacy);
     }
 }

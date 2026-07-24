@@ -8,6 +8,7 @@ pub mod capabilities;
 pub mod claude_session;
 #[cfg(feature = "codex-app-server")]
 pub mod codex_session;
+pub mod invocation;
 #[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
 pub mod live_session;
 pub mod transport;
@@ -16,8 +17,9 @@ pub mod usage;
 
 pub use types::{
     AgentAvailabilityReason, AgentEvent, AgentEventPayload, AgentEventStream, AgentStatus,
-    MessageKind, MessagePhase, MessageRole, OutputMode, ProgressSink, QuotaCategory,
-    QuotaExceededInfo, RunError, RunOptions, RunResult, StreamMessage, TokenUsage, UsageSource,
+    KnobSupport, MessageKind, MessagePhase, MessageRole, OutputMode, ProgressSink, QuotaCategory,
+    QuotaExceededInfo, RunError, RunOptions, RunResult, SandboxPolicy, StreamMessage, TokenUsage,
+    UsageSource,
 };
 
 pub use argv::{is_runnable, runnable_agents};
@@ -34,6 +36,9 @@ pub use claude_session::{
 #[cfg(feature = "codex-app-server")]
 pub use codex_session::{
     open_codex_session, CodexControlHandle, CodexSession, CodexSessionError, CodexSessionOptions,
+};
+pub use invocation::{
+    exit_code_for, format_capabilities, resolve_envelope, InvocationEnvelope, UnsupportedKnob,
 };
 // Shared approval types; available when at least one session feature is enabled.
 #[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
@@ -967,6 +972,82 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_spec013_fail_closed_on_unsupported_sandbox() {
+        use crate::runner::{Backend, RunError, SandboxPolicy};
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // cursor has no native sandbox. Requesting one MUST fail closed in
+        // `connect` (resolve_envelope runs before spawn), so no real agent is
+        // needed beyond a discoverable binary for the availability probe.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("agent"); // cursor binary candidate
+        let mut f = std::fs::File::create(&stub).unwrap();
+        writeln!(f, "#!/bin/sh\necho hi").unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), orig_path));
+
+        let opts = RunOptions::default().with_sandbox(SandboxPolicy::ReadOnly);
+        let result = run_agent_events("cursor", "hi", opts, |_| {});
+
+        std::env::set_var("PATH", orig_path);
+
+        match result {
+            Err(RunError::InvocationUnsupported(err)) => {
+                assert_eq!(err.backend, Backend::Cursor);
+                assert_eq!(err.knob, "sandbox");
+                // RunError::InvocationUnsupported Display delegates to UnsupportedKnob.
+                let rendered = RunError::InvocationUnsupported(err).to_string();
+                assert!(rendered.contains("cursor"), "{}", rendered);
+                assert!(rendered.contains("--sandbox"), "{}", rendered);
+            }
+            other => panic!("expected InvocationUnsupported, got {:?}", other),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_spec013_active_envelope_reaches_subprocess() {
+        use crate::runner::SandboxPolicy;
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // An active envelope (sandbox=bounded-write, which codex honors at OS
+        // level) is mapped onto the codex argv and the run proceeds normally.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("codex");
+        let mut f = std::fs::File::create(&stub).unwrap();
+        writeln!(f, "#!/bin/sh\necho '{{\"msg\":\"ok\"}}'").unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), orig_path));
+
+        let opts = RunOptions::default().with_sandbox(SandboxPolicy::BoundedWrite);
+        let mut events: Vec<AgentEvent> = Vec::new();
+        let result = run_agent_events("codex", "hi", opts, |ev| events.push(ev));
+
+        std::env::set_var("PATH", orig_path);
+
+        assert!(
+            result.is_ok(),
+            "codex with a supported sandbox should run: {:?}",
+            result.err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_run_agent_events_sequence_numbers_strictly_increasing() {
         let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
@@ -1105,6 +1186,7 @@ mod tests {
                 AgentEventPayload::AikitSubagentResult { .. } => "aikit_subagent_result",
                 AgentEventPayload::AikitContextCompressed { .. } => "aikit_context_compressed",
                 AgentEventPayload::AikitStepFinish { .. } => "aikit_step_finish",
+                AgentEventPayload::Result { .. } => "result",
                 AgentEventPayload::SessionStarted { .. } => "session_started",
             };
             payloads.push(kind.to_string());

@@ -158,6 +158,13 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
     let mut argv = vec![OsString::from(SPEC.binary)];
     SPEC.push_model(&mut argv, ctx.model);
     argv.push(OsString::from("run"));
+    // spec 013 D2: opencode's native per-call working root.
+    if let Some(e) = ctx.envelope {
+        if let Some(dir) = e.working_dir.as_deref() {
+            argv.push(OsString::from("--dir"));
+            argv.push(dir.as_os_str().to_owned());
+        }
+    }
     // `--dangerously-skip-permissions` (auto-approve tool use) must be passed
     // in BOTH plain and events mode. Without it opencode prompts for each
     // write/edit, so an unattended agent silently produces nothing.

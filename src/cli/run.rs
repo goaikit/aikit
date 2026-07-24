@@ -1,3 +1,4 @@
+use aikit_sdk::runner::{exit_code_for, format_capabilities, Backend, SandboxPolicy};
 use aikit_sdk::session_store::SessionStore;
 use aikit_sdk::{run_agent, run_agent_events, run_builtin_agent, AgentEvent, OutputMode};
 use aikit_sdk::{ProgressViewConfig, RunError, RunOptions, RunProgress};
@@ -24,6 +25,17 @@ pub struct RunArgs {
     pub session_persona: Option<String>,
     pub resume: Option<String>,
     pub resume_last: bool,
+    // spec 013 (slice 2): common invocation envelope
+    pub sandbox: Option<String>,
+    pub auto_approve: bool,
+    pub cd: Option<String>,
+    pub add_dir: Vec<String>,
+    pub output_result: Option<String>,
+    pub output_schema: Option<String>,
+    pub bare: bool,
+    pub ephemeral: bool,
+    pub skip_git_repo_check: bool,
+    pub capabilities: bool,
 }
 
 /// Load and merge `--session-agents` value into the registry.
@@ -66,6 +78,19 @@ fn load_session_agents(
 }
 
 pub fn execute(args: RunArgs) -> Result<()> {
+    // spec 013: --capabilities short-circuits before any prompt/run.
+    if args.capabilities {
+        let backend = Backend::from_key(&args.agent).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown agent '{}' for --capabilities (use a concrete key: \
+                 codex|claude|gemini|opencode|cursor|aikit)",
+                args.agent
+            )
+        })?;
+        print!("{}", format_capabilities(backend));
+        return Ok(());
+    }
+
     let mut agent = args.agent;
     let mut model = args.model;
 
@@ -253,6 +278,58 @@ pub fn execute(args: RunArgs) -> Result<()> {
         options = options.with_session_id(sid.clone());
     }
 
+    // spec 013 (slice 2): invocation envelope.
+    // --yolo is a macro over `--sandbox unrestricted --auto-approve` (D1); an
+    // explicit --sandbox wins.
+    let explicit_sandbox: Option<SandboxPolicy> = match args.sandbox.as_deref() {
+        Some(s) => Some(s.parse::<SandboxPolicy>().map_err(|_| {
+            anyhow::anyhow!("--sandbox must be read-only|bounded-write|unrestricted")
+        })?),
+        None => None,
+    };
+    // --yolo is a macro over `--sandbox unrestricted --auto-approve` (D1); an
+    // explicit --sandbox wins.
+    let yolo_sandbox = if args.yolo {
+        Some(SandboxPolicy::Unrestricted)
+    } else {
+        None
+    };
+    if let Some(p) = explicit_sandbox.or(yolo_sandbox) {
+        options = options.with_sandbox(p);
+    }
+    if args.auto_approve || args.yolo {
+        options = options.with_auto_approve(true);
+    }
+    if let Some(ref d) = args.cd {
+        options = options.with_current_dir(std::path::PathBuf::from(d));
+    }
+    for d in &args.add_dir {
+        options = options.with_extra_writable_root(std::path::PathBuf::from(d));
+    }
+    if let Some(ref f) = args.output_result {
+        options = options.with_result_file(std::path::PathBuf::from(f));
+    }
+    if let Some(ref f) = args.output_schema {
+        let raw = std::fs::read_to_string(f)
+            .map_err(|e| anyhow::anyhow!("--output-schema: cannot read {}: {}", f, e))?;
+        let val: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| anyhow::anyhow!("--output-schema: invalid JSON in {}: {}", f, e))?;
+        options = options.with_output_schema(val);
+    }
+    if args.bare {
+        options = options.with_bare(true);
+    }
+    if args.ephemeral {
+        options = options.with_ephemeral(true);
+    }
+    if args.skip_git_repo_check {
+        options = options.with_skip_git_repo_check(true);
+    }
+
+    // spec 013 D3: capture the result-handle inputs before `options` is moved.
+    let result_file = options.result_file.clone();
+    let result_session_id = options.session_id.clone();
+
     let is_builtin = agent == "aikit" || agent == "agent";
 
     if is_builtin {
@@ -281,54 +358,96 @@ pub fn execute(args: RunArgs) -> Result<()> {
             progress_sink,
         ) {
             Ok(result) => {
-                let exit_code = result.exit_code().unwrap_or(1);
-                std::process::exit(exit_code);
+                if let Some(p) = result_file.as_deref() {
+                    write_result_file(p, &String::from_utf8_lossy(&result.stdout));
+                }
+                std::process::exit(exit_code_for(result.exit_code(), None));
             }
             Err(e) => {
                 eprintln!("Error: {}", e);
-                std::process::exit(1);
+                std::process::exit(exit_code_for(None, Some(&e)));
             }
         }
     } else if args.events {
+        // spec 013 D3: track the final assistant text for the Result handle.
+        let mut last_text: Option<String> = None;
         match run_agent_events(&agent, &prompt, options, |event: AgentEvent| {
+            if let aikit_sdk::runner::AgentEventPayload::StreamMessage(sm) = &event.payload {
+                if matches!(sm.role, aikit_sdk::runner::MessageRole::Assistant)
+                    && !sm.text.trim().is_empty()
+                {
+                    last_text = Some(sm.text.clone());
+                }
+            }
             if let Ok(line) = serde_json::to_string(&event) {
                 println!("{}", line);
             }
         }) {
             Ok(result) => {
                 let _ = io::stderr().write_all(&result.stderr);
-                let exit_code = result.exit_code().unwrap_or(1);
-                std::process::exit(exit_code);
+                // spec 013 D3: emit one terminal Result event, then --output-result.
+                if let Some(t) = last_text.as_deref() {
+                    let res = AgentEvent {
+                        agent_key: agent.clone(),
+                        seq: 0,
+                        stream: aikit_sdk::runner::AgentEventStream::Stdout,
+                        payload: aikit_sdk::runner::AgentEventPayload::Result {
+                            text: t.to_string(),
+                            structured: None,
+                            session_id: result_session_id.clone(),
+                        },
+                    };
+                    if let Ok(line) = serde_json::to_string(&res) {
+                        println!("{}", line);
+                    }
+                    if let Some(p) = result_file.as_deref() {
+                        write_result_file(p, t);
+                    }
+                }
+                std::process::exit(exit_code_for(result.exit_code(), None));
             }
             Err(RunError::AgentNotRunnable(key)) => {
                 eprintln!("{}", RunError::AgentNotRunnable(key));
-                std::process::exit(1);
+                std::process::exit(exit_code_for(None, None));
             }
             Err(e) => {
                 eprintln!("Error: {}", e);
-                std::process::exit(1);
+                std::process::exit(exit_code_for(None, Some(&e)));
             }
         }
     } else if args.progress {
         let mut progress = RunProgress::new(ProgressViewConfig::default());
         let mut renderer = ProgressRenderer::new().unwrap_or_else(|_| ProgressRenderer::non_tty());
         let agent_key = agent.clone();
+        let mut last_text: Option<String> = None;
         match run_agent_events(&agent, &prompt, options, |event: AgentEvent| {
+            if let aikit_sdk::runner::AgentEventPayload::StreamMessage(sm) = &event.payload {
+                if matches!(sm.role, aikit_sdk::runner::MessageRole::Assistant)
+                    && !sm.text.trim().is_empty()
+                {
+                    last_text = Some(sm.text.clone());
+                }
+            }
             progress.push(&agent_key, &event);
             let _ = renderer.render(&progress);
         }) {
             Ok(result) => {
-                let exit_code = result.exit_code().unwrap_or(1);
+                let exit_code = exit_code_for(result.exit_code(), None);
+                if let Some(t) = last_text.as_deref() {
+                    if let Some(p) = result_file.as_deref() {
+                        write_result_file(p, t);
+                    }
+                }
                 let _ = renderer.finalize(exit_code, progress.token_footer());
                 std::process::exit(exit_code);
             }
             Err(RunError::AgentNotRunnable(key)) => {
                 eprintln!("{}", RunError::AgentNotRunnable(key));
-                std::process::exit(1);
+                std::process::exit(exit_code_for(None, None));
             }
             Err(e) => {
                 eprintln!("Error: {}", e);
-                std::process::exit(1);
+                std::process::exit(exit_code_for(None, Some(&e)));
             }
         }
     } else {
@@ -336,17 +455,28 @@ pub fn execute(args: RunArgs) -> Result<()> {
             Ok(result) => {
                 io::stdout().write_all(&result.stdout)?;
                 io::stderr().write_all(&result.stderr)?;
-                let exit_code = result.status.code().unwrap_or(1);
-                std::process::exit(exit_code);
+                if let Some(p) = result_file.as_deref() {
+                    write_result_file(p, &String::from_utf8_lossy(&result.stdout));
+                }
+                std::process::exit(exit_code_for(result.status.code(), None));
             }
             Err(RunError::AgentNotRunnable(key)) => {
                 eprintln!("{}", RunError::AgentNotRunnable(key));
-                std::process::exit(1);
+                std::process::exit(exit_code_for(None, None));
             }
             Err(e) => {
                 eprintln!("Error: {}", e);
-                std::process::exit(1);
+                std::process::exit(exit_code_for(None, Some(&e)));
             }
         }
+    }
+}
+
+/// Write the `--output-result` file (spec 013 D3). Best-effort on error: the
+/// run already produced its output, so a write failure is reported on stderr
+/// rather than turning a successful run into a non-zero exit.
+fn write_result_file(path: &std::path::Path, text: &str) {
+    if let Err(e) = std::fs::write(path, text) {
+        eprintln!("--output-result: cannot write {}: {}", path.display(), e);
     }
 }

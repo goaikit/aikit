@@ -158,6 +158,14 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
         ]);
     }
     SPEC.push_model(&mut argv, ctx.model);
+    // spec 013 D1: enable gemini's OS sandbox for any restrictive policy. The
+    // sandbox backend + profile + extra-root mounts are Command-env configured
+    // (seatbelt profile / SANDBOX_MOUNTS); slice 1 lands the `-s` toggle.
+    if let Some(e) = ctx.envelope {
+        if matches!(e.sandbox, Some(p) if p.as_kebab_str() != "unrestricted") {
+            argv.push(OsString::from("-s"));
+        }
+    }
     SPEC.push_session_flag(&mut argv, ctx.session_id);
     argv
 }
