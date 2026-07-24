@@ -78,19 +78,9 @@ async fn in_memory_sink_is_idempotent_for_same_content_key() {
     assert_eq!(sink.put_calls(), 2);
 }
 
-#[tokio::test]
-#[ignore = "requires live MinIO and the §13 owner-prefix IAM/bucket policy gap to be resolved"]
-async fn minio_s3_integration_round_trips_key_and_envelope() {
-    panic!("configure live MinIO before enabling this ignored integration test");
-}
-
-#[tokio::test]
-#[ignore = "requires live MinIO and the §13 owner-prefix IAM/bucket policy gap to be resolved"]
-async fn minio_owner_scoping_rejects_cross_owner_prefix() {
-    panic!(
-        "configure live MinIO owner-prefix policy before enabling this ignored integration test"
-    );
-}
+// Real MinIO round-trip lives in `tests/e2e_minio.rs` (testcontainers-backed).
+// The backend-enforced cross-owner-prefix rejection still depends on the spec
+// §13 owner-prefix IAM/bucket policy, which is an infra follow-up.
 
 #[tokio::test]
 async fn sync_error_is_non_exhaustive_shape() {

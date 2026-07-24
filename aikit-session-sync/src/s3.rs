@@ -62,3 +62,48 @@ impl SyncSink for S3Sink {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_cfg() -> S3SinkConfig {
+        S3SinkConfig {
+            bucket: "b".into(),
+            endpoint: "http://127.0.0.1:9".into(),
+            region: "us-east-1".into(),
+            allow_http: true,
+            endpoint_ca_bundle: None,
+            path_style: true,
+        }
+    }
+
+    #[test]
+    fn builds_with_valid_config() {
+        // Client construction is lazy: no network happens until a request.
+        std::env::set_var("AWS_ACCESS_KEY_ID", "x");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "y");
+        assert!(S3Sink::new(base_cfg()).is_ok());
+    }
+
+    #[test]
+    fn missing_ca_bundle_is_io_error() {
+        let mut cfg = base_cfg();
+        cfg.endpoint_ca_bundle = Some(std::path::PathBuf::from("/no/such/ca-bundle.pem"));
+        assert!(matches!(S3Sink::new(cfg), Err(SyncError::Io(_))));
+    }
+
+    #[test]
+    fn malformed_ca_bundle_is_backend_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("bad.pem");
+        std::fs::write(
+            &bundle,
+            b"-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let mut cfg = base_cfg();
+        cfg.endpoint_ca_bundle = Some(bundle);
+        assert!(matches!(S3Sink::new(cfg), Err(SyncError::Backend(_))));
+    }
+}

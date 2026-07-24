@@ -140,4 +140,25 @@ mod tests {
         store.save(&source, entry.clone()).await.unwrap();
         assert_eq!(store.load(&source).await, Some(entry));
     }
+
+    #[test]
+    fn open_creates_state_dir_under_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", tmp.path());
+        let store = JsonSyncStateStore::open().unwrap();
+        assert!(store.path.ends_with("state.json"));
+        assert!(tmp.path().join(".aikit").join("session-sync").is_dir());
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[tokio::test]
+    async fn load_missing_source_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = JsonSyncStateStore::at(tmp.path().join("state.json"));
+        assert_eq!(store.load(&tmp.path().join("absent.jsonl")).await, None);
+    }
 }

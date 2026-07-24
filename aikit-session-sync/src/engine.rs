@@ -600,6 +600,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_detected_walks_registry_and_syncs_jsonl_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        tokio::fs::write(tmp.path().join("a.jsonl"), "{\"m\":\"a\"}\n")
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join("ignore.txt"), "not a session")
+            .await
+            .unwrap();
+        let mut registry = Registry::new();
+        registry.register(Box::new(FakeAdapter {
+            kind: ToolKind::Codex,
+            root: tmp.path().to_path_buf(),
+        }));
+        let sink = InMemorySink::new();
+        let engine = engine(sink.clone(), InMemorySyncStateStore::default());
+
+        let summary = engine.sync_detected(&registry).await;
+        assert_eq!(summary.synced, 1);
+        assert_eq!(summary.failed, 0);
+        assert_eq!(sink.put_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn non_jsonl_adapter_kind_is_skipped_without_put() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("s.jsonl");
+        tokio::fs::write(&file, "{\"m\":\"x\"}\n").await.unwrap();
+        let adapter = FakeAdapter {
+            kind: ToolKind::OpenCode, // not a JSONL sync target
+            root: tmp.path().to_path_buf(),
+        };
+        let sink = InMemorySink::new();
+        let engine = engine(sink.clone(), InMemorySyncStateStore::default());
+        assert_eq!(
+            engine.sync_file(&adapter, &file).await.unwrap(),
+            SyncOutcome::SkippedUnchanged
+        );
+        assert_eq!(sink.put_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn same_hash_stale_fingerprint_resaves_and_skips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("s.jsonl");
+        tokio::fs::write(&file, "{\"m\":\"x\"}\n").await.unwrap();
+        let adapter = FakeAdapter {
+            kind: ToolKind::Codex,
+            root: tmp.path().to_path_buf(),
+        };
+        let sink = InMemorySink::new();
+        let state = InMemorySyncStateStore::default();
+        let engine = SyncEngine::new(
+            SyncConfig {
+                owner: Some("owner".into()),
+                host: "host".into(),
+                ..SyncConfig::default()
+            },
+            Arc::new(sink.clone()) as Arc<dyn SyncSink>,
+            Arc::new(state.clone()) as Arc<dyn SyncStateStore>,
+        )
+        .unwrap();
+
+        engine.sync_file(&adapter, &file).await.unwrap();
+        // Same content hash, but a stale fingerprint so the cheap mtime/size
+        // pre-check misses and we reach the hash-equality skip branch.
+        let cached = state.load(&file).await.unwrap();
+        state
+            .save(
+                &file,
+                SyncStateEntry {
+                    last_synced_content_hash: cached.last_synced_content_hash.clone(),
+                    mtime_ms: cached.mtime_ms + 1,
+                    size: cached.size,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            engine.sync_file(&adapter, &file).await.unwrap(),
+            SyncOutcome::SkippedUnchanged
+        );
+        assert_eq!(sink.put_calls(), 1, "no re-upload on hash-equality skip");
+    }
+
+    #[test]
+    fn default_host_is_non_empty() {
+        assert!(!default_host().is_empty());
+    }
+
+    #[test]
+    fn credential_owner_from_env_reads_and_absents() {
+        std::env::set_var("AIKIT_SYNC_CREDENTIAL_OWNER", "cred-owner");
+        assert_eq!(credential_owner_from_env().as_deref(), Some("cred-owner"));
+        std::env::remove_var("AIKIT_SYNC_CREDENTIAL_OWNER");
+        assert_eq!(credential_owner_from_env(), None);
+    }
+
+    #[tokio::test]
     async fn resume_offline_keeps_confirmed_state_only() {
         let tmp = tempfile::tempdir().unwrap();
         let one = tmp.path().join("one.jsonl");
