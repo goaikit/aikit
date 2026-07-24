@@ -77,6 +77,14 @@ pub struct JsonSyncStateStore {
 impl JsonSyncStateStore {
     pub fn open() -> std::io::Result<Self> {
         let root = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        Self::open_under(&root)
+    }
+
+    /// Create the `<root>/.aikit/session-sync/` state dir and return a store
+    /// rooted at it. `open()` passes the real home dir; tests pass a temp dir so
+    /// the assertion is independent of OS-specific home resolution
+    /// (`dirs::home_dir()` reads `USERPROFILE` on Windows, not `HOME`).
+    fn open_under(root: &Path) -> std::io::Result<Self> {
         let dir = root.join(".aikit").join("session-sync");
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
@@ -143,16 +151,21 @@ mod tests {
 
     #[test]
     fn open_creates_state_dir_under_home() {
+        // Use open_under with a temp root so the assertion is cross-platform:
+        // dirs::home_dir() reads USERPROFILE on Windows, so overriding HOME
+        // would silently not take effect there.
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("HOME");
-        std::env::set_var("HOME", tmp.path());
-        let store = JsonSyncStateStore::open().unwrap();
+        let store = JsonSyncStateStore::open_under(tmp.path()).unwrap();
         assert!(store.path.ends_with("state.json"));
         assert!(tmp.path().join(".aikit").join("session-sync").is_dir());
-        match prev {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
+    }
+
+    #[test]
+    fn open_uses_real_home() {
+        // Exercise the public open() entry point (home resolution + dir create).
+        let store = JsonSyncStateStore::open().unwrap();
+        assert!(store.path.ends_with("state.json"));
+        assert!(store.path.parent().unwrap().ends_with("session-sync"));
     }
 
     #[tokio::test]
