@@ -18,14 +18,20 @@ set -euo pipefail
 : "${ANTHROPIC_AUTH_TOKEN:?ANTHROPIC_AUTH_TOKEN (gateway key) is required}"
 export ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
 
+# Pin the model the gateway key is allowed to serve. Claude Code otherwise
+# defaults to the newest model, which the gateway may reject (403 "key not
+# allowed to access model"). Override via AGENT_E2E_MODEL as the gateway config
+# changes.
+MODEL="${AGENT_E2E_MODEL:-claude-sonnet-4-6}"
+
 echo "== aikit version =="
 aikit --version || true
-echo "== gateway: ${ANTHROPIC_BASE_URL} =="
+echo "== gateway: ${ANTHROPIC_BASE_URL}  model: ${MODEL} =="
 
 # 1. A real agent turn via the gateway. We don't assert the reply text (the
 #    backing model may be small); a clean exit means a turn round-tripped.
 echo "== [1/3] running a real claude turn =="
-aikit agent run --agent claude --prompt "Reply with the single word: pong"
+aikit agent run --agent claude --model "${MODEL}" --prompt "Reply with the single word: pong"
 echo "   turn completed (exit 0)"
 
 # 2. The turn must have produced a captured session transcript.
