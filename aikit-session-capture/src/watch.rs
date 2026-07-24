@@ -213,6 +213,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notify_driver_detects_created_file() {
+        // The notify-based driver is what `aikit session sync --watch` uses.
+        // Create the watch dir first (notify watches existing dirs), start the
+        // driver, then drop a .jsonl file in and assert the event is delivered.
+        // Generous timeout because OS notification latency varies across CI.
+        let tmp = tempfile::tempdir().unwrap();
+        let watch_path = tmp.path().to_path_buf();
+        let adapter = FakeAdapter {
+            kind: crate::ToolKind::ClaudeCode,
+            paths: vec![watch_path.clone()],
+        };
+        let adapters: Vec<&dyn Adapter> = vec![&adapter];
+        let mut driver = NotifyWatchDriver::new(adapters, Duration::from_millis(50))
+            .expect("notify watcher builds");
+
+        let sess_file = watch_path.join("sess.jsonl");
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            std::fs::write(&sess_file, "{\"type\":\"user\"}\n").unwrap();
+        });
+
+        let event = tokio::time::timeout(Duration::from_secs(10), driver.next_event()).await;
+        let path = event
+            .expect("notify driver should deliver an event within 10s")
+            .expect("event stream should not end");
+        assert_eq!(path.extension().unwrap(), "jsonl");
+    }
+
+    #[tokio::test]
     async fn polling_driver_detects_new_file() {
         let tmp = tempfile::tempdir().unwrap();
         let watch_path = tmp.path().to_path_buf();
