@@ -79,7 +79,20 @@ disconnect). Run them with:
 cargo test -p aikit -- serve
 ```
 
+## Nightly agent E2E (real agents)
+
+Most tests mock the agent transport. The **Nightly Agent E2E** workflow instead
+runs real agents (Claude Code via `aikit`) against our LLM gateway **over the
+Tailnet** and asserts the capture + sync pipeline end-to-end. It runs nightly
+and on manual dispatch — never on PRs — and skips cleanly until its secrets are
+configured.
+
+Setting it up (Tailscale OAuth client, ACL tag, repo secrets, first run) is
+documented in **`docs/ci-nightly-agent-e2e.md`**. The harness itself lives in
+`ci/agent-e2e/`.
+
 ## Additional references
 
 - Testing details: `TESTING.md`
+- Nightly real-agent E2E setup: `docs/ci-nightly-agent-e2e.md`
 - Agent runtime crate notes: `aikit-agent/CONTRIBUTING.md`
