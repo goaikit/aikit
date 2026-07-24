@@ -37,7 +37,9 @@ pub use claude_session::{
 pub use codex_session::{
     open_codex_session, CodexControlHandle, CodexSession, CodexSessionError, CodexSessionOptions,
 };
-pub use invocation::{resolve_envelope, InvocationEnvelope, UnsupportedKnob};
+pub use invocation::{
+    exit_code_for, format_capabilities, resolve_envelope, InvocationEnvelope, UnsupportedKnob,
+};
 // Shared approval types; available when at least one session feature is enabled.
 #[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
 pub use approval::{PermissionCallback, ToolApprovalRequest, ToolDecision};

@@ -212,6 +212,61 @@ pub fn resolve_envelope(backend: Backend, env: &InvocationEnvelope) -> Result<()
     Ok(())
 }
 
+/// Human-readable label for a [`KnobSupport`] value, for `--capabilities`.
+pub fn knob_support_label(s: KnobSupport) -> &'static str {
+    match s {
+        KnobSupport::SupportedOsEnforced => "supported (os-enforced)",
+        KnobSupport::SupportedAppLevel => "supported (app-level)",
+        KnobSupport::Emulated => "emulated",
+        KnobSupport::Unsupported => "unsupported",
+    }
+}
+
+/// Render a Backend's resolved spec-013 capability matrix (one knob per line),
+/// for `aikit agent run --capabilities`. Pure; unit-tested.
+pub fn format_capabilities(backend: Backend) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("backend: {}\n", backend.key()));
+    out.push_str("sandbox:\n");
+    for &p in SandboxPolicy::ALL {
+        out.push_str(&format!(
+            "  {:14} {}\n",
+            p.as_kebab_str(),
+            knob_support_label(backend.sandbox_support(p))
+        ));
+    }
+    for (knob, support) in [
+        ("auto-approve", backend.auto_approve_support()),
+        ("working-dir", backend.working_dir_support()),
+        (
+            "extra-writable-roots",
+            backend.extra_writable_roots_support(),
+        ),
+        ("output-schema", backend.output_schema_support()),
+        ("bare", backend.bare_support()),
+        ("ephemeral", backend.ephemeral_support()),
+        ("skip-git-repo-check", backend.skip_git_repo_check_support()),
+    ] {
+        out.push_str(&format!("{:21} {}\n", knob, knob_support_label(support)));
+    }
+    out
+}
+
+/// Map a run's outcome to the spec-013 D6 exit code. A security-knob fail-closed
+/// pre-flight (`InvocationUnsupported`) → 3; a timeout → 124; otherwise the
+/// backend's own exit code passes through (0 = success; 130/137/143 are
+/// SIGINT/SIGKILL/SIGTERM from the process group; a runtime sandbox violation
+/// surfaces as the backend's own non-zero code). `None` status → 1.
+pub fn exit_code_for(status_code: Option<i32>, run_error: Option<&super::types::RunError>) -> i32 {
+    use super::types::RunError;
+    match run_error {
+        Some(RunError::InvocationUnsupported(_)) => return 3,
+        Some(RunError::TimedOut { .. }) => return 124,
+        _ => {}
+    }
+    status_code.unwrap_or(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,5 +557,81 @@ mod tests {
             ..Default::default()
         }
         .is_active());
+    }
+
+    // ── --capabilities + exit-code helpers (slice 2) ───────────────────────────
+
+    #[test]
+    fn knob_support_label_all_variants() {
+        assert_eq!(
+            knob_support_label(KnobSupport::SupportedOsEnforced),
+            "supported (os-enforced)"
+        );
+        assert_eq!(
+            knob_support_label(KnobSupport::SupportedAppLevel),
+            "supported (app-level)"
+        );
+        assert_eq!(knob_support_label(KnobSupport::Emulated), "emulated");
+        assert_eq!(knob_support_label(KnobSupport::Unsupported), "unsupported");
+    }
+
+    #[test]
+    fn format_capabilities_codex_matrix() {
+        let s = format_capabilities(Backend::Codex);
+        assert!(s.contains("backend: codex"), "{}", s);
+        assert!(s.contains("sandbox:"), "{}", s);
+        assert!(s.contains("read-only"), "{}", s);
+        assert!(s.contains("bounded-write"), "{}", s);
+        assert!(s.contains("unrestricted"), "{}", s);
+        // codex sandbox is OS-enforced for every policy
+        assert!(s.contains("supported (os-enforced)"), "{}", s);
+        // every knob row is present
+        for knob in [
+            "auto-approve",
+            "working-dir",
+            "extra-writable-roots",
+            "output-schema",
+            "bare",
+            "ephemeral",
+            "skip-git-repo-check",
+        ] {
+            assert!(s.contains(knob), "missing knob {knob}:\n{s}");
+        }
+    }
+
+    #[test]
+    fn format_capabilities_cursor_marks_unsupported() {
+        let s = format_capabilities(Backend::Cursor);
+        assert!(s.contains("backend: cursor"), "{}", s);
+        assert!(s.contains("unsupported"), "{}", s);
+    }
+
+    #[test]
+    fn exit_code_for_maps_spec013_d6_table() {
+        use crate::runner::types::RunError;
+        use std::time::Duration;
+
+        assert_eq!(exit_code_for(Some(0), None), 0); // success
+        assert_eq!(exit_code_for(None, None), 1); // missing status => 1
+        assert_eq!(exit_code_for(Some(130), None), 130); // SIGINT
+        assert_eq!(exit_code_for(Some(143), None), 143); // SIGTERM
+        assert_eq!(exit_code_for(Some(137), None), 137); // SIGKILL
+        assert_eq!(exit_code_for(Some(7), None), 7); // backend non-zero pass-through
+
+        // fail-closed pre-flight => 3 (overrides status)
+        let unsupported = RunError::InvocationUnsupported(UnsupportedKnob {
+            backend: Backend::Cursor,
+            knob: "sandbox",
+            detail: "x".into(),
+        });
+        assert_eq!(exit_code_for(Some(0), Some(&unsupported)), 3);
+
+        // timeout => 124
+        let timed_out = RunError::TimedOut {
+            timeout: Duration::from_secs(10),
+            stdout: vec![],
+            stderr: vec![],
+        };
+        assert_eq!(exit_code_for(None, Some(&timed_out)), 124);
     }
 }

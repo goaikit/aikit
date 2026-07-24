@@ -176,6 +176,10 @@ path = "tests/serve/serve_signal_kill_test.rs"
 name = "serve_tool_policy_test"
 path = "tests/serve/serve_tool_policy_test.rs"
 
+[[test]]
+name = "spec013_invocation_test"
+path = "tests/cli/spec013_invocation_test.rs"
+
 [features]
 tools = ["dep:aikit-magictool"]
 # Session capture (spec 010): on-disk adapter parsing for AI coding tools.
