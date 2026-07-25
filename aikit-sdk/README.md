@@ -136,7 +136,7 @@ These helpers provide deterministic paths and fallback behavior per agent.
 
 ## Run agents
 
-Runnable keys: `codex`, `claude`, `gemini`, `opencode`, `agent`.
+Runnable keys: `codex`, `claude`, `gemini`, `opencode`, `cursor`, `pi`.
 
 ```rust
 use aikit_sdk::{run_agent, RunOptions};

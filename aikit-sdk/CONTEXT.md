@@ -5,11 +5,11 @@ The uniform layer for driving external coding-agent CLIs over a transport, decod
 ## Language
 
 **Backend**:
-A runnable agent that aikit drives over a Transport — Claude, Codex, Gemini, OpenCode, Cursor, and the built-in `aikit`. A Backend is an identity (the closed set, parsed from a key string) that produces a Transport, a Decoder, and a declared set of capabilities. The built-in `aikit` is the in-process Backend: it establishes an in-process Transport and emits canonical events directly (no Dialect to decode), and is the richest Backend (tools, subagents, context compression, step lifecycle).
+A runnable agent that aikit drives over a Transport — Claude, Codex, Gemini, OpenCode, Cursor, Pi, and the built-in `aikit`. A Backend is an identity (the closed set, parsed from a key string) that produces a Transport, a Decoder, and a declared set of capabilities. The built-in `aikit` is the in-process Backend: it establishes an in-process Transport and emits canonical events directly (no Dialect to decode), and is the richest Backend (tools, subagents, context compression, step lifecycle).
 _Avoid_: Codec, provider (that's the LLM-gateway layer), adapter, engine
 
 **Transport**:
-How a Backend's channel is established and how messages move across it — in **both** directions. Two impls exist initially: subprocess-stdout-lines (spawn the CLI, build its argv, read newline-delimited output) for the five external Backends, and in-process (direct canonical emission) for the built-in `aikit`. The seam is designed so JSON-RPC-over-stdio (Codex `app-server`), the Claude SDK, websockets, and unix sockets plug in later as additional Transports without reworking Backends. A Transport splits into a reader half (inbound messages) and a writer half (outbound). Modelled on `claude-agent-sdk-rust`'s `Transport`/`TransportReader`/`TransportWriter`.
+How a Backend's channel is established and how messages move across it — in **both** directions. Two impls exist initially: subprocess-stdout-lines (spawn the CLI, build its argv, read newline-delimited output) for the six external Backends, and in-process (direct canonical emission) for the built-in `aikit`. The seam is designed so JSON-RPC-over-stdio (Codex `app-server`), the Claude SDK, websockets, and unix sockets plug in later as additional Transports without reworking Backends. A Transport splits into a reader half (inbound messages) and a writer half (outbound). Modelled on `claude-agent-sdk-rust`'s `Transport`/`TransportReader`/`TransportWriter`.
 _Avoid_: Launch, spawn-spec (spawning is just the subprocess Transport's connect step), channel
 
 **Decode**:
