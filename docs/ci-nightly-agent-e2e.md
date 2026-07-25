@@ -84,6 +84,7 @@ secrets** (or use `gh` below).
 | `TS_OAUTH_SECRET` | OAuth **client secret** from step 1 |
 | `LLM_GATEWAY_URL` | Gateway Anthropic-compatible base URL **on the Tailnet** — a MagicDNS name or `100.x` IP, e.g. `http://gateway.<tailnet>.ts.net:4000` |
 | `LLM_GATEWAY_KEY` | Gateway API key |
+| `LLM_GATEWAY_MODEL` | *(optional)* model to run, e.g. `claude-sonnet-4-6`. Must be one the gateway key is allowed to serve. Falls back to `claude-sonnet-4-6` if unset. |
 
 With `gh` (run the secret-bearing ones in your own terminal so values aren't
 echoed into logs):

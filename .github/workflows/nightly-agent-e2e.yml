@@ -78,10 +78,10 @@ jobs:
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.LLM_GATEWAY_URL }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.LLM_GATEWAY_KEY }}
-          # Model the gateway key is allowed to serve. Set the repo variable
+          # Model the gateway key is allowed to serve. Set the repo secret
           # LLM_GATEWAY_MODEL to change it without editing code; falls back to
           # the model the gateway currently permits.
-          AGENT_E2E_MODEL: ${{ vars.LLM_GATEWAY_MODEL || 'claude-sonnet-4-6' }}
+          AGENT_E2E_MODEL: ${{ secrets.LLM_GATEWAY_MODEL || 'claude-sonnet-4-6' }}
         run: |
           # --network host lets the container use the runner's Tailnet
           # connectivity and MagicDNS resolution to reach the internal gateway.
