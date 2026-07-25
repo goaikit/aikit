@@ -32,6 +32,19 @@ fn test_run_agent_claude_basic() {
 }
 
 #[test]
+#[ignore = "Requires pi to be installed on PATH (pi --mode rpc)"]
+fn test_run_agent_pi_basic() {
+    let result = run_agent("pi", "say hi", RunOptions::default()).unwrap();
+
+    // A settled RPC run returns Ok; the streamed assistant text is captured.
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.token_usage.is_some() || !stdout.is_empty(),
+        "pi run should report usage or produce output"
+    );
+}
+
+#[test]
 fn test_run_agent_not_runnable() {
     let result = run_agent("copilot", "test", RunOptions::default());
 

@@ -28,6 +28,10 @@ exits 0, a `*.jsonl` transcript appears under `~/.claude/projects`, and
 
 ## Required repo secrets
 
+> Full setup guide (Tailscale OAuth client, ACL, secrets, first run,
+> troubleshooting): **[`docs/ci-nightly-agent-e2e.md`](../../docs/ci-nightly-agent-e2e.md)**.
+> This file is the quick reference.
+
 The gateway is reached **over the Tailnet**, not a public endpoint. The nightly
 workflow joins the Tailnet as an ephemeral, tagged node, then runs the smoke
 container with `--network host` so it can resolve/reach the internal gateway.

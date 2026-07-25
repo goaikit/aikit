@@ -672,6 +672,18 @@ const AGENTS: &[AgentEntry] = &[
         output_format: DeployOutputFormat::Markdown,
     },
     AgentEntry {
+        key: "pi",
+        name: "Pi",
+        commands: ".pi/prompts",
+        skills: Some(".pi/skills"),
+        subagents: None,
+        scripts: None,
+        instruction_file: Some("AGENTS.md"),
+        install_url: Some("https://pi.dev/"),
+        arg_placeholder: "$ARGUMENTS",
+        output_format: DeployOutputFormat::Markdown,
+    },
+    AgentEntry {
         key: "windsurf",
         name: "Windsurf",
         commands: ".windsurf/workflows",
@@ -811,7 +823,7 @@ mod tests {
 
     #[test]
     fn test_all_agents_count() {
-        assert_eq!(all_agents().len(), 18);
+        assert_eq!(all_agents().len(), 19);
     }
 
     #[test]
@@ -1371,7 +1383,7 @@ mod catalog_tests {
     #[test]
     fn test_catalog_contains_all_agents() {
         let all = all_agents();
-        assert_eq!(all.len(), 18);
+        assert_eq!(all.len(), 19);
 
         let keys: Vec<_> = all.iter().map(|a| a.name.clone()).collect();
         assert!(keys.contains(&"Claude Code".to_string()));
@@ -1382,6 +1394,7 @@ mod catalog_tests {
         assert!(keys.contains(&"Newton".to_string()));
         assert!(keys.contains(&"opencode".to_string()));
         assert!(keys.contains(&"Codex CLI".to_string()));
+        assert!(keys.contains(&"Pi".to_string()));
         assert!(keys.contains(&"Windsurf".to_string()));
         assert!(keys.contains(&"Kilo Code".to_string()));
         assert!(keys.contains(&"Auggie CLI".to_string()));

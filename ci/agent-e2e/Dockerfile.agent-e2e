@@ -31,9 +31,12 @@ COPY --from=build /src/target/release/aikit /usr/local/bin/aikit
 COPY ci/agent-e2e/smoke.sh /usr/local/bin/agent-smoke
 RUN chmod +x /usr/local/bin/agent-smoke
 
-# A non-root home so ~/.claude/projects is writable and isolated.
+# Run as a non-root user. Claude Code refuses `--dangerously-skip-permissions`
+# (which aikit's headless claude backend passes) under root/sudo, so the smoke
+# must run as an unprivileged user with a writable home for ~/.claude/projects.
+RUN useradd --create-home --home-dir /home/agent --shell /bin/bash agent
 ENV HOME=/home/agent
-RUN mkdir -p /home/agent && chmod 777 /home/agent
+USER agent
 WORKDIR /home/agent
 
 # The gateway endpoint + key are provided at `docker run` time, never baked in.
