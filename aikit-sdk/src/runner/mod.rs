@@ -399,6 +399,7 @@ where
         stderr_thread,
         stdin_thread,
         argv: _argv,
+        stdin_done,
     } = transport::subprocess::connect(backend, prompt, &options, true)?;
 
     // Bind the cancel handle to the live child immediately — before the
@@ -694,6 +695,14 @@ where
     // Signal watchdog on natural exit path (no-op if it already fired).
     if let Some(done_tx) = watchdog_done {
         let _ = done_tx.send(());
+    }
+
+    // Release the stdin writer for Backends that hold it open (`holds_stdin_open`),
+    // so the child observes EOF and can exit gracefully. No-op for every
+    // subprocess-lines Backend. Done before the kill/join below so a settled
+    // RPC server shuts down cleanly rather than being SIGKILLed mid-flush.
+    if let Some(tx) = &stdin_done {
+        let _ = tx.send(());
     }
 
     // If the Backend signalled a terminal settle event (Pi RPC
