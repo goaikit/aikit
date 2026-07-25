@@ -32,6 +32,7 @@ pub fn usage_source_label(source: &UsageSource) -> &'static str {
         UsageSource::Gemini => "gemini",
         UsageSource::OpenCode => "opencode",
         UsageSource::Cursor => "cursor",
+        UsageSource::Pi => "pi",
         UsageSource::Aikit => "aikit",
     }
 }

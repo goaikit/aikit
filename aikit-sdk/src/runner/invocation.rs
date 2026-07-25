@@ -107,7 +107,7 @@ impl Backend {
         match self {
             Backend::Codex | Backend::Gemini => KnobSupport::SupportedOsEnforced,
             Backend::Claude | Backend::OpenCode | Backend::Aikit => KnobSupport::SupportedAppLevel,
-            Backend::Cursor => KnobSupport::Unsupported,
+            Backend::Cursor | Backend::Pi => KnobSupport::Unsupported,
         }
     }
 
@@ -120,7 +120,7 @@ impl Backend {
             | Backend::Gemini
             | Backend::OpenCode
             | Backend::Aikit => KnobSupport::SupportedAppLevel,
-            Backend::Cursor => KnobSupport::Unsupported,
+            Backend::Cursor | Backend::Pi => KnobSupport::Unsupported,
         }
     }
 
@@ -137,7 +137,9 @@ impl Backend {
         match self {
             Backend::Codex | Backend::Gemini => KnobSupport::SupportedOsEnforced,
             Backend::Aikit => KnobSupport::SupportedAppLevel,
-            Backend::Claude | Backend::OpenCode | Backend::Cursor => KnobSupport::Unsupported,
+            Backend::Claude | Backend::OpenCode | Backend::Cursor | Backend::Pi => {
+                KnobSupport::Unsupported
+            }
         }
     }
 
@@ -146,9 +148,11 @@ impl Backend {
     pub fn output_schema_support(self) -> KnobSupport {
         match self {
             Backend::Codex | Backend::Claude => KnobSupport::SupportedOsEnforced,
-            Backend::Gemini | Backend::OpenCode | Backend::Cursor | Backend::Aikit => {
-                KnobSupport::Emulated
-            }
+            Backend::Gemini
+            | Backend::OpenCode
+            | Backend::Cursor
+            | Backend::Aikit
+            | Backend::Pi => KnobSupport::Emulated,
         }
     }
 
@@ -157,9 +161,11 @@ impl Backend {
     pub fn bare_support(self) -> KnobSupport {
         match self {
             Backend::Codex | Backend::Claude => KnobSupport::SupportedOsEnforced,
-            Backend::Gemini | Backend::OpenCode | Backend::Cursor | Backend::Aikit => {
-                KnobSupport::Unsupported
-            }
+            Backend::Gemini
+            | Backend::OpenCode
+            | Backend::Cursor
+            | Backend::Aikit
+            | Backend::Pi => KnobSupport::Unsupported,
         }
     }
 
@@ -373,7 +379,7 @@ mod tests {
             match b {
                 Backend::Codex | Backend::Gemini => assert_eq!(s, KnobSupport::SupportedOsEnforced),
                 Backend::Aikit => assert_eq!(s, KnobSupport::SupportedAppLevel),
-                Backend::Claude | Backend::OpenCode | Backend::Cursor => {
+                Backend::Claude | Backend::OpenCode | Backend::Cursor | Backend::Pi => {
                     assert_eq!(s, KnobSupport::Unsupported)
                 }
             }
@@ -388,7 +394,11 @@ mod tests {
                 Backend::Codex | Backend::Claude => {
                     assert_eq!(s, KnobSupport::SupportedOsEnforced)
                 }
-                Backend::Gemini | Backend::OpenCode | Backend::Cursor | Backend::Aikit => {
+                Backend::Gemini
+                | Backend::OpenCode
+                | Backend::Cursor
+                | Backend::Aikit
+                | Backend::Pi => {
                     assert_eq!(s, KnobSupport::Emulated)
                 }
             }

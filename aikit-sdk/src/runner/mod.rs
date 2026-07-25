@@ -445,6 +445,11 @@ where
     let mut json_lines_seen: u64 = 0;
     let mut stream_messages_emitted: u64 = 0;
     let mut json_lines_unmapped: u64 = 0;
+    // Set when the Backend signals its run is fully settled via a terminal
+    // event (Pi RPC `agent_settled`). The child is then still alive (an RPC
+    // server does not exit after one prompt), so it is torn down after the
+    // drain loop ends (spec 014).
+    let mut settled = false;
 
     let emit_raw = options.emit_raw_transport;
 
@@ -592,6 +597,11 @@ where
                                 }
                             }
                         }
+
+                        if backend.is_terminal_event(json_val) {
+                            settled = true;
+                            break;
+                        }
                     }
                     _ => {
                         let source_seq = seq;
@@ -674,6 +684,15 @@ where
     // Signal watchdog on natural exit path (no-op if it already fired).
     if let Some(done_tx) = watchdog_done {
         let _ = done_tx.send(());
+    }
+
+    // If the Backend signalled a terminal settle event (Pi RPC
+    // `agent_settled`) the child is an RPC server that is still alive: kill
+    // its process group so the reader threads observe EOF and the join/wait
+    // below do not block (spec 014). A no-op for every subprocess-lines
+    // Backend, which never sets `settled` and exits on its own.
+    if settled {
+        transport::subprocess::kill_process_group(&child);
     }
 
     // Join reader threads before wait() to prevent pipe deadlock.
@@ -842,7 +861,7 @@ mod tests {
         let err = RunError::AgentNotRunnable("unknown".to_string());
         let msg = format!("{}", err);
         assert!(msg.contains("not runnable"));
-        assert!(msg.contains("codex, claude, gemini, opencode, agent"));
+        assert!(msg.contains("codex, claude, gemini, opencode, cursor, pi, aikit"));
     }
 
     #[test]
@@ -1709,5 +1728,108 @@ mod tests {
                 other.map(|_| ())
             ),
         }
+    }
+
+    // --- Pi RPC session: settle-detection tears down a long-lived server ---
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_pi_settles_and_tears_down_long_lived_server() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // A `pi` stub that speaks RPC: it reads the one prompt command from
+        // stdin, emits a realistic event stream ending in `agent_settled`,
+        // then — like the real long-lived RPC server — stays alive instead of
+        // exiting. The run's settle-detection MUST tear it down (no timeout is
+        // set), proving the dispatch + kill path without the real binary.
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("pi");
+        let script = concat!(
+            "#!/bin/sh\n",
+            "read -r _prompt\n",
+            "echo '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"Hello\"}}'\n",
+            "echo '{\"type\":\"turn_end\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}],\"usage\":{\"input\":10,\"output\":5}}}'\n",
+            "echo '{\"type\":\"agent_settled\"}'\n",
+            "sleep 60",
+        );
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let mut texts: Vec<String> = Vec::new();
+        let start = std::time::Instant::now();
+        let result = run_agent_events("pi", "do the thing", RunOptions::default(), |ev| {
+            if let AgentEventPayload::StreamMessage(m) = ev.payload {
+                texts.push(m.text);
+            }
+        });
+        let elapsed = start.elapsed();
+
+        std::env::set_var("PATH", orig_path);
+
+        let res = result.expect("pi run should succeed");
+        // Settle-kill must return promptly; without it the stub sleeps 60s.
+        assert!(
+            elapsed < std::time::Duration::from_secs(6),
+            "pi run should return promptly after settle, took {:?}",
+            elapsed
+        );
+        assert!(
+            texts.iter().any(|t| t.contains("Hello")),
+            "expected streamed 'Hello' text in {:?}",
+            texts
+        );
+        let usage = res
+            .token_usage
+            .expect("pi run must aggregate usage from turn_end");
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_run_pi_passes_prompt_as_framed_stdin_command() {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Capture the first stdin line (the prompt command) into a file so we
+        // can assert it is a JSON-RPC prompt frame, not raw text.
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("pi");
+        let captured = dir.path().join("captured.txt");
+        let script = format!(
+            "#!/bin/sh\nread -r line\necho \"$line\" > '{}'\necho '{{\"type\":\"agent_settled\"}}'\nexit 0",
+            captured.display()
+        );
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let orig_path = std::env::var("PATH").unwrap_or_default();
+        let new_path = format!("{}:{}", dir.path().display(), orig_path);
+        std::env::set_var("PATH", &new_path);
+
+        let result = run_agent_events("pi", "write tests", RunOptions::default(), |_| {});
+
+        std::env::set_var("PATH", orig_path);
+        assert!(result.is_ok(), "{:?}", result.err());
+
+        let captured_line = std::fs::read_to_string(&captured).unwrap();
+        let v: serde_json::Value = serde_json::from_str(captured_line.trim()).unwrap();
+        assert_eq!(v["type"], "prompt");
+        assert_eq!(v["prompt"], "write tests");
     }
 }

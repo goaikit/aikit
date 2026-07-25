@@ -13,7 +13,9 @@ use super::invocation::InvocationEnvelope;
 /// The runnable agent keys, in canonical order. Kept in lockstep with
 /// [`Backend::ALL`] (enforced by a test below).
 pub fn runnable_agents() -> &'static [&'static str] {
-    &["codex", "claude", "gemini", "opencode", "cursor", "aikit"]
+    &[
+        "codex", "claude", "gemini", "opencode", "cursor", "pi", "aikit",
+    ]
 }
 
 pub fn is_runnable(agent_key: &str) -> bool {
@@ -70,6 +72,7 @@ mod tests {
         assert!(is_runnable("gemini"));
         assert!(is_runnable("opencode"));
         assert!(is_runnable("cursor"));
+        assert!(is_runnable("pi"));
         assert!(is_runnable("aikit"));
         assert!(!is_runnable("agent")); // renamed to "cursor" (ADR 0006)
         assert!(!is_runnable("copilot"));
@@ -92,8 +95,9 @@ mod tests {
         assert!(agents.contains(&"gemini"));
         assert!(agents.contains(&"opencode"));
         assert!(agents.contains(&"cursor"));
+        assert!(agents.contains(&"pi"));
         assert!(agents.contains(&"aikit"));
-        assert_eq!(agents.len(), 6);
+        assert_eq!(agents.len(), 7);
         // Single source of truth: same set as Backend::ALL.
         let mut from_list: Vec<&str> = agents.to_vec();
         from_list.sort_unstable();

@@ -1,0 +1,9 @@
+{"type":"message_update","assistantMessageEvent":{"type":"thinking_delta","delta":"Planning the edit"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"I'll "}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"read the file first."}}
+{"type":"tool_execution_start","toolCallId":"call_1","toolName":"read_file","args":{"path":"src/main.rs"}}
+{"type":"tool_execution_end","toolCallId":"call_1","result":{"lines":42},"isError":false}
+{"type":"compaction_end","result":{"tokensBefore":9000,"estimatedTokensAfter":4500},"reason":"auto"}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"Done."}}
+{"type":"turn_end","message":{"content":[{"type":"text","text":"Done. Edited src/main.rs."}],"usage":{"input":120,"output":34,"cacheRead":50,"cacheWrite":7}}}
+{"type":"agent_settled"}
