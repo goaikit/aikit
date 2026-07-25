@@ -118,6 +118,12 @@ pub(crate) fn connect(
         cmd.current_dir(dir);
     }
 
+    // spec 013 D1/D2: apply backend sandbox env for the resolved envelope
+    // (gemini SEATBELT_PROFILE / SANDBOX_MOUNTS).
+    for (k, v) in crate::runner::invocation::sandbox_env_for(backend, &envelope) {
+        cmd.env(k, v);
+    }
+
     // BUG-4 (ADR 0014): spawn the agent CLI as the leader of its own process
     // group. Termination is escalated over the whole group (see
     // `kill_process_group` below), which reaps grandchildren (tools the
