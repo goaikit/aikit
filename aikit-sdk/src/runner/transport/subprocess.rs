@@ -33,6 +33,10 @@ pub(crate) struct SubprocessConnection {
     pub stdin_thread: thread::JoinHandle<io::Result<()>>,
     /// argv used, retained for diagnostics.
     pub argv: Vec<OsString>,
+    /// When the Backend [`Backend::holds_stdin_open`], the drain loop signals
+    /// this to release the writer thread (drop stdin → EOF) once the run is
+    /// done. `None` for Backends whose writer drops stdin immediately.
+    pub stdin_done: Option<mpsc::Sender<()>>,
 }
 
 /// Spawn the Backend's CLI, start the stdout/stderr reader threads, and start
@@ -161,6 +165,8 @@ pub(crate) fn connect(
     // text (spec 014).
     let agent_key = backend.key();
     let stdin_bytes = backend.stdin_prompt_bytes(prompt);
+    let holds_stdin = backend.holds_stdin_open();
+    let (stdin_done_tx, stdin_done_rx) = mpsc::channel::<()>();
     let stdin_thread = thread::spawn(move || -> io::Result<()> {
         let mut stdin = stdin_pipe;
         let result = match stdin.write_all(&stdin_bytes) {
@@ -175,6 +181,14 @@ pub(crate) fn connect(
             }
             Err(e) => Err(e),
         };
+        if holds_stdin {
+            // A long-lived RPC server (pi) aborts the in-flight turn the
+            // moment it sees stdin EOF. Hold stdin open until the drain loop
+            // signals completion (or the Sender drops on teardown), so the
+            // server keeps running to `agent_settled`; the subsequent EOF
+            // then lets it exit gracefully.
+            let _ = stdin_done_rx.recv();
+        }
         // `stdin` drops here regardless of outcome, closing the write end
         // and signalling EOF to the child.
         result
@@ -187,6 +201,11 @@ pub(crate) fn connect(
         stderr_thread,
         stdin_thread,
         argv,
+        stdin_done: if holds_stdin {
+            Some(stdin_done_tx)
+        } else {
+            None
+        },
     })
 }
 

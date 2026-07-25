@@ -287,6 +287,17 @@ impl Backend {
         }
         pi::is_settled_event(value)
     }
+
+    /// Whether the subprocess transport must keep the child's stdin open for
+    /// the whole run and only close it once the drain completes. Pi's RPC
+    /// server aborts the in-flight turn the moment it observes stdin EOF, so
+    /// the prompt-writer thread must hold stdin open until the run settles
+    /// (then EOF lets the server exit gracefully). Subprocess-lines Backends
+    /// read their prompt and finish before EOF matters, so they take the
+    /// default `false` (writer drops stdin immediately, as before).
+    pub(crate) fn holds_stdin_open(self) -> bool {
+        matches!(self, Backend::Pi)
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +421,21 @@ mod tests {
         assert!(Backend::Claude.requires_cli());
         assert!(Backend::Cursor.requires_cli());
         assert!(!Backend::Aikit.requires_cli());
+    }
+
+    #[test]
+    fn only_pi_holds_stdin_open() {
+        // Pi's RPC server aborts the in-flight turn on stdin EOF, so the
+        // transport must hold stdin open until the run settles. Every other
+        // Backend reads its prompt and is unaffected by an early EOF, so it
+        // takes the default (writer drops stdin immediately).
+        for &b in ALL {
+            assert_eq!(
+                b.holds_stdin_open(),
+                b == Backend::Pi,
+                "holds_stdin_open for {b:?}"
+            );
+        }
     }
 
     // ---- shared invariant harness over every Backend (spec 006 §6) ----
