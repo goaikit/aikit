@@ -53,6 +53,7 @@ fn args() -> SyncSessionsArgs {
         allow_http: false,
         format: "default".to_string(),
         log_level: None,
+        log_format: "text".to_string(),
     }
 }
 

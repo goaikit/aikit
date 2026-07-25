@@ -43,6 +43,19 @@ pub enum SyncError {
     Auth(String),
 }
 
+impl SyncError {
+    /// Stable, low-cardinality label for logs/metrics: `io` | `backend` | `auth`.
+    /// Lets an analyst filter `kind=auth` (creds) vs `kind=backend` (S3/network)
+    /// vs `kind=io` (local file) without parsing the message.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            SyncError::Io(_) => "io",
+            SyncError::Backend(_) => "backend",
+            SyncError::Auth(_) => "auth",
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct InMemorySink {
     inner: Arc<Mutex<InMemoryInner>>,

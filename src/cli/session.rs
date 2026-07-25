@@ -57,6 +57,7 @@ pub struct SyncSessionsArgs {
     pub allow_http: bool,
     pub format: String,
     pub log_level: Option<String>,
+    pub log_format: String,
 }
 
 // ── new session ───────────────────────────────────────────────────────────────
@@ -179,8 +180,40 @@ pub fn execute_list(args: ListSessionsArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Install a stderr tracing subscriber for the sync run. No-op if one already
+/// exists (a global `--debug` or `RUST_LOG` setup wins). `json` emits ndjson.
+#[cfg(feature = "agent-adapters")]
+fn init_sync_logging(level: &str, json: bool) {
+    use tracing_subscriber::EnvFilter;
+    let filter = std::env::var("RUST_LOG")
+        .ok()
+        .map(EnvFilter::new)
+        .unwrap_or_else(|| EnvFilter::new(format!("aikit_session_sync={level},warn")));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr);
+    let _ = if json {
+        builder.json().flatten_event(true).try_init()
+    } else {
+        builder.try_init()
+    };
+}
+
 #[cfg(feature = "agent-adapters")]
 pub async fn execute_sync(args: SyncSessionsArgs) -> anyhow::Result<i32> {
+    // Turn on leveled sync logging to stderr. No-op if a subscriber is already
+    // installed (RUST_LOG / global --debug take precedence). --log-format json
+    // emits ndjson for log ingestion.
+    {
+        let level = args
+            .log_level
+            .clone()
+            .or_else(|| std::env::var("RUST_LOG").ok())
+            .unwrap_or_else(|| "info".to_string());
+        init_sync_logging(&level, args.log_format.eq_ignore_ascii_case("json"));
+    }
+
     let bucket = args
         .bucket
         .or_else(|| std::env::var("AIKIT_SYNC_BUCKET").ok());

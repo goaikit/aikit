@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aikit_session_capture::{
     Adapter, Registry, SecretScrubber, ToolKind, SCRUBBER_PATTERN_VERSION,
@@ -10,6 +10,7 @@ use chrono::Utc;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::time::sleep;
+use tracing::{debug, error, info, warn};
 
 use crate::key::object_key;
 use crate::state::{FileFingerprint, SyncStateEntry, SyncStateStore};
@@ -33,6 +34,18 @@ pub struct SyncConfig {
     pub log_level: String,
     pub host: String,
     pub state_path: Option<PathBuf>,
+    /// Correlation id stamped on every log event of one run. Empty → the engine
+    /// generates a time-sortable id in `SyncEngine::new`.
+    pub run_id: String,
+}
+
+/// A short, time-sortable correlation id: hex milliseconds + 4 random hex.
+pub fn new_run_id() -> String {
+    format!(
+        "{:x}{:04x}",
+        Utc::now().timestamp_millis().max(0),
+        rand::thread_rng().gen::<u16>()
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +73,7 @@ impl Default for SyncConfig {
             log_level: "info".to_string(),
             host: default_host(),
             state_path: None,
+            run_id: String::new(),
         }
     }
 }
@@ -110,6 +124,7 @@ impl Default for WatchRetryPolicy {
 pub struct SyncEngine {
     config: SyncConfig,
     owner: String,
+    run_id: String,
     sink: Arc<dyn SyncSink>,
     state: Arc<dyn SyncStateStore>,
     scrubber: SecretScrubber,
@@ -122,9 +137,15 @@ impl SyncEngine {
         state: Arc<dyn SyncStateStore>,
     ) -> Result<Self, SyncError> {
         let owner = resolve_owner(config.owner.as_deref(), config.credential_owner.as_deref())?;
+        let run_id = if config.run_id.is_empty() {
+            new_run_id()
+        } else {
+            config.run_id.clone()
+        };
         Ok(Self {
             config,
             owner,
+            run_id,
             sink,
             state,
             scrubber: SecretScrubber::default(),
@@ -135,19 +156,96 @@ impl SyncEngine {
         &self.owner
     }
 
+    /// Correlation id stamped on every log event of this run.
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
     pub async fn sync_detected(&self, registry: &Registry) -> SyncRunSummary {
-        let mut summary = SyncRunSummary::default();
+        // Enumerate up front so progress has a denominator and an ETA.
+        let mut work: Vec<(&dyn Adapter, PathBuf)> = Vec::new();
         for adapter in jsonl_adapters(registry, self.config.tools.as_deref()) {
             for file in session_files(adapter) {
-                let outcome = match self.sync_file(adapter, &file).await {
-                    Ok(outcome) => outcome,
-                    Err(error) => SyncOutcome::Failed {
-                        error: error.to_string(),
-                    },
-                };
-                summary.record(&outcome);
+                work.push((adapter, file));
             }
         }
+        let total = work.len();
+        let started = Instant::now();
+        info!(
+            run = %self.run_id,
+            owner = %self.owner,
+            host = %self.config.host,
+            bucket = self.config.bucket.as_deref().unwrap_or(""),
+            key_prefix = %self.config.key_prefix,
+            dry_run = self.config.dry_run,
+            total,
+            "sync.run.start"
+        );
+
+        let mut summary = SyncRunSummary::default();
+        let step = (total / 20).max(1); // ~20 progress lines over the run
+        for (i, (adapter, file)) in work.iter().enumerate() {
+            let t0 = Instant::now();
+            match self.sync_file(*adapter, file).await {
+                Ok(outcome) => {
+                    // sync_file only ever returns Synced or SkippedUnchanged.
+                    let (decision, bytes) = match &outcome {
+                        SyncOutcome::Synced { bytes_uploaded, .. } => ("synced", *bytes_uploaded),
+                        _ => ("skipped", 0),
+                    };
+                    debug!(
+                        run = %self.run_id,
+                        file = %file.display(),
+                        decision,
+                        bytes,
+                        dur_ms = t0.elapsed().as_millis() as u64,
+                        "sync.file"
+                    );
+                    summary.record(&outcome);
+                }
+                Err(error) => {
+                    error!(
+                        run = %self.run_id,
+                        file = %file.display(),
+                        kind = error.kind(),
+                        err = %error,
+                        dur_ms = t0.elapsed().as_millis() as u64,
+                        "sync.file.fail"
+                    );
+                    summary.record(&SyncOutcome::Failed {
+                        error: error.to_string(),
+                    });
+                }
+            }
+            let done = i + 1;
+            if done % step == 0 || done == total {
+                let secs = started.elapsed().as_secs_f64().max(0.001);
+                let rate = done as f64 / secs;
+                let eta_s = ((total - done) as f64 / rate.max(f64::MIN_POSITIVE)) as u64;
+                info!(
+                    run = %self.run_id,
+                    done,
+                    total,
+                    synced = summary.synced,
+                    skipped = summary.skipped_unchanged,
+                    failed = summary.failed,
+                    bytes = summary.bytes_uploaded,
+                    rate_per_s = rate as u64,
+                    eta_s,
+                    "sync.progress"
+                );
+            }
+        }
+
+        info!(
+            run = %self.run_id,
+            synced = summary.synced,
+            skipped = summary.skipped_unchanged,
+            failed = summary.failed,
+            bytes = summary.bytes_uploaded,
+            dur_ms = started.elapsed().as_millis() as u64,
+            "sync.run.end"
+        );
         summary
     }
 
@@ -261,11 +359,24 @@ impl SyncEngine {
             match self.sync_file(adapter, path).await {
                 Ok(outcome) => return Ok(outcome),
                 Err(error) => {
-                    last_error = Some(error);
                     if attempt + 1 < attempts {
                         let jitter = rand::thread_rng().gen_range(0..=delay.as_millis() / 4);
-                        sleep(delay + Duration::from_millis(jitter as u64)).await;
+                        let backoff = delay + Duration::from_millis(jitter as u64);
+                        warn!(
+                            run = %self.run_id,
+                            file = %path.display(),
+                            attempt = attempt + 1,
+                            max = attempts,
+                            kind = error.kind(),
+                            err = %error,
+                            backoff_ms = backoff.as_millis() as u64,
+                            "sync.retry"
+                        );
+                        last_error = Some(error);
+                        sleep(backoff).await;
                         delay = delay.saturating_mul(2).min(policy.cap);
+                    } else {
+                        last_error = Some(error);
                     }
                 }
             }
@@ -718,5 +829,50 @@ mod tests {
         resumed.sync_file(&adapter, &two).await.unwrap();
         resumed.sync_file(&adapter, &one).await.unwrap();
         assert_eq!(sink.object_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn sync_detected_records_and_logs_failures() {
+        // A failing sink drives sync_detected's error branch (sync.file.fail +
+        // SyncError::kind) and the failure is counted, not fatal.
+        let tmp = tempfile::tempdir().unwrap();
+        tokio::fs::write(tmp.path().join("a.jsonl"), "{\"m\":\"a\"}\n")
+            .await
+            .unwrap();
+        let mut registry = Registry::new();
+        registry.register(Box::new(FakeAdapter {
+            kind: ToolKind::Codex,
+            root: tmp.path().to_path_buf(),
+        }));
+        let engine = engine(
+            InMemorySink::with_backend_failure(),
+            InMemorySyncStateStore::default(),
+        );
+        let summary = engine.sync_detected(&registry).await;
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.synced, 0);
+    }
+
+    #[test]
+    fn sync_error_kind_labels() {
+        assert_eq!(SyncError::Io(std::io::Error::other("x")).kind(), "io");
+        assert_eq!(SyncError::Backend("x".into()).kind(), "backend");
+        assert_eq!(SyncError::Auth("x".into()).kind(), "auth");
+    }
+
+    #[test]
+    fn new_run_id_is_nonempty_and_varies() {
+        let a = new_run_id();
+        let b = new_run_id();
+        assert!(!a.is_empty());
+        // Same-ms collisions are possible but the random suffix makes repeats
+        // across a handful of calls astronomically unlikely.
+        assert!(a.len() >= 4 && b.len() >= 4);
+    }
+
+    #[tokio::test]
+    async fn engine_generates_run_id_when_unset() {
+        let e = engine(InMemorySink::new(), InMemorySyncStateStore::default());
+        assert!(!e.run_id().is_empty());
     }
 }

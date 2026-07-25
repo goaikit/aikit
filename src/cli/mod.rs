@@ -376,6 +376,7 @@ pub fn build_app() -> Result<AikitApp> {
                 allow_http: args.allow_http,
                 format: args.format,
                 log_level: args.log_level,
+                log_format: args.log_format,
             })
             .await?;
             if code == 0 {
@@ -1363,6 +1364,7 @@ struct SessionSyncArgs {
     allow_http: bool,
     format: String,
     log_level: Option<String>,
+    log_format: String,
 }
 
 impl IntoCommandSpec for SessionSyncArgs {
@@ -1401,6 +1403,7 @@ impl IntoCommandSpec for SessionSyncArgs {
                 flag_spec("allow-http", "Allow plain HTTP endpoints for local MinIO"),
                 opt_spec("format", "Output format: default or json"),
                 opt_spec("log-level", "Log level (default: info or RUST_LOG)"),
+                opt_spec("log-format", "Log output: text (default) or json (ndjson)"),
             ],
             ..CommandSpec::default()
         }
@@ -1421,6 +1424,7 @@ impl FromArgValueMap for SessionSyncArgs {
             allow_http: get_bool_val(map, "allow-http"),
             format: get_str_default(map, "format", "default"),
             log_level: get_opt_val(map, "log-level"),
+            log_format: get_str_default(map, "log-format", "text"),
         }
     }
 }

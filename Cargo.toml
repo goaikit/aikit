@@ -101,7 +101,7 @@ dotenv = "0.15"
 
 # Structured logging (spawn argv, run diagnostics)
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # YAML frontmatter parsing
 yaml-front-matter = "0.1"
