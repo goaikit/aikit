@@ -109,8 +109,8 @@ aikit agent run --agent claude --events -p "Summarize the project"
 aikit agent run --agent claude --events --stream -p "Refactor this module"
 ```
 
-**Runnable backends:** `codex`, `claude`, `gemini`, `opencode`, `agent`,
-`aikit` (built-in), `auto` (route to whatever is installed).
+**Runnable backends:** `codex`, `claude`, `gemini`, `opencode`, `cursor`,
+`pi`, `aikit` (built-in), `auto` (route to whatever is installed).
 
 **Options:**
 
@@ -367,11 +367,11 @@ GITHUB_TOKEN=your_github_token_here
 
 ## Supported AI assistants
 
-The catalog covers **18** coding assistants for install/template mapping.
+The catalog covers **19** coding assistants for install/template mapping.
 `aikit agent run` accepts: `codex`, `claude`, `gemini`, `opencode`,
-`agent`, `aikit`, `auto`.
+`cursor`, `pi`, `aikit`, `auto`.
 
-**CLI-based:** Claude, Gemini, Qwen, OpenCode, Codex, Auggie, CodeBuddy,
+**CLI-based:** Claude, Gemini, Qwen, OpenCode, Codex, Pi, Auggie, CodeBuddy,
 Qoder, Q, Amp, Shai
 
 **IDE-based:** GitHub Copilot, Cursor, Windsurf, KiloCode, Roo, Bob
