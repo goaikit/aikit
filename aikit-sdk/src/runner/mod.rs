@@ -1905,6 +1905,6 @@ mod tests {
         let captured_line = std::fs::read_to_string(&captured).unwrap();
         let v: serde_json::Value = serde_json::from_str(captured_line.trim()).unwrap();
         assert_eq!(v["type"], "prompt");
-        assert_eq!(v["prompt"], "write tests");
+        assert_eq!(v["message"], "write tests");
     }
 }

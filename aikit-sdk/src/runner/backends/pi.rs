@@ -257,13 +257,15 @@ pub(crate) fn extract_usage(line: &serde_json::Value) -> Option<(TokenUsage, Usa
     ))
 }
 
-/// True when an event signals the run is fully settled — automatic retries,
-/// compaction, and queued follow-ups have completed (spec 014). The live run
-/// drains until this fires, then tears the session down.
+/// True when an event signals the run is fully settled — no automatic retry,
+/// compaction retry, or queued follow-up remains. Only `agent_settled` is the
+/// terminal; `agent_end` may be followed by retry/compaction/continuations
+/// (Pi RPC spec), so the live run drains until `agent_settled` fires, then
+/// tears the session down. Falls back to process EOF if it never arrives.
 pub(crate) fn is_settled_event(value: &serde_json::Value) -> bool {
     matches!(
         value.get("type").and_then(|v| v.as_str()),
-        Some("agent_settled") | Some("agent_end")
+        Some("agent_settled")
     )
 }
 
@@ -318,10 +320,12 @@ pub(crate) fn extract_quota(payload: &AgentEventPayload) -> Option<QuotaExceeded
 }
 
 /// The bytes to write to `pi`'s stdin to issue a one-shot prompt command,
-/// newline-terminated (JSONL framing). Kept pure so it is shared by the live
-/// path and the test path.
+/// newline-terminated (JSONL framing). The Pi RPC protocol names the prompt
+/// field `message` (not `prompt`); an incorrect field is rejected with a
+/// `Cannot read properties of undefined` error before any agent run starts.
+/// Kept pure so it is shared by the live path and the test path.
 pub(crate) fn prompt_command(prompt: &str) -> String {
-    let cmd = serde_json::json!({ "type": "prompt", "prompt": prompt });
+    let cmd = serde_json::json!({ "type": "prompt", "message": prompt });
     format!("{cmd}\n")
 }
 
@@ -581,7 +585,9 @@ mod tests {
     #[test]
     fn is_settled_detects_terminal_events() {
         assert!(is_settled_event(&json(r#"{"type":"agent_settled"}"#)));
-        assert!(is_settled_event(&json(r#"{"type":"agent_end"}"#)));
+        // agent_end is NOT terminal — it may be followed by retry/compaction/
+        // queued continuations (Pi RPC spec), so the run must keep draining.
+        assert!(!is_settled_event(&json(r#"{"type":"agent_end"}"#)));
         assert!(!is_settled_event(&json(r#"{"type":"turn_end"}"#)));
         assert!(!is_settled_event(&json(r#"{"type":"response"}"#)));
         assert!(!is_settled_event(&json(r#"{}"#)));
@@ -640,7 +646,7 @@ mod tests {
         let line = cmd.trim_end();
         let v: serde_json::Value = serde_json::from_str(line).unwrap();
         assert_eq!(v["type"], "prompt");
-        assert_eq!(v["prompt"], "write a haiku");
+        assert_eq!(v["message"], "write a haiku");
     }
 
     #[test]
@@ -651,7 +657,7 @@ mod tests {
         // single valid JSON value — embedded newline must not split records.
         let line = cmd.trim_end_matches('\n');
         let v: serde_json::Value = serde_json::from_str(line).unwrap();
-        assert_eq!(v["prompt"], "line\nwith \"quotes\"");
+        assert_eq!(v["message"], "line\nwith \"quotes\"");
     }
 
     #[test]
