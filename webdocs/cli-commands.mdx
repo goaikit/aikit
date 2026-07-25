@@ -346,7 +346,8 @@ aikit session sync --owner alice --bucket my-sessions \
 | `--dry-run` | — | off | Detect + scrub + hash + summarize, upload nothing |
 | `--allow-http` | `AIKIT_SYNC_ALLOW_HTTP` | `false` | Permit plain-HTTP endpoints (local MinIO dev) |
 | `--format` | — | `default` | `default` (human) or `json` (machine-readable summary) |
-| `--log-level` | `RUST_LOG` | `info` | Log verbosity |
+| `--log-level` | `RUST_LOG` | `info` | Log verbosity: `error`, `warn`, `info`, `debug`, `trace` |
+| `--log-format` | — | `text` | Log output: `text` (human) or `json` (ndjson for log ingestion) |
 
 **Credentials** are read from the standard AWS environment
 (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or a workload-identity chain) and
@@ -362,6 +363,30 @@ are **never** accepted as flags. Two additional env-only knobs:
 **Idempotency & retention:** the object key is the SHA-256 of the scrubbed
 bytes, so re-syncing unchanged content is a no-op; a grown transcript produces a
 new version object and **all versions are retained** (v1 keeps everything).
+
+**Observability.** The sync run emits structured events to **stderr** (the JSON
+summary still goes to stdout), each carrying a `run` correlation id so one run's
+lines can be grepped together. Verbosity is `--log-level`; `--log-format json`
+emits ndjson for Loki/ELK/CloudWatch.
+
+| Level | Events |
+|-------|--------|
+| `error` | `sync.file.fail` — with `kind` (`auth` \| `backend` \| `io`) so creds vs S3/network vs local-file failures are filterable without parsing the message |
+| `warn` | `sync.retry` — attempt/max, backoff, error (watch mode) |
+| `info` | `sync.run.start` (owner, host, bucket, total), `sync.progress` (done/total, synced/skipped/failed, bytes, rate, ETA), `sync.run.end` (totals, duration) |
+| `debug` | `sync.file` — per file: decision (`synced`/`skipped`), bytes, duration |
+
+```bash
+# watch a large run with progress + per-file detail
+aikit session sync … --log-level debug
+
+# structured logs for ingestion
+aikit session sync … --log-format json
+# {"level":"INFO","message":"sync.progress","run":"19f9…","done":342,"total":992,"synced":342,"bytes":220300000,"rate_per_s":47,"eta_s":14}
+```
+
+`RUST_LOG` (or a global `--debug`) takes precedence over `--log-level`/`--log-format`
+if set.
 
 **Exit codes:** `0` everything synced or already current · `1` one or more files
 failed after retries · `2` configuration/auth error before any upload (missing
