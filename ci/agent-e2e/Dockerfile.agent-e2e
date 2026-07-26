@@ -1,12 +1,15 @@
 # Real-agent E2E image for the nightly pipeline.
 #
-# Bundles the aikit binary with the Claude Code CLI so the smoke suite can run
-# ACTUAL agent turns against a custom LLM gateway (Anthropic-compatible), then
-# assert the capture + sync pipeline end-to-end. No real Anthropic spend: the
-# gateway is injected at runtime via ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN.
+# Bundles the aikit binary with the Claude Code CLI and the Codex CLI so the
+# smoke suite can run ACTUAL agent turns against custom LLM gateways
+# (Anthropic-compatible for Claude, OpenAI-compatible for Codex), then assert
+# the capture + sync pipeline end-to-end. No real Anthropic/OpenAI spend: the
+# gateways are injected at runtime via env vars (ANTHROPIC_BASE_URL /
+# ANTHROPIC_AUTH_TOKEN for Claude; CODEX_BASE_URL / CODEX_API_KEY / CODEX_MODEL
+# for Codex, optional — the codex smoke case skips cleanly if unset).
 #
-# Reusable: add more agent CLIs (codex, gemini, …) and more cases to smoke.sh as
-# agentic features grow. Claude-only for the first cut.
+# Reusable: add more agent CLIs (gemini, …) and more cases to smoke.sh as
+# agentic features grow. Claude + Codex covered so far.
 
 # ---- build stage: compile the aikit binary ----
 FROM rust:1.93-bookworm AS build
@@ -16,7 +19,7 @@ COPY . .
 # smoke suite exercises (agent run + session capture + session sync).
 RUN cargo build --release --bin aikit
 
-# ---- runtime stage: aikit + Claude Code CLI ----
+# ---- runtime stage: aikit + Claude Code CLI + Codex CLI ----
 FROM node:22-bookworm-slim AS runtime
 
 # jq for asserting on the JSON sync summary; ca-certificates for TLS to the gateway.
@@ -27,19 +30,28 @@ RUN apt-get update \
 # The real Claude Code CLI — this is the agent aikit drives.
 RUN npm install -g @anthropic-ai/claude-code
 
+# The real Codex CLI. It needs an OpenAI-compatible gateway route and a
+# `~/.codex/config.toml` pointing at it — smoke.sh seeds that config at
+# runtime from CODEX_BASE_URL/CODEX_API_KEY/CODEX_MODEL (never baked in here).
+RUN npm install -g @openai/codex
+
 COPY --from=build /src/target/release/aikit /usr/local/bin/aikit
 COPY ci/agent-e2e/smoke.sh /usr/local/bin/agent-smoke
 RUN chmod +x /usr/local/bin/agent-smoke
 
 # Run as a non-root user. Claude Code refuses `--dangerously-skip-permissions`
 # (which aikit's headless claude backend passes) under root/sudo, so the smoke
-# must run as an unprivileged user with a writable home for ~/.claude/projects.
+# must run as an unprivileged user with a writable home for ~/.claude/projects
+# and ~/.codex (Codex sessions + the runtime-seeded config.toml).
 RUN useradd --create-home --home-dir /home/agent --shell /bin/bash agent
 ENV HOME=/home/agent
 USER agent
 WORKDIR /home/agent
 
-# The gateway endpoint + key are provided at `docker run` time, never baked in.
+# The gateway endpoints + keys are provided at `docker run` time, never baked in.
 #   ANTHROPIC_BASE_URL   — the gateway's Anthropic-compatible base URL
 #   ANTHROPIC_AUTH_TOKEN — the gateway API key
+#   CODEX_BASE_URL       — (optional) gateway OpenAI-compatible base URL
+#   CODEX_API_KEY        — (optional) gateway API key for that route
+#   CODEX_MODEL          — (optional) model to run through Codex
 CMD ["agent-smoke"]

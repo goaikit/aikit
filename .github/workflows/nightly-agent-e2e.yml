@@ -1,9 +1,10 @@
 name: Nightly Agent E2E
 
-# Runs ACTUAL agents (Claude Code via aikit) against our LLM gateway over the
-# Tailnet, and asserts the capture + sync pipeline end-to-end. Kept OFF the PR
-# path on purpose: it needs secrets + Tailnet access, takes minutes, and
-# shouldn't gate every PR or run on forks. Nightly on main + manual dispatch.
+# Runs ACTUAL agents (Claude Code always; Codex when configured) via aikit
+# against our LLM gateway(s) over the Tailnet, and asserts the capture + sync
+# pipeline end-to-end. Kept OFF the PR path on purpose: it needs secrets +
+# Tailnet access, takes minutes, and shouldn't gate every PR or run on forks.
+# Nightly on main + manual dispatch.
 #
 # The gateway is reached over the Tailnet (not a public endpoint): the runner
 # joins the Tailnet with an ephemeral, tagged node, and the smoke container uses
@@ -16,6 +17,12 @@ name: Nightly Agent E2E
 #                         Tailnet (MagicDNS name or 100.x tailnet IP, e.g.
 #                         http://gateway.<tailnet>.ts.net:4000)
 #   LLM_GATEWAY_KEY     — the gateway API key
+#
+# Optional repo secrets (Codex case in smoke.sh skips cleanly if any is
+# unset — the Claude cases above still run and gate the job):
+#   CODEX_BASE_URL      — gateway OpenAI-compatible base URL (incl. any /v1)
+#   CODEX_API_KEY       — the gateway API key for that route
+#   CODEX_MODEL         — model to run through Codex
 #
 # This is the reusable harness for real-agent testing: extend ci/agent-e2e/
 # (more agents, more cases) as agentic features grow.
@@ -73,7 +80,7 @@ jobs:
         if: steps.guard.outputs.run == 'true'
         run: docker build -f ci/agent-e2e/Dockerfile.agent-e2e -t aikit-agent-e2e .
 
-      - name: Run Claude smoke against the gateway over the Tailnet
+      - name: Run agent smoke suite against the gateway over the Tailnet
         if: steps.guard.outputs.run == 'true'
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.LLM_GATEWAY_URL }}
@@ -82,6 +89,11 @@ jobs:
           # LLM_GATEWAY_MODEL to change it without editing code; falls back to
           # the model the gateway currently permits.
           AGENT_E2E_MODEL: ${{ secrets.LLM_GATEWAY_MODEL || 'claude-sonnet-4-6' }}
+          # Optional: the codex case in smoke.sh skips cleanly if any of these
+          # three are unset, so leaving them unconfigured is safe.
+          CODEX_BASE_URL: ${{ secrets.CODEX_BASE_URL }}
+          CODEX_API_KEY: ${{ secrets.CODEX_API_KEY }}
+          CODEX_MODEL: ${{ secrets.CODEX_MODEL }}
         run: |
           # --network host lets the container use the runner's Tailnet
           # connectivity and MagicDNS resolution to reach the internal gateway.
@@ -89,4 +101,7 @@ jobs:
             -e ANTHROPIC_BASE_URL \
             -e ANTHROPIC_AUTH_TOKEN \
             -e AGENT_E2E_MODEL \
+            -e CODEX_BASE_URL \
+            -e CODEX_API_KEY \
+            -e CODEX_MODEL \
             aikit-agent-e2e
