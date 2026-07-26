@@ -6,6 +6,7 @@
 
 ## Core Documentation
 - [CLI Commands](cli-commands.mdx): Complete reference for all AIKit command-line interface commands with examples and options
+- [Sub-Agent Invocation Interface](subagent-invocation.mdx): The common, vendor-neutral interface for running coding sub-agents (`aikit agent run`) — sandbox policy, approval, working roots, result capture, per-backend capability matrix, and exit codes (spec 013)
 - [Serve HTTP API](serve.mdx): Multi-turn agent sessions over HTTP — SSE streaming or single-shot JSON responses, selected by the request's Accept header
 - [MCP registration](mcp.mdx): Merge MCP servers into agent configs via CLI, aikit-sdk, or aikit-py
 - [Configuration](configuration.mdx): Complete guide to configuring AIKit including AikConfig structure, file locations, and agent-specific settings

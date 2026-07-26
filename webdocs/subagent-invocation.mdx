@@ -1,0 +1,217 @@
+---
+title: "Sub-Agent Invocation Interface"
+description: "The common, vendor-neutral interface for running coding sub-agents with aikit — filesystem-trust policy, tool approval, working roots, result capture, and per-backend capability negotiation. Spec 013."
+---
+
+# Sub-Agent Invocation Interface (`aikit agent run`)
+
+`aikit agent run` drives any supported coding agent from one uniform CLI
+surface. Instead of learning each agent's native flags for sandboxing,
+approval, working directory, and result capture, you use a single
+vendor-neutral set of knobs; aikit maps them onto each backend's native
+mechanism and tells you honestly what it could and could not enforce.
+
+This matters when an orchestrator runs untrusted-ish sub-tasks at scale: the
+**sandbox is a trust boundary** (ADR-0012), and a knob a backend cannot honor
+is **never silently downgraded** — security knobs fail closed.
+
+## Run a sub-agent
+
+```bash
+# minimal — prompt via -p
+aikit agent run -a claude -p "fix the failing test in src/auth.rs"
+
+# prompt via stdin (no ARG_MAX ceiling; preferred for large prompts)
+git diff | aikit agent run -a codex
+
+# auto-detect an available agent
+aikit agent run -a auto -p "summarize this file"
+```
+
+**Runnable agent keys:** `codex`, `claude`, `gemini`, `opencode`, `cursor`,
+`pi`, `aikit` (the built-in in-process agent), and `auto` (pick an available
+backend). Run `aikit agent check` to see which CLIs are installed.
+
+## The invocation knobs
+
+| Flag | Meaning |
+|---|---|
+| `--sandbox <read-only\|bounded-write\|unrestricted>` | Filesystem-trust boundary (D1) |
+| `--auto-approve` | Auto-approve every tool call without prompting (D1) |
+| `-C, --cd <dir>` | Working root for the agent (D2); default is the current dir |
+| `--add-dir <dir>` | Extra writable root; repeatable (D2) |
+| `-o, --output-result <file>` | Write the agent's final message to `<file>` (D3) |
+| `--output-schema <file>` | JSON Schema the final output must satisfy (D4) |
+| `--capabilities` | Print the resolved capability matrix for `--agent` and exit (D5) |
+| `--bare` | Skip user config / hooks / MCP for reproducible runs (D6) |
+| `--ephemeral` | Do not persist the session (D6) |
+| `--skip-git-repo-check` | Skip the headless git-repo guard (D6) |
+| `--yolo` | Macro for `--sandbox unrestricted --auto-approve` |
+| `--events` / `--stream` / `--progress` | Output mode: NDJSON events / streamed text / live progress |
+| `-r, --resume <id>` / `--resume-last` | Resume a prior session |
+| `--dry-run` | Validate inputs (and print the resolved matrix) without executing |
+
+## Sandbox policy — the trust boundary
+
+`--sandbox` is graduated and vendor-neutral (named for the property, not any
+CLI's vocabulary):
+
+- **`read-only`** — no writes.
+- **`bounded-write`** — writes confined to `--cd` plus any `--add-dir` roots.
+- **`unrestricted`** — no filesystem boundary.
+
+It is **separate from** `--auto-approve`: sandbox = *what the agent may do to
+the filesystem*; approval = *whether each tool call prompts*. Backends model
+these independently (except codex, where approval is coupled into `--sandbox`).
+
+## Per-backend capability matrix
+
+Each backend declares, per knob, how it can honor a request. Legend: **OS** =
+`SupportedOsEnforced` (enforced via OS primitives), **App** =
+`SupportedAppLevel` (cooperative, the agent promises), **Emu** = `Emulated`
+(aikit validates/handles it), **—** = `Unsupported`.
+
+| Knob | codex | claude | gemini | opencode | cursor | pi | aikit |
+|---|---|---|---|---|---|---|---|
+| `--sandbox` (any policy) | OS | App | OS | App | — | — | App |
+| `--auto-approve` | App | App | App | App | — | — | App |
+| `-C, --cd` (working dir) | OS | OS | OS | OS | OS | OS | OS |
+| `--add-dir` (extra roots) | OS | — | OS | — | — | — | App |
+| `--output-schema` | OS | OS | Emu | Emu | Emu | Emu | Emu |
+| `--bare` | OS | OS | — | — | — | OS | — |
+| `--ephemeral` | OS | — | — | — | — | OS | — |
+| `--skip-git-repo-check` | OS | — | — | — | — | — | — |
+
+This is exactly what `aikit agent run -a <agent> --capabilities` prints. Use
+it to **pre-flight** a backend before committing work.
+
+### How knobs map to native flags
+
+aikit translates the common knobs onto each backend's native mechanism:
+
+- **codex** — `--sandbox read-only|workspace-write|danger-full-access`,
+  `--add-dir`, `--cd`, `--ignore-user-config` (`--bare`), `--ephemeral`,
+  `--skip-git-repo-check`. Approval is coupled to the sandbox.
+- **claude** — read-only restricts the toolset (`--allowedTools Read`);
+  `--bare`; `--cd` via the child cwd. Sandbox is cooperative (app-level).
+- **gemini** — `-s` plus `SEATBELT_PROFILE` / `SANDBOX_MOUNTS` env (OS-enforced).
+- **opencode** — `--dir` (`-C`), `--dangerously-skip-permissions` (events mode).
+- **pi** — `--no-session` (`--ephemeral`), `--no-context-files` family
+  (`--bare`); runs as an RPC session (`pi --mode rpc`). No native sandbox.
+- **cursor** — no native spec-013 knobs; security requests fail closed.
+
+## Capability negotiation and fail-closed
+
+A knob a backend cannot honor is handled explicitly, never silently:
+
+- **Security knobs** (`--sandbox`, `--add-dir`) that are `Unsupported` **fail
+  closed** — the run exits **3 before spawning**, with a clear message. A
+  `SupportedAppLevel` sandbox is cooperative and is reported honestly as
+  app-level (never relabeled OS-enforced). aikit does not synthesize its own
+  OS sandbox where a backend lacks one.
+- **Convenience knobs** (`--output-schema`, `--bare`, `--ephemeral`, …) never
+  fail closed; they are emulated or mapped where possible and otherwise
+  dropped.
+
+```bash
+# Pre-flight: what can this backend honor?
+aikit agent run -a cursor --capabilities
+aikit agent run -a pi --sandbox read-only --dry-run   # exits 3 — pi has no sandbox
+```
+
+## Result capture
+
+- `--output-result <file>` / `-o` writes the agent's final assistant message
+  to `<file>`. It is derived from the terminal canonical event, so it works
+  even for backends whose native CLI has no equivalent flag.
+- `--output-schema <file>` constrains the final output to a JSON Schema; where
+  a backend lacks a native flag (codex/claude do), aikit validates the final
+  message itself (emulated).
+- In `--events` mode, a terminal `Result` event
+  (`{ "type": "result", "text": …, "structured": …, "session_id": … }`) is
+  emitted once, so streaming callers get the same handle without a temp file.
+
+## Exit codes
+
+Uniform across backends (D6); aligned with ADR-0014 cancellation.
+
+| Code | Meaning |
+|---|---|
+| `0` | success — terminal `Result` emitted |
+| `2` | invalid invocation (bad CLI args) |
+| `3` | pre-flight failure — an `Unsupported` security knob (fail-closed), backend missing, or auth failure, all before spawning |
+| `10` | runtime sandbox violation — the agent hit the native sandbox mid-run |
+| `124` | timeout — run exceeded its timeout |
+| `130` | cancelled (SIGINT) |
+| `137` | cancelled (SIGKILL after grace) |
+| `143` | cancelled (SIGTERM) |
+| `1` / other | backend failure — pass-through of the backend CLI's own non-zero exit |
+
+## Examples
+
+```bash
+# Read-only review, capture the report
+aikit agent run -a claude --sandbox read-only -C ./repo \
+  -o review.md -p "Review this code for security issues"
+
+# Bounded write inside a worktree, allow a shared cache dir, no prompts
+aikit agent run -a codex --sandbox bounded-write -C ./wt \
+  --add-dir ./cache --auto-approve -p "Generate the build assets"
+
+# Reproducible CI run: no user config, no persisted session
+aikit agent run -a claude --bare --ephemeral -C ./repo \
+  -o result.txt -p "Run the test suite and summarize failures"
+
+# Stream canonical events for an orchestrator
+aikit agent run -a pi --events -p "refactor the parser" > events.ndjson
+
+# Same effect as the old --yolo, made explicit
+aikit agent run -a codex --sandbox unrestricted --auto-approve -p "ship it"
+```
+
+## Rust SDK
+
+The flags populate one backend-agnostic `RunOptions`; each field has a builder.
+
+```rust
+use aikit_sdk::{run_agent, RunOptions};
+use aikit_sdk::runner::types::SandboxPolicy;
+use std::path::PathBuf;
+
+let opts = RunOptions::default()
+    .with_sandbox(SandboxPolicy::BoundedWrite)
+    .with_auto_approve(true)
+    .with_current_dir(PathBuf::from("./wt"))
+    .with_extra_writable_root(PathBuf::from("./cache"))
+    .with_result_file(PathBuf::from("out.txt"))
+    .with_bare(true)
+    .with_ephemeral(true);
+
+let result = run_agent("codex", "generate the build assets", opts)?;
+// result.final_text, result.session_id, result.usage, …
+```
+
+For streaming, use `run_agent_events` (or `_cancellable`) to receive the
+canonical `AgentEvent` stream, including the terminal `Result` event. An
+unsupported security knob surfaces as
+`RunError::InvocationUnsupported` before any process is spawned.
+
+## Python
+
+`aikit_py.PyRunOptions` currently exposes `model`, `yolo`, and `stream`. The
+full spec-013 knob set is available via the **CLI** and the **Rust SDK**;
+exposing it on the Python binding is tracked as a follow-up.
+
+## Rules for orchestrators and agents
+
+1. **Pre-flight unknown backends** with `--capabilities` (or `--dry-run`)
+   before committing work.
+2. **Never assume a sandbox is OS-enforced.** Check the matrix: only codex and
+   gemini enforce `--sandbox` at the OS layer; claude/opencode/aikit are
+   cooperative (app-level); cursor and pi have no sandbox.
+3. **Security-knob requests fail closed** (exit 3). Branch on it rather than
+   assuming the run started.
+4. **Capture output reliably** with `-o`/`--output-result` or the terminal
+   `Result` event — do not parse streamed text.
+5. **Prefer `--bare` + `--ephemeral`** for reproducible / CI runs.
+6. **Prefer stdin for large prompts** to avoid `ARG_MAX` limits.
