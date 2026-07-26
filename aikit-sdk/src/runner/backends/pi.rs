@@ -331,7 +331,10 @@ pub(crate) fn prompt_command(prompt: &str) -> String {
 
 /// The spawn argv for `pi --mode rpc`. `model` and `session_id` are passed
 /// through verbatim as spawn flags (spec 014); `yolo`/`stream`/`events_mode`
-/// are unused — RPC mode always emits structured events.
+/// are unused — RPC mode always emits structured events. The spec-013
+/// lifecycle knobs the matrix declares `SupportedOsEnforced` (`--bare`,
+/// `--ephemeral`) map onto pi's native user-config / no-session flags; an
+/// inactive envelope leaves argv identical to the legacy argv.
 pub(crate) fn argv(ctx: crate::runner::backends::argv_spec::ArgvCtx) -> Vec<OsString> {
     let mut argv = vec![
         OsString::from(KEY),
@@ -348,6 +351,23 @@ pub(crate) fn argv(ctx: crate::runner::backends::argv_spec::ArgvCtx) -> Vec<OsSt
         argv.push(OsString::from("--session"));
         argv.push(OsString::from(id));
     }
+    // spec 013 D6: map honored lifecycle knobs onto pi's native flags. These
+    // are convenience knobs (never fail-closed by resolve_envelope), so an
+    // inactive envelope adds nothing.
+    if let Some(env) = ctx.envelope {
+        // --bare ⇒ skip user-config discovery (the pi analogue of codex
+        // --ignore-user-config / claude --bare).
+        if env.bare {
+            argv.push(OsString::from("--no-context-files"));
+            argv.push(OsString::from("--no-extensions"));
+            argv.push(OsString::from("--no-skills"));
+            argv.push(OsString::from("--no-prompt-templates"));
+        }
+        // --ephemeral ⇒ don't persist the session.
+        if env.ephemeral {
+            argv.push(OsString::from("--no-session"));
+        }
+    }
     argv
 }
 
@@ -355,6 +375,7 @@ pub(crate) fn argv(ctx: crate::runner::backends::argv_spec::ArgvCtx) -> Vec<OsSt
 mod tests {
     use super::*;
     use crate::runner::backends::argv_spec::ArgvCtx;
+    use crate::runner::invocation::InvocationEnvelope;
     use crate::runner::types::AgentEventStream;
 
     const STDOUT: AgentEventStream = AgentEventStream::Stdout;
@@ -711,6 +732,93 @@ mod tests {
         });
         let s: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
         assert_eq!(s, vec!["pi", "--mode", "rpc"]);
+    }
+
+    // ---- spec 013 envelope mapping ---------------------------------------
+
+    #[test]
+    fn argv_ephemeral_emits_no_session() {
+        let argv = argv(ArgvCtx {
+            model: None,
+            yolo: false,
+            stream: false,
+            events_mode: false,
+            session_id: None,
+            envelope: Some(&InvocationEnvelope {
+                ephemeral: true,
+                ..Default::default()
+            }),
+        });
+        assert!(argv.contains(&OsString::from("--no-session")));
+    }
+
+    #[test]
+    fn argv_bare_emits_no_context_files_family() {
+        let argv = argv(ArgvCtx {
+            model: None,
+            yolo: false,
+            stream: false,
+            events_mode: false,
+            session_id: None,
+            envelope: Some(&InvocationEnvelope {
+                bare: true,
+                ..Default::default()
+            }),
+        });
+        assert!(argv.contains(&OsString::from("--no-context-files")));
+        assert!(argv.contains(&OsString::from("--no-extensions")));
+        assert!(argv.contains(&OsString::from("--no-skills")));
+        assert!(argv.contains(&OsString::from("--no-prompt-templates")));
+        // bare alone must not imply --no-session (that is --ephemeral's mapping)
+        assert!(!argv.contains(&OsString::from("--no-session")));
+    }
+
+    #[test]
+    fn argv_inactive_envelope_adds_no_flags() {
+        let argv = argv(ArgvCtx {
+            model: None,
+            yolo: false,
+            stream: false,
+            events_mode: false,
+            session_id: None,
+            envelope: Some(&InvocationEnvelope::default()),
+        });
+        let s: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(s, vec!["pi", "--mode", "rpc"]);
+    }
+
+    #[test]
+    fn argv_envelope_composes_with_model_and_session() {
+        let argv = argv(ArgvCtx {
+            model: Some(&"anthropic/claude-sonnet-4".to_string()),
+            yolo: false,
+            stream: false,
+            events_mode: false,
+            session_id: Some("sess-1"),
+            envelope: Some(&InvocationEnvelope {
+                bare: true,
+                ephemeral: true,
+                ..Default::default()
+            }),
+        });
+        let s: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
+        assert_eq!(
+            s,
+            vec![
+                "pi",
+                "--mode",
+                "rpc",
+                "--model",
+                "anthropic/claude-sonnet-4",
+                "--session",
+                "sess-1",
+                "--no-context-files",
+                "--no-extensions",
+                "--no-skills",
+                "--no-prompt-templates",
+                "--no-session"
+            ]
+        );
     }
 
     // ---- capability honesty (spec 014 testing decisions) -----------------

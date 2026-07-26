@@ -653,4 +653,52 @@ mod tests {
         let legacy = build_argv("cursor", None, false, false, false, None);
         assert_eq!(with_env, legacy);
     }
+
+    // ── spec 013: pi envelope argv mapping ────────────────────────────────────
+
+    #[test]
+    fn spec013_pi_ephemeral_and_bare_map_to_native_flags() {
+        // pi honors --bare and --ephemeral natively (--no-context-files family
+        // / --no-session); the envelope maps them onto those flags.
+        let env = InvocationEnvelope {
+            bare: true,
+            ephemeral: true,
+            ..Default::default()
+        };
+        let argv = build_argv_envelope("pi", None, false, false, false, None, Some(&env));
+        assert!(argv.contains(&OsString::from("rpc")));
+        assert!(argv.contains(&OsString::from("--no-session")));
+        assert!(argv.contains(&OsString::from("--no-context-files")));
+        assert!(argv.contains(&OsString::from("--no-extensions")));
+        assert!(argv.contains(&OsString::from("--no-skills")));
+        assert!(argv.contains(&OsString::from("--no-prompt-templates")));
+    }
+
+    #[test]
+    fn spec013_pi_inactive_envelope_is_identical_to_legacy() {
+        // An inactive envelope (no knobs set) must yield the identical argv to
+        // the legacy no-envelope path — pi adds nothing when nothing is asked.
+        let env = InvocationEnvelope::default();
+        let with_env = build_argv_envelope("pi", None, false, false, false, None, Some(&env));
+        let legacy = build_argv("pi", None, false, false, false, None);
+        assert_eq!(with_env, legacy);
+    }
+
+    #[test]
+    fn spec013_pi_security_knobs_are_not_argv_mapped() {
+        // sandbox / add-dir are Unsupported for pi and fail closed in
+        // resolve_envelope before argv; an envelope carrying only those must
+        // NOT sneak any sandbox flag into pi's argv (there is none to emit).
+        let env = InvocationEnvelope {
+            sandbox: Some(SandboxPolicy::BoundedWrite),
+            extra_writable_roots: vec![PathBuf::from("/shared")],
+            ..Default::default()
+        };
+        let argv = build_argv_envelope("pi", None, false, false, false, None, Some(&env));
+        assert!(
+            !argv.iter().any(|a| a == "--sandbox" || a == "--add-dir"),
+            "pi has no native sandbox/add-dir flag; got {:?}",
+            argv
+        );
+    }
 }

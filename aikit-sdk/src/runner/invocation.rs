@@ -156,23 +156,24 @@ impl Backend {
         }
     }
 
-    /// `--bare` support (D6). codex (`--ignore-user-config`) and claude
-    /// (`--bare`); no native equivalent elsewhere.
+    /// `--bare` support (D6). codex (`--ignore-user-config`), claude (`--bare`),
+    /// and pi (`--no-context-files`/`--no-extensions`/`--no-skills`/
+    /// `--no-prompt-templates` skip user-config discovery); no native
+    /// equivalent elsewhere.
     pub fn bare_support(self) -> KnobSupport {
         match self {
-            Backend::Codex | Backend::Claude => KnobSupport::SupportedOsEnforced,
-            Backend::Gemini
-            | Backend::OpenCode
-            | Backend::Cursor
-            | Backend::Aikit
-            | Backend::Pi => KnobSupport::Unsupported,
+            Backend::Codex | Backend::Claude | Backend::Pi => KnobSupport::SupportedOsEnforced,
+            Backend::Gemini | Backend::OpenCode | Backend::Cursor | Backend::Aikit => {
+                KnobSupport::Unsupported
+            }
         }
     }
 
-    /// `--ephemeral` support (D6). codex only today.
+    /// `--ephemeral` support (D6). codex (`--ephemeral`) and pi
+    /// (`--no-session`); no native equivalent elsewhere.
     pub fn ephemeral_support(self) -> KnobSupport {
         match self {
-            Backend::Codex => KnobSupport::SupportedOsEnforced,
+            Backend::Codex | Backend::Pi => KnobSupport::SupportedOsEnforced,
             _ => KnobSupport::Unsupported,
         }
     }
@@ -432,33 +433,51 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_knobs_codex_only_or_codex_claude() {
+    fn lifecycle_knobs_matrix() {
+        // bare: codex + claude + pi
+        assert_eq!(
+            Backend::Codex.bare_support(),
+            KnobSupport::SupportedOsEnforced
+        );
+        assert_eq!(
+            Backend::Claude.bare_support(),
+            KnobSupport::SupportedOsEnforced
+        );
+        assert_eq!(Backend::Pi.bare_support(), KnobSupport::SupportedOsEnforced);
+        // ephemeral: codex + pi
+        assert_eq!(
+            Backend::Codex.ephemeral_support(),
+            KnobSupport::SupportedOsEnforced
+        );
+        assert_eq!(
+            Backend::Pi.ephemeral_support(),
+            KnobSupport::SupportedOsEnforced
+        );
+        // skip-git-repo-check: codex only
+        assert_eq!(
+            Backend::Codex.skip_git_repo_check_support(),
+            KnobSupport::SupportedOsEnforced
+        );
         for &b in ALL {
-            // bare: codex + claude
-            assert_eq!(
-                Backend::Codex.bare_support(),
-                KnobSupport::SupportedOsEnforced
-            );
-            assert_eq!(
-                Backend::Claude.bare_support(),
-                KnobSupport::SupportedOsEnforced
-            );
-            // ephemeral / skip-git-repo-check: codex only
-            assert_eq!(
-                Backend::Codex.ephemeral_support(),
-                KnobSupport::SupportedOsEnforced
-            );
-            assert_eq!(
-                Backend::Codex.skip_git_repo_check_support(),
-                KnobSupport::SupportedOsEnforced
-            );
-            // every non-codex lifecycle is unsupported except claude bare
+            // skip-git-repo-check is codex-only
             if !matches!(b, Backend::Codex) {
-                assert_eq!(b.ephemeral_support(), KnobSupport::Unsupported);
-                assert_eq!(b.skip_git_repo_check_support(), KnobSupport::Unsupported);
-                if !matches!(b, Backend::Claude) {
-                    assert_eq!(b.bare_support(), KnobSupport::Unsupported);
-                }
+                assert_eq!(
+                    b.skip_git_repo_check_support(),
+                    KnobSupport::Unsupported,
+                    "skip-git-repo-check for {b:?}"
+                );
+            }
+            // ephemeral is unsupported except codex + pi
+            if !matches!(b, Backend::Codex | Backend::Pi) {
+                assert_eq!(
+                    b.ephemeral_support(),
+                    KnobSupport::Unsupported,
+                    "ephemeral for {b:?}"
+                );
+            }
+            // bare is unsupported except codex + claude + pi
+            if !matches!(b, Backend::Codex | Backend::Claude | Backend::Pi) {
+                assert_eq!(b.bare_support(), KnobSupport::Unsupported, "bare for {b:?}");
             }
         }
     }
@@ -507,6 +526,49 @@ mod tests {
         assert!(resolve_envelope(Backend::Codex, &env).is_ok());
         assert!(resolve_envelope(Backend::Gemini, &env).is_ok());
         assert!(resolve_envelope(Backend::Aikit, &env).is_ok());
+    }
+
+    #[test]
+    fn resolve_pi_with_sandbox_fails_closed() {
+        // Pi has no native sandbox (Unsupported); any --sandbox policy fails
+        // closed rather than silently downgrading trust.
+        let env = InvocationEnvelope {
+            sandbox: Some(SandboxPolicy::BoundedWrite),
+            ..Default::default()
+        };
+        let err = resolve_envelope(Backend::Pi, &env).unwrap_err();
+        assert_eq!(err.backend, Backend::Pi);
+        assert_eq!(err.knob, "sandbox");
+    }
+
+    #[test]
+    fn resolve_pi_extra_roots_fails_closed() {
+        let env = InvocationEnvelope {
+            extra_writable_roots: vec![PathBuf::from("/tmp/x")],
+            ..Default::default()
+        };
+        let err = resolve_envelope(Backend::Pi, &env).unwrap_err();
+        assert_eq!(err.backend, Backend::Pi);
+        assert_eq!(err.knob, "add-dir");
+    }
+
+    #[test]
+    fn format_capabilities_pi_shows_native_lifecycle_unsupported_sandbox() {
+        let s = format_capabilities(Backend::Pi);
+        assert!(s.contains("backend: pi"), "{}", s);
+        // sandbox is unsupported for every policy
+        assert!(s.contains("unsupported"), "{}", s);
+        // bare + ephemeral are now natively supported
+        assert!(
+            s.lines()
+                .any(|l| l.trim_start().starts_with("bare") && l.contains("supported")),
+            "bare line must be supported:\n{s}"
+        );
+        assert!(
+            s.lines()
+                .any(|l| l.trim_start().starts_with("ephemeral") && l.contains("supported")),
+            "ephemeral line must be supported:\n{s}"
+        );
     }
 
     #[test]
