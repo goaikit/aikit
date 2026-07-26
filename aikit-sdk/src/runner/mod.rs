@@ -11,6 +11,11 @@ pub mod codex_session;
 pub mod invocation;
 #[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
 pub mod live_session;
+// Always compiled: unlike the Claude/Codex sessions this bridge pulls no
+// optional dependency (no async SDK, no tokio feature) — it drives Pi's plain
+// JSONL-over-stdio RPC with std threads. The `LiveSession` impl lives in
+// `live_session`, which is feature-gated.
+pub mod pi_session;
 pub mod transport;
 pub mod types;
 pub mod usage;
@@ -40,6 +45,9 @@ pub use codex_session::{
 pub use invocation::{
     exit_code_for, format_capabilities, resolve_envelope, sandbox_env_for, InvocationEnvelope,
     UnsupportedKnob,
+};
+pub use pi_session::{
+    open_pi_session, PiControlHandle, PiSession, PiSessionError, PiSessionOptions,
 };
 // Shared approval types; available when at least one session feature is enabled.
 #[cfg(any(feature = "claude-control", feature = "codex-app-server"))]
