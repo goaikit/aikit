@@ -13,8 +13,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use aikit_sdk::{
-    open_claude_session, open_codex_session, ClaudeSessionError, ClaudeSessionOptions,
-    CodexSessionError, CodexSessionOptions, ControlError, LiveSession,
+    open_claude_session, open_codex_session, open_pi_session, ClaudeSessionError,
+    ClaudeSessionOptions, CodexSessionError, CodexSessionOptions, ControlError, LiveSession,
+    PiSessionError, PiSessionOptions,
 };
 use uuid::Uuid;
 
@@ -265,11 +266,37 @@ pub(super) async fn create_live_session_handler(
                 }
             }
         }
+        "pi" => {
+            let opts = PiSessionOptions {
+                model: body.model.clone(),
+                ..PiSessionOptions::default()
+            };
+            match open_pi_session(&body.prompt, opts) {
+                Ok(s) => {
+                    let (ctrl, evts) = s.into_parts();
+                    (Box::new(ctrl), evts)
+                }
+                Err(PiSessionError::Connect(msg)) => {
+                    return error_response(
+                        StatusCode::BAD_GATEWAY,
+                        "session_connect_failed",
+                        &format!("Failed to connect to pi: {msg}"),
+                    );
+                }
+                Err(e) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "session_error",
+                        &e.to_string(),
+                    );
+                }
+            }
+        }
         other => {
             return error_response(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "agent_not_supported",
-                &format!("Live sessions require agent 'claude' or 'codex', got '{other}'"),
+                &format!("Live sessions require agent 'claude', 'codex', or 'pi', got '{other}'"),
             );
         }
     };
