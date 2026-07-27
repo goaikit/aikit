@@ -38,9 +38,25 @@ export ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN
 # changes.
 MODEL="${AGENT_E2E_MODEL:-claude-sonnet-4-6}"
 
+# Hard ceiling per agent turn. A wedged model / unresponsive gateway must not
+# hang the whole job (GitHub would let it run for hours); on timeout the turn is
+# killed and its case fails cleanly. Override with AGENT_TIMEOUT (seconds).
+AGENT_TIMEOUT="${AGENT_TIMEOUT:-180}"
+
+# run_agent <args...> — `aikit agent run` under a hard timeout. SIGTERM at
+# AGENT_TIMEOUT, SIGKILL 10s later if it ignores it. Exit 124 => timed out.
+run_agent() {
+  local rc=0
+  timeout -k 10 "${AGENT_TIMEOUT}" aikit agent run "$@" || rc=$?
+  if [ "${rc}" -eq 124 ] || [ "${rc}" -eq 137 ]; then
+    echo "  (agent run exceeded ${AGENT_TIMEOUT}s and was killed)" >&2
+  fi
+  return "${rc}"
+}
+
 echo "== aikit version =="
 aikit --version || true
-echo "== gateway: ${ANTHROPIC_BASE_URL}  model: ${MODEL} =="
+echo "== gateway: ${ANTHROPIC_BASE_URL}  model: ${MODEL}  turn-timeout: ${AGENT_TIMEOUT}s =="
 
 # ---------------------------------------------------------------------------
 # Harness
@@ -96,7 +112,7 @@ newest_claude_transcript() {
 # ---------------------------------------------------------------------------
 case_claude_turn() {
   echo "running a real claude turn"
-  if ! aikit agent run --agent claude --model "${MODEL}" --prompt "Reply with the single word: pong"; then
+  if ! run_agent --agent claude --model "${MODEL}" --prompt "Reply with the single word: pong"; then
     echo "FAIL: claude turn did not exit 0" >&2
     return 1
   fi
@@ -133,7 +149,7 @@ case_claude_tool_use() {
   workdir="$(mktemp -d)"
   echo "workdir: ${workdir}"
 
-  if ! aikit agent run --agent claude --model "${MODEL}" \
+  if ! run_agent --agent claude --model "${MODEL}" \
       --cd "${workdir}" --skip-git-repo-check \
       --prompt "You MUST actually call your file-writing tool right now to create a file named e2e-proof.txt in the current directory containing exactly the text: ready
 Do not merely describe or explain the action — invoke the tool and perform the write."; then
@@ -175,7 +191,7 @@ case_streaming() {
   local outfile
   outfile="$(mktemp)"
 
-  if ! aikit agent run --agent claude --model "${MODEL}" --events \
+  if ! run_agent --agent claude --model "${MODEL}" --events \
       --prompt "Reply with the single word: pong" >"${outfile}" 2>/dev/null; then
     echo "FAIL: streaming claude turn did not exit 0" >&2
     rm -f "${outfile}"
@@ -215,7 +231,7 @@ case_resume_claude() {
   workdir="$(mktemp -d)"
   echo "workdir: ${workdir}"
 
-  if ! aikit agent run --agent claude --model "${MODEL}" \
+  if ! run_agent --agent claude --model "${MODEL}" \
       --cd "${workdir}" --skip-git-repo-check \
       --prompt "Remember the number 42."; then
     echo "FAIL: first (seed) turn did not exit 0" >&2
@@ -231,7 +247,7 @@ case_resume_claude() {
   sid="$(basename "${transcript}" .jsonl)"
   echo "  seed session id: ${sid}"
 
-  if ! aikit agent run --agent claude --model "${MODEL}" \
+  if ! run_agent --agent claude --model "${MODEL}" \
       --cd "${workdir}" --skip-git-repo-check --resume "${sid}" \
       --prompt "What number did I ask you to remember?"; then
     echo "FAIL: resumed turn did not exit 0" >&2
@@ -275,7 +291,7 @@ wire_api = "chat"
 EOF
   echo "  wrote ${codex_home}/config.toml (provider e2e -> ${CODEX_BASE_URL})"
 
-  if ! aikit agent run --agent codex --yolo --model "${CODEX_MODEL}" \
+  if ! run_agent --agent codex --yolo --model "${CODEX_MODEL}" \
       --skip-git-repo-check --prompt "Reply with the single word: pong"; then
     echo "FAIL: codex turn did not exit 0" >&2
     return 1

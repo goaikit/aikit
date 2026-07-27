@@ -46,6 +46,9 @@ jobs:
   claude-smoke:
     name: Claude smoke (real agent → gateway over Tailnet)
     runs-on: ubuntu-latest
+    # Backstop: the smoke's per-turn timeout (AGENT_TIMEOUT) is the primary
+    # guard; this caps the whole job so a stuck build/step can't run for hours.
+    timeout-minutes: 30
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
