@@ -20,6 +20,7 @@
 //! stops the current operation without ending the session); `steer` and
 //! `follow_up` map 1:1 to Pi's same-named commands.
 
+use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
@@ -42,6 +43,10 @@ use crate::runner::types::{AgentEvent, AgentEventPayload, AgentEventStream};
 /// started but never answers) hits this; a healthy run resolves in well under a
 /// second once Pi is up.
 const READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long [`PiControlHandle::get_context_usage`] waits for Pi's
+/// `get_session_stats` response before surfacing a [`PiSessionError::Backend`].
+const STATS_REPLY_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Options for opening a Pi session.
 #[derive(Clone, Default)]
@@ -73,6 +78,9 @@ pub enum PiSessionError {
     /// Spawning / handshaking with `pi --mode rpc` failed, or Pi rejected the
     /// first prompt (e.g. auth, config, model resolution).
     Connect(String),
+    /// The backend rejected an operation (e.g. `set_model` with an unknown
+    /// model) or a control request did not complete.
+    Backend(String),
     /// The control channel is closed (the session has ended).
     Closed,
 }
@@ -82,6 +90,7 @@ impl std::fmt::Display for PiSessionError {
         match self {
             PiSessionError::Runtime(e) => write!(f, "pi session runtime error: {e}"),
             PiSessionError::Connect(e) => write!(f, "pi session connect error: {e}"),
+            PiSessionError::Backend(e) => write!(f, "pi session error: {e}"),
             PiSessionError::Closed => write!(f, "pi session control channel closed"),
         }
     }
@@ -90,7 +99,6 @@ impl std::fmt::Display for PiSessionError {
 impl std::error::Error for PiSessionError {}
 
 /// Commands forwarded from a [`PiControlHandle`] to the session bridge.
-#[derive(Debug)]
 enum ControlCmd {
     /// New user turn: a second `prompt` command on the same session.
     SendTurn(String),
@@ -100,8 +108,27 @@ enum ControlCmd {
     Steer(String),
     /// Queue a message for after the agent settles (Pi's `follow_up`).
     FollowUp(String),
+    /// Switch the model mid-session (Pi's `set_model`). Fire-and-forget.
+    SetModel(String),
+    /// Request session stats (Pi's `get_session_stats`); the reply is routed
+    /// back on this channel when the matching response frame arrives.
+    GetContextUsage(mpsc::Sender<Result<Value, PiSessionError>>),
     /// End the session.
     Disconnect,
+}
+
+impl std::fmt::Debug for ControlCmd {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ControlCmd::SendTurn(t) => f.debug_tuple("SendTurn").field(t).finish(),
+            ControlCmd::Interrupt => write!(f, "Interrupt"),
+            ControlCmd::Steer(t) => f.debug_tuple("Steer").field(t).finish(),
+            ControlCmd::FollowUp(t) => f.debug_tuple("FollowUp").field(t).finish(),
+            ControlCmd::SetModel(m) => f.debug_tuple("SetModel").field(m).finish(),
+            ControlCmd::GetContextUsage(_) => write!(f, "GetContextUsage(<reply>)"),
+            ControlCmd::Disconnect => write!(f, "Disconnect"),
+        }
+    }
 }
 
 /// One unit multiplexed over the bridge's single inbound channel: either a
@@ -149,6 +176,49 @@ impl PiControlHandle {
     /// Queue a message processed once the agent has settled.
     pub fn follow_up(&self, text: impl Into<String>) -> Result<(), PiSessionError> {
         self.cmd(ControlCmd::FollowUp(text.into()))
+    }
+
+    /// Switch the model mid-session. Accepts `provider/id` (split into Pi's
+    /// `provider` + `modelId`) — Pi's `set_model` requires both and rejects a
+    /// bare model id, so a string without a provider is surfaced as a
+    /// [`PiSessionError::Backend`] without sending. Fire-and-forget: returns
+    /// once the command is queued, not once Pi has applied it. `None` is a
+    /// graceful no-op — Pi's RPC has no "reset to default" command.
+    pub fn set_model(&self, model: Option<String>) -> Result<(), PiSessionError> {
+        let Some(s) = model else {
+            return Ok(());
+        };
+        let s = s.trim();
+        if s.is_empty() {
+            return Ok(());
+        }
+        let (provider, model_id) = s.split_once('/').ok_or_else(|| {
+            PiSessionError::Backend(format!(
+                "pi set_model requires 'provider/id'; '{s}' has no provider"
+            ))
+        })?;
+        if provider.is_empty() || model_id.is_empty() {
+            return Err(PiSessionError::Backend(format!(
+                "pi set_model requires non-empty provider and id; got '{s}'"
+            )));
+        }
+        self.cmd(ControlCmd::SetModel(s.to_string()))
+    }
+
+    /// Fetch session statistics (tokens, cost, and `contextUsage`) via Pi's
+    /// `get_session_stats`. Blocks until Pi replies (or the session closes / a
+    /// 15s deadline elapses). Returns the raw `data` object from the response.
+    pub fn get_context_usage(&self) -> Result<Value, PiSessionError> {
+        let (tx, rx) = mpsc::channel::<Result<Value, PiSessionError>>();
+        self.cmd(ControlCmd::GetContextUsage(tx))?;
+        match rx.recv_timeout(STATS_REPLY_TIMEOUT) {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(e),
+            Err(mpsc::RecvTimeoutError::Timeout) => Err(PiSessionError::Backend(
+                "pi did not return session stats within the deadline".to_string(),
+            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(PiSessionError::Closed),
+        }
     }
 
     /// End the session.
@@ -340,6 +410,10 @@ fn drive(
 ) {
     let mut seq: u64 = 0;
     let mut ready = false;
+    // Outstanding `get_session_stats` callers, in the order their requests
+    // were written. Pi processes commands and emits responses in order, so the
+    // front waiter is always the one the next stats response satisfies.
+    let mut pending_stats: VecDeque<mpsc::Sender<Result<Value, PiSessionError>>> = VecDeque::new();
 
     // ── readiness phase ──
     while !ready {
@@ -403,6 +477,11 @@ fn drive(
     loop {
         match msg_rx.recv() {
             Ok(Msg::Frame(v)) => {
+                // A `get_session_stats` response satisfies the front waiter
+                // (if any). All other responses (prompt/steer/abort/set_model
+                // acks) are unsolicited here and fall through to `emit_frame`,
+                // which is a no-op for response frames.
+                route_stats_response(&v, &mut pending_stats);
                 if !emit_frame(event_tx, &mut seq, &v) {
                     return;
                 }
@@ -424,6 +503,13 @@ fn drive(
             }
             Ok(Msg::Cmd(ControlCmd::FollowUp(t))) => {
                 write_cmd(stdin, follow_up_command(&t), event_tx, &mut seq)
+            }
+            Ok(Msg::Cmd(ControlCmd::SetModel(m))) => {
+                write_cmd(stdin, set_model_command(&m), event_tx, &mut seq)
+            }
+            Ok(Msg::Cmd(ControlCmd::GetContextUsage(reply))) => {
+                pending_stats.push_back(reply);
+                write_cmd(stdin, get_session_stats_command(), event_tx, &mut seq)
             }
             Ok(Msg::Cmd(ControlCmd::Disconnect)) => return,
             Err(_) => return,
@@ -465,6 +551,60 @@ fn steer_command(message: &str) -> String {
 fn follow_up_command(message: &str) -> String {
     let cmd = serde_json::json!({"type":"follow_up","message":message});
     format!("{cmd}\n")
+}
+
+/// `{"type":"set_model",...}\n`. Accepts `provider/id` (split into Pi's
+/// `provider` + `modelId`) or a bare model id (sent as `modelId` alone).
+fn set_model_command(model: &str) -> String {
+    let cmd = match model.split_once('/') {
+        Some((provider, model_id)) => {
+            serde_json::json!({"type":"set_model","provider":provider,"modelId":model_id})
+        }
+        None => serde_json::json!({"type":"set_model","modelId":model}),
+    };
+    format!("{cmd}\n")
+}
+
+/// `{"type":"get_session_stats"}\n` — the request whose response carries
+/// `contextUsage` (plus aggregate tokens / cost).
+fn get_session_stats_command() -> String {
+    format!("{}\n", serde_json::json!({"type":"get_session_stats"}))
+}
+
+/// If `value` is a `get_session_stats` response, deliver its `data` to the
+/// front pending waiter (if any). Other responses and non-response frames are
+/// left untouched for normal emission.
+fn route_stats_response(
+    value: &Value,
+    pending: &mut VecDeque<mpsc::Sender<Result<Value, PiSessionError>>>,
+) {
+    if value.get("type").and_then(|v| v.as_str()) != Some("response") {
+        return;
+    }
+    if value.get("command").and_then(|v| v.as_str()) != Some("get_session_stats") {
+        return;
+    }
+    let Some(reply) = pending.pop_front() else {
+        return;
+    };
+    let success = value
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let result = if success {
+        Ok(value
+            .get("data")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})))
+    } else {
+        let msg = value
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("pi rejected get_session_stats")
+            .to_string();
+        Err(PiSessionError::Backend(msg))
+    };
+    let _ = reply.send(result);
 }
 
 // ── stdout/stderr reader threads ──────────────────────────────────────────────
@@ -686,6 +826,12 @@ mod tests {
         serde_json::from_str(s).unwrap()
     }
 
+    /// Parse a framed command (must be one JSONL record terminated by `\n`).
+    fn parse_cmd(cmd: String) -> Value {
+        assert!(cmd.ends_with('\n'), "command must be newline-terminated");
+        serde_json::from_str(cmd.trim_end()).unwrap()
+    }
+
     #[test]
     fn send_turn_interrupt_steer_follow_up_queue_correctly() {
         let (tx, rx) = mpsc::channel::<Msg>();
@@ -782,6 +928,115 @@ mod tests {
         ))
         .is_none());
         assert!(prompt_response_outcome(&json(r#"{"type":"agent_start"}"#)).is_none());
+    }
+
+    #[test]
+    fn set_model_command_splits_provider_and_model() {
+        assert_eq!(
+            parse_cmd(set_model_command("anthropic/claude-sonnet-4")),
+            json(r#"{"type":"set_model","provider":"anthropic","modelId":"claude-sonnet-4"}"#)
+        );
+        // A bare id is sent as `modelId` alone (Pi resolves the provider).
+        assert_eq!(
+            parse_cmd(set_model_command("claude-sonnet-4")),
+            json(r#"{"type":"set_model","modelId":"claude-sonnet-4"}"#)
+        );
+    }
+
+    #[test]
+    fn get_session_stats_command_is_framed() {
+        assert_eq!(
+            parse_cmd(get_session_stats_command()),
+            json(r#"{"type":"get_session_stats"}"#)
+        );
+    }
+
+    #[test]
+    fn set_model_queues_command_and_validates_provider() {
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let h = PiControlHandle { tx };
+        // `provider/id` is queued for the bridge.
+        h.set_model(Some("anthropic/claude-sonnet-4".into()))
+            .unwrap();
+        match rx.recv() {
+            Ok(Msg::Cmd(ControlCmd::SetModel(m))) => assert_eq!(m, "anthropic/claude-sonnet-4"),
+            other => panic!("expected SetModel, got {other:?}"),
+        }
+        // A bare id is rejected without sending — Pi requires the provider.
+        let (tx2, rx2) = mpsc::channel::<Msg>();
+        let h2 = PiControlHandle { tx: tx2 };
+        match h2.set_model(Some("claude-sonnet-4".into())) {
+            Err(PiSessionError::Backend(msg)) => assert!(msg.contains("provider"), "got: {msg}"),
+            other => panic!("expected Backend error for bare id, got {other:?}"),
+        }
+        // `None` and whitespace-only must not queue anything.
+        h2.set_model(None).unwrap();
+        h2.set_model(Some("   ".into())).unwrap();
+        assert!(
+            rx2.try_recv().is_err(),
+            "None / empty / bare-id set_model must not queue a command"
+        );
+    }
+
+    #[test]
+    fn get_context_usage_routes_reply_through_the_channel() {
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let h = PiControlHandle { tx };
+        // The handle blocks on the reply; this test plays the bridge half.
+        let join = thread::spawn(move || h.get_context_usage());
+        match rx.recv() {
+            Ok(Msg::Cmd(ControlCmd::GetContextUsage(reply))) => {
+                reply
+                    .send(Ok(json(r#"{"contextUsage":{"percent":42}}"#)))
+                    .unwrap();
+            }
+            other => panic!("expected GetContextUsage, got {other:?}"),
+        }
+        let value = join.join().unwrap().unwrap();
+        assert_eq!(value["contextUsage"]["percent"], 42);
+    }
+
+    #[test]
+    fn route_stats_response_delivers_data_and_skips_other_responses() {
+        let mut pending: VecDeque<mpsc::Sender<Result<Value, PiSessionError>>> = VecDeque::new();
+        let (tx1, rx1) = mpsc::channel();
+        let (tx2, rx2) = mpsc::channel();
+        pending.push_back(tx1);
+        pending.push_back(tx2);
+
+        // A non-response frame and an unrelated response leave the queue intact.
+        route_stats_response(&json(r#"{"type":"agent_start"}"#), &mut pending);
+        route_stats_response(
+            &json(r#"{"type":"response","command":"prompt","success":true}"#),
+            &mut pending,
+        );
+        assert_eq!(pending.len(), 2);
+
+        // First stats response satisfies the front waiter with `data`.
+        route_stats_response(
+            &json(
+                r#"{"type":"response","command":"get_session_stats","success":true,"data":{"contextUsage":{"percent":7}}}"#,
+            ),
+            &mut pending,
+        );
+        assert_eq!(pending.len(), 1);
+        match rx1.recv() {
+            Ok(Ok(v)) => assert_eq!(v["contextUsage"]["percent"], 7),
+            other => panic!("expected Ok(data) on the front waiter, got {other:?}"),
+        }
+
+        // A failed stats response surfaces as a Backend error on the next waiter.
+        route_stats_response(
+            &json(
+                r#"{"type":"response","command":"get_session_stats","success":false,"error":"nope"}"#,
+            ),
+            &mut pending,
+        );
+        assert!(pending.is_empty());
+        assert!(matches!(
+            rx2.recv(),
+            Ok(Err(PiSessionError::Backend(msg))) if msg == "nope"
+        ));
     }
 
     #[test]
@@ -922,6 +1177,7 @@ mod tests {
         let mut sent_turn2 = false;
         let mut turn2_text = false;
         let mut turn2_settled = false;
+        let mut got_context_usage = false;
         let deadline = Instant::now() + Duration::from_secs(90);
         while Instant::now() < deadline {
             match session.events.recv_timeout(Duration::from_secs(5)) {
@@ -941,6 +1197,16 @@ mod tests {
                             // Turn 1 settled → Pi is idle → a bare second
                             // prompt is accepted (no `streamingBehavior` needed).
                             sent_turn2 = true;
+                            // Exercise the correlated control op while idle: Pi
+                            // replies to `get_session_stats` out-of-band, and
+                            // the bridge must route that response back here.
+                            match session.control.get_context_usage() {
+                                Ok(stats) => {
+                                    eprintln!("LIVE PI STATS {stats}");
+                                    got_context_usage = stats.is_object();
+                                }
+                                Err(e) => eprintln!("LIVE PI STATS ERROR {e}"),
+                            }
                             let _ = session
                                 .control
                                 .send_turn("Now reply with exactly one word: ping.");
@@ -961,5 +1227,9 @@ mod tests {
             "turn 2 (multi-turn follow-up) should have streamed text"
         );
         assert!(turn2_settled, "turn 2 should have settled");
+        assert!(
+            got_context_usage,
+            "get_context_usage should return a JSON object from get_session_stats"
+        );
     }
 }

@@ -174,8 +174,20 @@ aikit serve --host 0.0.0.0 --port 8787 \
 | `GET`  | `/api/v1/sessions` | List active and recently completed runs |
 | `GET`  | `/api/v1/sessions/{id}` | Inspect one run |
 | `DELETE` | `/api/v1/sessions/{id}` | Abort and close a run |
+| `POST` | `/api/v1/live-sessions` | Open a bidirectional session (`claude`/`codex`/`pi`); streams as SSE |
+| `POST` | `/api/v1/live-sessions/{id}/control` | Drive a live session: `interrupt`, `send_turn`, `set_model`, `get_context_usage`, `disconnect` |
+| `GET`  | `/api/v1/live-sessions` | List active live sessions |
+| `DELETE` | `/api/v1/live-sessions/{id}` | Close and evict a live session |
 
 `GET /api/` redirects `308` to `/api/v1`.
+
+**Bidirectional live sessions** (`/api/v1/live-sessions`) are long-lived,
+multi-turn agent processes for `claude`, `codex`, and `pi`. Open one with
+`POST /api/v1/live-sessions` (streams the session as SSE) and drive it through
+`/control`: `send_turn` (follow-up), `interrupt`, `set_model`,
+`get_context_usage`, and `disconnect`. `pi` supports the full set — `set_model`
+takes `provider/id` (Pi rejects a bare id) and `get_context_usage` returns
+session stats including the context-window fill.
 
 **Two response shapes on `/api/v1/messages`, selected by the `Accept` header:**
 

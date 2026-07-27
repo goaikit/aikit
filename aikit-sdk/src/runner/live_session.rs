@@ -116,11 +116,16 @@ impl LiveSession for super::pi_session::PiControlHandle {
         super::pi_session::PiControlHandle::disconnect(self)
             .map_err(|e| ControlError::Backend(e.to_string()))
     }
-    // set_model / get_context_usage fall through to the default `Unsupported`.
-    // Pi's RPC does support `set_model` and `get_session_stats`, but the former
-    // needs provider/id splitting and the latter request/response correlation;
-    // both are deferred. The session's own steer/follow_up are pi-specific and
-    // live on the concrete handle, not the trait (mirrors Codex's `steer`).
+    fn set_model(&self, model: Option<String>) -> Result<(), ControlError> {
+        super::pi_session::PiControlHandle::set_model(self, model)
+            .map_err(|e| ControlError::Backend(e.to_string()))
+    }
+    fn get_context_usage(&self) -> Result<serde_json::Value, ControlError> {
+        super::pi_session::PiControlHandle::get_context_usage(self)
+            .map_err(|e| ControlError::Backend(e.to_string()))
+    }
+    // The session's own steer / follow_up are pi-specific extras on the
+    // concrete handle, not on the trait (mirrors Codex's `steer`).
 }
 
 #[cfg(test)]
