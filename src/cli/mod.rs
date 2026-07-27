@@ -9,8 +9,6 @@ mod release;
 mod run;
 pub mod serve;
 pub mod session;
-mod template_package;
-mod version;
 
 pub mod commands {
     pub mod install;

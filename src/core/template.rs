@@ -17,8 +17,7 @@ impl ProjectPath {
 
 /// Select the release asset matching the requested agent + script variant.
 ///
-/// Release assets produced by `aikit package` / `template_package::execute`
-/// (see `src/core/package.rs::generate_package`) are named
+/// Release assets are named
 /// `spec-kit-template-{agent_key}-{script_variant}-{version}.zip`. We match on
 /// that filename convention against the basename of each candidate asset URL
 /// (case-insensitively, since GitHub asset URLs are not guaranteed to preserve
