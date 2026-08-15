@@ -455,6 +455,8 @@ pub fn deploy_subagent(
 pub mod aikit_agent_adapter;
 #[cfg(feature = "agent-adapters")]
 pub mod cost;
+#[cfg(feature = "history")]
+pub mod history;
 pub mod runner;
 pub mod session_store;
 

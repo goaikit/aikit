@@ -43,6 +43,12 @@ pub enum Decoded {
 }
 
 /// A runnable agent. Closed set; parse from a key with [`Backend::from_key`].
+///
+/// Serializes/deserializes as its [`key`](Backend::key) string (e.g.
+/// `"claude"`), not the Rust variant name — needed so canonical types that
+/// carry a `Backend` field (e.g. `HistorySession`, spec 008) round-trip over
+/// JSON using the same identifier `GET /api/v1/agents` and the serve history
+/// routes already use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Backend {
     Claude,
@@ -300,6 +306,20 @@ impl Backend {
     }
 }
 
+impl serde::Serialize for Backend {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.key())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Backend {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        Backend::from_key(&s)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown backend key '{s}'")))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,6 +328,16 @@ mod tests {
     fn from_key_roundtrip_for_all() {
         for &b in ALL {
             assert_eq!(Backend::from_key(b.key()), Some(b), "roundtrip for {b:?}");
+        }
+    }
+
+    #[test]
+    fn serde_round_trip_uses_key_string_for_all() {
+        for &b in ALL {
+            let json = serde_json::to_string(&b).unwrap();
+            assert_eq!(json, format!("\"{}\"", b.key()));
+            let back: Backend = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, b);
         }
     }
 

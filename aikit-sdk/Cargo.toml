@@ -11,9 +11,17 @@ categories = ["command-line-utilities"]
 [features]
 default = ["claude-sdk"]
 testing = []
+# History (transcript) backend (spec 008): the `HistoryReader`/`HistoryMutator`
+# traits + canonical types. No SDK dependency — compiles standalone so the
+# seam is provable without any concrete adapter.
+history = []
 # Delegate Claude decode to the typed `claude-agent-sdk` parser (richer
 # tool/thinking frames). When off, a hand-rolled text-only decode is used.
-claude-sdk = ["dep:claude-agent-sdk"]
+# Also enables the Claude `HistoryReader`/`HistoryMutator` adapter (spec 008),
+# which delegates to `claude-agent-sdk`'s spawn-free `session::history` /
+# `session::mutations` modules — `history` is implied so the common case
+# needs only this one feature.
+claude-sdk = ["dep:claude-agent-sdk", "history"]
 # Bidirectional Claude sessions (B2): drive `claude-agent-sdk`'s client over a
 # tokio bridge with a Control handle (interrupt / permission mode / model).
 claude-control = ["claude-sdk", "dep:tokio"]
