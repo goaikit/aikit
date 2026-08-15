@@ -25,7 +25,7 @@ pub(crate) const BINARY_CANDIDATES: &[&str] = &["claude"];
 // `claudecode` adapter feature are enabled. Spec 010 §17.2. Two `#[cfg]`
 // arms keep the const evaluable without runtime branching.
 #[cfg(all(feature = "agent-adapters", feature = "claudecode"))]
-pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
+const BASE_CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_bidirectional()
     .with_structured_tools()
     .with_reasoning()
@@ -38,7 +38,7 @@ pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_passive_capture();
 
 #[cfg(not(all(feature = "agent-adapters", feature = "claudecode")))]
-pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
+const BASE_CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_bidirectional()
     .with_structured_tools()
     .with_reasoning()
@@ -48,6 +48,19 @@ pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_hooks()
     .with_server_tools()
     .with_subagents();
+
+// History (spec 008 §4): `history_store` flips on only when `claude-sdk` is
+// enabled — the same feature that compiles in `history::claude::ClaudeHistory`
+// (`aikit_sdk::Backend::history_reader()`). Two `#[cfg]` arms mirror the
+// `passive_capture` pattern above exactly (composed on top of
+// `BASE_CAPABILITIES` rather than duplicating the whole builder chain), so
+// `capabilities().history_store == true` iff `history_reader()` can return
+// `Some` in every build configuration (the invariant spec 008 §4/§6 rests on).
+#[cfg(feature = "claude-sdk")]
+pub(crate) const CAPABILITIES: BackendCapabilities = BASE_CAPABILITIES.with_history_store();
+
+#[cfg(not(feature = "claude-sdk"))]
+pub(crate) const CAPABILITIES: BackendCapabilities = BASE_CAPABILITIES;
 
 const SPEC: ArgvSpec = ArgvSpec {
     binary: "claude",
