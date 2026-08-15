@@ -51,6 +51,14 @@ pub struct BackendCapabilities {
     /// unenforceable — callers threading a persona/tool-policy through `RunOptions` must reject
     /// rather than accept-and-drop it. Currently only the in-process `aikit` Backend enforces it.
     pub supports_tool_policy: bool,
+    /// The Backend persists browsable session transcripts that aikit can read
+    /// via [`HistoryReader`](crate::history::HistoryReader). `false` = the
+    /// Backend is opaque; history is unsupported, not merely empty. Spec 008.
+    pub history_store: bool,
+    /// History metadata mutations (rename/tag) are supported. Implies nothing
+    /// without `history_store`. Distinct because a store may be read-only.
+    /// Spec 008.
+    pub history_mutations: bool,
 }
 
 impl BackendCapabilities {
@@ -69,6 +77,8 @@ impl BackendCapabilities {
         context_compression: false,
         passive_capture: false,
         supports_tool_policy: false,
+        history_store: false,
+        history_mutations: false,
     };
 
     pub const fn with_bidirectional(mut self) -> Self {
@@ -124,6 +134,18 @@ impl BackendCapabilities {
     /// Declare that this Backend enforces `AgentPersona.tools` / `disallowed_tools` (D2).
     pub const fn with_supports_tool_policy(mut self) -> Self {
         self.supports_tool_policy = true;
+        self
+    }
+    /// Declare that this Backend persists browsable session transcripts
+    /// readable via `HistoryReader` (spec 008 §4).
+    pub const fn with_history_store(mut self) -> Self {
+        self.history_store = true;
+        self
+    }
+    /// Declare that this Backend's history store supports metadata mutations
+    /// (rename/tag) via `HistoryMutator` (spec 008 §4).
+    pub const fn with_history_mutations(mut self) -> Self {
+        self.history_mutations = true;
         self
     }
 }
