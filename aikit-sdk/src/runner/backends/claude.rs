@@ -57,7 +57,9 @@ const BASE_CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
 // `capabilities().history_store == true` iff `history_reader()` can return
 // `Some` in every build configuration (the invariant spec 008 §4/§6 rests on).
 #[cfg(feature = "claude-sdk")]
-pub(crate) const CAPABILITIES: BackendCapabilities = BASE_CAPABILITIES.with_history_store();
+pub(crate) const CAPABILITIES: BackendCapabilities = BASE_CAPABILITIES
+    .with_history_store()
+    .with_history_mutations();
 
 #[cfg(not(feature = "claude-sdk"))]
 pub(crate) const CAPABILITIES: BackendCapabilities = BASE_CAPABILITIES;

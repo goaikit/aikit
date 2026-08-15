@@ -96,9 +96,11 @@ impl Backend {
     /// return `Some` here from `history_reader()` but `None` from this
     /// method.
     ///
-    /// Every Backend returns `None` until `ClaudeHistory` implements
-    /// `HistoryMutator` (spec 008 Phase 2 Task 4 — rename/tag mutations).
     pub fn history_mutator(self) -> Option<Box<dyn HistoryMutator>> {
-        None
+        match self {
+            #[cfg(feature = "claude-sdk")]
+            Backend::Claude => Some(Box::new(claude::ClaudeHistory)),
+            _ => None,
+        }
     }
 }

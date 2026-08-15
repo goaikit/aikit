@@ -52,17 +52,13 @@ fn only_claude_can_ever_have_a_history_reader() {
     }
 }
 
-// NOTE: `history_mutator()` assertions land in Phase 2 Task 4, once
-// `ClaudeHistory` implements `HistoryMutator` (rename/tag). Until then every
-// Backend's mutator is `None`, covered by
-// `history_mutations_capability_matches_mutator_presence_for_all_backends`
-// above.
-
 #[cfg(feature = "claude-sdk")]
 #[test]
-fn claude_history_reader_is_some_when_claude_sdk_enabled() {
+fn claude_history_reader_and_mutator_are_some_when_claude_sdk_enabled() {
     assert!(Backend::Claude.history_reader().is_some());
+    assert!(Backend::Claude.history_mutator().is_some());
     assert!(Backend::Claude.capabilities().history_store);
+    assert!(Backend::Claude.capabilities().history_mutations);
     assert_eq!(
         Backend::Claude.history_reader().unwrap().backend(),
         Backend::Claude
@@ -71,8 +67,10 @@ fn claude_history_reader_is_some_when_claude_sdk_enabled() {
 
 #[cfg(not(feature = "claude-sdk"))]
 #[test]
-fn claude_history_reader_is_none_when_claude_sdk_disabled() {
+fn claude_history_reader_and_mutator_are_none_when_claude_sdk_disabled() {
     // The capability is honest: "unsupported," not "supported but empty."
     assert!(Backend::Claude.history_reader().is_none());
+    assert!(Backend::Claude.history_mutator().is_none());
     assert!(!Backend::Claude.capabilities().history_store);
+    assert!(!Backend::Claude.capabilities().history_mutations);
 }

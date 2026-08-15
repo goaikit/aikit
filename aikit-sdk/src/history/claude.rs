@@ -16,7 +16,7 @@ use super::types::{
     HistoryBlock, HistoryContent, HistoryError, HistoryMessage, HistoryQuery, HistorySession,
     MessagesQuery,
 };
-use super::HistoryReader;
+use super::{HistoryMutator, HistoryReader};
 
 /// A bare `ClaudeHistory` reads the default `~/.claude` projects directory;
 /// the underlying SDK honours `CLAUDE_CONFIG_DIR` (not `CLAUDE_HOME`) via
@@ -108,6 +108,39 @@ impl HistoryReader for ClaudeHistory {
         let limit = effective_limit(q.limit);
         let raw = claude_agent_sdk::get_session_messages(id, cwd, Some(limit), q.offset);
         Ok(raw.into_iter().map(to_history_message).collect())
+    }
+}
+
+impl HistoryMutator for ClaudeHistory {
+    fn rename(&self, id: &str, title: &str, cwd: Option<&Path>) -> Result<(), HistoryError> {
+        validate_session_id(id)?;
+        claude_agent_sdk::rename_session(id, title, cwd).map_err(|e| map_mutation_io_err(id, e))
+    }
+
+    fn tag(&self, id: &str, tag: Option<&str>, cwd: Option<&Path>) -> Result<(), HistoryError> {
+        validate_session_id(id)?;
+        claude_agent_sdk::tag_session(id, tag, cwd).map_err(|e| map_mutation_io_err(id, e))
+    }
+}
+
+/// `rename_session`/`tag_session` return a plain `std::io::Result<()>`. The
+/// SDK sets `ErrorKind::NotFound` specifically when the session file doesn't
+/// exist (`mutations::find_session_file` failing), which this promotes to
+/// the canonical `HistoryError::NotFound` (-> HTTP 404) rather than a
+/// generic `Io` (-> 500) — matching the same 404-vs-500 distinction the
+/// reader methods make. Every other I/O failure (including an
+/// empty-title/empty-tag `InvalidInput`, which the SDK also rejects) maps to
+/// `HistoryError::Io`.
+fn map_mutation_io_err(id: &str, e: std::io::Error) -> HistoryError {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        HistoryError::NotFound {
+            session_id: id.to_string(),
+        }
+    } else {
+        HistoryError::Io {
+            source: e,
+            path: None,
+        }
     }
 }
 
@@ -481,6 +514,62 @@ mod tests {
         ));
         assert!(matches!(
             reader.messages(missing, &MessagesQuery::default(), None),
+            Err(HistoryError::NotFound { .. })
+        ));
+
+        // Spec 008 §12 acceptance criterion 5: PATCH .../{id} with
+        // {rename: "x"} appends a custom-title entry and a subsequent
+        // info(id) reflects it, idempotently (repeating the same rename is a
+        // no-op observationally — the SDK just appends another identical
+        // custom-title entry, and the *latest* one wins).
+        let mutator = Backend::Claude
+            .history_mutator()
+            .expect("claude-sdk feature is enabled for this test");
+        mutator
+            .rename(session_id, "My Renamed Session", None)
+            .expect("rename should succeed");
+        let renamed = reader
+            .info(session_id, None)
+            .expect("info should succeed")
+            .expect("session should still exist");
+        assert_eq!(renamed.custom_title.as_deref(), Some("My Renamed Session"));
+        // Idempotent: renaming again with the same title still succeeds and
+        // still reflects that title.
+        mutator
+            .rename(session_id, "My Renamed Session", None)
+            .expect("repeat rename should also succeed");
+        let renamed_again = reader
+            .info(session_id, None)
+            .expect("info should succeed")
+            .expect("session should still exist");
+        assert_eq!(
+            renamed_again.custom_title.as_deref(),
+            Some("My Renamed Session")
+        );
+
+        mutator
+            .tag(session_id, Some("urgent"), None)
+            .expect("tag set should succeed");
+        let tagged = reader
+            .info(session_id, None)
+            .expect("info should succeed")
+            .expect("session should still exist");
+        assert_eq!(tagged.tag.as_deref(), Some("urgent"));
+
+        mutator
+            .tag(session_id, None, None)
+            .expect("tag clear should succeed");
+        let untagged = reader
+            .info(session_id, None)
+            .expect("info should succeed")
+            .expect("session should still exist");
+        assert_eq!(untagged.tag, None);
+
+        // A well-formed but absent session id is NotFound on mutation too
+        // (mapped from the SDK's io::ErrorKind::NotFound), not a silent
+        // success or a generic 500-shaped error.
+        assert!(matches!(
+            mutator.rename(missing, "x", None),
             Err(HistoryError::NotFound { .. })
         ));
 
