@@ -50,7 +50,7 @@ pub fn select_template_asset(
 /// traversal / absolute-path entries) and flattening a single common
 /// top-level wrapping directory if the archive has one (as produced by
 /// GitHub-style zipballs; a no-op for the flat archives this CLI itself
-/// produces via `generate_package`).
+/// produces internally).
 ///
 /// The actual extraction — including all zip-slip/absolute-path/symlink
 /// hardening — is delegated to `aikit_sdk::extract_zip`, the single
