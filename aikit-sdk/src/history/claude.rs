@@ -421,23 +421,283 @@ mod tests {
         assert_eq!(content, HistoryContent::Raw(message));
     }
 
+    // ── Phase 4 hardening: parametrized mapping/normalization table ─────
+    //
+    // (tasks.md Phase 4 Task 6.) These tests are pure in-memory (no env var
+    // mutation, no filesystem I/O), so — unlike the live fixture test below
+    // — they run safely in parallel with the rest of the suite.
+
+    /// Every `SDKSessionInfo` field maps to its `HistorySession` counterpart,
+    /// and the two millisecond-epoch fields pass through **unchanged** (no
+    /// `*1000`/`/1000` rescale) — a 2026-range value stays a 2026-range
+    /// value. `message_count` is always `None` on this path: the SDK follow-up
+    /// (a `message_count` field on `SDKSessionInfo`) is deliberately not
+    /// implemented here (spec 008 §7 — the SDK repo is out of scope).
+    #[test]
+    fn map_session_copies_every_field_with_already_ms_passthrough() {
+        let info = claude_agent_sdk::SDKSessionInfo {
+            session_id: "650e8400-e29b-41d4-a716-446655440099".to_string(),
+            summary: "a session summary".to_string(),
+            last_modified: 1_782_398_632_826,
+            file_size: Some(4_630_391),
+            custom_title: Some("My Title".to_string()),
+            first_prompt: Some("do the thing".to_string()),
+            git_branch: Some("main".to_string()),
+            cwd: Some("/tmp/fixture-proj".to_string()),
+            tag: Some("urgent".to_string()),
+            created_at: Some(1_781_423_077_944),
+        };
+
+        let session = map_session(info.clone());
+
+        assert_eq!(session.backend, Backend::Claude);
+        assert_eq!(session.session_id, info.session_id);
+        assert_eq!(session.summary, info.summary);
+        assert_eq!(session.first_prompt, info.first_prompt);
+        assert_eq!(session.custom_title, info.custom_title);
+        assert_eq!(session.tag, info.tag);
+        assert_eq!(session.cwd, info.cwd.map(std::path::PathBuf::from));
+        assert_eq!(session.git_branch, info.git_branch);
+        assert_eq!(session.size_bytes, info.file_size);
+        // Already-ms passthrough (spec 008 §5/§7, data-model.md): copied
+        // verbatim, not rescaled.
+        assert_eq!(session.last_modified_ms, info.last_modified);
+        assert_eq!(session.created_at_ms, info.created_at);
+        // 2026-range regression guard, not a normalization step: a value
+        // 1000x smaller (seconds mistaken for ms) or 1000x larger would fail.
+        assert!(session.last_modified_ms > 1_700_000_000_000);
+        assert!(session.last_modified_ms < 2_000_000_000_000);
+        assert!(session.created_at_ms.unwrap() > 1_700_000_000_000);
+        assert!(session.created_at_ms.unwrap() < 2_000_000_000_000);
+        // SDK follow-up deferred — see doc comment above.
+        assert_eq!(session.message_count, None);
+    }
+
+    /// `map_session` on an all-`None` `SDKSessionInfo` still round-trips the
+    /// required fields and never panics — the optional-field half of the
+    /// same mapping table.
+    #[test]
+    fn map_session_handles_all_optional_fields_absent() {
+        let info = claude_agent_sdk::SDKSessionInfo {
+            session_id: "650e8400-e29b-41d4-a716-446655440098".to_string(),
+            summary: "bare".to_string(),
+            last_modified: 1_782_000_000_000,
+            file_size: None,
+            custom_title: None,
+            first_prompt: None,
+            git_branch: None,
+            cwd: None,
+            tag: None,
+            created_at: None,
+        };
+        let session = map_session(info);
+        assert_eq!(session.custom_title, None);
+        assert_eq!(session.first_prompt, None);
+        assert_eq!(session.tag, None);
+        assert_eq!(session.cwd, None);
+        assert_eq!(session.git_branch, None);
+        assert_eq!(session.created_at_ms, None);
+        assert_eq!(session.size_bytes, None);
+        assert_eq!(session.message_count, None);
+    }
+
+    /// Every `ContentBlock` variant → `HistoryBlock` mapping, in one
+    /// data-driven table (spec 008 §5/§7, data-model.md: "the six typed
+    /// variants are a 1:1 image of the SDK's `ContentBlock` taxonomy").
+    /// `map_block` is exhaustive with no wildcard arm, so this table is
+    /// exactly as long as `ContentBlock` has variants — if the SDK ever adds
+    /// a seventh, `map_block` fails to compile before this test could miss it.
+    #[test]
+    fn every_content_block_variant_maps_via_table() {
+        use claude_agent_sdk::{
+            ContentBlock, ServerToolName, ServerToolResultBlock, ServerToolUseBlock, TextBlock,
+            ThinkingBlock, ToolResultBlock, ToolUseBlock,
+        };
+
+        let mut tool_use_input = serde_json::Map::new();
+        tool_use_input.insert("command".to_string(), serde_json::json!("ls"));
+        let mut server_input = serde_json::Map::new();
+        server_input.insert("query".to_string(), serde_json::json!("rust"));
+        let mut server_result_content = serde_json::Map::new();
+        server_result_content.insert("result".to_string(), serde_json::json!("ok"));
+
+        let cases: Vec<(&str, ContentBlock, HistoryBlock)> = vec![
+            (
+                "text",
+                ContentBlock::Text(TextBlock {
+                    text: "hello".to_string(),
+                }),
+                HistoryBlock::Text {
+                    text: "hello".to_string(),
+                },
+            ),
+            (
+                "thinking",
+                ContentBlock::Thinking(ThinkingBlock {
+                    thinking: "let me think".to_string(),
+                    signature: "sig".to_string(),
+                }),
+                HistoryBlock::Thinking {
+                    text: "let me think".to_string(),
+                },
+            ),
+            (
+                "tool_use",
+                ContentBlock::ToolUse(ToolUseBlock {
+                    id: "tu_1".to_string(),
+                    name: "Bash".to_string(),
+                    input: tool_use_input.clone(),
+                }),
+                HistoryBlock::ToolUse {
+                    id: "tu_1".to_string(),
+                    name: "Bash".to_string(),
+                    input: serde_json::Value::Object(tool_use_input),
+                },
+            ),
+            (
+                "tool_result",
+                ContentBlock::ToolResult(ToolResultBlock {
+                    tool_use_id: "tu_1".to_string(),
+                    content: Some(serde_json::json!("file.txt")),
+                    is_error: Some(true),
+                }),
+                HistoryBlock::ToolResult {
+                    tool_use_id: "tu_1".to_string(),
+                    content: serde_json::json!("file.txt"),
+                    is_error: true,
+                },
+            ),
+            (
+                "tool_result (defaults: no content, no is_error)",
+                ContentBlock::ToolResult(ToolResultBlock {
+                    tool_use_id: "tu_2".to_string(),
+                    content: None,
+                    is_error: None,
+                }),
+                HistoryBlock::ToolResult {
+                    tool_use_id: "tu_2".to_string(),
+                    content: serde_json::Value::Null,
+                    is_error: false,
+                },
+            ),
+            (
+                "server_tool_use",
+                ContentBlock::ServerToolUse(ServerToolUseBlock {
+                    id: "stu_1".to_string(),
+                    name: ServerToolName::WebSearch,
+                    input: server_input.clone(),
+                }),
+                HistoryBlock::ServerToolUse {
+                    id: "stu_1".to_string(),
+                    name: "web_search".to_string(),
+                    input: serde_json::Value::Object(server_input),
+                },
+            ),
+            (
+                "server_tool_result (advisor_tool_result on the wire)",
+                ContentBlock::ServerToolResult(ServerToolResultBlock {
+                    tool_use_id: "stu_1".to_string(),
+                    content: server_result_content.clone(),
+                }),
+                HistoryBlock::ServerToolResult {
+                    tool_use_id: "stu_1".to_string(),
+                    content: serde_json::Value::Object(server_result_content),
+                    // `ServerToolResultBlock` carries no `is_error` field —
+                    // always `false` (matches the live decode path's default).
+                    is_error: false,
+                },
+            ),
+        ];
+
+        for (label, block, expected) in cases {
+            let got = map_block(block);
+            assert_eq!(got, expected, "mismatch for variant: {label}");
+        }
+    }
+
+    /// Every `HistoryContent` arm (Text / Blocks / Raw), table-driven over
+    /// `history_content` (spec 008 §5/§7, data-model.md derivation rule).
+    #[test]
+    fn every_history_content_arm_maps_via_table() {
+        let cases: Vec<(&str, &str, serde_json::Value, HistoryContent)> = vec![
+            (
+                "plain string content -> Text",
+                "user",
+                serde_json::json!({"content": "plain prompt"}),
+                HistoryContent::Text("plain prompt".to_string()),
+            ),
+            (
+                "array content -> Blocks",
+                "assistant",
+                serde_json::json!({
+                    "model": "claude-x",
+                    "content": [{"type": "text", "text": "hi"}],
+                }),
+                HistoryContent::Blocks(vec![HistoryBlock::Text {
+                    text: "hi".to_string(),
+                }]),
+            ),
+            (
+                "unparseable message -> Raw(original value)",
+                "assistant",
+                serde_json::json!({"nonsense": true}),
+                HistoryContent::Raw(serde_json::json!({"nonsense": true})),
+            ),
+            (
+                "unrecognized entry type -> Raw(original value)",
+                "progress",
+                serde_json::json!({"content": "x"}),
+                HistoryContent::Raw(serde_json::json!({"content": "x"})),
+            ),
+        ];
+
+        for (label, entry_type, message, expected) in cases {
+            let got = history_content(entry_type, &message, "sess-table");
+            assert_eq!(got, expected, "mismatch for case: {label}");
+        }
+    }
+
     // ── live fixture test (spec 008 §7/§12, tasks.md Phase 2 Task 3) ────
     //
     // `#[ignore]`d by default: it mutates the process-global `CLAUDE_CONFIG_DIR`
-    // env var, which would race other tests in the same binary if run
-    // concurrently. Run explicitly and single-threaded:
+    // (and, for the zero-subprocess proof, `PATH`) env vars, which would race
+    // other tests in the same binary if run concurrently. Run explicitly and
+    // single-threaded:
     //   cargo test -p aikit-sdk --all-features -- --ignored --test-threads=1
     //
     // Points `CLAUDE_CONFIG_DIR` at an isolated temp fixture — **never** the
-    // real `~/.claude` — and proves two things end-to-end through the public
-    // `Backend::history_reader()` seam: (a) `list`/`info`/`messages` read a
-    // hand-written fixture correctly, and (b) the whole call graph is
-    // spawn-free (nothing in this module — or the SDK functions it calls —
-    // touches `std::process::Command`; the on-disk-JSONL-read design makes a
-    // subprocess structurally unreachable, not just empirically absent).
+    // real `~/.claude` — and proves three things end-to-end through the public
+    // `Backend::history_reader()`/`history_mutator()` seam: (a) `list`/`info`/
+    // `messages` read a hand-written fixture correctly; (b) rename/tag
+    // mutations round-trip; and (c) the whole call graph is spawn-free —
+    // `PATH` is pointed at a directory containing only a `claude` script that
+    // writes a sentinel file if ever executed, and the test asserts that
+    // sentinel is never created (nothing in this module — or the SDK
+    // functions it calls — touches `std::process::Command`; the
+    // on-disk-JSONL-read design makes a subprocess structurally unreachable,
+    // not just empirically absent).
     #[test]
     #[ignore]
     fn live_fixture_list_info_messages_via_claude_config_dir() {
+        // Zero-subprocess proof (tasks.md Phase 4 Task 6): PATH resolves only
+        // to a fake `claude` that would leave a mark if ever spawned.
+        #[cfg(unix)]
+        let path_guard = {
+            let path_dir = tempfile::tempdir().unwrap();
+            let sentinel = path_dir.path().join("claude-was-spawned");
+            let script_path = path_dir.path().join("claude");
+            std::fs::write(
+                &script_path,
+                format!("#!/bin/sh\ntouch {}\nexit 1\n", sentinel.to_string_lossy()),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let prev_path = std::env::var("PATH").ok();
+            std::env::set_var("PATH", path_dir.path());
+            (path_dir, sentinel, prev_path)
+        };
+
         let fixture = tempfile::tempdir().unwrap();
         let project_dir = fixture.path().join("projects").join("-tmp-fixture-proj");
         std::fs::create_dir_all(&project_dir).unwrap();
@@ -576,6 +836,22 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
             None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+        }
+
+        // Zero-subprocess proof: the fake `claude` on PATH was never
+        // executed by any of the list/info/messages/rename/tag calls above.
+        #[cfg(unix)]
+        {
+            let (_path_dir, sentinel, prev_path) = path_guard;
+            assert!(
+                !sentinel.exists(),
+                "a `claude` subprocess was spawned during history ops \
+                 (sentinel file was created) — history ops must be spawn-free"
+            );
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
         }
     }
 
