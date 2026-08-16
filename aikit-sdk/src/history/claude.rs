@@ -149,9 +149,9 @@ fn map_mutation_io_err(id: &str, e: std::io::Error) -> HistoryError {
 /// `last_modified`/`created_at` are already milliseconds since epoch in the
 /// SDK (`system_time_ms`/`parse_iso_epoch_ms` internally) — copied through
 /// verbatim, **no arithmetic** (spec 008 §5/§7, data-model.md).
-/// `message_count` is `None`: `SDKSessionInfo` has no such field yet (SDK
-/// follow-up noted in spec 008 §7, deliberately not implemented here — the
-/// SDK repo is out of scope for this change).
+/// `message_count` is copied from `SDKSessionInfo.message_count` (the SDK
+/// follow-up from spec 008 §7 has landed): `Some(n)` on the file/entries path,
+/// `None` only on the SDK's cached-summary store path.
 fn map_session(info: claude_agent_sdk::SDKSessionInfo) -> HistorySession {
     HistorySession {
         backend: Backend::Claude,
@@ -164,7 +164,7 @@ fn map_session(info: claude_agent_sdk::SDKSessionInfo) -> HistorySession {
         git_branch: info.git_branch,
         last_modified_ms: info.last_modified,
         created_at_ms: info.created_at,
-        message_count: None,
+        message_count: info.message_count,
         size_bytes: info.file_size,
     }
 }
@@ -430,9 +430,8 @@ mod tests {
     /// Every `SDKSessionInfo` field maps to its `HistorySession` counterpart,
     /// and the two millisecond-epoch fields pass through **unchanged** (no
     /// `*1000`/`/1000` rescale) — a 2026-range value stays a 2026-range
-    /// value. `message_count` is always `None` on this path: the SDK follow-up
-    /// (a `message_count` field on `SDKSessionInfo`) is deliberately not
-    /// implemented here (spec 008 §7 — the SDK repo is out of scope).
+    /// value. `message_count` is copied straight from `SDKSessionInfo`
+    /// (the SDK follow-up from spec 008 §7 has landed).
     #[test]
     fn map_session_copies_every_field_with_already_ms_passthrough() {
         let info = claude_agent_sdk::SDKSessionInfo {
@@ -446,6 +445,7 @@ mod tests {
             cwd: Some("/tmp/fixture-proj".to_string()),
             tag: Some("urgent".to_string()),
             created_at: Some(1_781_423_077_944),
+            message_count: Some(321),
         };
 
         let session = map_session(info.clone());
@@ -469,8 +469,9 @@ mod tests {
         assert!(session.last_modified_ms < 2_000_000_000_000);
         assert!(session.created_at_ms.unwrap() > 1_700_000_000_000);
         assert!(session.created_at_ms.unwrap() < 2_000_000_000_000);
-        // SDK follow-up deferred — see doc comment above.
-        assert_eq!(session.message_count, None);
+        // Copied straight from the SDK field (no longer hardcoded None).
+        assert_eq!(session.message_count, info.message_count);
+        assert_eq!(session.message_count, Some(321));
     }
 
     /// `map_session` on an all-`None` `SDKSessionInfo` still round-trips the
@@ -489,6 +490,7 @@ mod tests {
             cwd: None,
             tag: None,
             created_at: None,
+            message_count: None,
         };
         let session = map_session(info);
         assert_eq!(session.custom_title, None);

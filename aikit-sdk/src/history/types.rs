@@ -46,9 +46,9 @@ pub struct HistorySession {
     /// Session creation time, **milliseconds since epoch**, if known. Same
     /// already-ms passthrough rule as `last_modified_ms`.
     pub created_at_ms: Option<i64>,
-    /// Message count, if the store can report it for free during `list`.
-    /// `None` on the Claude store path today — the SDK's `SDKSessionInfo`
-    /// has no such field yet (spec 008 §7 SDK follow-up).
+    /// Message count, when the store can report it for free during `list`.
+    /// Populated from `SDKSessionInfo.message_count` on the Claude path;
+    /// `None` only on the SDK's cached-summary store path.
     pub message_count: Option<u64>,
     /// Size of the underlying transcript file in bytes, if known.
     pub size_bytes: Option<u64>,
