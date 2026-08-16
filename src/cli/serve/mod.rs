@@ -19,6 +19,7 @@
 //! Bidirectional sessions (`/api/v1/live-sessions`) are handled by
 //! [`live_session`] and one-shot runs by [`run_session`].
 
+mod history;
 mod live_session;
 mod run_session;
 
@@ -652,6 +653,11 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
     };
 
     let domain_router = build_router(state.clone());
+
+    // Spec 008: history (transcript) routes, stateless — always registered
+    // regardless of any capture/adapter feature; capability gating happens
+    // per-request via `Backend::capabilities().history_store`.
+    let domain_router = domain_router.merge(history::build_router());
 
     #[cfg(feature = "tools")]
     let domain_router = domain_router.merge(aikit_magictool::router(

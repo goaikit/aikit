@@ -318,6 +318,50 @@ cargo build --features tools
 ./target/debug/aikit serve
 ```
 
+## History (`/api/v1/history`)
+
+Read and lightly annotate a Backend's own past sessions — no `claude`/`codex`/…
+subprocess involved; this is a pure on-disk read/append against whatever
+transcript store the Backend already persists. Only Backends that declare
+`history_store` in `GET /api/v1/agents` support these routes; every other
+`{backend}` returns `409`.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/v1/history/{backend}` | List sessions (`?cwd=&tag=&limit=&offset=`) |
+| `GET` | `/api/v1/history/{backend}/{session_id}` | One session's metadata (`?cwd=`) |
+| `GET` | `/api/v1/history/{backend}/{session_id}/messages` | A session's transcript (`?cwd=&limit=&offset=`) |
+| `PATCH` | `/api/v1/history/{backend}/{session_id}` | Rename and/or tag a session |
+
+```bash
+curl http://127.0.0.1:8787/api/v1/history/claude?limit=3
+# → 200 [{"backend":"claude","session_id":"95ac29df-...","summary":"heromart",...}, ...]
+
+curl http://127.0.0.1:8787/api/v1/history/codex
+# → 409 {"error":"history_unsupported","backend":"codex"}
+```
+
+`PATCH` body: `{"rename"?: string, "tag"?: string|null}` — at least one field
+required. `tag` is three-state: omit it to leave the tag untouched, send
+`"tag": null` to clear it, or `"tag": "urgent"` to set it. An empty body is
+`400 empty_patch`.
+
+| HTTP | `error` | When |
+|------|---------|------|
+| `404` | `unknown_backend` | `{backend}` isn't a Backend key at all |
+| `409` | `history_unsupported` | `{backend}` is a real Backend with no history store |
+| `409` | `mutations_unsupported` | `PATCH` on a store that's read-only |
+| `400` | `invalid_id` | `{session_id}` isn't a well-formed session id |
+| `404` | `not_found` | Well-formed `{session_id}`, no matching session |
+| `400` | `empty_patch` | `PATCH` body has neither `rename` nor `tag` |
+
+An empty list (`200 []`) always means "this store genuinely has zero matching
+sessions" — never infer unsupportedness from it; that's what the `409` is for.
+Today only `claude` implements this (built with the default `claude-sdk`
+Cargo feature); as Backends adopt Backend-agnostic history seams over time
+they'll flip `history_store`/`history_mutations` in `GET /api/v1/agents` and
+these routes will start working for them with no client-side changes.
+
 ## Authentication
 
 If you start the server with `--api-key <key>` (or set `AIKIT_SERVE_API_KEY`),
