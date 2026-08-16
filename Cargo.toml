@@ -141,6 +141,10 @@ name = "serve_smoke_test"
 path = "tests/serve/serve_smoke_test.rs"
 
 [[test]]
+name = "serve_history_test"
+path = "tests/serve/serve_history_test.rs"
+
+[[test]]
 name = "serve_auth_test"
 path = "tests/serve/serve_auth_test.rs"
 
