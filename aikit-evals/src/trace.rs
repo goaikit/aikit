@@ -32,6 +32,50 @@ pub enum TracePayload {
         source: String,
         raw_agent_line_seq: u64,
     },
+    /// Canonical text output from the agent (not a command)
+    Message { text: String, role: String },
+    /// A structured tool invocation decoded from the agent's output.
+    /// This is what `max_command_count` counts.
+    ToolUse {
+        call_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    },
+    /// The result of a structured tool invocation; `call_id` correlates to the
+    /// originating `ToolUse`.
+    ToolResult {
+        call_id: String,
+        output: serde_json::Value,
+        is_error: bool,
+    },
+    /// An `AgentEventPayload` variant this crate does not model yet.
+    ///
+    /// `AgentEventPayload` is `#[non_exhaustive]`, so new SDK variants land
+    /// here rather than being silently mislabelled as another payload type.
+    Unknown { payload_type: String, raw: String },
+}
+
+/// Render a unit-like enum value as a lowercase string, falling back to its
+/// `Debug` form if it does not serialize to a JSON string.
+fn enum_tag<T: Serialize + std::fmt::Debug>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
+        .unwrap_or_else(|| format!("{:?}", value).to_lowercase())
+}
+
+/// Name of an `AgentEventPayload` variant, taken from its serde tag so the
+/// trace records *which* unmodelled variant was seen, not just that one was.
+fn agent_event_payload_tag(payload: &AgentEventPayload) -> String {
+    match serde_json::to_value(payload) {
+        Ok(serde_json::Value::Object(map)) => map
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string()),
+        Ok(serde_json::Value::String(tag)) => tag,
+        _ => "unknown".to_string(),
+    }
 }
 
 /// Convert aikit-sdk AgentEvent to internal TraceEvent
@@ -56,17 +100,55 @@ pub fn agent_events_to_trace(events: &[AgentEvent]) -> Vec<TraceEvent> {
                     raw_agent_line_seq,
                 } => TracePayload::TokenUsageLine {
                     usage: serde_json::to_value(usage).unwrap_or(serde_json::Value::Null),
-                    source: serde_json::to_value(source)
-                        .ok()
-                        .and_then(|v| v.as_str().map(|s| s.to_lowercase()))
-                        .unwrap_or_else(|| format!("{:?}", source).to_lowercase()),
+                    source: enum_tag(source),
                     raw_agent_line_seq: *raw_agent_line_seq,
                 },
-                _ => TracePayload::RawJson {
-                    data: serde_json::json!({
-                        "type": "unknown_agent_event_payload",
-                        "raw": format!("{:?}", ev.payload)
-                    }),
+                AgentEventPayload::StreamMessage(message) => TracePayload::Message {
+                    text: message.text.clone(),
+                    role: enum_tag(&message.role),
+                },
+                AgentEventPayload::ToolUse {
+                    call_id,
+                    tool_name,
+                    input,
+                } => TracePayload::ToolUse {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    input: input.clone(),
+                },
+                AgentEventPayload::AikitToolUse {
+                    call_id,
+                    tool_name,
+                    tool_input,
+                } => TracePayload::ToolUse {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    input: tool_input.clone(),
+                },
+                AgentEventPayload::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                } => TracePayload::ToolResult {
+                    call_id: call_id.clone(),
+                    output: output.clone(),
+                    is_error: *is_error,
+                },
+                AgentEventPayload::AikitToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                } => TracePayload::ToolResult {
+                    call_id: call_id.clone(),
+                    output: serde_json::Value::String(output.clone()),
+                    is_error: *is_error,
+                },
+                // `AgentEventPayload` is `#[non_exhaustive]`; anything not
+                // modelled above is preserved verbatim rather than being
+                // recorded as `raw_json`, which would inflate command counts.
+                other => TracePayload::Unknown {
+                    payload_type: agent_event_payload_tag(other),
+                    raw: format!("{:?}", other),
                 },
             };
             TraceEvent {
@@ -174,6 +256,117 @@ mod tests {
         assert!(
             matches!(deserialized.payload, TracePayload::TokenUsageLine { .. }),
             "deserialized payload must be TokenUsageLine"
+        );
+    }
+
+    fn stream_message_event(seq: u64, text: &str) -> AgentEvent {
+        use aikit_sdk::{AgentEventStream, MessageKind, MessagePhase, MessageRole, StreamMessage};
+        AgentEvent {
+            agent_key: "claude".to_string(),
+            seq,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::StreamMessage(StreamMessage {
+                text: text.to_string(),
+                phase: MessagePhase::Final,
+                role: MessageRole::Assistant,
+                kind: MessageKind::Message,
+                source: AgentEventStream::Stdout,
+                raw_line_seq: seq,
+                turn_id: None,
+            }),
+        }
+    }
+
+    fn tool_use_event(seq: u64, tool_name: &str) -> AgentEvent {
+        use aikit_sdk::AgentEventStream;
+        AgentEvent {
+            agent_key: "claude".to_string(),
+            seq,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::ToolUse {
+                call_id: format!("call_{}", seq),
+                tool_name: tool_name.to_string(),
+                input: serde_json::json!({"command": "ls"}),
+            },
+        }
+    }
+
+    /// Regression test for the defect where an agent that ran **zero** tools
+    /// still reported `command_count: 2`: `StreamMessage` fell through to the
+    /// catch-all arm, was stored as `raw_json`, and was then counted as a
+    /// command. Text output is not a command.
+    #[test]
+    fn test_text_only_run_counts_zero_commands() {
+        use crate::checks::count_command_events;
+        let events = vec![
+            stream_message_event(0, "Here are the three options you asked for."),
+            stream_message_event(1, "Let me know which you would like."),
+        ];
+        let jsonl = trace_to_jsonl(&agent_events_to_trace(&events));
+
+        assert!(
+            !jsonl.contains("\"type\":\"raw_json\""),
+            "stream messages must not be recorded as raw_json, got: {}",
+            jsonl
+        );
+        assert_eq!(
+            count_command_events(&jsonl),
+            0,
+            "an agent that invoked no tools must report 0 commands, got: {}",
+            jsonl
+        );
+    }
+
+    #[test]
+    fn test_tool_use_events_are_counted_as_commands() {
+        use crate::checks::count_command_events;
+        let events = vec![
+            stream_message_event(0, "I will list the directory."),
+            tool_use_event(1, "bash"),
+            stream_message_event(2, "Now reading the file."),
+            tool_use_event(3, "read_file"),
+        ];
+        let jsonl = trace_to_jsonl(&agent_events_to_trace(&events));
+
+        assert_eq!(
+            count_command_events(&jsonl),
+            2,
+            "expected exactly the two tool_use events to count, got: {}",
+            jsonl
+        );
+        assert!(
+            jsonl.contains("\"tool_name\":\"bash\""),
+            "tool name must be preserved in the trace, got: {}",
+            jsonl
+        );
+    }
+
+    #[test]
+    fn test_unmodelled_payload_is_not_counted_as_a_command() {
+        use crate::checks::count_command_events;
+        use aikit_sdk::AgentEventStream;
+        let events = vec![AgentEvent {
+            agent_key: "claude".to_string(),
+            seq: 0,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::RawTransportLine {
+                raw: "{\"debug\": true}".to_string(),
+                stream: AgentEventStream::Stdout,
+                seq: 0,
+            },
+        }];
+        let jsonl = trace_to_jsonl(&agent_events_to_trace(&events));
+
+        assert!(
+            jsonl.contains("\"type\":\"unknown\""),
+            "unmodelled payloads must serialize as `unknown`, got: {}",
+            jsonl
+        );
+        assert_eq!(
+            count_command_events(&jsonl),
+            0,
+            "unmodelled payloads must not count as commands, got: {}",
+            jsonl
         );
     }
 

@@ -1,7 +1,7 @@
 //! Eval runner implementation using aikit-sdk
 
 use crate::artifacts::{CaseResult, CaseStatus, CaseTrialsResult, TrialResult};
-use crate::checks::{count_raw_json_events, run_checks, CheckDefinition};
+use crate::checks::{count_command_events, run_checks, CheckDefinition};
 use crate::suite::EvalCase;
 use crate::trace::{agent_events_to_trace, trace_to_jsonl, TraceEvent, TracePayload};
 use aikit_sdk::{run_agent_events, AgentEvent, RunOptions};
@@ -287,7 +287,7 @@ impl AikitEvalRunner {
 
         let trace_jsonl = trace_to_jsonl(&trace_events);
         let stdout_str = String::from_utf8_lossy(&run_output.stdout).to_string();
-        let command_count = count_raw_json_events(&trace_jsonl);
+        let command_count = count_command_events(&trace_jsonl);
         let check_results = run_checks(checks, &stdout_str, &trace_jsonl, &working_dir);
         let all_passed = check_results.iter().all(|r| r.passed);
 

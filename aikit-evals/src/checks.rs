@@ -112,10 +112,31 @@ pub fn run_checks(
 
 /// Count trace events with payload type `raw_json`.
 pub fn count_raw_json_events(trace_jsonl: &str) -> usize {
+    count_matching(trace_jsonl, |payload| {
+        matches!(payload, TracePayload::RawJson { .. })
+    })
+}
+
+/// Count the commands an agent issued during a run.
+///
+/// A command is a structured tool invocation (`tool_use`), plus any `raw_json`
+/// line for backends that emit tool calls as raw JSON rather than as decoded
+/// `ToolUse` events. Text output, token-usage events and unmodelled SDK event
+/// variants are explicitly *not* commands.
+pub fn count_command_events(trace_jsonl: &str) -> usize {
+    count_matching(trace_jsonl, |payload| {
+        matches!(
+            payload,
+            TracePayload::ToolUse { .. } | TracePayload::RawJson { .. }
+        )
+    })
+}
+
+fn count_matching(trace_jsonl: &str, predicate: impl Fn(&TracePayload) -> bool) -> usize {
     trace_jsonl
         .lines()
         .filter_map(|line| serde_json::from_str::<TraceEvent>(line).ok())
-        .filter(|event| matches!(event.payload, TracePayload::RawJson { .. }))
+        .filter(|event| predicate(&event.payload))
         .count()
 }
 
@@ -175,8 +196,7 @@ fn run_single_check(
             }
         }
         CheckDefinition::MaxCommandCount { limit, .. } => {
-            // Count raw_json trace lines
-            let count = count_raw_json_events(trace_jsonl);
+            let count = count_command_events(trace_jsonl);
             let passed = count <= *limit;
             let message = if passed {
                 None
