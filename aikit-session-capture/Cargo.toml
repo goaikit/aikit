@@ -37,7 +37,7 @@ anyhow = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "fs", "time"] }
 rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "eaef0191a64faab76a27267567a0358b0c7af0e1", optional = true }
-notify = { version = "6", optional = true }
+notify = { version = "8", optional = true }
 walkdir = { version = "2", optional = true }
 
 [dev-dependencies]
