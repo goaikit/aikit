@@ -35,7 +35,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 anyhow = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "macros", "fs", "time"] }
-rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 cli-framework = { git = "https://github.com/aroff/cli-framework", rev = "eaef0191a64faab76a27267567a0358b0c7af0e1", optional = true }
 notify = { version = "6", optional = true }
 walkdir = { version = "2", optional = true }
@@ -43,4 +43,4 @@ walkdir = { version = "2", optional = true }
 [dev-dependencies]
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
