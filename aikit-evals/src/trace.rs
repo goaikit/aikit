@@ -35,7 +35,7 @@ pub enum TracePayload {
     /// Canonical text output from the agent (not a command)
     Message { text: String, role: String },
     /// A structured tool invocation decoded from the agent's output.
-    /// This is what `max_command_count` counts.
+    /// This is what `max_tool_calls` counts.
     ToolUse {
         call_id: String,
         tool_name: String,
@@ -259,6 +259,154 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_agent_events_to_trace_maps_raw_payload_variants() {
+        use aikit_sdk::AgentEventStream;
+        let events = vec![
+            AgentEvent {
+                agent_key: "codex".to_string(),
+                seq: 0,
+                stream: AgentEventStream::Stdout,
+                payload: AgentEventPayload::JsonLine(serde_json::json!({"cmd": "ls"})),
+            },
+            AgentEvent {
+                agent_key: "codex".to_string(),
+                seq: 1,
+                stream: AgentEventStream::Stdout,
+                payload: AgentEventPayload::RawLine("plain".to_string()),
+            },
+            AgentEvent {
+                agent_key: "codex".to_string(),
+                seq: 2,
+                stream: AgentEventStream::Stdout,
+                payload: AgentEventPayload::RawBytes(vec![0xff, 0x00]),
+            },
+        ];
+        let trace = agent_events_to_trace(&events);
+
+        assert!(matches!(
+            &trace[0].payload,
+            TracePayload::RawJson { data } if data == &serde_json::json!({"cmd": "ls"})
+        ));
+        assert!(matches!(
+            &trace[1].payload,
+            TracePayload::RawLine { line } if line == "plain"
+        ));
+        assert!(matches!(
+            &trace[2].payload,
+            TracePayload::RawBytes { b64 } if b64 == "/wA="
+        ));
+    }
+
+    #[test]
+    fn test_agent_events_to_trace_maps_token_usage_and_tool_results() {
+        use aikit_sdk::{AgentEventStream, TokenUsage, UsageSource};
+        let events = vec![
+            AgentEvent {
+                agent_key: "codex".to_string(),
+                seq: 0,
+                stream: AgentEventStream::Stdout,
+                payload: AgentEventPayload::TokenUsageLine {
+                    usage: TokenUsage {
+                        input_tokens: 3,
+                        output_tokens: 4,
+                        total_tokens: Some(7),
+                        cache_read_tokens: None,
+                        cache_creation_tokens: None,
+                        reasoning_tokens: None,
+                    },
+                    source: UsageSource::Codex,
+                    raw_agent_line_seq: 9,
+                },
+            },
+            AgentEvent {
+                agent_key: "codex".to_string(),
+                seq: 1,
+                stream: AgentEventStream::Stdout,
+                payload: AgentEventPayload::ToolResult {
+                    call_id: "item_1".to_string(),
+                    output: serde_json::json!("ok"),
+                    is_error: false,
+                },
+            },
+        ];
+        let trace = agent_events_to_trace(&events);
+
+        assert!(matches!(
+            &trace[0].payload,
+            TracePayload::TokenUsageLine {
+                source,
+                raw_agent_line_seq: 9,
+                ..
+            } if source == "codex"
+        ));
+        assert!(matches!(
+            &trace[1].payload,
+            TracePayload::ToolResult {
+                call_id,
+                output,
+                is_error: false
+            } if call_id == "item_1" && output == &serde_json::json!("ok")
+        ));
+    }
+
+    #[test]
+    fn test_agent_events_to_trace_maps_aikit_tool_aliases() {
+        use aikit_sdk::AgentEventStream;
+        let events = vec![
+            AgentEvent {
+                agent_key: "aikit".to_string(),
+                seq: 0,
+                stream: AgentEventStream::Stdout,
+                payload: AgentEventPayload::AikitToolUse {
+                    call_id: "call_a".to_string(),
+                    tool_name: "read_file".to_string(),
+                    tool_input: serde_json::json!({"path": "README.md"}),
+                },
+            },
+            AgentEvent {
+                agent_key: "aikit".to_string(),
+                seq: 1,
+                stream: AgentEventStream::Stdout,
+                payload: AgentEventPayload::AikitToolResult {
+                    call_id: "call_a".to_string(),
+                    output: "contents".to_string(),
+                    is_error: true,
+                },
+            },
+        ];
+        let trace = agent_events_to_trace(&events);
+
+        assert!(matches!(
+            &trace[0].payload,
+            TracePayload::ToolUse {
+                call_id,
+                tool_name,
+                input
+            } if call_id == "call_a"
+                && tool_name == "read_file"
+                && input == &serde_json::json!({"path": "README.md"})
+        ));
+        assert!(matches!(
+            &trace[1].payload,
+            TracePayload::ToolResult {
+                call_id,
+                output,
+                is_error: true
+            } if call_id == "call_a" && output == &serde_json::json!("contents")
+        ));
+    }
+
+    #[test]
+    fn test_stdout_to_trace_skips_blank_lines() {
+        let events = stdout_to_trace(b"\n  \nvisible\n");
+        assert_eq!(events.len(), 1);
+        assert!(matches!(
+            &events[0].payload,
+            TracePayload::RawLine { line } if line == "visible"
+        ));
+    }
+
     fn stream_message_event(seq: u64, text: &str) -> AgentEvent {
         use aikit_sdk::{AgentEventStream, MessageKind, MessagePhase, MessageRole, StreamMessage};
         AgentEvent {
@@ -337,6 +485,44 @@ mod tests {
         assert!(
             jsonl.contains("\"tool_name\":\"bash\""),
             "tool name must be preserved in the trace, got: {}",
+            jsonl
+        );
+    }
+
+    #[test]
+    fn test_codex_tool_use_event_counts_non_zero_commands() {
+        use crate::checks::count_command_events;
+        use aikit_sdk::AgentEventStream;
+        let mut events = vec![
+            stream_message_event(0, "I will inspect the tree"),
+            AgentEvent {
+                agent_key: "codex".to_string(),
+                seq: 1,
+                stream: AgentEventStream::Stdout,
+                payload: AgentEventPayload::ToolUse {
+                    call_id: "item_1".to_string(),
+                    tool_name: "shell".to_string(),
+                    input: serde_json::json!({"command": "ls -la"}),
+                },
+            },
+            AgentEvent {
+                agent_key: "codex".to_string(),
+                seq: 2,
+                stream: AgentEventStream::Stdout,
+                payload: AgentEventPayload::ToolResult {
+                    call_id: "item_1".to_string(),
+                    output: serde_json::json!("total 0\n"),
+                    is_error: false,
+                },
+            },
+        ];
+        events[0].agent_key = "codex".to_string();
+        let jsonl = trace_to_jsonl(&agent_events_to_trace(&events));
+
+        assert_eq!(
+            count_command_events(&jsonl),
+            1,
+            "codex structured tool_use must produce a non-zero command count, got: {}",
             jsonl
         );
     }
