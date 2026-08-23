@@ -98,23 +98,25 @@ pub(crate) fn decode(
                         }
                     }
                     "command_execution" => {
+                        // The command and its output are recorded independently:
+                        // an item carrying output but no `command` still has a
+                        // result worth keeping, and dropping it would lose the
+                        // only record that the tool ran.
+                        let call_id = item_call_id(item, raw_line_seq);
                         if let Some(cmd) = item.get("command").and_then(|v| v.as_str()) {
-                            let call_id = item_call_id(item, raw_line_seq);
                             results.push(Decoded::ToolUse {
                                 call_id: call_id.clone(),
                                 tool_name: "shell".to_string(),
                                 input: serde_json::json!({ "command": cmd }),
                             });
-                            if let Some(out) =
-                                item.get("aggregated_output").and_then(|v| v.as_str())
-                            {
-                                if !out.trim().is_empty() {
-                                    results.push(Decoded::ToolResult {
-                                        call_id,
-                                        output: serde_json::json!(out),
-                                        is_error: item_is_error(item),
-                                    });
-                                }
+                        }
+                        if let Some(out) = item.get("aggregated_output").and_then(|v| v.as_str()) {
+                            if !out.trim().is_empty() {
+                                results.push(Decoded::ToolResult {
+                                    call_id,
+                                    output: serde_json::json!(out),
+                                    is_error: item_is_error(item),
+                                });
                             }
                         }
                     }
@@ -185,14 +187,20 @@ pub(crate) fn decode(
             }
         }
         "action" => {
-            if value.get("action").and_then(|v| v.as_str()) == Some("shell") {
-                if let Some(cmd) = value.get("command").and_then(|v| v.as_str()) {
-                    results.push(Decoded::ToolUse {
-                        call_id: legacy_call_id(value, "shell"),
-                        tool_name: "shell".to_string(),
-                        input: serde_json::json!({ "command": cmd }),
-                    });
-                }
+            // Any action carrying a command is a tool call. An unrecognised
+            // action name is recorded under its own name rather than dropped:
+            // losing the line entirely would understate what the agent did.
+            if let Some(cmd) = value.get("command").and_then(|v| v.as_str()) {
+                let action = value
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .filter(|a| !a.trim().is_empty())
+                    .unwrap_or("action");
+                results.push(Decoded::ToolUse {
+                    call_id: legacy_call_id(value, action),
+                    tool_name: action.to_string(),
+                    input: serde_json::json!({ "command": cmd }),
+                });
             }
         }
         "output" => {

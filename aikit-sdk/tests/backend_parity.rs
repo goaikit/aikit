@@ -285,11 +285,53 @@ fn test_decode_codex_text_and_noop_edge_cases() {
         .decode(&empty_file_change, AgentEventStream::Stdout, 4)
         .is_empty());
     assert!(Backend::Codex
-        .decode(&non_shell_action, AgentEventStream::Stdout, 5)
-        .is_empty());
-    assert!(Backend::Codex
         .decode(&empty_output, AgentEventStream::Stdout, 6)
         .is_empty());
+
+    // An action we do not recognise is still a tool call: it is recorded under
+    // its own name rather than dropped, so the trace never understates what the
+    // agent did.
+    let non_shell_out = Backend::Codex.decode(&non_shell_action, AgentEventStream::Stdout, 5);
+    assert_eq!(non_shell_out.len(), 1, "got {non_shell_out:?}");
+    assert!(
+        matches!(
+            &non_shell_out[0],
+            Decoded::ToolUse { tool_name, input, .. }
+                if tool_name == "plan"
+                    && input.get("command").and_then(|c| c.as_str())
+                        == Some("not a shell command")
+        ),
+        "got {non_shell_out:?}"
+    );
+}
+
+#[test]
+fn test_decode_codex_command_output_without_command_is_kept() {
+    // Output with no `command` field must still yield a ToolResult: the item is
+    // the only record that the tool ran, and silently dropping it would make a
+    // real tool call invisible to `max_tool_calls` and to the trace.
+    let output_without_command = serde_json::json!({
+        "type": "item.completed",
+        "item": {
+            "id": "item_out_only",
+            "type": "command_execution",
+            "aggregated_output": "partial output",
+            "exit_code": 2
+        }
+    });
+
+    let out = Backend::Codex.decode(&output_without_command, AgentEventStream::Stdout, 7);
+    assert_eq!(out.len(), 1, "got {out:?}");
+    assert!(
+        matches!(
+            &out[0],
+            Decoded::ToolResult { call_id, output, is_error }
+                if call_id == "item_out_only"
+                    && output.as_str() == Some("partial output")
+                    && *is_error
+        ),
+        "got {out:?}"
+    );
 }
 
 #[test]
