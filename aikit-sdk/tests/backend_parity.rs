@@ -6,7 +6,7 @@
 //! act as golden-vector guards proving behaviour is preserved by the refactor.
 //! The Cursor key is `cursor` (was `agent`, ADR 0006).
 
-use aikit_sdk::runner::extract_quota_signal;
+use aikit_sdk::runner::{extract_quota_signal, Backend, Decoded};
 use aikit_sdk::{
     extract_usage_from_line, normalize_json_line, AgentEventPayload, AgentEventStream, MessageKind,
     MessagePhase, MessageRole, QuotaCategory, QuotaExceededInfo, RunError, RunResult, UsageSource,
@@ -45,13 +45,36 @@ fn test_decode_codex_item_command_execution() {
             "exit_code": 0, "status": "completed"
         }
     });
-    let out = normalize_json_line("codex", AgentEventStream::Stdout, &line, 0);
-    assert_eq!(out.len(), 2, "command + output; got {:?}", out);
-    assert_eq!(out[0].text, "ls -la");
-    assert_eq!(out[0].role, MessageRole::Tool);
-    assert_eq!(out[0].kind, MessageKind::Message);
-    assert_eq!(out[1].text, "file.txt\n");
-    assert_eq!(out[1].kind, MessageKind::ToolOutput);
+    let out = Backend::Codex.decode(&line, AgentEventStream::Stdout, 0);
+    assert_eq!(out.len(), 2, "tool use + result; got {:?}", out);
+    match &out[0] {
+        Decoded::ToolUse {
+            call_id,
+            tool_name,
+            input,
+        } => {
+            assert_eq!(call_id, "item_1");
+            assert_eq!(tool_name, "shell");
+            assert_eq!(input, &serde_json::json!({"command": "ls -la"}));
+        }
+        other => panic!("expected ToolUse, got {other:?}"),
+    }
+    match &out[1] {
+        Decoded::ToolResult {
+            call_id,
+            output,
+            is_error,
+        } => {
+            assert_eq!(call_id, "item_1");
+            assert_eq!(output, &serde_json::json!("file.txt\n"));
+            assert!(!is_error);
+        }
+        other => panic!("expected ToolResult, got {other:?}"),
+    }
+    assert!(
+        normalize_json_line("codex", AgentEventStream::Stdout, &line, 0).is_empty(),
+        "legacy StreamMessage view must not flatten structured tools"
+    );
 }
 
 #[test]
@@ -63,10 +86,127 @@ fn test_decode_codex_item_file_change() {
             "changes": [{"path": "/tmp/a.md", "kind": "add"}]
         }
     });
-    let out = normalize_json_line("codex", AgentEventStream::Stdout, &line, 0);
+    let out = Backend::Codex.decode(&line, AgentEventStream::Stdout, 0);
     assert_eq!(out.len(), 1, "got {:?}", out);
-    assert_eq!(out[0].text, "file_change: add /tmp/a.md");
-    assert_eq!(out[0].role, MessageRole::Tool);
+    match &out[0] {
+        Decoded::ToolUse {
+            call_id,
+            tool_name,
+            input,
+        } => {
+            assert_eq!(call_id, "item_2");
+            assert_eq!(tool_name, "file_change");
+            assert_eq!(
+                input,
+                &serde_json::json!({"changes": [{"path": "/tmp/a.md", "kind": "add"}]})
+            );
+        }
+        other => panic!("expected ToolUse, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_decode_codex_item_reasoning_stays_stream() {
+    let line = serde_json::json!({
+        "type": "item.completed",
+        "item": {"id": "item_r", "type": "reasoning", "summary": "thinking"}
+    });
+    let out = Backend::Codex.decode(&line, AgentEventStream::Stdout, 4);
+    assert_eq!(out.len(), 1, "got {:?}", out);
+    match &out[0] {
+        Decoded::Stream(message) => {
+            assert_eq!(message.text, "thinking");
+            assert_eq!(message.role, MessageRole::Assistant);
+            assert_eq!(message.kind, MessageKind::Reasoning);
+            assert_eq!(message.raw_line_seq, 4);
+        }
+        other => panic!("expected Stream, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_decode_codex_item_unknown_text_stays_stream() {
+    let line = serde_json::json!({
+        "type": "item.completed",
+        "item": {"id": "item_u", "type": "future_item", "text": "visible text"}
+    });
+    let out = Backend::Codex.decode(&line, AgentEventStream::Stdout, 5);
+    assert_eq!(out.len(), 1, "got {:?}", out);
+    assert!(matches!(
+        &out[0],
+        Decoded::Stream(message)
+            if message.text == "visible text" && message.kind == MessageKind::Message
+    ));
+}
+
+#[test]
+fn test_decode_codex_command_fallback_id_is_deterministic() {
+    let line = serde_json::json!({
+        "type": "item.completed",
+        "item": {
+            "type": "command_execution",
+            "command": "pwd",
+            "aggregated_output": "/tmp\n"
+        }
+    });
+    let out = Backend::Codex.decode(&line, AgentEventStream::Stdout, 17);
+    assert!(matches!(&out[0], Decoded::ToolUse { call_id, .. } if call_id == "codex-item-17"));
+    assert!(matches!(&out[1], Decoded::ToolResult { call_id, .. } if call_id == "codex-item-17"));
+}
+
+#[test]
+fn test_decode_codex_command_error_status_sets_result_error() {
+    let line = serde_json::json!({
+        "type": "item.completed",
+        "item": {
+            "id": "item_fail",
+            "type": "command_execution",
+            "command": "false",
+            "aggregated_output": "boom",
+            "status": "failed"
+        }
+    });
+    let out = Backend::Codex.decode(&line, AgentEventStream::Stdout, 0);
+    assert!(matches!(
+        out.last().unwrap(),
+        Decoded::ToolResult { is_error: true, .. }
+    ));
+}
+
+#[test]
+fn test_decode_codex_legacy_action_output_schema_is_structured() {
+    let action = serde_json::json!({"type":"action","action":"shell","command":"ls -la"});
+    let output = serde_json::json!({"type":"output","stdout":"total 0\n","stderr":""});
+
+    let action_out = Backend::Codex.decode(&action, AgentEventStream::Stdout, 2);
+    let output_out = Backend::Codex.decode(&output, AgentEventStream::Stdout, 3);
+
+    assert_eq!(action_out.len(), 1, "got {action_out:?}");
+    assert_eq!(output_out.len(), 1, "got {output_out:?}");
+    assert!(matches!(
+        &action_out[0],
+        Decoded::ToolUse { call_id, tool_name, input }
+            if call_id == "codex-legacy-shell"
+                && tool_name == "shell"
+                && input == &serde_json::json!({"command": "ls -la"})
+    ));
+    assert!(matches!(
+        &output_out[0],
+        Decoded::ToolResult { call_id, output, is_error }
+            if call_id == "codex-legacy-shell"
+                && output == &serde_json::json!({"stdout": "total 0\n", "stderr": ""})
+                && !is_error
+    ));
+}
+
+#[test]
+fn test_decode_codex_legacy_stderr_marks_error() {
+    let output = serde_json::json!({"type":"output","stdout":"","stderr":"boom\n"});
+    let out = Backend::Codex.decode(&output, AgentEventStream::Stderr, 3);
+    assert!(matches!(
+        &out[0],
+        Decoded::ToolResult { is_error: true, .. }
+    ));
 }
 
 #[test]
@@ -106,6 +246,92 @@ fn test_decode_codex_legacy_message_shape_still_works() {
     let out = normalize_json_line("codex", AgentEventStream::Stdout, &line, 0);
     assert_eq!(out.len(), 1);
     assert_eq!(out[0].text, "hi");
+}
+
+#[test]
+fn test_decode_codex_text_and_noop_edge_cases() {
+    let system = serde_json::json!({"type":"message","role":"system","content":"started"});
+    let user = serde_json::json!({"type":"message","role":"user","content":"prompt"});
+    let fallback = serde_json::json!({"type":"future","item":{"text":"fallback text"}});
+    let command_without_output = serde_json::json!({
+        "type": "item.completed",
+        "item": {"id": "item_no_output", "type": "command_execution", "command": "true"}
+    });
+    let empty_file_change =
+        serde_json::json!({"type":"item.completed","item":{"type":"file_change","changes":[]}});
+    let non_shell_action =
+        serde_json::json!({"type":"action","action":"plan","command":"not a shell command"});
+    let empty_output = serde_json::json!({"type":"output","stdout":"","stderr":""});
+
+    let system_out = normalize_json_line("codex", AgentEventStream::Stdout, &system, 0);
+    assert_eq!(system_out[0].role, MessageRole::System);
+    assert_eq!(system_out[0].kind, MessageKind::Status);
+
+    let user_out = normalize_json_line("codex", AgentEventStream::Stdout, &user, 1);
+    assert_eq!(user_out[0].role, MessageRole::User);
+    assert_eq!(user_out[0].kind, MessageKind::Message);
+
+    let fallback_out = normalize_json_line("codex", AgentEventStream::Stdout, &fallback, 2);
+    assert_eq!(fallback_out[0].text, "fallback text");
+
+    let command_out = Backend::Codex.decode(&command_without_output, AgentEventStream::Stdout, 3);
+    assert_eq!(command_out.len(), 1, "got {command_out:?}");
+    assert!(matches!(
+        &command_out[0],
+        Decoded::ToolUse { call_id, .. } if call_id == "item_no_output"
+    ));
+
+    assert!(Backend::Codex
+        .decode(&empty_file_change, AgentEventStream::Stdout, 4)
+        .is_empty());
+    assert!(Backend::Codex
+        .decode(&empty_output, AgentEventStream::Stdout, 6)
+        .is_empty());
+
+    // An action we do not recognise is still a tool call: it is recorded under
+    // its own name rather than dropped, so the trace never understates what the
+    // agent did.
+    let non_shell_out = Backend::Codex.decode(&non_shell_action, AgentEventStream::Stdout, 5);
+    assert_eq!(non_shell_out.len(), 1, "got {non_shell_out:?}");
+    assert!(
+        matches!(
+            &non_shell_out[0],
+            Decoded::ToolUse { tool_name, input, .. }
+                if tool_name == "plan"
+                    && input.get("command").and_then(|c| c.as_str())
+                        == Some("not a shell command")
+        ),
+        "got {non_shell_out:?}"
+    );
+}
+
+#[test]
+fn test_decode_codex_command_output_without_command_is_kept() {
+    // Output with no `command` field must still yield a ToolResult: the item is
+    // the only record that the tool ran, and silently dropping it would make a
+    // real tool call invisible to `max_tool_calls` and to the trace.
+    let output_without_command = serde_json::json!({
+        "type": "item.completed",
+        "item": {
+            "id": "item_out_only",
+            "type": "command_execution",
+            "aggregated_output": "partial output",
+            "exit_code": 2
+        }
+    });
+
+    let out = Backend::Codex.decode(&output_without_command, AgentEventStream::Stdout, 7);
+    assert_eq!(out.len(), 1, "got {out:?}");
+    assert!(
+        matches!(
+            &out[0],
+            Decoded::ToolResult { call_id, output, is_error }
+                if call_id == "item_out_only"
+                    && output.as_str() == Some("partial output")
+                    && *is_error
+        ),
+        "got {out:?}"
+    );
 }
 
 #[test]

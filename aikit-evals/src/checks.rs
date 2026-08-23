@@ -33,9 +33,9 @@ pub enum CheckDefinition {
         #[serde(default = "default_required")]
         required: bool,
     },
-    /// Check that the number of raw_json trace lines does not exceed a limit
-    #[serde(rename = "max_command_count")]
-    MaxCommandCount {
+    /// Check that the number of decoded tool calls does not exceed a limit
+    #[serde(rename = "max_tool_calls", alias = "max_command_count")]
+    MaxToolCalls {
         limit: usize,
         #[serde(default = "default_required")]
         required: bool,
@@ -52,7 +52,7 @@ impl CheckDefinition {
             CheckDefinition::TriggerExpectation { .. } => "trigger_expectation",
             CheckDefinition::CommandContains { .. } => "command_contains",
             CheckDefinition::FileExists { .. } => "file_exists",
-            CheckDefinition::MaxCommandCount { .. } => "max_command_count",
+            CheckDefinition::MaxToolCalls { .. } => "max_tool_calls",
         }
     }
 
@@ -61,7 +61,7 @@ impl CheckDefinition {
             CheckDefinition::TriggerExpectation { required, .. } => *required,
             CheckDefinition::CommandContains { required, .. } => *required,
             CheckDefinition::FileExists { required, .. } => *required,
-            CheckDefinition::MaxCommandCount { required, .. } => *required,
+            CheckDefinition::MaxToolCalls { required, .. } => *required,
         }
     }
 }
@@ -117,12 +117,13 @@ pub fn count_raw_json_events(trace_jsonl: &str) -> usize {
     })
 }
 
-/// Count the commands an agent issued during a run.
+/// Count the tool invocations an agent issued during a run.
 ///
-/// A command is a structured tool invocation (`tool_use`), plus any `raw_json`
-/// line for backends that emit tool calls as raw JSON rather than as decoded
-/// `ToolUse` events. Text output, token-usage events and unmodelled SDK event
-/// variants are explicitly *not* commands.
+/// This intentionally preserves the Phase 0 artifact field name
+/// `command_count`: the counter is a structured tool invocation (`tool_use`),
+/// plus any `raw_json` line for backends that still emit tool calls as raw JSON
+/// rather than decoded `ToolUse` events. Text output, token-usage events and
+/// unmodelled SDK event variants are explicitly not counted.
 pub fn count_command_events(trace_jsonl: &str) -> usize {
     count_matching(trace_jsonl, |payload| {
         matches!(
@@ -195,7 +196,7 @@ fn run_single_check(
                 message,
             }
         }
-        CheckDefinition::MaxCommandCount { limit, .. } => {
+        CheckDefinition::MaxToolCalls { limit, .. } => {
             let count = count_command_events(trace_jsonl);
             let passed = count <= *limit;
             let message = if passed {
@@ -204,7 +205,7 @@ fn run_single_check(
                 Some(format!("Command count {} exceeds limit {}", count, limit))
             };
             CheckResult {
-                check_name: "max_command_count".to_string(),
+                check_name: "max_tool_calls".to_string(),
                 passed,
                 message,
             }
@@ -257,6 +258,53 @@ mod tests {
     }
 
     #[test]
+    fn test_trigger_expectation_negative_fails_when_pattern_found() {
+        let check = CheckDefinition::TriggerExpectation {
+            pattern: "fastskill".to_string(),
+            expected: false,
+            required: true,
+        };
+        let results = run_checks(&[check], "fastskill triggered", "", Path::new("/tmp"));
+        assert!(!results[0].passed);
+        assert_eq!(
+            results[0].message.as_deref(),
+            Some("Pattern 'fastskill' found but was not expected")
+        );
+    }
+
+    #[test]
+    fn test_check_definition_names_and_required_flags() {
+        let checks = [
+            CheckDefinition::TriggerExpectation {
+                pattern: "a".to_string(),
+                expected: true,
+                required: false,
+            },
+            CheckDefinition::CommandContains {
+                pattern: "b".to_string(),
+                required: true,
+            },
+            CheckDefinition::FileExists {
+                path: PathBuf::from("c"),
+                required: false,
+            },
+            CheckDefinition::MaxToolCalls {
+                limit: 1,
+                required: true,
+            },
+        ];
+
+        assert_eq!(checks[0].name(), "trigger_expectation");
+        assert!(!checks[0].is_required());
+        assert_eq!(checks[1].name(), "command_contains");
+        assert!(checks[1].is_required());
+        assert_eq!(checks[2].name(), "file_exists");
+        assert!(!checks[2].is_required());
+        assert_eq!(checks[3].name(), "max_tool_calls");
+        assert!(checks[3].is_required());
+    }
+
+    #[test]
     fn test_file_exists_check_passes() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("output.txt");
@@ -282,8 +330,8 @@ mod tests {
     }
 
     #[test]
-    fn test_max_command_count_passes() {
-        let check = CheckDefinition::MaxCommandCount {
+    fn test_max_tool_calls_passes() {
+        let check = CheckDefinition::MaxToolCalls {
             limit: 5,
             required: true,
         };
@@ -292,11 +340,12 @@ mod tests {
 {"seq":2,"payload":{"type":"raw_line","line":"ok"}}"#;
         let results = run_checks(&[check], "", trace, Path::new("/tmp"));
         assert!(results[0].passed);
+        assert_eq!(results[0].check_name, "max_tool_calls");
     }
 
     #[test]
-    fn test_max_command_count_fails() {
-        let check = CheckDefinition::MaxCommandCount {
+    fn test_max_tool_calls_fails() {
+        let check = CheckDefinition::MaxToolCalls {
             limit: 1,
             required: true,
         };
@@ -305,6 +354,50 @@ mod tests {
 {"seq":2,"payload":{"type":"raw_json","data":{"cmd":"c"}}}"#;
         let results = run_checks(&[check], "", trace, Path::new("/tmp"));
         assert!(!results[0].passed);
+        assert_eq!(results[0].check_name, "max_tool_calls");
+    }
+
+    #[test]
+    fn test_max_tool_calls_name_is_canonical() {
+        let check = CheckDefinition::MaxToolCalls {
+            limit: 1,
+            required: true,
+        };
+        assert_eq!(check.name(), "max_tool_calls");
+
+        let json = serde_json::to_string(&check).unwrap();
+        assert!(
+            json.contains("\"name\":\"max_tool_calls\""),
+            "serialized check must use canonical spelling, got {json}"
+        );
+        assert!(
+            !json.contains("max_command_count"),
+            "deprecated spelling must not be emitted, got {json}"
+        );
+    }
+
+    #[test]
+    fn test_legacy_max_command_count_alias_parses_and_behaves_like_max_tool_calls() {
+        let toml = r#"
+[[check]]
+name = "max_command_count"
+limit = 1
+"#;
+        let parsed: ChecksToml = toml::from_str(toml).unwrap();
+        assert_eq!(parsed.checks.len(), 1);
+        assert!(matches!(
+            parsed.checks[0],
+            CheckDefinition::MaxToolCalls {
+                limit: 1,
+                required: true
+            }
+        ));
+
+        let trace = r#"{"seq":0,"payload":{"type":"tool_use","call_id":"call_1","tool_name":"shell","input":{"command":"ls"}}}
+{"seq":1,"payload":{"type":"tool_use","call_id":"call_2","tool_name":"shell","input":{"command":"pwd"}}}"#;
+        let results = run_checks(&parsed.checks, "", trace, Path::new("/tmp"));
+        assert!(!results[0].passed);
+        assert_eq!(results[0].check_name, "max_tool_calls");
     }
 
     #[test]
@@ -353,6 +446,30 @@ mod tests {
         let path = Path::new("/nonexistent/path/checks.toml");
         let result = load_checks(path);
         assert!(matches!(result, Err(ChecksError::Io(_))));
+    }
+
+    #[test]
+    fn test_load_checks_valid_file_returns_checks() {
+        let dir = TempDir::new().unwrap();
+        let checks_file = dir.path().join("checks.toml");
+        std::fs::write(
+            &checks_file,
+            r#"
+[[check]]
+name = "max_tool_calls"
+limit = 2
+"#,
+        )
+        .unwrap();
+
+        let checks = load_checks(&checks_file).unwrap();
+        assert!(matches!(
+            checks.as_slice(),
+            [CheckDefinition::MaxToolCalls {
+                limit: 2,
+                required: true
+            }]
+        ));
     }
 
     #[test]

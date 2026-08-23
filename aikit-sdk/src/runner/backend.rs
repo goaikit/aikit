@@ -186,11 +186,11 @@ impl Backend {
         stream: AgentEventStream,
         raw_line_seq: u64,
     ) -> Vec<Decoded> {
-        // Claude (with the `claude-sdk` feature) emits rich frames directly;
-        // the other backends emit StreamMessages that we wrap as Decoded::Stream.
+        // Rich backends emit canonical frames directly; text-only backends
+        // emit StreamMessages that we wrap as Decoded::Stream.
         let decoded: Vec<Decoded> = match self {
             Backend::Claude => claude::decode(value, stream, raw_line_seq),
-            Backend::Codex => wrap(codex::decode(value, stream, raw_line_seq)),
+            Backend::Codex => codex::decode(value, stream, raw_line_seq),
             Backend::Gemini => wrap(gemini::decode(value, stream, raw_line_seq)),
             Backend::OpenCode => wrap(opencode::decode(value, stream, raw_line_seq)),
             Backend::Cursor => wrap(cursor::decode(value, stream, raw_line_seq)),

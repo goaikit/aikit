@@ -6,6 +6,7 @@
 
 use std::ffi::OsString;
 
+use crate::runner::backend::Decoded;
 use crate::runner::backends::argv_spec::{ArgvCtx, ArgvSpec, SessionMode};
 use crate::runner::backends::quota_match::{match_quota, JsonPat, RawPat};
 use crate::runner::capabilities::BackendCapabilities;
@@ -50,18 +51,20 @@ pub(crate) fn decode(
     value: &serde_json::Value,
     stream: AgentEventStream,
     raw_line_seq: u64,
-) -> Vec<StreamMessage> {
+) -> Vec<Decoded> {
     let mut results = Vec::new();
     let line_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
-    let mk = |text: String, role: MessageRole, kind: MessageKind| StreamMessage {
-        text,
-        phase: MessagePhase::Final,
-        role,
-        kind,
-        source: stream,
-        raw_line_seq,
-        turn_id: None,
+    let mk = |text: String, role: MessageRole, kind: MessageKind| {
+        Decoded::Stream(StreamMessage {
+            text,
+            phase: MessagePhase::Final,
+            role,
+            kind,
+            source: stream,
+            raw_line_seq,
+            turn_id: None,
+        })
     };
 
     match line_type {
@@ -95,41 +98,36 @@ pub(crate) fn decode(
                         }
                     }
                     "command_execution" => {
+                        // The command and its output are recorded independently:
+                        // an item carrying output but no `command` still has a
+                        // result worth keeping, and dropping it would lose the
+                        // only record that the tool ran.
+                        let call_id = item_call_id(item, raw_line_seq);
                         if let Some(cmd) = item.get("command").and_then(|v| v.as_str()) {
-                            results.push(mk(
-                                cmd.to_string(),
-                                MessageRole::Tool,
-                                MessageKind::Message,
-                            ));
+                            results.push(Decoded::ToolUse {
+                                call_id: call_id.clone(),
+                                tool_name: "shell".to_string(),
+                                input: serde_json::json!({ "command": cmd }),
+                            });
                         }
                         if let Some(out) = item.get("aggregated_output").and_then(|v| v.as_str()) {
                             if !out.trim().is_empty() {
-                                results.push(mk(
-                                    out.to_string(),
-                                    MessageRole::Tool,
-                                    MessageKind::ToolOutput,
-                                ));
+                                results.push(Decoded::ToolResult {
+                                    call_id,
+                                    output: serde_json::json!(out),
+                                    is_error: item_is_error(item),
+                                });
                             }
                         }
                     }
                     "file_change" => {
                         if let Some(arr) = item.get("changes").and_then(|c| c.as_array()) {
-                            let summary = arr
-                                .iter()
-                                .filter_map(|c| {
-                                    let path = c.get("path").and_then(|v| v.as_str())?;
-                                    let kind =
-                                        c.get("kind").and_then(|v| v.as_str()).unwrap_or("change");
-                                    Some(format!("{kind} {path}"))
-                                })
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            if !summary.is_empty() {
-                                results.push(mk(
-                                    format!("file_change: {summary}"),
-                                    MessageRole::Tool,
-                                    MessageKind::Message,
-                                ));
+                            if !arr.is_empty() {
+                                results.push(Decoded::ToolUse {
+                                    call_id: item_call_id(item, raw_line_seq),
+                                    tool_name: "file_change".to_string(),
+                                    input: serde_json::json!({ "changes": arr }),
+                                });
                             }
                         }
                     }
@@ -189,17 +187,36 @@ pub(crate) fn decode(
             }
         }
         "action" => {
+            // Any action carrying a command is a tool call. An unrecognised
+            // action name is recorded under its own name rather than dropped:
+            // losing the line entirely would understate what the agent did.
             if let Some(cmd) = value.get("command").and_then(|v| v.as_str()) {
-                results.push(mk(cmd.to_string(), MessageRole::Tool, MessageKind::Message));
+                let action = value
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .filter(|a| !a.trim().is_empty())
+                    .unwrap_or("action");
+                results.push(Decoded::ToolUse {
+                    call_id: legacy_call_id(value, action),
+                    tool_name: action.to_string(),
+                    input: serde_json::json!({ "command": cmd }),
+                });
             }
         }
         "output" => {
-            if let Some(stdout) = value.get("stdout").and_then(|v| v.as_str()) {
-                results.push(mk(
-                    stdout.to_string(),
-                    MessageRole::Tool,
-                    MessageKind::ToolOutput,
-                ));
+            let stdout = value.get("stdout").and_then(|v| v.as_str());
+            let stderr = value.get("stderr").and_then(|v| v.as_str());
+            if stdout.is_some_and(|s| !s.trim().is_empty())
+                || stderr.is_some_and(|s| !s.trim().is_empty())
+            {
+                results.push(Decoded::ToolResult {
+                    call_id: legacy_call_id(value, "shell"),
+                    output: serde_json::json!({
+                        "stdout": stdout.unwrap_or(""),
+                        "stderr": stderr.unwrap_or("")
+                    }),
+                    is_error: stderr.is_some_and(|s| !s.trim().is_empty()),
+                });
             }
         }
         // ── Unknown line type: legacy fallback for a top-level `item.text` ──────
@@ -219,6 +236,34 @@ pub(crate) fn decode(
     }
 
     results
+}
+
+fn item_call_id(item: &serde_json::Value, raw_line_seq: u64) -> String {
+    item.get("id")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("codex-item-{raw_line_seq}"))
+}
+
+fn legacy_call_id(value: &serde_json::Value, tool_name: &str) -> String {
+    value
+        .get("id")
+        .or_else(|| value.get("call_id"))
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("codex-legacy-{tool_name}"))
+}
+
+fn item_is_error(item: &serde_json::Value) -> bool {
+    if let Some(exit_code) = item.get("exit_code").and_then(|v| v.as_i64()) {
+        return exit_code != 0;
+    }
+    matches!(
+        item.get("status").and_then(|v| v.as_str()),
+        Some("failed" | "error" | "cancelled" | "canceled")
+    )
 }
 
 pub(crate) fn extract_usage(line: &serde_json::Value) -> Option<(TokenUsage, UsageSource)> {
