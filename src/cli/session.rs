@@ -283,14 +283,23 @@ pub async fn execute_sync(args: SyncSessionsArgs) -> anyhow::Result<i32> {
     let sink: Arc<dyn SyncSink> = if config.dry_run {
         Arc::new(aikit_session_sync::InMemorySink::new())
     } else {
-        Arc::new(S3Sink::new(S3SinkConfig {
+        match S3Sink::new(S3SinkConfig {
             bucket: config.bucket.clone().unwrap_or_default(),
             endpoint: config.endpoint.clone().unwrap_or_default(),
             region,
             allow_http,
             endpoint_ca_bundle: config.endpoint_ca_bundle.clone(),
             path_style: config.path_style,
-        })?)
+        }) {
+            Ok(s) => Arc::new(s),
+            // Missing/partial AWS credentials — fail fast with a clear message
+            // instead of the IMDS retry loop. Config/auth error → exit 2.
+            Err(aikit_session_sync::SyncError::Auth(e)) => {
+                eprintln!("Error: auth: {e}");
+                return Ok(2);
+            }
+            Err(e) => return Err(anyhow::anyhow!("{e}")),
+        }
     };
     let state = Arc::new(JsonSyncStateStore::open()?);
     let engine = match SyncEngine::new(config.clone(), sink, state) {
