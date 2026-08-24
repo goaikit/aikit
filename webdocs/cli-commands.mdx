@@ -351,8 +351,21 @@ aikit session sync --owner alice --bucket my-sessions \
 
 **Credentials** are read from the standard AWS environment
 (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or a workload-identity chain) and
-are **never** accepted as flags. Two additional env-only knobs:
+are **never** accepted as flags. Credentials are **checked before the first
+upload**: if neither static keys nor another configured provider
+(`AWS_PROFILE`, ECS/EKS container creds, or web-identity/IRSA) is present, sync
+**fails closed** with a clear `auth` error (exit `2`) instead of silently
+falling through to the EC2 instance-metadata (IMDS) provider — which, on a host
+with no metadata service (Hetzner, bare metal, most laptops), is a slow
+per-file retry loop against `169.254.169.254` ending in an opaque
+"error sending request". Setting only one of the key/secret pair is likewise
+rejected up front. Additional env-only knobs:
 
+- `AIKIT_SYNC_ALLOW_INSTANCE_CREDENTIALS` — set truthy (`1`/`true`/`yes`) to
+  **opt in** to the instance/role (IMDS) provider when no explicit credential
+  source is configured. Use this on EC2/ECS where the role really is delivered
+  via metadata; leave it unset everywhere else so a forgotten key is caught
+  immediately.
 - `AIKIT_SYNC_CREDENTIAL_OWNER` — the owner identity derived from the credential.
   If it is set **and** disagrees with `--owner`, sync **fails closed** (exit `2`)
   rather than guessing. If neither is set, sync also refuses to start — an owner

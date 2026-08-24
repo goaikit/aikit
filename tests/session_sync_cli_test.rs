@@ -26,6 +26,15 @@ const VARS: &[&str] = &[
     "AIKIT_SYNC_ENDPOINT_CA_BUNDLE",
     "AIKIT_SYNC_CREDENTIAL_OWNER",
     "RUST_LOG",
+    // Cleared so the S3 credential preflight sees a known-empty environment.
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+    "AIKIT_SYNC_ALLOW_INSTANCE_CREDENTIALS",
 ];
 
 /// Serialize env-mutating tests on an async-aware lock (held across `.await`)
@@ -94,6 +103,21 @@ async fn owner_mismatch_fails_closed_returns_2() {
     a.endpoint = Some("http://127.0.0.1:9000".into());
     a.allow_http = true;
     a.owner = Some("alice".into()); // disagrees with credential owner "bob"
+    assert_eq!(execute_sync(a).await.unwrap(), 2);
+}
+
+/// Owner resolves and config is complete, but no AWS credential source is in the
+/// environment (env_lock cleaned them). A real (non-dry-run) sync must fail fast
+/// with an auth error → exit 2, rather than falling into the IMDS retry loop.
+/// No network: the preflight returns before any S3 client is built.
+#[tokio::test]
+async fn missing_aws_credentials_returns_2() {
+    let _g = env_lock().await;
+    let mut a = args();
+    a.bucket = Some("b".into());
+    a.endpoint = Some("http://127.0.0.1:9000".into());
+    a.allow_http = true;
+    a.owner = Some("alice".into()); // owner ok → construction is reached
     assert_eq!(execute_sync(a).await.unwrap(), 2);
 }
 

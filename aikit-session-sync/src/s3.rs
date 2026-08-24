@@ -19,6 +19,86 @@ pub struct S3Sink {
     store: object_store::aws::AmazonS3,
 }
 
+/// Env vars whose presence signals a non-static AWS credential source is
+/// configured (shared-config profile, ECS/EKS container creds, or
+/// web-identity/IRSA). Any one of these means the default provider chain has a
+/// real source to draw from, so the preflight lets construction proceed.
+const CONFIGURED_PROVIDER_ENVS: &[&str] = &[
+    "AWS_PROFILE",
+    "AWS_DEFAULT_PROFILE",
+    "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+    "AWS_WEB_IDENTITY_TOKEN_FILE",
+];
+
+/// Opt-in escape hatch: set truthy to allow the EC2/ECS instance-metadata
+/// (IMDS) credential provider when no explicit source is configured.
+const ALLOW_INSTANCE_ENV: &str = "AIKIT_SYNC_ALLOW_INSTANCE_CREDENTIALS";
+
+fn env_present(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| !v.is_empty())
+}
+
+fn parse_bool_flag(raw: &str) -> bool {
+    matches!(raw.trim(), "1" | "true" | "TRUE" | "yes")
+}
+
+fn instance_credentials_opt_in() -> bool {
+    std::env::var_os(ALLOW_INSTANCE_ENV)
+        .map(|v| parse_bool_flag(&v.to_string_lossy()))
+        .unwrap_or(false)
+}
+
+/// Fail fast when no AWS credential source is discoverable.
+///
+/// Without this, a missing-key misconfiguration falls through to the default
+/// provider chain's *instance* provider, which hammers the IMDS endpoint
+/// (`169.254.169.254`) — on a host with no metadata service (Hetzner, bare
+/// metal, most laptops) that is a ~19s retry loop *per file* ending in an
+/// opaque "error sending request", instead of one clear line up front.
+fn credentials_preflight() -> Result<(), SyncError> {
+    evaluate_credentials(
+        env_present("AWS_ACCESS_KEY_ID"),
+        env_present("AWS_SECRET_ACCESS_KEY"),
+        CONFIGURED_PROVIDER_ENVS.iter().any(|n| env_present(n)),
+        instance_credentials_opt_in(),
+    )
+}
+
+/// Pure decision behind [`credentials_preflight`], split out so every branch is
+/// testable without mutating process-global environment variables.
+fn evaluate_credentials(
+    have_key_id: bool,
+    have_secret: bool,
+    other_provider: bool,
+    allow_instance: bool,
+) -> Result<(), SyncError> {
+    match (have_key_id, have_secret) {
+        (true, true) => return Ok(()),
+        (true, false) => {
+            return Err(SyncError::Auth(
+                "AWS_ACCESS_KEY_ID is set but AWS_SECRET_ACCESS_KEY is missing".to_string(),
+            ))
+        }
+        (false, true) => {
+            return Err(SyncError::Auth(
+                "AWS_SECRET_ACCESS_KEY is set but AWS_ACCESS_KEY_ID is missing".to_string(),
+            ))
+        }
+        (false, false) => {}
+    }
+    if other_provider || allow_instance {
+        return Ok(());
+    }
+    Err(SyncError::Auth(
+        "no AWS credentials found in the environment. Set AWS_ACCESS_KEY_ID and \
+         AWS_SECRET_ACCESS_KEY (the S3 access key/secret for your bucket). To use an \
+         instance/role provider instead (e.g. EC2/ECS IMDS), set \
+         AIKIT_SYNC_ALLOW_INSTANCE_CREDENTIALS=1 to opt in."
+            .to_string(),
+    ))
+}
+
 impl S3Sink {
     pub fn new(config: S3SinkConfig) -> Result<Self, SyncError> {
         let mut client_options = ClientOptions::default().with_allow_http(config.allow_http);
@@ -30,6 +110,9 @@ impl S3Sink {
                 client_options = client_options.with_root_certificate(cert);
             }
         }
+        // Surface a missing/partial credential setup as a clear auth error
+        // before the builder falls through to the IMDS retry loop.
+        credentials_preflight()?;
         let store = AmazonS3Builder::from_env()
             .with_bucket_name(config.bucket)
             .with_endpoint(config.endpoint)
@@ -120,5 +203,58 @@ mod tests {
         let mut cfg = base_cfg();
         cfg.endpoint_ca_bundle = Some(bundle);
         assert!(matches!(S3Sink::new(cfg), Err(SyncError::Backend(_))));
+    }
+
+    // --- credential preflight (pure decision; no env mutation) --------------
+
+    #[test]
+    fn creds_static_pair_ok() {
+        assert!(evaluate_credentials(true, true, false, false).is_ok());
+    }
+
+    #[test]
+    fn creds_key_id_without_secret_is_auth() {
+        let e = evaluate_credentials(true, false, false, false).unwrap_err();
+        assert_eq!(e.kind(), "auth");
+        assert!(e.to_string().contains("AWS_SECRET_ACCESS_KEY is missing"));
+    }
+
+    #[test]
+    fn creds_secret_without_key_id_is_auth() {
+        let e = evaluate_credentials(false, true, false, false).unwrap_err();
+        assert_eq!(e.kind(), "auth");
+        assert!(e.to_string().contains("AWS_ACCESS_KEY_ID is missing"));
+    }
+
+    #[test]
+    fn creds_other_provider_ok() {
+        // A profile / container / web-identity source is configured.
+        assert!(evaluate_credentials(false, false, true, false).is_ok());
+    }
+
+    #[test]
+    fn creds_instance_opt_in_ok() {
+        // No explicit source, but the user opted into IMDS.
+        assert!(evaluate_credentials(false, false, false, true).is_ok());
+    }
+
+    #[test]
+    fn creds_none_is_auth_with_actionable_message() {
+        let e = evaluate_credentials(false, false, false, false).unwrap_err();
+        assert_eq!(e.kind(), "auth");
+        let msg = e.to_string();
+        assert!(msg.contains("no AWS credentials"));
+        assert!(msg.contains("AWS_ACCESS_KEY_ID"));
+        assert!(msg.contains("AIKIT_SYNC_ALLOW_INSTANCE_CREDENTIALS"));
+    }
+
+    #[test]
+    fn parse_bool_flag_accepts_truthy_only() {
+        for truthy in ["1", "true", "TRUE", "yes", "  yes  "] {
+            assert!(parse_bool_flag(truthy), "{truthy:?} should be truthy");
+        }
+        for falsy in ["0", "false", "no", "", "  "] {
+            assert!(!parse_bool_flag(falsy), "{falsy:?} should be falsy");
+        }
     }
 }
