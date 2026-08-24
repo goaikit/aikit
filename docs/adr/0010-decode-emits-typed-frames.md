@@ -14,6 +14,8 @@ Phase A's `Backend::decode` returned `Vec<StreamMessage>` — a text-only lowest
 
 The five non-Claude backends are unchanged in behaviour: their `decode` still produces only `StreamMessage`s, which `Backend::decode` wraps as `Decoded::Stream`. The legacy `normalize_json_line` helper keeps its `Vec<StreamMessage>` signature by projecting out `Stream` frames; structured frames are observed via `run_agent_events`.
 
+> **Inventory note (this decision stands; the list has moved on).** Pi emits typed frames as of [ADR 0017](0017-pi-backend-drives-rpc-session-mode.md), and Codex as of [ADR 0019](0019-codex-decode-emits-typed-tool-frames.md). Only Gemini, OpenCode, Cursor and the in-process Aikit backend are still wrapped.
+
 ## Consequences
 
 - Additive on the wire (the Event Streaming Protocol is an open tagged-frame format — [ADR 0005](0005-agent-events-are-the-shared-streaming-protocol.md)); existing consumers that match `StreamMessage` are unaffected. `AgentEventPayload` is `#[non_exhaustive]`, so external matches already tolerate the new variants.

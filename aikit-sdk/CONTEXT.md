@@ -13,7 +13,7 @@ How a Backend's channel is established and how messages move across it — in **
 _Avoid_: Launch, spawn-spec (spawning is just the subprocess Transport's connect step), channel
 
 **Decode**:
-Translating one inbound message from a Backend's Dialect into canonical output: zero or more `StreamMessage`s, an optional `TokenUsage`, and an optional quota signal. Pure and side-effect-free. A Backend's decoder may delegate to a dedicated typed parser (`claude-agent-sdk-rust::parse_message`, `aikit-agent-codex` events) rather than poke at `serde_json::Value`.
+Translating one inbound message from a Backend's Dialect into canonical output: zero or more `Decoded` frames (`Stream`, `ToolUse`, `ToolResult` — see [ADR 0010](../docs/adr/0010-decode-emits-typed-frames.md)), an optional `TokenUsage`, and an optional quota signal. Pure and side-effect-free. A Backend's decoder may delegate to a dedicated typed parser (`claude-agent-sdk-rust::parse_message`, `aikit-agent-codex` events) rather than poke at `serde_json::Value`. Claude, Pi and Codex emit typed tool frames; the remaining backends still produce only `Stream`. Text is never promoted to a tool frame, and a decodable line is never dropped.
 _Avoid_: Parse, normalize (normalize is the legacy function name being retired)
 
 **Dialect**:

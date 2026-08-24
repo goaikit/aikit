@@ -108,6 +108,10 @@ _Avoid_: Target, trainable, document interface
 The reward function of a benchmark environment: maps one trajectory to a result the gate can reduce to a scalar in [0,1]. An interface — the built-in `ChecksScorer` derives the scalar from the deterministic checks engine. New benchmarks supply their own scorer without touching the training loop.
 _Avoid_: Grader, evaluator (that's the run harness), reward model
 
+**Tool call**:
+One structured invocation the target agent made during a rollout, decoded from its output as a `ToolUse` frame and recorded in the trace. What the `max_tool_calls` check counts, alongside `raw_json` lines for backends that still emit tool calls as raw JSON. An agent's text, reasoning and token-usage events are **not** tool calls — counting prose as activity is the specific bug this vocabulary exists to prevent (see [ADR 0019](docs/adr/0019-codex-decode-emits-typed-tool-frames.md)). The eval artifact field is still named `command_count`, deliberately: renaming a config knob does not justify breaking artifact readers.
+_Avoid_: Command (it is not necessarily a shell command), action, step
+
 **Gate metric**:
 How a scorer's per-item results are reduced to a split-level score: `hard` (per-item full-pass → 1/0, averaged = accuracy), `soft` (per-item fraction of required checks passed, averaged), or `mixed` (weighted combination). Selectable at runtime.
 _Avoid_: Reward, score mode
