@@ -182,6 +182,35 @@ fn count_matching(trace_jsonl: &str, predicate: impl Fn(&TracePayload) -> bool) 
         .count()
 }
 
+/// Haystack for substring pattern checks (`trigger_expectation`,
+/// `command_contains`): the trace JSONL with `Unknown` payloads' `raw` field
+/// blanked out.
+///
+/// `Unknown.raw` preserves the full raw payload text of unmodelled SDK
+/// variants, so if `emit_raw_transport` were enabled a raw `system`/`init`
+/// line enumerating every installed skill would land there verbatim and
+/// re-open the stdout/init false-pass that spec 015 closed by keeping checks
+/// off raw stdout. Blanking only that one field is the narrower change: every
+/// modelled payload line still matches byte-identically, and the `Unknown`
+/// event itself (with its `payload_type`) stays visible in the haystack.
+fn pattern_haystack(trace_jsonl: &str) -> String {
+    trace_jsonl
+        .lines()
+        .map(|line| match serde_json::from_str::<TraceEvent>(line) {
+            Ok(mut event) => {
+                if let TracePayload::Unknown { raw, .. } = &mut event.payload {
+                    raw.clear();
+                    serde_json::to_string(&event).unwrap_or_default()
+                } else {
+                    line.to_string()
+                }
+            }
+            Err(_) => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn run_single_check(
     check: &CheckDefinition,
     trace_jsonl: &str,
@@ -192,7 +221,7 @@ fn run_single_check(
         CheckDefinition::TriggerExpectation {
             pattern, expected, ..
         } => {
-            let found = trace_jsonl.contains(pattern.as_str());
+            let found = pattern_haystack(trace_jsonl).contains(pattern.as_str());
             let passed = found == *expected;
             let message = if passed {
                 None
@@ -209,7 +238,7 @@ fn run_single_check(
             }
         }
         CheckDefinition::CommandContains { pattern, .. } => {
-            let passed = trace_jsonl.contains(pattern.as_str());
+            let passed = pattern_haystack(trace_jsonl).contains(pattern.as_str());
             let message = if passed {
                 None
             } else {
@@ -400,6 +429,63 @@ mod tests {
         assert!(
             results[0].passed,
             "expected=false should pass when the trace has no matching trigger"
+        );
+    }
+
+    #[test]
+    fn test_trigger_expectation_ignores_unknown_payload_raw_text() {
+        use crate::trace::trace_to_jsonl;
+        // Regression guard: `Unknown.raw` embeds the full raw payload text, so
+        // with emit_raw_transport enabled a raw `system`/`init` line listing
+        // every installed skill would land there verbatim. Pattern checks must
+        // not match against it, or the stdout/init false-pass returns.
+        let events = vec![TraceEvent {
+            seq: 0,
+            payload: TracePayload::Unknown {
+                payload_type: "raw_transport_line".to_string(),
+                raw: r#"RawTransportLine { raw: "{\"type\":\"system\",\"subtype\":\"init\",\"skills\":[\"fastskill\"]}" }"#.to_string(),
+            },
+        }];
+        let trace = trace_to_jsonl(&events);
+        assert!(
+            trace.contains("fastskill"),
+            "trace text must contain the skill name for this guard to be meaningful"
+        );
+
+        let check = CheckDefinition::TriggerExpectation {
+            pattern: "fastskill".to_string(),
+            expected: true,
+            required: true,
+        };
+        let results = run_checks(&[check], "", &trace, Path::new("/tmp"));
+
+        assert!(
+            !results[0].passed,
+            "a raw init line inside Unknown.raw must not satisfy trigger_expectation"
+        );
+    }
+
+    #[test]
+    fn test_command_contains_ignores_unknown_payload_raw_text() {
+        use crate::trace::trace_to_jsonl;
+        let events = vec![TraceEvent {
+            seq: 0,
+            payload: TracePayload::Unknown {
+                payload_type: "raw_transport_line".to_string(),
+                raw: "raw text mentioning fastskill".to_string(),
+            },
+        }];
+        let trace = trace_to_jsonl(&events);
+
+        let check = CheckDefinition::CommandContains {
+            pattern: "fastskill".to_string(),
+            required: true,
+        };
+        let results = run_checks(&[check], "", &trace, Path::new("/tmp"));
+
+        assert!(
+            !results[0].passed,
+            "Unknown.raw content must not satisfy command_contains"
         );
     }
 
