@@ -271,14 +271,24 @@ pub fn read_case_results(run_dir: &Path) -> Result<Vec<CaseResult>, ArtifactsErr
                     .fold(None::<u64>, |acc, v| {
                         Some(acc.unwrap_or(0).saturating_add(v))
                     });
+                // Representative trial for per-case detail fields: the first
+                // failing trial if any (its check_results/error_message explain
+                // the aggregated failure), else the first trial.
+                let representative = aggregated
+                    .trials
+                    .iter()
+                    .find(|t| t.status != CaseStatus::Passed)
+                    .or_else(|| aggregated.trials.first());
                 results.push(CaseResult {
-                    id: aggregated.id,
-                    status: aggregated.aggregated_status,
-                    command_count: None,
+                    id: aggregated.id.clone(),
+                    status: aggregated.aggregated_status.clone(),
+                    command_count: representative.and_then(|t| t.command_count),
                     input_tokens: total_input,
                     output_tokens: total_output,
-                    check_results: vec![],
-                    error_message: None,
+                    check_results: representative
+                        .map(|t| t.check_results.clone())
+                        .unwrap_or_default(),
+                    error_message: representative.and_then(|t| t.error_message.clone()),
                 });
                 continue;
             }
@@ -403,6 +413,110 @@ mod tests {
             results[0].output_tokens, None,
             "must remain None when all trial tokens are None"
         );
+    }
+
+    #[test]
+    fn test_read_case_results_populates_from_representative_failing_trial() {
+        use crate::checks::CheckResult;
+        let dir = TempDir::new().unwrap();
+
+        let passing_trial = TrialResult {
+            trial_id: 1,
+            status: CaseStatus::Passed,
+            command_count: Some(3),
+            input_tokens: Some(10),
+            output_tokens: Some(5),
+            check_results: vec![CheckResult {
+                check_name: "file_exists".to_string(),
+                passed: true,
+                required: true,
+                message: None,
+            }],
+            error_message: None,
+        };
+        let failing_trial = TrialResult {
+            trial_id: 2,
+            status: CaseStatus::Failed,
+            command_count: Some(7),
+            input_tokens: Some(20),
+            output_tokens: Some(8),
+            check_results: vec![CheckResult {
+                check_name: "file_exists".to_string(),
+                passed: false,
+                required: true,
+                message: Some("File 'out.txt' does not exist".to_string()),
+            }],
+            error_message: Some("something went wrong".to_string()),
+        };
+        let trials_result = CaseTrialsResult {
+            id: "case-repr".to_string(),
+            trials: vec![passing_trial, failing_trial],
+            aggregated_status: CaseStatus::Failed,
+            pass_count: 1,
+            total_trials: 2,
+            pass_rate: 0.5,
+        };
+        write_case_trials_summary(dir.path(), "case-repr", &trials_result).unwrap();
+
+        let results = read_case_results(dir.path()).unwrap();
+        assert_eq!(results.len(), 1);
+        let result = &results[0];
+        assert_eq!(
+            result.check_results.len(),
+            1,
+            "check_results must come from the representative (first failing) trial"
+        );
+        assert!(!result.check_results[0].passed);
+        assert_eq!(
+            result.check_results[0].message.as_deref(),
+            Some("File 'out.txt' does not exist")
+        );
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("something went wrong"),
+            "error_message on disk must survive the read"
+        );
+        assert_eq!(
+            result.command_count,
+            Some(7),
+            "command_count must come from the representative trial"
+        );
+    }
+
+    #[test]
+    fn test_read_case_results_representative_defaults_to_first_trial() {
+        use crate::checks::CheckResult;
+        let dir = TempDir::new().unwrap();
+
+        let trials_result = CaseTrialsResult {
+            id: "case-allpass".to_string(),
+            trials: vec![TrialResult {
+                trial_id: 1,
+                status: CaseStatus::Passed,
+                command_count: Some(2),
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                check_results: vec![CheckResult {
+                    check_name: "max_tool_calls".to_string(),
+                    passed: true,
+                    required: true,
+                    message: None,
+                }],
+                error_message: None,
+            }],
+            aggregated_status: CaseStatus::Passed,
+            pass_count: 1,
+            total_trials: 1,
+            pass_rate: 1.0,
+        };
+        write_case_trials_summary(dir.path(), "case-allpass", &trials_result).unwrap();
+
+        let results = read_case_results(dir.path()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].check_results.len(), 1);
+        assert!(results[0].check_results[0].passed);
+        assert_eq!(results[0].command_count, Some(2));
+        assert_eq!(results[0].error_message, None);
     }
 
     #[test]
