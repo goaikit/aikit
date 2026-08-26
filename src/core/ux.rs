@@ -49,6 +49,25 @@ pub fn confirm_action(prompt: &str) -> Result<bool, AikError> {
         .map_err(|e| AikError::Generic(format!("Confirmation prompt failed: {}", e)))
 }
 
+/// Show a confirmation prompt for a *destructive* action (e.g. deleting files).
+///
+/// Unlike [`confirm_action`], this refuses (returns `Ok(false)`) when there is
+/// no interactive terminal instead of defaulting to yes. Silently deleting a
+/// user's files because stdout happens to be piped is exactly the failure we
+/// want to avoid; callers should instruct the user to pass `--force` to proceed
+/// without a prompt.
+pub fn confirm_destructive_action(prompt: &str) -> Result<bool, AikError> {
+    if !atty::is(atty::Stream::Stdout) {
+        return Ok(false);
+    }
+
+    dialoguer::Confirm::new()
+        .with_prompt(prompt)
+        .default(false)
+        .interact()
+        .map_err(|e| AikError::Generic(format!("Confirmation prompt failed: {}", e)))
+}
+
 /// Select from a list of options
 #[allow(dead_code)]
 pub fn select_from_list<T: Display>(items: &[T], prompt: &str) -> Result<usize, AikError> {
@@ -81,4 +100,22 @@ pub fn show_warning(message: &str) {
 /// Show an info message
 pub fn show_info(message: &str) {
     println!("ℹ️  {}", message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Under `cargo test` stdout is captured (never a TTY), so a destructive
+    /// confirmation must refuse rather than default to yes. This is the guard
+    /// that stops `remove` from silently deleting when piped/scripted without
+    /// `--force`.
+    #[test]
+    fn confirm_destructive_action_refuses_when_non_interactive() {
+        assert!(
+            !atty::is(atty::Stream::Stdout),
+            "test harness stdout is a TTY; this test relies on it being non-interactive"
+        );
+        assert!(!confirm_destructive_action("delete everything?").unwrap());
+    }
 }

@@ -699,6 +699,57 @@ description = "Test package with invalid name"
         Ok(())
     }
 
+    /// Test that `remove` without `--force` does NOT delete in a
+    /// non-interactive context. `remove` is destructive, so when there is no
+    /// TTY to confirm on and `--force` was not passed, it must refuse rather
+    /// than silently delete the package. Regression test for the confirmation
+    /// prompt that printed "(y/N)" but never read the answer.
+    #[test]
+    fn test_remove_without_force_noninteractive_refuses() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let temp = tempdir()?;
+        let work = temp.path();
+
+        // Create and install a package first
+        cargo_bin_cmd!("aikit")
+            .current_dir(work)
+            .args(["package", "init", "keep-me-pkg", "--yes"])
+            .assert()
+            .success();
+
+        cargo_bin_cmd!("aikit")
+            .current_dir(work.join("keep-me-pkg"))
+            .args(["package", "build"])
+            .assert()
+            .success();
+
+        cargo_bin_cmd!("aikit")
+            .current_dir(work)
+            .args(["install", "./keep-me-pkg", "--yes", "--ai", "claude"])
+            .assert()
+            .success();
+
+        // Attempt removal WITHOUT --force. stdout is piped (non-interactive),
+        // so there is no way to confirm; the package must be left intact.
+        cargo_bin_cmd!("aikit")
+            .current_dir(work)
+            .args(["remove", "keep-me-pkg"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("removed successfully").not())
+            .stdout(predicate::str::contains("--force"));
+
+        // Verify the package is STILL installed.
+        cargo_bin_cmd!("aikit")
+            .current_dir(work)
+            .args(["list"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("keep-me-pkg"));
+
+        Ok(())
+    }
+
     /// Test remove command with nonexistent package
     #[test]
     fn test_remove_nonexistent_package() -> Result<(), Box<dyn std::error::Error>> {

@@ -1437,16 +1437,22 @@ pub async fn execute_remove(args: RemoveArgs) -> Result<(), AikError> {
         return Err(AikError::PackageNotFound(args.package.clone()));
     }
 
-    // Confirm removal unless forced
+    // Confirm removal unless forced. `remove` is destructive, so in a
+    // non-interactive context we refuse rather than assume yes — the user must
+    // pass --force to delete without an interactive prompt. This is what
+    // actually reads and honors the confirmation answer.
     if !args.force {
-        println!(
-            "Are you sure you want to remove package '{}'?",
+        let confirmed = crate::core::ux::confirm_destructive_action(&format!(
+            "Remove package '{}'? This deletes all its files and commands.",
             args.package
-        );
-        println!("This will delete all associated files and commands. (y/N): ");
-
-        // For now, assume yes in automated context
-        // TODO: Add interactive confirmation
+        ))?;
+        if !confirmed {
+            println!(
+                "Removal of '{}' cancelled. Re-run with --force to remove without confirmation.",
+                args.package
+            );
+            return Ok(());
+        }
     }
 
     // Get installed package info to determine version
