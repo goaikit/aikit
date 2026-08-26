@@ -73,7 +73,7 @@ which = "8.0"
 aikit-session-capture = { path = "aikit-session-capture", version = "0.1.0", optional = true }
 aikit-session-sync = { path = "aikit-session-sync", version = "0.1.0", optional = true }
 # SQLite for the production EventStore/CursorStore (capture serve surface).
-rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 # async trait for the EventStore/CursorStore impls.
 async-trait = { version = "0.1", optional = true }
 
