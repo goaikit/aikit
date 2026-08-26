@@ -593,6 +593,71 @@ mod tests {
         );
     }
 
+    // ---- T5: f64 config fields must be finite and in range ----
+
+    #[test]
+    fn test_invalid_config_gate_epsilon_nan() {
+        // NaN epsilon: `score > best + NaN` is false forever — no candidate ever accepted.
+        let mut config = make_config();
+        config.gate_epsilon = f64::NAN;
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn test_invalid_config_gate_epsilon_negative() {
+        // Negative epsilon accepts equal-or-worse candidates; best_score can drift down.
+        let mut config = make_config();
+        config.gate_epsilon = -0.1;
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn test_invalid_config_pass_threshold_nan_or_out_of_range() {
+        let mut config = make_config();
+        config.pass_threshold = f64::NAN;
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+        config.pass_threshold = 1.5;
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn test_invalid_config_mixed_hard_weight_non_finite_or_out_of_range() {
+        let mut config = make_config();
+        config.gate_metric = aikit_evals::GateMetric::Mixed {
+            hard_weight: f64::NAN,
+        };
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+        config.gate_metric = aikit_evals::GateMetric::Mixed { hard_weight: 2.0 };
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn test_valid_config_accepts_sensible_f64_fields() {
+        let mut config = make_config();
+        config.gate_epsilon = 0.0;
+        config.pass_threshold = 1.0;
+        config.gate_metric = aikit_evals::GateMetric::Mixed { hard_weight: 0.5 };
+        assert!(config::validate_config(&config).is_ok());
+    }
+
     // ---- T3: NoTrainingCases ----
 
     #[tokio::test]
