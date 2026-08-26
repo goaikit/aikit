@@ -91,8 +91,8 @@ pub async fn resume_skill(
 mod tests {
     use super::*;
     use aikit_evals::{
-        AikitEvalRunner, CaseResult, CaseRunOptions, CaseRunOutput, CaseStatus, CaseTrialsResult,
-        EvalCase, TrialResult,
+        stdout_to_trace, trace_to_jsonl, AikitEvalRunner, CaseResult, CaseRunOptions,
+        CaseRunOutput, CaseStatus, CaseTrialsResult, EvalCase, TrialResult,
     };
     use aikit_textgrad::training::state::{init_run_dir, write_runtime_state, RuntimeState};
     use aikit_textgrad::training::{SlowUpdateMode, StepRecord};
@@ -103,12 +103,18 @@ mod tests {
 
     // ---- ScriptedEvalRunner: injectable EvalRunner double (F6) ----
     //
-    // Two independent trigger-expectation markers ("M1"/"M2"), scored with GateMetric::Soft,
-    // give three controllable score levels per scripted call: neither present = 0.0, one = 0.5,
+    // Two independent markers ("M1"/"M2"), scored with GateMetric::Soft, give three
+    // controllable score levels per scripted call: neither present = 0.0, one = 0.5,
     // both = 1.0. This lets tests script realistic multi-step score trajectories (improve,
     // regress, mixed) and observe the GATE's actual accept/reject decisions and best_score
     // bookkeeping — coverage the old windsurf-agent no-op could never exercise, since every
     // call there failed identically and no score ever changed.
+    //
+    // The markers must reach the *trace*: checks score canonical trace JSONL and deliberately
+    // ignore raw stdout, because raw stdout carries agent capability listings that make any
+    // skill-name match vacuous. `run_case` therefore feeds the scripted bytes through
+    // `stdout_to_trace`. A double that only set `CaseRunOutput::stdout` would score 0.0 on
+    // every call and silently stop testing the gate at all.
     #[derive(Clone, Copy)]
     enum ScriptedOutcome {
         Score0,
@@ -186,6 +192,11 @@ mod tests {
                 exit_code: Some(0),
                 timed_out: matches!(outcome, ScriptedOutcome::TimedOut),
             };
+            // Checks score the canonical trace, never raw stdout, so the double has to put
+            // its markers where a real agent's output actually lands. `stdout_to_trace` is
+            // the crate's own conversion, so this double exercises the real path rather than
+            // a hand-rolled approximation of it.
+            let trace_jsonl = trace_to_jsonl(&stdout_to_trace(outcome.stdout()));
             let result = CaseResult {
                 id: case.id.clone(),
                 status: CaseStatus::Passed,
@@ -195,7 +206,7 @@ mod tests {
                 check_results: vec![],
                 error_message: None,
             };
-            (output, result, String::new())
+            (output, result, trace_jsonl)
         }
 
         async fn run_case_trials(

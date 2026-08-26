@@ -30,8 +30,9 @@ impl Scorer for ChecksScorer {
 
 /// How to reduce a scorer's per-item results to a scalar in [0, 1].
 ///
-/// All three variants treat every element in the input `Vec<CheckResult>` as a required check.
-/// An empty input slice always yields `1.0` for all variants (vacuously successful).
+/// All three variants reduce only checks whose `required` flag is true. Optional
+/// check failures remain visible in the result vector but do not lower the item score.
+/// An empty required-check set always yields `1.0` for all variants (vacuously successful).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GateMetric {
     /// Per item: 1.0 iff all checks pass, else 0.0. Split score = accuracy.
@@ -44,10 +45,11 @@ pub enum GateMetric {
 
 /// Reduce one item's `Vec<CheckResult>` to a scalar in [0, 1] under `metric`.
 ///
-/// When `results` is empty, returns `1.0` regardless of metric (zero required checks =
-/// vacuously successful).
+/// When there are zero required checks, returns `1.0` regardless of metric (vacuously
+/// successful). Optional check results are reported but ignored by the reduction.
 pub fn item_score(results: &[CheckResult], metric: &GateMetric) -> f64 {
-    if results.is_empty() {
+    let required_results: Vec<&CheckResult> = results.iter().filter(|r| r.required).collect();
+    if required_results.is_empty() {
         return 1.0;
     }
     match metric {
@@ -59,8 +61,8 @@ pub fn item_score(results: &[CheckResult], metric: &GateMetric) -> f64 {
             }
         }
         GateMetric::Soft => {
-            let passed = results.iter().filter(|r| r.passed).count();
-            passed as f64 / results.len() as f64
+            let passed = required_results.iter().filter(|r| r.passed).count();
+            passed as f64 / required_results.len() as f64
         }
         GateMetric::Mixed { hard_weight } => {
             let w = *hard_weight;
@@ -153,10 +155,18 @@ fn majority_vote(trial_results: Vec<Vec<CheckResult>>, total_trials: usize) -> V
     }
 
     let mut pass_counts: HashMap<String, usize> = HashMap::new();
+    let mut required_by_name: HashMap<String, bool> = HashMap::new();
     for trial in &trial_results {
         for result in trial {
             if result.passed {
                 *pass_counts.entry(result.check_name.clone()).or_insert(0) += 1;
+            }
+            if result.required {
+                required_by_name.insert(result.check_name.clone(), true);
+            } else {
+                required_by_name
+                    .entry(result.check_name.clone())
+                    .or_insert(false);
             }
         }
     }
@@ -175,6 +185,7 @@ fn majority_vote(trial_results: Vec<Vec<CheckResult>>, total_trials: usize) -> V
                 ))
             };
             CheckResult {
+                required: *required_by_name.get(&name).unwrap_or(&true),
                 check_name: name,
                 passed,
                 message,
@@ -199,6 +210,7 @@ mod tests {
         CheckResult {
             check_name: name.to_string(),
             passed: true,
+            required: true,
             message: None,
         }
     }
@@ -207,7 +219,17 @@ mod tests {
         CheckResult {
             check_name: name.to_string(),
             passed: false,
+            required: true,
             message: Some("fail".to_string()),
+        }
+    }
+
+    fn optional_failed(name: &str) -> CheckResult {
+        CheckResult {
+            check_name: name.to_string(),
+            passed: false,
+            required: false,
+            message: Some("optional fail".to_string()),
         }
     }
 
@@ -282,6 +304,12 @@ mod tests {
     }
 
     #[test]
+    fn test_item_score_hard_ignores_optional_failure() {
+        let r = vec![passed("required"), optional_failed("optional")];
+        assert_eq!(item_score(&r, &GateMetric::Hard), 1.0);
+    }
+
+    #[test]
     fn test_item_score_soft_fraction() {
         let r = vec![passed("a"), passed("b"), failed("c")];
         let expected = 2.0 / 3.0;
@@ -292,6 +320,22 @@ mod tests {
     #[test]
     fn test_item_score_soft_empty_returns_one() {
         assert_eq!(item_score(&[], &GateMetric::Soft), 1.0);
+    }
+
+    #[test]
+    fn test_item_score_all_optional_failing_returns_one() {
+        let r = vec![optional_failed("a"), optional_failed("b")];
+        assert_eq!(item_score(&r, &GateMetric::Hard), 1.0);
+        assert_eq!(item_score(&r, &GateMetric::Soft), 1.0);
+        assert_eq!(item_score(&r, &GateMetric::Mixed { hard_weight: 0.5 }), 1.0);
+    }
+
+    #[test]
+    fn test_item_score_soft_counts_required_checks_only() {
+        let r = vec![passed("a"), failed("b"), optional_failed("c")];
+        let expected = 1.0 / 2.0;
+        let actual = item_score(&r, &GateMetric::Soft);
+        assert!((actual - expected).abs() < 1e-12);
     }
 
     #[test]
@@ -512,6 +556,33 @@ mod tests {
         let result = score_cases(&runner, &cases, &opts, &scorer, 2, Some(2)).await;
         assert_eq!(result.len(), 1);
         assert!(!result[0][0].passed, "tie (1/2) should not pass");
+    }
+
+    #[tokio::test]
+    async fn test_score_cases_majority_vote_preserves_required_flags() {
+        let scorer = scripted_scorer(vec![
+            vec![passed("required"), optional_failed("optional")],
+            vec![passed("required"), optional_failed("optional")],
+            vec![failed("required"), optional_failed("optional")],
+        ]);
+        let runner = ScriptedRunner;
+        let cases = vec![make_case("c1")];
+        let opts = make_opts();
+        let result = score_cases(&runner, &cases, &opts, &scorer, 3, Some(1)).await;
+
+        let required = result[0]
+            .iter()
+            .find(|r| r.check_name == "required")
+            .unwrap();
+        let optional = result[0]
+            .iter()
+            .find(|r| r.check_name == "optional")
+            .unwrap();
+
+        assert!(required.required);
+        assert!(!optional.required);
+        assert!(required.passed);
+        assert!(!optional.passed);
     }
 
     #[tokio::test]

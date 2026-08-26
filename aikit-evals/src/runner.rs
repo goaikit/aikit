@@ -1,7 +1,7 @@
 //! Eval runner implementation using aikit-sdk
 
 use crate::artifacts::{CaseResult, CaseStatus, CaseTrialsResult, TrialResult};
-use crate::checks::{count_command_events, run_checks, CheckDefinition};
+use crate::checks::{count_command_events, run_checks, suite_passes, CheckDefinition};
 use crate::suite::EvalCase;
 use crate::trace::{agent_events_to_trace, trace_to_jsonl, TraceEvent, TracePayload};
 use aikit_sdk::{run_agent_events, AgentEvent, RunOptions};
@@ -289,7 +289,7 @@ impl AikitEvalRunner {
         let stdout_str = String::from_utf8_lossy(&run_output.stdout).to_string();
         let command_count = count_command_events(&trace_jsonl);
         let check_results = run_checks(checks, &stdout_str, &trace_jsonl, &working_dir);
-        let all_passed = check_results.iter().all(|r| r.passed);
+        let all_passed = suite_passes(&check_results);
 
         let status = if run_output.timed_out {
             CaseStatus::Error
@@ -339,6 +339,24 @@ pub async fn run_eval_case(
 mod tests {
     use super::*;
     use crate::artifacts::CaseStatus;
+    use std::path::Path;
+
+    #[cfg(unix)]
+    fn write_fake_claude(dir: &Path) {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("claude");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(
+            file,
+            "#!/bin/sh\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\",\"session_id\":\"stub-session\"}}'"
+        )
+        .unwrap();
+        let mut perms = file.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        file.set_permissions(perms).unwrap();
+    }
 
     /// Stub runner for trait wiring tests (no aikit).
     struct StubEvalRunner;
@@ -455,6 +473,78 @@ mod tests {
         let err = RunnerError::AgentUnavailable("codex".to_string());
         assert!(err.to_string().contains("codex"));
         assert!(err.to_string().contains("EVAL_AGENT_UNAVAILABLE"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_run_case_inner_status_uses_required_checks() {
+        let command_dir = tempfile::tempdir().unwrap();
+        write_fake_claude(command_dir.path());
+        let previous_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", command_dir.path().display(), previous_path),
+        );
+
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("present.txt"), "ok").unwrap();
+        let opts = CaseRunOptions {
+            agent_key: "claude".to_string(),
+            model: None,
+            project_root: project.path().to_path_buf(),
+            timeout_seconds: 5,
+            pass_threshold: 1.0,
+        };
+        let case = EvalCase {
+            id: "required-matrix".to_string(),
+            prompt: "p".to_string(),
+            should_trigger: true,
+            tags: vec![],
+            workspace_subdir: None,
+        };
+        let runner = AikitEvalRunner;
+
+        let required_fail_checks = vec![CheckDefinition::FileExists {
+            path: PathBuf::from("missing-required.txt"),
+            required: true,
+        }];
+        let (_out, required_fail, _trace) = runner
+            .run_case_inner(&case, &opts, &required_fail_checks)
+            .await;
+        assert_eq!(required_fail.status, CaseStatus::Failed);
+
+        let optional_fail_checks = vec![
+            CheckDefinition::FileExists {
+                path: PathBuf::from("present.txt"),
+                required: true,
+            },
+            CheckDefinition::FileExists {
+                path: PathBuf::from("missing-optional.txt"),
+                required: false,
+            },
+        ];
+        let (_out, optional_fail, _trace) = runner
+            .run_case_inner(&case, &opts, &optional_fail_checks)
+            .await;
+        assert_eq!(optional_fail.status, CaseStatus::Passed);
+        assert!(
+            optional_fail
+                .check_results
+                .iter()
+                .any(|r| !r.required && !r.passed),
+            "optional failure must remain visible in check_results"
+        );
+
+        let all_optional_failing_checks = vec![CheckDefinition::FileExists {
+            path: PathBuf::from("missing-optional-only.txt"),
+            required: false,
+        }];
+        let (_out, all_optional, _trace) = runner
+            .run_case_inner(&case, &opts, &all_optional_failing_checks)
+            .await;
+        assert_eq!(all_optional.status, CaseStatus::Passed);
+
+        std::env::set_var("PATH", previous_path);
     }
 
     #[tokio::test]
