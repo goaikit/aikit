@@ -238,12 +238,13 @@ pub(crate) fn kill_process_group(child: &Arc<Mutex<Child>>) {
     let pgid = Pid::from_raw(-pid);
     let _ = kill(pgid, Signal::SIGTERM);
 
+    // Give the direct child a grace period to exit on the SIGTERM.
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
         {
             let mut guard = child.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(guard.try_wait(), Ok(Some(_))) {
-                return;
+                break;
             }
         }
         if Instant::now() >= deadline {
@@ -252,6 +253,15 @@ pub(crate) fn kill_process_group(child: &Arc<Mutex<Child>>) {
         thread::sleep(Duration::from_millis(50));
     }
 
+    // Then SIGKILL the group unconditionally — reaping the direct child is not
+    // proof the group is empty. A grandchild can outlive the SIGTERM: a shell
+    // forks with the signal briefly ignored and `exec` preserves SIG_IGN, so a
+    // SIGTERM landing in that window is lost outright. Such a survivor still
+    // holds the stdout/stderr pipes it inherited, which would keep the reader
+    // threads — and therefore the join/wait this function exists to unblock —
+    // parked for as long as it runs. The pgid stays reserved while any member
+    // is alive, so this cannot land on a recycled pid; an empty group just
+    // gives ESRCH, which is ignored like every other signal error here.
     let _ = kill(pgid, Signal::SIGKILL);
     let mut guard = child.lock().unwrap_or_else(|e| e.into_inner());
     let _ = guard.wait();
