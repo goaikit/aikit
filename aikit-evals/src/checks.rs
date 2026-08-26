@@ -124,16 +124,26 @@ pub fn load_checks(path: &std::path::Path) -> Result<Vec<CheckDefinition>, Check
     Ok(parsed.checks)
 }
 
-/// Run all checks against captured stdout content and working directory
+/// Run all checks against the canonical trace JSONL and working directory.
+///
+/// `stdout_content` is accepted for API stability but **no check type consults it**, and that
+/// is deliberate — not an oversight. Raw stdout for the `claude` backend opens with a
+/// `system`/`init` event enumerating every skill installed in the environment, so any
+/// substring check against stdout passes on a skill's own name whether or not the skill ever
+/// ran. Scoring reads the parsed trace, where that capability listing never appears.
+///
+/// **Do not wire `stdout_content` back into a check** without re-reading that rationale;
+/// `test_trigger_expectation_ignores_stdout_capability_listing` exists to catch exactly that
+/// regression.
 pub fn run_checks(
     checks: &[CheckDefinition],
-    stdout_content: &str,
+    _stdout_content: &str,
     trace_jsonl: &str,
     working_dir: &std::path::Path,
 ) -> Vec<CheckResult> {
     checks
         .iter()
-        .map(|check| run_single_check(check, stdout_content, trace_jsonl, working_dir))
+        .map(|check| run_single_check(check, trace_jsonl, working_dir))
         .collect()
 }
 
@@ -170,7 +180,6 @@ fn count_matching(trace_jsonl: &str, predicate: impl Fn(&TracePayload) -> bool) 
 
 fn run_single_check(
     check: &CheckDefinition,
-    stdout_content: &str,
     trace_jsonl: &str,
     working_dir: &std::path::Path,
 ) -> CheckResult {
@@ -179,7 +188,6 @@ fn run_single_check(
         CheckDefinition::TriggerExpectation {
             pattern, expected, ..
         } => {
-            let _ = stdout_content;
             let found = trace_jsonl.contains(pattern.as_str());
             let passed = found == *expected;
             let message = if passed {
@@ -197,7 +205,6 @@ fn run_single_check(
             }
         }
         CheckDefinition::CommandContains { pattern, .. } => {
-            let _ = stdout_content;
             let passed = trace_jsonl.contains(pattern.as_str());
             let message = if passed {
                 None
