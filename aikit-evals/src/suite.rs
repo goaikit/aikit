@@ -108,9 +108,12 @@ fn parse_prompts_csv(content: &str) -> Result<EvalSuite, SuiteError> {
             )));
         }
 
+        // No trim_matches('"') here: parse_csv_records already unquotes and
+        // un-escapes fields, so stripping again would eat a legitimate quote
+        // at the edge of a prompt (e.g. one ending in an escaped `""`).
         let prompt = cols
             .get(prompt_idx)
-            .map(|s| s.trim_matches('"').trim().to_string())
+            .map(|s| s.trim().to_string())
             .ok_or_else(|| {
                 SuiteError::InvalidCsv(format!("Missing prompt at line {}", line_num + 2))
             })?;
@@ -282,6 +285,19 @@ mod tests {
             suite.cases[0].prompt
         );
         assert_eq!(suite.cases[1].id, "test-2");
+    }
+
+    #[test]
+    fn test_parse_prompts_csv_prompt_keeps_edge_escaped_quote() {
+        // The parser un-escapes `""` itself; a second trim_matches('"') pass
+        // would eat the legitimate quote left at the edge of the prompt.
+        let csv = "id,prompt,should_trigger,tags,workspace_subdir\n\
+                   test-1,\"say \"\"hi\"\"\",true,,\n";
+        let suite = parse_prompts_csv(csv).unwrap();
+        assert_eq!(
+            suite.cases[0].prompt, "say \"hi\"",
+            "escaped quotes at the field edge must survive parsing"
+        );
     }
 
     #[test]
