@@ -216,17 +216,25 @@ mod tests {
     async fn notify_driver_detects_created_file() {
         // The notify-based driver is what `aikit session sync --watch` uses.
         // Create the watch dir first (notify watches existing dirs), start the
-        // driver, then drop a .jsonl file in and assert the event is delivered.
+        // driver, then drop a .jsonl file in and assert that an event for THAT
+        // file is delivered. Two things this has to tolerate, both of which
+        // have failed it in CI:
         //
-        // On macOS FSEvents (the backend on the GitHub Actions macos runners)
-        // the native event stream has high, variable startup latency and can
-        // drop the first event for a freshly registered watch. A single
-        // one-shot write therefore races the OS: the event may arrive late or
-        // not at all within a fixed window. We instead re-stimulate the file
-        // on a short cadence and poll the driver in a loop, so a dropped or
-        // delayed first delivery is recovered by a later round. The overall
-        // deadline is a safety net only — a healthy run resolves in well under
-        // a second.
+        // 1. Unrelated paths arriving first. The backend may surface any event
+        //    in the watched tree — on macOS FSEvents the watched directory
+        //    itself gets one when a file is created inside it. The condition
+        //    under test is "an event for sess.jsonl arrives", so anything else
+        //    is drained past rather than asserted on. Asserting on whichever
+        //    event happened to land first is exactly what broke this on
+        //    macos-latest: a directory path has no extension to unwrap. The
+        //    decoy below manufactures such an event, so the drain-past path is
+        //    exercised off macOS too rather than only where it was observed.
+        //
+        // 2. High, variable startup latency for a freshly registered watch,
+        //    where the first event can be dropped outright. A one-shot write
+        //    races the OS, so the file is re-stimulated on a short cadence and
+        //    the driver polled in a loop. The deadline is a safety net only —
+        //    a healthy run resolves in well under a second.
         let tmp = tempfile::tempdir().unwrap();
         let watch_path = tmp.path().to_path_buf();
         let adapter = FakeAdapter {
@@ -237,27 +245,54 @@ mod tests {
         let mut driver = NotifyWatchDriver::new(adapters, Duration::from_millis(50))
             .expect("notify watcher builds");
 
+        // Decoy: an extension-less path inside the watched tree, so the driver
+        // has a non-session event to surface next to the one under test. Which
+        // of the two is delivered first is up to the backend, so this is a
+        // probabilistic guard, not a deterministic one — it cost nothing and
+        // reproduced the macOS failure on Linux in 10 of 12 pre-fix runs.
+        std::fs::create_dir(watch_path.join("decoy")).unwrap();
+
         let sess_file = watch_path.join("sess.jsonl");
         let content = "{\"type\":\"user\"}\n";
 
         let deadline = Instant::now() + Duration::from_secs(30);
-        let mut path = None;
-        while Instant::now() < deadline {
+        let mut hit: Option<PathBuf> = None;
+        let mut ignored: Vec<PathBuf> = Vec::new();
+        while Instant::now() < deadline && hit.is_none() {
             // Re-stimulate: a fresh write produces a new FS event even when an
             // earlier one was coalesced or dropped by the OS backend.
             std::fs::write(&sess_file, content).unwrap();
-            match tokio::time::timeout(Duration::from_secs(2), driver.next_event()).await {
-                Ok(Some(p)) => {
-                    path = Some(p);
-                    break;
+            // Drain this round until the session file's event shows up or the
+            // round goes quiet.
+            while Instant::now() < deadline {
+                match tokio::time::timeout(Duration::from_secs(2), driver.next_event()).await {
+                    // Match on the file name, not the full path: macOS reports
+                    // the resolved `/private/var/...` form of a `/var/...`
+                    // tempdir, so full-path equality would never hold there.
+                    Ok(Some(p)) if p.file_name() == sess_file.file_name() => {
+                        hit = Some(p);
+                        break;
+                    }
+                    Ok(Some(p)) => ignored.push(p), // Not ours — keep draining.
+                    Ok(None) => panic!("notify driver event stream ended unexpectedly"),
+                    Err(_) => break, // Quiet round — re-stimulate and retry.
                 }
-                Ok(None) => panic!("notify driver event stream ended unexpectedly"),
-                Err(_) => {} // No event this round — retry with a fresh write.
             }
         }
 
-        let path =
-            path.expect("notify driver should deliver an event for sess.jsonl within the deadline");
+        let path = hit.unwrap_or_else(|| {
+            panic!(
+                "notify driver should deliver an event for sess.jsonl within the \
+                 deadline; only saw {ignored:?}"
+            )
+        });
+        // The delivered path is what `sync --watch` feeds to the parse
+        // pipeline, so it has to route back to the adapter that asked for it.
+        let adapters: Vec<&dyn Adapter> = vec![&adapter];
+        assert!(
+            find_adapter_for_path(&adapters, &path).is_some(),
+            "delivered path {path:?} should route to an adapter"
+        );
         assert_eq!(path.extension().unwrap(), "jsonl");
     }
 
