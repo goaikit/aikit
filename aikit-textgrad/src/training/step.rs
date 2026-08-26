@@ -181,6 +181,19 @@ fn select_ranked_pool(edits: Vec<Edit>) -> Vec<Edit> {
     ranked
 }
 
+/// Settle score bookkeeping after a gate run.
+///
+/// On accept the candidate becomes the current model, so `best_score` and
+/// `current_score` both advance to the gate score. On reject the candidate is discarded
+/// and the model in effect is unchanged, so neither score moves — `current_score` must
+/// never absorb the score of a candidate that was thrown away.
+fn settle_gate_scores(state: &mut RuntimeState, gate_score: f64, accepted: bool) {
+    if accepted {
+        state.best_score = gate_score;
+        state.current_score = gate_score;
+    }
+}
+
 fn format_skip_feedback(skips: &[SkipRecord]) -> String {
     if skips.is_empty() {
         return String::new();
@@ -309,10 +322,10 @@ pub(super) async fn run_step(
         gate_score = Some(score);
 
         accepted = score > state.best_score + config.gate_epsilon;
+        settle_gate_scores(state, score, accepted);
 
         if accepted {
             // Leave artifact with candidate text.
-            state.best_score = score;
             let best_path =
                 save_accepted_artifact(run_dir, &config.artifact_stem, &candidate_text).await?;
             let _ = best_path; // path is written; best_artifact_path is tracked by caller
@@ -329,8 +342,6 @@ pub(super) async fn run_step(
                 });
             }
         }
-
-        state.current_score = score;
     }
 
     // ------------------------------------------------------------------
@@ -408,4 +419,69 @@ pub(super) async fn run_step(
 /// Format intra-patch skips from the previous step into a human-readable feedback note.
 pub(super) fn build_skip_feedback(skips: &[SkipRecord]) -> String {
     format_skip_feedback(skips)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::training::config::SlowUpdateMode;
+
+    fn make_state(best_score: f64, current_score: f64) -> RuntimeState {
+        RuntimeState {
+            config: RunConfig {
+                n_epochs: 1,
+                batch_size: 1,
+                accumulation: 1,
+                aggregate_group_size: 2,
+                lr_0: 2,
+                pass_threshold: 0.5,
+                gate_metric: aikit_evals::GateMetric::Soft,
+                gate_trials: 1,
+                gate_epsilon: 0.01,
+                slow_update_mode: SlowUpdateMode::ForceAccept,
+                protected_soft_cap_chars: 500,
+                target_agent: "stub".to_string(),
+                target_model: None,
+                optimizer_agent: "stub-opt".to_string(),
+                optimizer_model: None,
+                timeout_seconds: 30,
+                parallel: Some(1),
+                artifact_stem: "artifact".to_string(),
+            },
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score,
+            current_score,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: "strategy".to_string(),
+        }
+    }
+
+    // T8: a rejected candidate is discarded, so the scores of the model still in effect
+    // must not move — before the fix, current_score was set to the (rejected) gate score
+    // unconditionally, making StepRecord.score_current always equal score_candidate.
+    #[test]
+    fn test_settle_gate_scores_reject_leaves_current_and_best() {
+        let mut state = make_state(0.8, 0.8);
+        settle_gate_scores(&mut state, 0.3, false);
+        assert!(
+            (state.current_score - 0.8).abs() < 1e-9,
+            "reject must not move current_score, got {}",
+            state.current_score
+        );
+        assert!(
+            (state.best_score - 0.8).abs() < 1e-9,
+            "reject must not move best_score, got {}",
+            state.best_score
+        );
+    }
+
+    #[test]
+    fn test_settle_gate_scores_accept_advances_both() {
+        let mut state = make_state(0.5, 0.5);
+        settle_gate_scores(&mut state, 0.9, true);
+        assert!((state.best_score - 0.9).abs() < 1e-9);
+        assert!((state.current_score - 0.9).abs() < 1e-9);
+    }
 }

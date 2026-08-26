@@ -36,7 +36,12 @@ pub struct StepRecord {
     pub epoch: u32,
     pub hash_before: String,
     pub hash_after: String,
+    /// Score of the model in effect *after* this step: advances to the gate score only on
+    /// an accepted step; on a rejected or skipped step it keeps the previous value, so it
+    /// equals `score_candidate` only when `accepted` is true.
     pub score_current: f64,
+    /// Gate score of this step's candidate (for a skipped no-edit step: the best-known
+    /// score of the identical text, since no gate ran).
     pub score_candidate: f64,
     pub accepted: bool,
     /// True when the step produced no textual change (`apply_budgeted` applied nothing).
