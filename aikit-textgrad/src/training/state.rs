@@ -52,6 +52,9 @@ pub struct TrainingOutcome {
     pub final_score: f64,
     /// Path to `best_{stem}.md` inside `run_dir`.
     pub best_artifact_path: PathBuf,
+    /// Number of optimizer steps executed by this invocation (for a resume, only the
+    /// steps run after the checkpoint). `0` would indicate the loop never executed.
+    pub steps_run: u32,
 }
 
 // ---- I/O helpers ----

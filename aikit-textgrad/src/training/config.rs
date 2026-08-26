@@ -67,6 +67,11 @@ pub struct OptimizerPrompts {
 pub enum TextgradError {
     #[error("TEXTGRAD_NO_SELECTION_CASES: EvalSuite has zero cases tagged 'selection'")]
     NoSelectionCases,
+    #[error(
+        "TEXTGRAD_NO_TRAIN_CASES: EvalSuite has zero training cases (tagged 'train' or \
+         untagged) — the training loop would never execute and return a silent success"
+    )]
+    NoTrainingCases,
     #[error("TEXTGRAD_INVALID_CONFIG: {0}")]
     InvalidConfig(String),
     #[error("TEXTGRAD_RESUME_STATE_CORRUPT: {0}")]

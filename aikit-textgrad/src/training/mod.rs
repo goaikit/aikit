@@ -236,6 +236,9 @@ pub async fn run_training(
     if splits.selection.is_empty() {
         return Err(TextgradError::NoSelectionCases);
     }
+    if splits.train.is_empty() {
+        return Err(TextgradError::NoTrainingCases);
+    }
 
     // Create run-dir structure.
     init_run_dir(run_dir, &config).await?;
@@ -300,6 +303,7 @@ pub async fn run_training(
         best_score: state.best_score,
         final_score,
         best_artifact_path,
+        steps_run: state.global_step,
     })
 }
 
@@ -319,6 +323,9 @@ pub async fn resume_training(
     if splits.selection.is_empty() {
         return Err(TextgradError::NoSelectionCases);
     }
+    if splits.train.is_empty() {
+        return Err(TextgradError::NoTrainingCases);
+    }
 
     let best_artifact_path = run_dir.join(format!("best_{}.md", config.artifact_stem));
 
@@ -330,6 +337,7 @@ pub async fn resume_training(
 
     let start_epoch = state.epoch;
     let start_step = state.step_in_epoch;
+    let steps_before_resume = state.global_step;
 
     let mut state_mut = state;
     let mut prompts_mut = prompts;
@@ -367,6 +375,7 @@ pub async fn resume_training(
         best_score: state_mut.best_score,
         final_score,
         best_artifact_path,
+        steps_run: state_mut.global_step - steps_before_resume,
     })
 }
 
@@ -580,6 +589,69 @@ mod tests {
         );
     }
 
+    // ---- T3: NoTrainingCases ----
+
+    #[tokio::test]
+    async fn test_no_training_cases_returns_error() {
+        let dir = TempDir::new().unwrap();
+        // Zero train cases: steps_per_epoch would be 0, the loop would never execute, and
+        // run_training would return Ok(best_score = initial) — a silent success.
+        let suite = vec![make_eval_case("sel-1", &["selection"])];
+        let mut artifact = SimpleArtifact {
+            text: "hello".to_string(),
+        };
+        let result = run_training(
+            &mut artifact,
+            &suite,
+            &EmptyScorer,
+            &StubRunner,
+            make_prompts(),
+            make_config(),
+            dir.path(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(TextgradError::NoTrainingCases)),
+            "expected NoTrainingCases, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_no_training_cases_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config();
+        init_run_dir(dir.path(), &config).await.unwrap();
+        let state = RuntimeState {
+            config: config.clone(),
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score: 0.5,
+            current_score: 0.5,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: "saved strategy".to_string(),
+        };
+        write_runtime_state(dir.path(), &state).await.unwrap();
+
+        let suite = vec![make_eval_case("sel-1", &["selection"])];
+        let mut artifact = SimpleArtifact {
+            text: "hello".to_string(),
+        };
+        let result = resume_training(
+            dir.path(),
+            &mut artifact,
+            &suite,
+            &EmptyScorer,
+            &StubRunner,
+            make_prompts(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(TextgradError::NoTrainingCases)),
+            "expected NoTrainingCases, got {result:?}"
+        );
+    }
+
     // ---- AC28: InvalidConfig ----
 
     #[tokio::test]
@@ -693,6 +765,10 @@ mod tests {
             "expected best_score = 1.0, got {}",
             outcome.best_score
         );
+
+        // T3: the outcome reports how many optimizer steps actually ran
+        // (1 train case, batch=1, accum=1, 1 epoch → exactly 1 step).
+        assert_eq!(outcome.steps_run, 1, "expected exactly one step to run");
     }
 
     // ---- AC15: resume after checkpoint ----
