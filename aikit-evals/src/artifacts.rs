@@ -122,6 +122,8 @@ pub enum ArtifactsError {
     Json(#[from] serde_json::Error),
     #[error("EVAL_ARTIFACTS_CORRUPT: Missing required field: {0}")]
     MissingField(String),
+    #[error("EVAL_RUN_DIR_EXHAUSTED: no free run directory for '{0}' after 999 suffix attempts")]
+    RunDirExhausted(String),
 }
 
 /// Allocate a run directory under output_dir using ISO 8601 timestamp format
@@ -142,8 +144,9 @@ pub fn allocate_run_dir(output_dir: &Path, run_id: &str) -> Result<PathBuf, Arti
         }
     }
 
-    // Fallback: use the base (it exists, will overwrite)
-    Ok(base)
+    // All suffixes taken: error out rather than silently reusing (and
+    // overwriting) the existing base directory.
+    Err(ArtifactsError::RunDirExhausted(run_id.to_string()))
 }
 
 /// Write per-trial artifacts (stdout.txt, stderr.txt, trace.jsonl, result.json) under:
@@ -326,6 +329,26 @@ mod tests {
         let run_dir2 = allocate_run_dir(dir.path(), "2026-04-01T14-00-00Z").unwrap();
         assert_ne!(run_dir1, run_dir2);
         assert!(run_dir2.to_string_lossy().contains("-2"));
+    }
+
+    #[test]
+    fn test_allocate_run_dir_errors_after_suffix_exhaustion() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir(dir.path().join("run")).unwrap();
+        for i in 2..=999 {
+            std::fs::create_dir(dir.path().join(format!("run-{}", i))).unwrap();
+        }
+
+        let result = allocate_run_dir(dir.path(), "run");
+
+        assert!(
+            result.is_err(),
+            "exhausting all 999 suffixes must error, not silently reuse the base dir"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("EVAL_RUN_DIR_EXHAUSTED"));
     }
 
     #[test]

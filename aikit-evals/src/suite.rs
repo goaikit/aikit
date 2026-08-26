@@ -74,13 +74,12 @@ pub fn load_suite(prompts_path: &Path) -> Result<EvalSuite, SuiteError> {
 
 /// Parse prompts CSV content
 fn parse_prompts_csv(content: &str) -> Result<EvalSuite, SuiteError> {
-    let mut lines = content.lines();
+    let mut records = parse_csv_records(content)?.into_iter();
 
     // Parse header
-    let header = lines
+    let headers: Vec<String> = records
         .next()
         .ok_or_else(|| SuiteError::InvalidCsv("CSV is empty".to_string()))?;
-    let headers: Vec<String> = parse_csv_line(header);
 
     // Find column indices
     let id_idx = find_col(&headers, "id")?;
@@ -90,15 +89,9 @@ fn parse_prompts_csv(content: &str) -> Result<EvalSuite, SuiteError> {
     let workspace_subdir_idx = headers.iter().position(|h| h.trim() == "workspace_subdir");
 
     let mut cases = Vec::new();
+    let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for (line_num, line) in lines.enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        let cols = parse_csv_line(line);
-
+    for (line_num, cols) in records.enumerate() {
         let id = cols
             .get(id_idx)
             .map(|s| s.trim().to_string())
@@ -106,6 +99,14 @@ fn parse_prompts_csv(content: &str) -> Result<EvalSuite, SuiteError> {
             .ok_or_else(|| {
                 SuiteError::InvalidCsv(format!("Missing id at line {}", line_num + 2))
             })?;
+
+        if !seen_ids.insert(id.clone()) {
+            return Err(SuiteError::InvalidCsv(format!(
+                "Duplicate case id '{}' at line {}",
+                id,
+                line_num + 2
+            )));
+        }
 
         let prompt = cols
             .get(prompt_idx)
@@ -167,12 +168,19 @@ fn find_col(headers: &[String], name: &str) -> Result<usize, SuiteError> {
         .ok_or_else(|| SuiteError::InvalidCsv(format!("Missing required column: {}", name)))
 }
 
-/// Simple CSV line parser that handles quoted fields
-fn parse_csv_line(line: &str) -> Vec<String> {
+/// Simple CSV parser that handles quoted fields, including quoted fields
+/// containing commas, escaped quotes (`""`) and embedded newlines.
+///
+/// Splitting on physical lines before parsing would cut a quoted multi-line
+/// field in half, so records are delimited here, while quote state is known.
+/// An unterminated quote at end of input is a loud error rather than a
+/// silently mis-parsed suite. Blank records (empty lines) are skipped.
+fn parse_csv_records(content: &str) -> Result<Vec<Vec<String>>, SuiteError> {
+    let mut records = Vec::new();
     let mut fields = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut chars = line.chars().peekable();
+    let mut chars = content.chars().peekable();
 
     while let Some(ch) = chars.next() {
         match ch {
@@ -193,13 +201,35 @@ fn parse_csv_line(line: &str) -> Vec<String> {
                 fields.push(current.clone());
                 current.clear();
             }
+            '\r' if !in_quotes && chars.peek() == Some(&'\n') => {
+                // CRLF record terminator; the LF is consumed below.
+            }
+            '\n' if !in_quotes => {
+                fields.push(current.clone());
+                current.clear();
+                if fields.iter().any(|f| !f.trim().is_empty()) {
+                    records.push(std::mem::take(&mut fields));
+                } else {
+                    fields.clear();
+                }
+            }
             _ => {
                 current.push(ch);
             }
         }
     }
+    if in_quotes {
+        return Err(SuiteError::InvalidCsv(
+            "Unbalanced quote: a quoted field is never closed".to_string(),
+        ));
+    }
+    // Final record without a trailing newline.
     fields.push(current);
-    fields
+    if fields.iter().any(|f| !f.trim().is_empty()) {
+        records.push(fields);
+    }
+
+    Ok(records)
 }
 
 #[cfg(test)]
@@ -217,6 +247,57 @@ mod tests {
         assert!(suite.cases[0].should_trigger);
         assert_eq!(suite.cases[1].id, "test-2");
         assert!(!suite.cases[1].should_trigger);
+    }
+
+    #[test]
+    fn test_parse_prompts_csv_rejects_duplicate_case_ids() {
+        let csv = "id,prompt,should_trigger,tags,workspace_subdir\n\
+                   test-1,\"Do something\",true,,\n\
+                   test-1,\"Do it again\",false,,\n";
+        let result = parse_prompts_csv(csv);
+        assert!(result.is_err(), "duplicate case ids must be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("Duplicate") && msg.contains("test-1"),
+            "error must name the duplicated id, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_parse_prompts_csv_quoted_field_with_embedded_newline() {
+        let csv = "id,prompt,should_trigger,tags,workspace_subdir\n\
+                   test-1,\"first line\nsecond line\",true,,\n\
+                   test-2,plain,false,,\n";
+        let suite = parse_prompts_csv(csv).unwrap();
+        assert_eq!(
+            suite.cases.len(),
+            2,
+            "a quoted newline must not split the record"
+        );
+        assert!(
+            suite.cases[0].prompt.contains("first line")
+                && suite.cases[0].prompt.contains("second line"),
+            "embedded newline content must survive parsing, got: {:?}",
+            suite.cases[0].prompt
+        );
+        assert_eq!(suite.cases[1].id, "test-2");
+    }
+
+    #[test]
+    fn test_parse_prompts_csv_unbalanced_quote_errors() {
+        let csv = "id,prompt,should_trigger,tags,workspace_subdir\n\
+                   test-1,\"never closed,true,,\n";
+        let result = parse_prompts_csv(csv);
+        assert!(
+            result.is_err(),
+            "an unterminated quote must error loudly, not mis-parse silently"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .to_lowercase()
+            .contains("quote"));
     }
 
     #[test]
