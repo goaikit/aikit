@@ -222,6 +222,12 @@ impl AikitEvalRunner {
             AgentExecutionResult { result, events }
         });
 
+        // Captured agent exec/spawn failure. When set, the case is an Error no
+        // matter what the checks say: an empty trace makes negative-expectation
+        // and limit checks pass vacuously, which must not mask a run that never
+        // produced output.
+        let mut exec_error: Option<String> = None;
+
         let (run_output, trace_events, token_usage) = match spawn_result.await {
             Ok(exec_result) => match exec_result.result {
                 Ok(run_result) => {
@@ -264,10 +270,12 @@ impl AikitEvalRunner {
                     }
                 }
                 Err(e) => {
+                    let message = format!("Agent execution failed: {}", e);
+                    exec_error = Some(message.clone());
                     let trace = agent_events_to_trace(&exec_result.events);
                     let output = CaseRunOutput {
                         stdout: vec![],
-                        stderr: format!("Agent execution failed: {}", e).into_bytes(),
+                        stderr: message.into_bytes(),
                         exit_code: None,
                         timed_out: false,
                     };
@@ -275,9 +283,11 @@ impl AikitEvalRunner {
                 }
             },
             Err(e) => {
+                let message = format!("spawn_blocking failed: {}", e);
+                exec_error = Some(message.clone());
                 let output = CaseRunOutput {
                     stdout: vec![],
-                    stderr: format!("spawn_blocking failed: {}", e).into_bytes(),
+                    stderr: message.into_bytes(),
                     exit_code: None,
                     timed_out: false,
                 };
@@ -291,7 +301,7 @@ impl AikitEvalRunner {
         let check_results = run_checks(checks, &stdout_str, &trace_jsonl, &working_dir);
         let all_passed = suite_passes(&check_results);
 
-        let status = if run_output.timed_out {
+        let status = if run_output.timed_out || exec_error.is_some() {
             CaseStatus::Error
         } else if checks.is_empty() {
             if run_output.exit_code == Some(0) {
@@ -318,7 +328,7 @@ impl AikitEvalRunner {
                     timeout_secs
                 ))
             } else {
-                None
+                exec_error
             },
         };
 
@@ -545,6 +555,94 @@ mod tests {
         assert_eq!(all_optional.status, CaseStatus::Passed);
 
         std::env::set_var("PATH", previous_path);
+    }
+
+    #[tokio::test]
+    async fn test_run_case_inner_agent_failure_is_error_despite_vacuous_checks() {
+        // An unavailable agent key makes run_agent_events fail before any
+        // output exists. The trace is empty, so every check below passes
+        // vacuously — that must not turn an execution failure into Passed.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("preexisting.txt"), "ok").unwrap();
+        let opts = CaseRunOptions {
+            agent_key: "definitely-not-a-real-agent".to_string(),
+            model: None,
+            project_root: project.path().to_path_buf(),
+            timeout_seconds: 5,
+            pass_threshold: 1.0,
+        };
+        let case = EvalCase {
+            id: "agent-failure".to_string(),
+            prompt: "p".to_string(),
+            should_trigger: true,
+            tags: vec![],
+            workspace_subdir: None,
+        };
+        let checks = vec![
+            CheckDefinition::TriggerExpectation {
+                pattern: "never-happens".to_string(),
+                expected: false,
+                required: true,
+            },
+            CheckDefinition::MaxToolCalls {
+                limit: 10,
+                required: true,
+            },
+            CheckDefinition::FileExists {
+                path: PathBuf::from("preexisting.txt"),
+                required: true,
+            },
+        ];
+        let runner = AikitEvalRunner;
+
+        let (_out, result, _trace) = runner.run_case_inner(&case, &opts, &checks).await;
+
+        assert_eq!(
+            result.status,
+            CaseStatus::Error,
+            "agent execution failure must be Error even when checks pass vacuously"
+        );
+        assert!(
+            result.error_message.is_some(),
+            "error_message must carry the captured execution error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_case_trials_counts_agent_failure_like_timeout_error() {
+        // Aggregation over trials must treat exec-failure Errors as it treats
+        // timeout Errors: not passed, so the case fails its threshold.
+        let opts = CaseRunOptions {
+            agent_key: "definitely-not-a-real-agent".to_string(),
+            model: None,
+            project_root: PathBuf::from("/tmp"),
+            timeout_seconds: 5,
+            pass_threshold: 1.0,
+        };
+        let case = EvalCase {
+            id: "agent-failure-trials".to_string(),
+            prompt: "p".to_string(),
+            should_trigger: true,
+            tags: vec![],
+            workspace_subdir: None,
+        };
+        let checks = vec![CheckDefinition::TriggerExpectation {
+            pattern: "never-happens".to_string(),
+            expected: false,
+            required: true,
+        }];
+        let runner = AikitEvalRunner;
+
+        let trials_result = runner
+            .run_case_trials(&case, &opts, &checks, 2, Some(1))
+            .await;
+
+        assert_eq!(trials_result.pass_count, 0);
+        assert_eq!(trials_result.aggregated_status, CaseStatus::Failed);
+        for trial in &trials_result.trials {
+            assert_eq!(trial.status, CaseStatus::Error);
+            assert!(trial.error_message.is_some());
+        }
     }
 
     #[tokio::test]

@@ -1,6 +1,5 @@
 //! Scalar reward, gate-metric reduction, and pluggable Scorer trait.
 
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -143,38 +142,26 @@ pub async fn score_cases(
 }
 
 fn majority_vote(trial_results: Vec<Vec<CheckResult>>, total_trials: usize) -> Vec<CheckResult> {
-    let mut check_names: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    // Aggregate by ordinal, not by check_name: `run_checks` names results by
+    // check TYPE (e.g. "trigger_expectation"), so two same-typed checks would
+    // collapse into one counter and a check failing every trial could report
+    // passed on a same-typed sibling's votes. Every trial runs the same check
+    // list in order, so the index within a trial's result vector is a stable
+    // per-check identity; each trial contributes at most one vote per check.
+    let check_count = trial_results.iter().map(Vec::len).max().unwrap_or(0);
 
-    for trial in &trial_results {
-        for result in trial {
-            if seen.insert(result.check_name.clone()) {
-                check_names.push(result.check_name.clone());
-            }
-        }
-    }
-
-    let mut pass_counts: HashMap<String, usize> = HashMap::new();
-    let mut required_by_name: HashMap<String, bool> = HashMap::new();
-    for trial in &trial_results {
-        for result in trial {
-            if result.passed {
-                *pass_counts.entry(result.check_name.clone()).or_insert(0) += 1;
-            }
-            if result.required {
-                required_by_name.insert(result.check_name.clone(), true);
-            } else {
-                required_by_name
-                    .entry(result.check_name.clone())
-                    .or_insert(false);
-            }
-        }
-    }
-
-    check_names
-        .into_iter()
-        .map(|name| {
-            let pass_count = *pass_counts.get(&name).unwrap_or(&0);
+    (0..check_count)
+        .map(|idx| {
+            let contributors: Vec<&CheckResult> = trial_results
+                .iter()
+                .filter_map(|trial| trial.get(idx))
+                .collect();
+            let check_name = contributors
+                .first()
+                .map(|r| r.check_name.clone())
+                .unwrap_or_default();
+            let pass_count = contributors.iter().filter(|r| r.passed).count();
+            let required = contributors.iter().any(|r| r.required);
             let passed = pass_count > total_trials / 2;
             let message = if passed {
                 None
@@ -185,9 +172,9 @@ fn majority_vote(trial_results: Vec<Vec<CheckResult>>, total_trials: usize) -> V
                 ))
             };
             CheckResult {
-                required: *required_by_name.get(&name).unwrap_or(&true),
-                check_name: name,
+                check_name,
                 passed,
+                required,
                 message,
             }
         })
@@ -619,6 +606,60 @@ mod tests {
         let result = score_cases(&runner, &cases, &opts, &scorer, 3, None).await;
         assert!(result[0][0].passed, "c1 should pass");
         assert!(!result[1][0].passed, "c2 should fail");
+    }
+
+    #[tokio::test]
+    async fn test_score_cases_same_named_check_failing_all_trials_reports_failed() {
+        // Two checks share the type name "trigger_expectation" (run_checks names
+        // results by check TYPE). Check #2 fails every trial; it must not be
+        // absorbed into check #1's pass counter.
+        let scorer = scripted_scorer(vec![
+            vec![passed("trigger_expectation"), failed("trigger_expectation")],
+            vec![passed("trigger_expectation"), failed("trigger_expectation")],
+            vec![passed("trigger_expectation"), failed("trigger_expectation")],
+        ]);
+        let runner = ScriptedRunner;
+        let cases = vec![make_case("c1")];
+        let opts = make_opts();
+        let result = score_cases(&runner, &cases, &opts, &scorer, 3, Some(1)).await;
+
+        assert_eq!(
+            result[0].len(),
+            2,
+            "output must have one entry per input check, not per distinct name"
+        );
+        assert!(result[0][0].passed, "check #1 passed every trial");
+        assert!(
+            !result[0][1].passed,
+            "check #2 failed every trial and must be reported failed"
+        );
+        assert!(
+            !suite_passes(&result[0]),
+            "a required check failing every trial must fail the case"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_score_cases_ordinal_aggregation_caps_one_vote_per_trial() {
+        // Two same-named checks both passing in one trial must contribute at
+        // most one vote each — never two votes to a shared name counter.
+        let scorer = scripted_scorer(vec![
+            vec![passed("file_exists"), passed("file_exists")],
+            vec![failed("file_exists"), failed("file_exists")],
+            vec![failed("file_exists"), failed("file_exists")],
+        ]);
+        let runner = ScriptedRunner;
+        let cases = vec![make_case("c1")];
+        let opts = make_opts();
+        let result = score_cases(&runner, &cases, &opts, &scorer, 3, Some(1)).await;
+
+        assert_eq!(result[0].len(), 2);
+        for r in &result[0] {
+            assert!(
+                !r.passed,
+                "1/3 trials passing must not reach majority for either check"
+            );
+        }
     }
 
     #[tokio::test]

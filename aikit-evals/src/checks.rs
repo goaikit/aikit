@@ -34,9 +34,13 @@ pub enum CheckDefinition {
     },
     /// Check whether the trace contains a structured `Skill` tool invocation.
     ///
-    /// When `skill` is omitted, any `Skill` tool use matches. When present, the
-    /// serialized `Skill` input must contain that skill name. `expected = false`
-    /// asserts no matching skill invocation occurred.
+    /// When `skill` is omitted, any `Skill` tool use matches. When present, an
+    /// identifying field of the `Skill` input (`skill`, `name`, or `skillName`)
+    /// must equal that skill name exactly — substring matches against the
+    /// serialized input (JSON keys, argument text, longer skill names) do not
+    /// count. The field set is a best guess: the claude backend's real Skill
+    /// tool input field name is unverified upstream (no recorded fixture).
+    /// `expected = false` asserts no matching skill invocation occurred.
     #[serde(rename = "skill_invoked")]
     SkillInvoked {
         skill: Option<String>,
@@ -178,6 +182,35 @@ fn count_matching(trace_jsonl: &str, predicate: impl Fn(&TracePayload) -> bool) 
         .count()
 }
 
+/// Haystack for substring pattern checks (`trigger_expectation`,
+/// `command_contains`): the trace JSONL with `Unknown` payloads' `raw` field
+/// blanked out.
+///
+/// `Unknown.raw` preserves the full raw payload text of unmodelled SDK
+/// variants, so if `emit_raw_transport` were enabled a raw `system`/`init`
+/// line enumerating every installed skill would land there verbatim and
+/// re-open the stdout/init false-pass that spec 015 closed by keeping checks
+/// off raw stdout. Blanking only that one field is the narrower change: every
+/// modelled payload line still matches byte-identically, and the `Unknown`
+/// event itself (with its `payload_type`) stays visible in the haystack.
+fn pattern_haystack(trace_jsonl: &str) -> String {
+    trace_jsonl
+        .lines()
+        .map(|line| match serde_json::from_str::<TraceEvent>(line) {
+            Ok(mut event) => {
+                if let TracePayload::Unknown { raw, .. } = &mut event.payload {
+                    raw.clear();
+                    serde_json::to_string(&event).unwrap_or_default()
+                } else {
+                    line.to_string()
+                }
+            }
+            Err(_) => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn run_single_check(
     check: &CheckDefinition,
     trace_jsonl: &str,
@@ -188,7 +221,7 @@ fn run_single_check(
         CheckDefinition::TriggerExpectation {
             pattern, expected, ..
         } => {
-            let found = trace_jsonl.contains(pattern.as_str());
+            let found = pattern_haystack(trace_jsonl).contains(pattern.as_str());
             let passed = found == *expected;
             let message = if passed {
                 None
@@ -205,7 +238,7 @@ fn run_single_check(
             }
         }
         CheckDefinition::CommandContains { pattern, .. } => {
-            let passed = trace_jsonl.contains(pattern.as_str());
+            let passed = pattern_haystack(trace_jsonl).contains(pattern.as_str());
             let message = if passed {
                 None
             } else {
@@ -282,9 +315,12 @@ fn skill_invoked(trace_jsonl: &str, skill: Option<&str>) -> bool {
             TracePayload::ToolUse {
                 tool_name, input, ..
             } if tool_name == "Skill" => match skill {
-                Some(skill) => {
-                    serde_json::to_string(&input).is_ok_and(|serialized| serialized.contains(skill))
-                }
+                // Compare the identifying field exactly: a substring match over
+                // the serialized input would false-match "foo" against
+                // "foo-bar" and match JSON keys or argument text.
+                Some(skill) => ["skill", "name", "skillName"]
+                    .iter()
+                    .any(|field| input.get(field).and_then(|v| v.as_str()) == Some(skill)),
                 None => true,
             },
             _ => false,
@@ -393,6 +429,63 @@ mod tests {
         assert!(
             results[0].passed,
             "expected=false should pass when the trace has no matching trigger"
+        );
+    }
+
+    #[test]
+    fn test_trigger_expectation_ignores_unknown_payload_raw_text() {
+        use crate::trace::trace_to_jsonl;
+        // Regression guard: `Unknown.raw` embeds the full raw payload text, so
+        // with emit_raw_transport enabled a raw `system`/`init` line listing
+        // every installed skill would land there verbatim. Pattern checks must
+        // not match against it, or the stdout/init false-pass returns.
+        let events = vec![TraceEvent {
+            seq: 0,
+            payload: TracePayload::Unknown {
+                payload_type: "raw_transport_line".to_string(),
+                raw: r#"RawTransportLine { raw: "{\"type\":\"system\",\"subtype\":\"init\",\"skills\":[\"fastskill\"]}" }"#.to_string(),
+            },
+        }];
+        let trace = trace_to_jsonl(&events);
+        assert!(
+            trace.contains("fastskill"),
+            "trace text must contain the skill name for this guard to be meaningful"
+        );
+
+        let check = CheckDefinition::TriggerExpectation {
+            pattern: "fastskill".to_string(),
+            expected: true,
+            required: true,
+        };
+        let results = run_checks(&[check], "", &trace, Path::new("/tmp"));
+
+        assert!(
+            !results[0].passed,
+            "a raw init line inside Unknown.raw must not satisfy trigger_expectation"
+        );
+    }
+
+    #[test]
+    fn test_command_contains_ignores_unknown_payload_raw_text() {
+        use crate::trace::trace_to_jsonl;
+        let events = vec![TraceEvent {
+            seq: 0,
+            payload: TracePayload::Unknown {
+                payload_type: "raw_transport_line".to_string(),
+                raw: "raw text mentioning fastskill".to_string(),
+            },
+        }];
+        let trace = trace_to_jsonl(&events);
+
+        let check = CheckDefinition::CommandContains {
+            pattern: "fastskill".to_string(),
+            required: true,
+        };
+        let results = run_checks(&[check], "", &trace, Path::new("/tmp"));
+
+        assert!(
+            !results[0].passed,
+            "Unknown.raw content must not satisfy command_contains"
         );
     }
 
@@ -513,6 +606,66 @@ mod tests {
             !no_tool_results[0].passed,
             "stdout skill listings and assistant prose are not Skill tool invocations"
         );
+    }
+
+    #[test]
+    fn test_skill_invoked_requires_exact_name_not_substring() {
+        let check = CheckDefinition::SkillInvoked {
+            skill: Some("foo".to_string()),
+            expected: true,
+            required: true,
+        };
+        // "foo" is a substring of the invoked skill "foo-bar" but not its name.
+        let trace = r#"{"seq":0,"payload":{"type":"tool_use","call_id":"call_1","tool_name":"Skill","input":{"skill":"foo-bar"}}}"#;
+
+        let results = run_checks(&[check], "", trace, Path::new("/tmp"));
+
+        assert!(
+            !results[0].passed,
+            "'foo' must not match an invocation of 'foo-bar'"
+        );
+    }
+
+    #[test]
+    fn test_skill_invoked_does_not_match_json_keys_or_other_fields() {
+        let check = CheckDefinition::SkillInvoked {
+            skill: Some("greeting-helper".to_string()),
+            expected: true,
+            required: true,
+        };
+        // The skill name appears as a JSON key and inside an unrelated field,
+        // but no identifying field names it.
+        let trace = r#"{"seq":0,"payload":{"type":"tool_use","call_id":"call_1","tool_name":"Skill","input":{"greeting-helper":true,"args":"use greeting-helper please"}}}"#;
+
+        let results = run_checks(&[check], "", trace, Path::new("/tmp"));
+
+        assert!(
+            !results[0].passed,
+            "JSON keys and non-identifying fields must not satisfy skill_invoked"
+        );
+    }
+
+    #[test]
+    fn test_skill_invoked_exact_match_on_each_identifying_field() {
+        for field in ["skill", "name", "skillName"] {
+            let check = CheckDefinition::SkillInvoked {
+                skill: Some("greeting-helper".to_string()),
+                expected: true,
+                required: true,
+            };
+            let trace = format!(
+                r#"{{"seq":0,"payload":{{"type":"tool_use","call_id":"call_1","tool_name":"Skill","input":{{"{}":"greeting-helper"}}}}}}"#,
+                field
+            );
+
+            let results = run_checks(&[check], "", &trace, Path::new("/tmp"));
+
+            assert!(
+                results[0].passed,
+                "exact match on identifying field '{}' must pass",
+                field
+            );
+        }
     }
 
     #[test]
