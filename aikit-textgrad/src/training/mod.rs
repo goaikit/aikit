@@ -318,6 +318,10 @@ pub async fn resume_training(
 ) -> Result<TrainingOutcome, TextgradError> {
     let state = read_runtime_state(run_dir).await?;
 
+    // The persisted config is as untrusted as a caller-supplied one: e.g. gate_trials = 0
+    // would make every gate score a vacuous 1.0 (zero trials → empty results).
+    validate_config(&state.config)?;
+
     let config = state.config.clone();
     let splits = split_cases(suite);
     if splits.selection.is_empty() {
@@ -699,6 +703,50 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(TextgradError::InvalidConfig(_))));
+    }
+
+    // ---- T4: resume must validate the persisted config ----
+
+    #[tokio::test]
+    async fn test_resume_rejects_invalid_persisted_config() {
+        let dir = TempDir::new().unwrap();
+        let mut config = make_config();
+        // gate_trials = 0 makes score_cases run zero trials: majority_vote over an empty
+        // trial set yields empty results, so every gate item_score is a vacuous 1.0.
+        config.gate_trials = 0;
+        init_run_dir(dir.path(), &config).await.unwrap();
+        let state = RuntimeState {
+            config: config.clone(),
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score: 0.5,
+            current_score: 0.5,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: "saved strategy".to_string(),
+        };
+        write_runtime_state(dir.path(), &state).await.unwrap();
+
+        let suite = vec![
+            make_eval_case("train-1", &["train"]),
+            make_eval_case("sel-1", &["selection"]),
+        ];
+        let mut artifact = SimpleArtifact {
+            text: "hello".to_string(),
+        };
+        let result = resume_training(
+            dir.path(),
+            &mut artifact,
+            &suite,
+            &EmptyScorer,
+            &StubRunner,
+            make_prompts(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(TextgradError::InvalidConfig(_))),
+            "expected InvalidConfig for persisted gate_trials=0, got {result:?}"
+        );
     }
 
     // ---- AC14: complete 1-epoch run produces run-dir layout and monotonic best_score ----
