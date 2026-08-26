@@ -394,8 +394,9 @@ pub fn deploy_command(
 
 /// Deploys a skill to an agent's skills directory.
 ///
-/// Creates the skill directory and subdirectories if they don't exist.
-/// Returns the full path to the SKILL.md file.
+/// This is a full replace, not a merge: any existing content of the skill directory is
+/// removed first, so files from a prior deploy (e.g. scripts no longer shipped) cannot
+/// linger. Returns the full path to the SKILL.md file.
 pub fn deploy_skill(
     agent_key: &str,
     project_root: &Path,
@@ -407,7 +408,10 @@ pub fn deploy_skill(
 
     let skill_dir_path = skill_dir(project_root, agent_key, skill_name)?;
 
-    // Create skill directory and subdirectories
+    // Clear any previous deploy of this skill, then recreate the directory.
+    if skill_dir_path.exists() {
+        fs::remove_dir_all(&skill_dir_path).map_err(DeployError::Io)?;
+    }
     fs::create_dir_all(&skill_dir_path).map_err(DeployError::Io)?;
 
     // Create scripts subdirectory if scripts are provided
@@ -1253,6 +1257,34 @@ mod tests {
         let script_content =
             fs::read_to_string(path.parent().unwrap().join("scripts/newton_script.sh")).unwrap();
         assert_eq!(script_content, "#!/bin/sh\necho 'Hello from Newton'");
+    }
+
+    // T10: deploy_skill is a full replace — files from a prior materialize must not linger.
+    #[test]
+    fn test_deploy_skill_replaces_stale_files() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // First deploy leaves a script behind.
+        let stale_scripts: &[(&str, &[u8])] = &[("stale.sh", b"#!/bin/sh\necho 'stale'")];
+        let first_path = deploy_skill(
+            "cursor",
+            temp_dir.path(),
+            "my-skill",
+            "# v1",
+            Some(stale_scripts),
+        )
+        .unwrap();
+        let stale_script = first_path.parent().unwrap().join("scripts/stale.sh");
+        assert!(stale_script.exists(), "precondition: stale script written");
+
+        // Second deploy of the same skill without that script.
+        let path = deploy_skill("cursor", temp_dir.path(), "my-skill", "# v2", None).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# v2");
+        assert!(
+            !stale_script.exists(),
+            "stale script from a prior deploy must be removed"
+        );
     }
 
     #[test]
