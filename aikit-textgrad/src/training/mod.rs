@@ -439,6 +439,22 @@ mod tests {
         }
     }
 
+    /// Scorer that emits one *real* required check with a fixed verdict, so scores come
+    /// from an actual check result rather than the vacuous empty-set 1.0.
+    struct FixedScorer {
+        passed: bool,
+    }
+    impl Scorer for FixedScorer {
+        fn score(&self, _stdout: &str, _trace: &str, _wd: &Path) -> Vec<CheckResult> {
+            vec![CheckResult {
+                check_name: "fixed".to_string(),
+                passed: self.passed,
+                required: true,
+                message: None,
+            }]
+        }
+    }
+
     struct StubRunner;
 
     #[async_trait]
@@ -630,7 +646,7 @@ mod tests {
         let result = run_training(
             &mut artifact,
             &suite,
-            &EmptyScorer,
+            &FixedScorer { passed: true },
             &StubRunner,
             make_prompts(),
             config,
@@ -669,9 +685,9 @@ mod tests {
 
         // Monotonic best_score (AC25): initial score ≥ 0, outcome score ≥ initial
         assert!(outcome.best_score >= 0.0);
-        // With EmptyScorer (empty check_results → item_score = 1.0) initial score = 1.0.
-        // Gate can only accept if gate_score > 1.0 + 0.01, which is impossible.
-        // So best_score stays at 1.0.
+        // FixedScorer emits one real required check that passes, so the initial score is a
+        // non-vacuous 1.0. The stub optimizer proposes no edits, so no candidate can ever
+        // beat it and best_score stays at 1.0.
         assert!(
             (outcome.best_score - 1.0).abs() < 1e-9,
             "expected best_score = 1.0, got {}",

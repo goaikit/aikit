@@ -27,6 +27,21 @@ pub struct SkillOptInputs {
     pub run_dir: PathBuf,
 }
 
+/// Reject an empty check set at the skillopt boundary.
+///
+/// With zero checks every case's `item_score` is a vacuous 1.0, so `best_score` starts at
+/// 1.0 and the gate condition (`score > best + epsilon`) is unsatisfiable — the whole
+/// training run would be a silent no-op that still returns `Ok`.
+fn validate_checks(checks: &[CheckDefinition]) -> anyhow::Result<()> {
+    if checks.is_empty() {
+        anyhow::bail!(
+            "SKILLOPT_EMPTY_CHECKS: checks must be non-empty — with zero checks every case \
+             scores a vacuous 1.0 and the gate can never accept, so training would be a no-op"
+        );
+    }
+    Ok(())
+}
+
 /// Run a complete training loop for a skill document from scratch.
 ///
 /// `runner` drives every eval-case execution the loop performs (initial score, per-step
@@ -36,6 +51,7 @@ pub async fn train_skill(
     inputs: SkillOptInputs,
     runner: &dyn EvalRunner,
 ) -> anyhow::Result<TrainingOutcome> {
+    validate_checks(&inputs.checks)?;
     let mut artifact = SkillArtifact::from_existing(
         inputs.initial_skill_md,
         inputs.skill_name,
@@ -72,6 +88,7 @@ pub async fn resume_skill(
     config: RunConfig,
     runner: &dyn EvalRunner,
 ) -> anyhow::Result<TrainingOutcome> {
+    validate_checks(&checks)?;
     let mut artifact =
         SkillArtifact::from_existing(initial_skill_md, skill_name, config.target_agent.clone());
     let scorer = ChecksScorer { checks };
@@ -307,18 +324,19 @@ mod tests {
                 make_eval_case("train-1", &["train"]),
                 make_eval_case("sel-1", &["selection"]),
             ],
-            checks: vec![],
+            // Non-empty by construction: an empty check set is rejected at the boundary
+            // (SKILLOPT_EMPTY_CHECKS) because it makes every score a vacuous 1.0.
+            checks: score_markers(),
             config: make_config(),
             run_dir: dir.path().to_path_buf(),
         }
     }
 
-    /// Like [`make_inputs`], but wired for [`ScriptedEvalRunner`]: uses the two-marker checks
-    /// so scores are controllable, and `n_epochs` steps (batch=1, one train case) so the queue
-    /// has exactly one rollout+gate pair per epoch.
+    /// Like [`make_inputs`], but wired for [`ScriptedEvalRunner`]: `n_epochs` steps
+    /// (batch=1, one train case) so the scripted queue maps one-to-one onto the loop's
+    /// `run_case` calls.
     fn make_scripted_inputs(dir: &TempDir, n_epochs: u32) -> SkillOptInputs {
         let mut inputs = make_inputs(dir);
-        inputs.checks = score_markers();
         inputs.config.n_epochs = n_epochs;
         inputs
     }
@@ -388,7 +406,7 @@ mod tests {
             "# Test Skill\n\nOriginal.".to_string(),
             "test-skill".to_string(),
             suite,
-            vec![],
+            score_markers(),
             config,
             &runner,
         )
@@ -436,6 +454,62 @@ mod tests {
         assert!(
             err.contains("TEXTGRAD_INVALID_CONFIG"),
             "expected TEXTGRAD_INVALID_CONFIG in: {err}"
+        );
+    }
+
+    // T2: an empty check set makes every item_score a vacuous 1.0, so best_score starts at
+    // 1.0 and the gate (`> best + epsilon`) can never accept — the whole run would be a
+    // silent no-op returning Ok. Both entry points must reject it up front.
+    #[tokio::test]
+    async fn test_train_skill_empty_checks_rejected() {
+        let dir = TempDir::new().unwrap();
+        let mut inputs = make_inputs(&dir);
+        inputs.checks = vec![];
+        // Validation fails before the runner is ever touched — empty queue proves it.
+        let result = train_skill(inputs, &ScriptedEvalRunner::new(vec![])).await;
+        assert!(result.is_err(), "empty checks must be rejected");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("SKILLOPT_EMPTY_CHECKS"),
+            "expected SKILLOPT_EMPTY_CHECKS in: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_skill_empty_checks_rejected() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config();
+        init_run_dir(dir.path(), &config).await.unwrap();
+        let state = RuntimeState {
+            config: config.clone(),
+            epoch: config.n_epochs,
+            step_in_epoch: 0,
+            global_step: 1,
+            best_score: 0.9,
+            current_score: 0.9,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: "saved strategy".to_string(),
+        };
+        write_runtime_state(dir.path(), &state).await.unwrap();
+
+        let result = resume_skill(
+            dir.path().to_path_buf(),
+            "# Test Skill\n\nOriginal.".to_string(),
+            "test-skill".to_string(),
+            vec![
+                make_eval_case("train-1", &["train"]),
+                make_eval_case("sel-1", &["selection"]),
+            ],
+            vec![],
+            config,
+            &ScriptedEvalRunner::new(vec![]),
+        )
+        .await;
+        assert!(result.is_err(), "empty checks must be rejected on resume");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("SKILLOPT_EMPTY_CHECKS"),
+            "expected SKILLOPT_EMPTY_CHECKS in: {err}"
         );
     }
 
