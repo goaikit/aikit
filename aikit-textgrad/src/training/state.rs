@@ -39,6 +39,12 @@ pub struct StepRecord {
     pub score_current: f64,
     pub score_candidate: f64,
     pub accepted: bool,
+    /// True when the step produced no textual change (`apply_budgeted` applied nothing).
+    /// The gate is skipped for such steps — scoring a byte-identical artifact could only
+    /// promote `best_score` on evaluation noise — so they are never accepted and
+    /// `score_candidate` is recorded as the best-known score of that identical text.
+    #[serde(default)]
+    pub no_edit: bool,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
 }
