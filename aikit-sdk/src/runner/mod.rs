@@ -829,6 +829,43 @@ mod tests {
     #[cfg(unix)]
     static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Prepends `dir` to the process-global `PATH`, holding `PATH_LOCK` for
+    /// the whole window and restoring the previous value on drop.
+    ///
+    /// `PATH` is process-global, so restoring it from `Drop` rather than by a
+    /// statement at the end of the test is what makes it unwind-safe: a test
+    /// that panics mid-body would otherwise leave `PATH` pointing at a
+    /// since-deleted tempdir and cascade failures into every later test in
+    /// this binary under `--test-threads=1`.
+    #[cfg(unix)]
+    struct PathOverride {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original: std::ffi::OsString,
+    }
+
+    #[cfg(unix)]
+    impl PathOverride {
+        fn prepend(dir: &std::path::Path) -> Self {
+            let lock = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let original = std::env::var_os("PATH").unwrap_or_default();
+            let mut entries = vec![dir.to_path_buf()];
+            entries.extend(std::env::split_paths(&original));
+            let joined = std::env::join_paths(entries).expect("PATH entries are join-able");
+            std::env::set_var("PATH", joined);
+            Self {
+                _lock: lock,
+                original,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for PathOverride {
+        fn drop(&mut self) {
+            std::env::set_var("PATH", &self.original);
+        }
+    }
+
     #[test]
     fn test_run_options_session_id_default_is_none() {
         assert_eq!(RunOptions::default().session_id, None);
@@ -975,7 +1012,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_with_echo_stub() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -993,17 +1029,12 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        // Prepend dir to PATH
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let mut events: Vec<AgentEvent> = Vec::new();
         let result = run_agent_events("cursor", "hello", RunOptions::default(), |ev| {
             events.push(ev)
         });
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(
             result.is_ok(),
@@ -1021,7 +1052,6 @@ mod tests {
     #[test]
     fn test_spec013_fail_closed_on_unsupported_sandbox() {
         use crate::runner::{Backend, RunError, SandboxPolicy};
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1037,13 +1067,10 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), orig_path));
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let opts = RunOptions::default().with_sandbox(SandboxPolicy::ReadOnly);
         let result = run_agent_events("cursor", "hi", opts, |_| {});
-
-        std::env::set_var("PATH", orig_path);
 
         match result {
             Err(RunError::InvocationUnsupported(err)) => {
@@ -1062,7 +1089,6 @@ mod tests {
     #[test]
     fn test_spec013_active_envelope_reaches_subprocess() {
         use crate::runner::SandboxPolicy;
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1077,14 +1103,11 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), orig_path));
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let opts = RunOptions::default().with_sandbox(SandboxPolicy::BoundedWrite);
         let mut events: Vec<AgentEvent> = Vec::new();
         let result = run_agent_events("codex", "hi", opts, |ev| events.push(ev));
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(
             result.is_ok(),
@@ -1099,7 +1122,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_spec013_result_event_emitted_at_run_end() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1117,8 +1139,7 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{}", dir.path().display(), orig_path));
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let mut got_result = false;
         let result = run_agent_events("codex", "hi", RunOptions::default(), |ev| {
@@ -1130,7 +1151,6 @@ mod tests {
             }
         });
 
-        std::env::set_var("PATH", orig_path);
         assert!(result.is_ok(), "{:?}", result.err());
         assert!(
             got_result,
@@ -1141,7 +1161,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_sequence_numbers_strictly_increasing() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1154,14 +1173,10 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let mut seqs: Vec<u64> = Vec::new();
         let result = run_agent_events("codex", "hi", RunOptions::default(), |ev| seqs.push(ev.seq));
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(result.is_ok());
         // Sequence numbers must be strictly increasing
@@ -1173,7 +1188,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_callback_panic_isolated() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1186,15 +1200,11 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let result = run_agent_events("gemini", "hi", RunOptions::default(), |_ev| {
             panic!("test panic")
         });
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(
             matches!(result, Err(RunError::CallbackPanic(_))),
@@ -1206,7 +1216,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_empty_output() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1219,16 +1228,12 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let mut event_count = 0usize;
         let result = run_agent_events("opencode", "hi", RunOptions::default(), |_ev| {
             event_count += 1
         });
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(result.is_ok());
         assert_eq!(event_count, 0, "Empty output should produce zero events");
@@ -1237,7 +1242,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_mixed_json_and_raw() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1254,9 +1258,7 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let mut payloads: Vec<String> = Vec::new();
         let result = run_agent_events("claude", "hi", RunOptions::default(), |ev| {
@@ -1283,8 +1285,6 @@ mod tests {
             };
             payloads.push(kind.to_string());
         });
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(result.is_ok());
         assert_eq!(payloads, vec!["raw"]);
@@ -1368,7 +1368,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_timeout_kills_child() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1386,16 +1385,12 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let opts = RunOptions::new().with_timeout(Duration::from_millis(500));
         let start = std::time::Instant::now();
         let result = run_agent_events("cursor", "hi", opts, |_| {});
         let elapsed = start.elapsed();
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(
             matches!(result, Err(RunError::TimedOut { .. })),
@@ -1415,7 +1410,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_agent_events_no_timeout_on_fast_exit() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1429,14 +1423,10 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let opts = RunOptions::new().with_timeout(Duration::from_secs(60));
         let result = run_agent_events("cursor", "hi", opts, |_| {});
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(
             result.is_ok(),
@@ -1448,7 +1438,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_current_dir_applied_to_child() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1466,9 +1455,7 @@ mod tests {
         let target_dir = std::path::PathBuf::from("/tmp");
         let parent_cwd = std::env::current_dir().unwrap();
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", stub_dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(stub_dir.path());
 
         let mut collected_output = Vec::<u8>::new();
         let opts = RunOptions::new().with_current_dir(target_dir.clone());
@@ -1478,8 +1465,6 @@ mod tests {
                 collected_output.push(b'\n');
             }
         });
-
-        std::env::set_var("PATH", orig_path);
 
         // Parent cwd must not have changed
         assert_eq!(
@@ -1516,7 +1501,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_timeout_partial_output_returned() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1530,14 +1514,10 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let opts = RunOptions::new().with_timeout(Duration::from_millis(600));
         let result = run_agent_events("cursor", "hi", opts, |_| {});
-
-        std::env::set_var("PATH", orig_path);
 
         match result {
             Err(RunError::TimedOut { stdout, .. }) => {
@@ -1560,7 +1540,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_large_prompt_does_not_deadlock_stdin_write() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1585,9 +1564,7 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         // A prompt larger than a typical pipe buffer, to be written on the
         // stdin side while the child is simultaneously producing its own
@@ -1600,8 +1577,6 @@ mod tests {
         let start = std::time::Instant::now();
         let result = run_agent_events("cursor", &big_prompt, opts, |_| {});
         let elapsed = start.elapsed();
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(
             result.is_ok(),
@@ -1620,7 +1595,6 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn test_process_group_kill_reaps_grandchild() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1641,14 +1615,10 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let opts = RunOptions::new().with_timeout(Duration::from_millis(500));
         let result = run_agent_events("cursor", "hi", opts, |_| {});
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(
             matches!(result, Err(RunError::TimedOut { .. })),
@@ -1675,7 +1645,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_external_cancel_terminates_run_and_returns() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1688,9 +1657,7 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         // No timeout configured: only an external caller can end this run —
         // simulating a `serve` client-disconnect handler cancelling a
@@ -1714,8 +1681,6 @@ mod tests {
         let start = std::time::Instant::now();
         let result = run_thread.join().expect("run thread should not panic");
         let elapsed = start.elapsed();
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(
             matches!(result, Err(RunError::TimedOut { .. })),
@@ -1745,7 +1710,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_bug11_claude_stdout_rawline_rate_limit_not_quota() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1765,13 +1729,9 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let result = run_agent("claude", "explain rate limits", RunOptions::default());
-
-        std::env::set_var("PATH", orig_path);
 
         assert!(
             result.is_ok(),
@@ -1785,7 +1745,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_bug11_claude_stderr_rawline_rate_limit_still_detected() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1805,13 +1764,9 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let result = run_agent("claude", "hi", RunOptions::default());
-
-        std::env::set_var("PATH", orig_path);
 
         match result {
             Err(RunError::QuotaExceeded(_)) => {}
@@ -1827,7 +1782,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_run_pi_settles_and_tears_down_long_lived_server() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1836,6 +1790,14 @@ mod tests {
         // then — like the real long-lived RPC server — stays alive instead of
         // exiting. The run's settle-detection MUST tear it down (no timeout is
         // set), proving the dispatch + kill path without the real binary.
+        //
+        // The teardown is asserted through the child's *exit status*, not
+        // through how long the run took: wall-clock is not a reliable proxy on
+        // a loaded CI runner. `kill_process_group` signals the child, so a
+        // torn-down stub is reaped as killed-by-signal, whereas one that was
+        // left alone runs its `sleep 60` out and exits 0. The two are
+        // unambiguous and the distinction is made by the kernel, so no shell
+        // logic (and no timing) sits between the behaviour and the assertion.
         let dir = tempfile::tempdir().unwrap();
         let stub_path = dir.path().join("pi");
         let script = concat!(
@@ -1844,7 +1806,8 @@ mod tests {
             "echo '{\"type\":\"message_update\",\"assistantMessageEvent\":{\"type\":\"text_delta\",\"delta\":\"Hello\"}}'\n",
             "echo '{\"type\":\"turn_end\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Hello\"}],\"usage\":{\"input\":10,\"output\":5}}}'\n",
             "echo '{\"type\":\"agent_settled\"}'\n",
-            "sleep 60",
+            "sleep 60\n",
+            "exit 0\n",
         );
         let mut f = std::fs::File::create(&stub_path).unwrap();
         f.write_all(script.as_bytes()).unwrap();
@@ -1853,9 +1816,7 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let mut texts: Vec<String> = Vec::new();
         let start = std::time::Instant::now();
@@ -1866,13 +1827,33 @@ mod tests {
         });
         let elapsed = start.elapsed();
 
-        std::env::set_var("PATH", orig_path);
-
         let res = result.expect("pi run should succeed");
-        // Settle-kill must return promptly; without it the stub sleeps 60s.
+
+        // The condition under test: the settle-kill fired and tore the
+        // still-running RPC server down. Being reaped as killed-by-signal is
+        // only reachable through `kill_process_group`, and on the `Ok` path
+        // only the `settled` branch calls it — every other caller returns
+        // `Err`. Had the kill not fired, the stub would have finished its
+        // `sleep 60` and exited 0, giving `signal() == None`.
+        assert_eq!(
+            res.status.code(),
+            None,
+            "settle-kill must tear down the long-lived RPC server, but it \
+             exited on its own with {:?} — the 60s sleep ran to completion",
+            res.status
+        );
         assert!(
-            elapsed < std::time::Duration::from_secs(6),
-            "pi run should return promptly after settle, took {:?}",
+            res.status.signal().is_some(),
+            "torn-down RPC server should be reaped as killed-by-signal, got {:?}",
+            res.status
+        );
+        // Safety net only, so a regression that breaks teardown fails fast
+        // instead of blocking for the stub's full 60s sleep. Deliberately far
+        // looser than the real teardown (well under a second) so runner load
+        // can never trip it on its own.
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "pi run should return once settled, took {:?}",
             elapsed
         );
         assert!(
@@ -1889,8 +1870,67 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_run_pi_teardown_not_blocked_by_sigterm_ignoring_grandchild() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Regression guard. `kill_process_group` used to return the moment the
+        // direct child was reaped, never escalating to SIGKILL for the group.
+        // A grandchild that outlived the SIGTERM then kept the stdout/stderr
+        // pipes it inherited open, parking the reader-thread joins that the
+        // kill exists to unblock — so a settled run stayed stuck for as long
+        // as the grandchild ran, with no timeout set to rescue it.
+        //
+        // In the wild this is a race (a shell forks with SIGTERM briefly
+        // ignored and `exec` preserves SIG_IGN, so a signal landing in that
+        // window is simply lost — reproducible roughly 1 run in 40). Here the
+        // grandchild ignores SIGTERM outright, which turns that race into a
+        // deterministic reproduction: with the group-wide SIGKILL removed this
+        // test blocks for the grandchild's full 60s, every time.
+        let dir = tempfile::tempdir().unwrap();
+        let stub_path = dir.path().join("pi");
+        let script = concat!(
+            "#!/bin/sh\n",
+            "read -r _prompt\n",
+            "echo '{\"type\":\"turn_end\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"Hi\"}]}}'\n",
+            // The grandchild arms itself against SIGTERM and only *then*
+            // announces the settle, so the run cannot tear the group down
+            // before the trap is installed — emitting the event from inside
+            // the grandchild is what makes that ordering deterministic rather
+            // than a startup race. It then holds the stdout pipe it inherited.
+            "( trap \"\" TERM; echo '{\"type\":\"agent_settled\"}'; sleep 60 ) &\n",
+            "sleep 60\n",
+            "exit 0\n",
+        );
+        let mut f = std::fs::File::create(&stub_path).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        let mut perms = f.metadata().unwrap().permissions();
+        perms.set_mode(0o755);
+        f.set_permissions(perms).unwrap();
+        drop(f);
+
+        let _path_guard = PathOverride::prepend(dir.path());
+
+        let start = std::time::Instant::now();
+        let result = run_agent_events("pi", "do the thing", RunOptions::default(), |_| {});
+        let elapsed = start.elapsed();
+
+        result.expect("pi run should succeed");
+        // "Did not hang" is inherently a duration, but this is not a wall-clock
+        // proxy for some other condition: blocking IS the regression. The
+        // margin is not tight either way — a healthy teardown finishes in well
+        // under a second, and the broken one parks for the grandchild's full
+        // 60s, so no amount of runner load lands in between.
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "settled run must not be held open by a surviving grandchild, took {:?}",
+            elapsed
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_run_pi_passes_prompt_as_framed_stdin_command() {
-        let _guard = PATH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
@@ -1910,13 +1950,10 @@ mod tests {
         f.set_permissions(perms).unwrap();
         drop(f);
 
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let new_path = format!("{}:{}", dir.path().display(), orig_path);
-        std::env::set_var("PATH", &new_path);
+        let _path_guard = PathOverride::prepend(dir.path());
 
         let result = run_agent_events("pi", "write tests", RunOptions::default(), |_| {});
 
-        std::env::set_var("PATH", orig_path);
         assert!(result.is_ok(), "{:?}", result.err());
 
         let captured_line = std::fs::read_to_string(&captured).unwrap();
