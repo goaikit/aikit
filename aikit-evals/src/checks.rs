@@ -10,7 +10,10 @@ use crate::trace::{TraceEvent, TracePayload};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "name")]
 pub enum CheckDefinition {
-    /// Check whether a pattern appears (or doesn't appear) in the trace
+    /// Legacy substring check over canonical trace JSONL.
+    ///
+    /// Prefer `skill_invoked` when asserting that a skill ran. This check ignores
+    /// raw stdout so agent startup capability listings do not satisfy it.
     #[serde(rename = "trigger_expectation")]
     TriggerExpectation {
         pattern: String,
@@ -19,10 +22,26 @@ pub enum CheckDefinition {
         #[serde(default = "default_required")]
         required: bool,
     },
-    /// Check whether the trace contains a line with this pattern
+    /// Check whether canonical trace JSONL contains this pattern.
+    ///
+    /// Assistant text is represented in trace messages, so answer-text matches
+    /// remain available without consulting raw stdout.
     #[serde(rename = "command_contains")]
     CommandContains {
         pattern: String,
+        #[serde(default = "default_required")]
+        required: bool,
+    },
+    /// Check whether the trace contains a structured `Skill` tool invocation.
+    ///
+    /// When `skill` is omitted, any `Skill` tool use matches. When present, the
+    /// serialized `Skill` input must contain that skill name. `expected = false`
+    /// asserts no matching skill invocation occurred.
+    #[serde(rename = "skill_invoked")]
+    SkillInvoked {
+        skill: Option<String>,
+        #[serde(default = "default_expected")]
+        expected: bool,
         #[serde(default = "default_required")]
         required: bool,
     },
@@ -46,11 +65,16 @@ fn default_required() -> bool {
     true
 }
 
+fn default_expected() -> bool {
+    true
+}
+
 impl CheckDefinition {
     pub fn name(&self) -> &str {
         match self {
             CheckDefinition::TriggerExpectation { .. } => "trigger_expectation",
             CheckDefinition::CommandContains { .. } => "command_contains",
+            CheckDefinition::SkillInvoked { .. } => "skill_invoked",
             CheckDefinition::FileExists { .. } => "file_exists",
             CheckDefinition::MaxToolCalls { .. } => "max_tool_calls",
         }
@@ -60,6 +84,7 @@ impl CheckDefinition {
         match self {
             CheckDefinition::TriggerExpectation { required, .. } => *required,
             CheckDefinition::CommandContains { required, .. } => *required,
+            CheckDefinition::SkillInvoked { required, .. } => *required,
             CheckDefinition::FileExists { required, .. } => *required,
             CheckDefinition::MaxToolCalls { required, .. } => *required,
         }
@@ -71,6 +96,8 @@ impl CheckDefinition {
 pub struct CheckResult {
     pub check_name: String,
     pub passed: bool,
+    #[serde(default = "default_required")]
+    pub required: bool,
     pub message: Option<String>,
 }
 
@@ -147,13 +174,13 @@ fn run_single_check(
     trace_jsonl: &str,
     working_dir: &std::path::Path,
 ) -> CheckResult {
+    let required = check.is_required();
     match check {
         CheckDefinition::TriggerExpectation {
             pattern, expected, ..
         } => {
-            // Literal substring matching in stdout + trace
-            let combined = format!("{}\n{}", stdout_content, trace_jsonl);
-            let found = combined.contains(pattern.as_str());
+            let _ = stdout_content;
+            let found = trace_jsonl.contains(pattern.as_str());
             let passed = found == *expected;
             let message = if passed {
                 None
@@ -165,20 +192,45 @@ fn run_single_check(
             CheckResult {
                 check_name: "trigger_expectation".to_string(),
                 passed,
+                required,
                 message,
             }
         }
         CheckDefinition::CommandContains { pattern, .. } => {
-            let combined = format!("{}\n{}", stdout_content, trace_jsonl);
-            let passed = combined.contains(pattern.as_str());
+            let _ = stdout_content;
+            let passed = trace_jsonl.contains(pattern.as_str());
             let message = if passed {
                 None
             } else {
-                Some(format!("Pattern '{}' not found in output", pattern))
+                Some(format!("Pattern '{}' not found in trace", pattern))
             };
             CheckResult {
                 check_name: "command_contains".to_string(),
                 passed,
+                required,
+                message,
+            }
+        }
+        CheckDefinition::SkillInvoked {
+            skill, expected, ..
+        } => {
+            let found = skill_invoked(trace_jsonl, skill.as_deref());
+            let passed = found == *expected;
+            let target = skill.as_deref().unwrap_or("any skill");
+            let message = if passed {
+                None
+            } else if *expected {
+                Some(format!("Skill invocation '{}' not found", target))
+            } else {
+                Some(format!(
+                    "Skill invocation '{}' found but was not expected",
+                    target
+                ))
+            };
+            CheckResult {
+                check_name: "skill_invoked".to_string(),
+                passed,
+                required,
                 message,
             }
         }
@@ -193,6 +245,7 @@ fn run_single_check(
             CheckResult {
                 check_name: "file_exists".to_string(),
                 passed,
+                required,
                 message,
             }
         }
@@ -207,15 +260,33 @@ fn run_single_check(
             CheckResult {
                 check_name: "max_tool_calls".to_string(),
                 passed,
+                required,
                 message,
             }
         }
     }
 }
 
+fn skill_invoked(trace_jsonl: &str, skill: Option<&str>) -> bool {
+    trace_jsonl
+        .lines()
+        .filter_map(|line| serde_json::from_str::<TraceEvent>(line).ok())
+        .any(|event| match event.payload {
+            TracePayload::ToolUse {
+                tool_name, input, ..
+            } if tool_name == "Skill" => match skill {
+                Some(skill) => {
+                    serde_json::to_string(&input).is_ok_and(|serialized| serialized.contains(skill))
+                }
+                None => true,
+            },
+            _ => false,
+        })
+}
+
 /// Aggregate check results: suite passes if all required checks pass
 pub fn suite_passes(results: &[CheckResult]) -> bool {
-    results.iter().all(|r| r.passed)
+    results.iter().filter(|r| r.required).all(|r| r.passed)
 }
 
 #[cfg(test)]
@@ -231,7 +302,8 @@ mod tests {
             expected: true,
             required: true,
         };
-        let results = run_checks(&[check], "fastskill triggered", "", Path::new("/tmp"));
+        let trace = r#"{"seq":0,"payload":{"type":"message","text":"fastskill triggered","role":"assistant"}}"#;
+        let results = run_checks(&[check], "", trace, Path::new("/tmp"));
         assert!(results[0].passed);
     }
 
@@ -264,12 +336,81 @@ mod tests {
             expected: false,
             required: true,
         };
-        let results = run_checks(&[check], "fastskill triggered", "", Path::new("/tmp"));
+        let trace = r#"{"seq":0,"payload":{"type":"message","text":"fastskill triggered","role":"assistant"}}"#;
+        let results = run_checks(&[check], "", trace, Path::new("/tmp"));
         assert!(!results[0].passed);
         assert_eq!(
             results[0].message.as_deref(),
             Some("Pattern 'fastskill' found but was not expected")
         );
+    }
+
+    #[test]
+    fn test_trigger_expectation_ignores_stdout_capability_listing() {
+        let stdout = include_str!("../../aikit-sdk/tests/fixtures/recorded_case01/claude.jsonl");
+        assert!(
+            stdout.contains("\"fastskill\""),
+            "fixture must contain the false-positive skill listing"
+        );
+        let trace = r#"{"seq":0,"payload":{"type":"message","text":"ok.","role":"assistant"}}"#;
+        let check = CheckDefinition::TriggerExpectation {
+            pattern: "fastskill".to_string(),
+            expected: true,
+            required: true,
+        };
+
+        let results = run_checks(&[check], stdout, trace, Path::new("/tmp"));
+
+        assert!(
+            !results[0].passed,
+            "stdout-only skill listings must not satisfy trigger_expectation"
+        );
+        assert_eq!(
+            results[0].message.as_deref(),
+            Some("Pattern 'fastskill' not found but was expected")
+        );
+    }
+
+    #[test]
+    fn test_trigger_expectation_negative_ignores_stdout_capability_listing() {
+        let stdout = include_str!("../../aikit-sdk/tests/fixtures/recorded_case01/claude.jsonl");
+        let trace = r#"{"seq":0,"payload":{"type":"message","text":"ok.","role":"assistant"}}"#;
+        let check = CheckDefinition::TriggerExpectation {
+            pattern: "fastskill".to_string(),
+            expected: false,
+            required: true,
+        };
+
+        let results = run_checks(&[check], stdout, trace, Path::new("/tmp"));
+
+        assert!(
+            results[0].passed,
+            "expected=false should pass when the trace has no matching trigger"
+        );
+    }
+
+    #[test]
+    fn test_command_contains_uses_trace_not_stdout() {
+        let check = CheckDefinition::CommandContains {
+            pattern: "trace-only".to_string(),
+            required: true,
+        };
+
+        let stdout_only = run_checks(
+            std::slice::from_ref(&check),
+            "trace-only",
+            r#"{"seq":0,"payload":{"type":"message","text":"different","role":"assistant"}}"#,
+            Path::new("/tmp"),
+        );
+        let trace_match = run_checks(
+            &[check],
+            "",
+            r#"{"seq":0,"payload":{"type":"message","text":"trace-only","role":"assistant"}}"#,
+            Path::new("/tmp"),
+        );
+
+        assert!(!stdout_only[0].passed);
+        assert!(trace_match[0].passed);
     }
 
     #[test]
@@ -283,6 +424,11 @@ mod tests {
             CheckDefinition::CommandContains {
                 pattern: "b".to_string(),
                 required: true,
+            },
+            CheckDefinition::SkillInvoked {
+                skill: Some("d".to_string()),
+                expected: true,
+                required: false,
             },
             CheckDefinition::FileExists {
                 path: PathBuf::from("c"),
@@ -298,10 +444,82 @@ mod tests {
         assert!(!checks[0].is_required());
         assert_eq!(checks[1].name(), "command_contains");
         assert!(checks[1].is_required());
-        assert_eq!(checks[2].name(), "file_exists");
+        assert_eq!(checks[2].name(), "skill_invoked");
         assert!(!checks[2].is_required());
-        assert_eq!(checks[3].name(), "max_tool_calls");
-        assert!(checks[3].is_required());
+        assert_eq!(checks[3].name(), "file_exists");
+        assert!(!checks[3].is_required());
+        assert_eq!(checks[4].name(), "max_tool_calls");
+        assert!(checks[4].is_required());
+    }
+
+    #[test]
+    fn test_skill_invoked_matches_any_skill_tool_use() {
+        let check = CheckDefinition::SkillInvoked {
+            skill: None,
+            expected: true,
+            required: true,
+        };
+        let trace = r#"{"seq":0,"payload":{"type":"tool_use","call_id":"call_1","tool_name":"Skill","input":{"skill":"greeting-helper"}}}"#;
+
+        let results = run_checks(&[check], "", trace, Path::new("/tmp"));
+
+        assert!(results[0].passed);
+        assert_eq!(results[0].check_name, "skill_invoked");
+    }
+
+    #[test]
+    fn test_skill_invoked_matches_named_skill_input() {
+        let check = CheckDefinition::SkillInvoked {
+            skill: Some("greeting-helper".to_string()),
+            expected: true,
+            required: true,
+        };
+        let trace = r#"{"seq":0,"payload":{"type":"tool_use","call_id":"call_1","tool_name":"Skill","input":{"name":"greeting-helper"}}}"#;
+
+        let results = run_checks(&[check], "", trace, Path::new("/tmp"));
+
+        assert!(results[0].passed);
+    }
+
+    #[test]
+    fn test_skill_invoked_rejects_other_tools_and_stdout_listing() {
+        let stdout = include_str!("../../aikit-sdk/tests/fixtures/recorded_case01/claude.jsonl");
+        let check = CheckDefinition::SkillInvoked {
+            skill: Some("fastskill".to_string()),
+            expected: true,
+            required: true,
+        };
+        let bash_trace = r#"{"seq":0,"payload":{"type":"tool_use","call_id":"call_1","tool_name":"Bash","input":{"command":"fastskill"}}}"#;
+        let no_tool_trace =
+            r#"{"seq":0,"payload":{"type":"message","text":"fastskill","role":"assistant"}}"#;
+
+        let bash_results = run_checks(
+            std::slice::from_ref(&check),
+            "",
+            bash_trace,
+            Path::new("/tmp"),
+        );
+        let no_tool_results = run_checks(&[check], stdout, no_tool_trace, Path::new("/tmp"));
+
+        assert!(!bash_results[0].passed);
+        assert!(
+            !no_tool_results[0].passed,
+            "stdout skill listings and assistant prose are not Skill tool invocations"
+        );
+    }
+
+    #[test]
+    fn test_skill_invoked_expected_false_passes_when_absent() {
+        let check = CheckDefinition::SkillInvoked {
+            skill: Some("greeting-helper".to_string()),
+            expected: false,
+            required: true,
+        };
+        let trace = r#"{"seq":0,"payload":{"type":"tool_use","call_id":"call_1","tool_name":"Bash","input":{"command":"echo greeting-helper"}}}"#;
+
+        let results = run_checks(&[check], "", trace, Path::new("/tmp"));
+
+        assert!(results[0].passed);
     }
 
     #[test]
@@ -401,6 +619,24 @@ limit = 1
     }
 
     #[test]
+    fn test_skill_invoked_toml_defaults_expected_and_required_to_true() {
+        let toml = r#"
+[[check]]
+name = "skill_invoked"
+skill = "greeting-helper"
+"#;
+        let parsed: ChecksToml = toml::from_str(toml).unwrap();
+        assert!(matches!(
+            &parsed.checks[0],
+            CheckDefinition::SkillInvoked {
+                skill: Some(skill),
+                expected: true,
+                required: true
+            } if skill == "greeting-helper"
+        ));
+    }
+
+    #[test]
     fn test_count_raw_json_events_ignores_substring_only() {
         let trace = r#"{"seq":0,"payload":{"type":"raw_line","line":"mentions raw_json text"}}
 {"seq":1,"payload":{"type":"raw_json","data":{"cmd":"x"}}}"#;
@@ -413,11 +649,13 @@ limit = 1
             CheckResult {
                 check_name: "a".to_string(),
                 passed: true,
+                required: true,
                 message: None,
             },
             CheckResult {
                 check_name: "b".to_string(),
                 passed: true,
+                required: true,
                 message: None,
             },
         ];
@@ -430,15 +668,44 @@ limit = 1
             CheckResult {
                 check_name: "a".to_string(),
                 passed: true,
+                required: true,
                 message: None,
             },
             CheckResult {
                 check_name: "b".to_string(),
                 passed: false,
+                required: true,
                 message: Some("failed".to_string()),
             },
         ];
         assert!(!suite_passes(&results));
+    }
+
+    #[test]
+    fn test_suite_passes_ignores_optional_failures() {
+        let results = vec![
+            CheckResult {
+                check_name: "required".to_string(),
+                passed: true,
+                required: true,
+                message: None,
+            },
+            CheckResult {
+                check_name: "optional".to_string(),
+                passed: false,
+                required: false,
+                message: Some("advisory".to_string()),
+            },
+        ];
+
+        assert!(suite_passes(&results));
+    }
+
+    #[test]
+    fn test_check_result_missing_required_deserializes_as_required() {
+        let json = r#"{"check_name":"legacy","passed":true,"message":null}"#;
+        let result: CheckResult = serde_json::from_str(json).unwrap();
+        assert!(result.required);
     }
 
     #[test]
