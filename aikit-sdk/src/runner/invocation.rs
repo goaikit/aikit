@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 
 use super::backend::Backend;
-use super::types::{KnobSupport, RunOptions, SandboxPolicy};
+use super::types::{KnobSupport, RunOptions, SandboxPolicy, SkillIsolation};
 
 /// The per-call invocation envelope: every spec-013 knob expressed as data.
 /// Built from [`RunOptions`] at the subprocess boundary and mapped per-Backend
@@ -41,6 +41,10 @@ pub struct InvocationEnvelope {
     pub ephemeral: bool,
     /// `--skip-git-repo-check` (D6).
     pub skip_git_repo_check: bool,
+    /// Restrict the skill surface to one materialized skill (spec 016 D3).
+    /// Carried on the envelope so every backend's argv builder sees the
+    /// payload (pi needs `--skill <path>`) without an `ArgvCtx` change.
+    pub skill_isolation: Option<SkillIsolation>,
 }
 
 impl InvocationEnvelope {
@@ -56,6 +60,7 @@ impl InvocationEnvelope {
             bare: opts.bare,
             ephemeral: opts.ephemeral,
             skip_git_repo_check: opts.skip_git_repo_check,
+            skill_isolation: opts.skill_isolation.clone(),
         }
     }
 
@@ -70,6 +75,7 @@ impl InvocationEnvelope {
             || self.bare
             || self.ephemeral
             || self.skip_git_repo_check
+            || self.skill_isolation.is_some()
     }
 }
 
@@ -185,6 +191,38 @@ impl Backend {
             _ => KnobSupport::Unsupported,
         }
     }
+
+    /// `skill_isolation` support (spec 016 D3) — a *fidelity* knob, never
+    /// fail-closed (D4). Mechanisms are per-backend and empirically verified
+    /// (spec 016 Appendices A/B):
+    ///
+    /// - claude: `--setting-sources project` (36→19 skills, plugins gone,
+    ///   skill under test retained, auth intact). NOT `--bare`, which drops
+    ///   the skill under test and breaks OAuth auth.
+    /// - codex: scratch `CODEX_HOME` containing a copied `auth.json`. NOT
+    ///   `--ignore-user-config`, which is a measured no-op for skills.
+    /// - pi: `--no-skills` **paired with** `--skill <path>` — both or
+    ///   neither; `--no-skills` alone removes the skill under test.
+    /// - gemini/cursor: no per-run mechanism exists (`gemini skills
+    ///   enable/disable` is stateful; cursor-agent exposes only `--sandbox`).
+    /// - opencode: no mechanism *and* no skills path in the deploy catalog.
+    /// - aikit: in-process; `AgentConfig.skills_dirs` is an explicit
+    ///   caller-supplied list, so isolation is emulated by pointing it at the
+    ///   scratch skills dir only.
+    ///
+    /// Exhaustive match, no `_` arm: adding a Backend must force an explicit
+    /// isolation decision (do not copy `ephemeral_support`'s `_` fallback).
+    pub fn skill_isolation_support(self) -> KnobSupport {
+        match self {
+            Backend::Claude => KnobSupport::SupportedAppLevel,
+            Backend::Codex => KnobSupport::SupportedAppLevel,
+            Backend::Pi => KnobSupport::SupportedAppLevel,
+            Backend::Gemini => KnobSupport::Unsupported,
+            Backend::Cursor => KnobSupport::Unsupported,
+            Backend::OpenCode => KnobSupport::Unsupported,
+            Backend::Aikit => KnobSupport::Emulated,
+        }
+    }
 }
 
 /// Pre-flight resolution (spec 013 D5). Security knobs (`--sandbox`,
@@ -253,6 +291,7 @@ pub fn format_capabilities(backend: Backend) -> String {
         ("bare", backend.bare_support()),
         ("ephemeral", backend.ephemeral_support()),
         ("skip-git-repo-check", backend.skip_git_repo_check_support()),
+        ("skill-isolation", backend.skill_isolation_support()),
     ] {
         out.push_str(&format!("{:21} {}\n", knob, knob_support_label(support)));
     }
@@ -298,6 +337,21 @@ pub fn sandbox_env_for(backend: Backend, env: &InvocationEnvelope) -> Vec<(Strin
         out.push(("SANDBOX_MOUNTS".to_string(), mounts.join(",")));
     }
     out
+}
+
+/// Env vars to apply to the spawned agent Command for the envelope's
+/// `skill_isolation` knob (spec 016 D3). codex's mechanism is a home-directory
+/// swap rather than an argv flag: point `CODEX_HOME` at the caller-allocated
+/// scratch home (which holds only a copied `auth.json` — never log it, never
+/// retain it). Every other backend maps isolation via argv (or in-process
+/// config) and returns empty.
+pub fn isolation_env_for(backend: Backend, env: &InvocationEnvelope) -> Vec<(String, String)> {
+    if let (Backend::Codex, Some(iso)) = (backend, env.skill_isolation.as_ref()) {
+        if let Some(home) = &iso.codex_home {
+            return vec![("CODEX_HOME".to_string(), home.display().to_string())];
+        }
+    }
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -386,10 +440,116 @@ mod tests {
             let _ = b.bare_support();
             let _ = b.ephemeral_support();
             let _ = b.skip_git_repo_check_support();
+            let _ = b.skill_isolation_support();
             for &p in SandboxPolicy::ALL {
                 let _ = b.sandbox_support(p);
             }
         }
+    }
+
+    fn test_isolation() -> SkillIsolation {
+        SkillIsolation {
+            workspace_root: PathBuf::from("/scratch/ws"),
+            skill_path: PathBuf::from("/scratch/ws/.claude/skills/my-skill"),
+            skill_name: "my-skill".to_string(),
+            codex_home: None,
+        }
+    }
+
+    /// The spec-016 D3 matrix, locked value-by-value so a change is a
+    /// conscious decision (and exhaustive over ALL so a new Backend that
+    /// forgets a row fails here too).
+    #[test]
+    fn skill_isolation_support_matrix() {
+        for &b in ALL {
+            let expected = match b {
+                Backend::Claude | Backend::Codex | Backend::Pi => KnobSupport::SupportedAppLevel,
+                Backend::Gemini | Backend::Cursor | Backend::OpenCode => KnobSupport::Unsupported,
+                Backend::Aikit => KnobSupport::Emulated,
+            };
+            assert_eq!(
+                b.skill_isolation_support(),
+                expected,
+                "skill_isolation_support for {b:?}"
+            );
+        }
+    }
+
+    /// spec 016 D4: isolation is a fidelity knob, not a trust boundary —
+    /// resolve_envelope must NOT reject it on any backend, including the ones
+    /// that cannot honor it (they run anyway and report degraded fidelity).
+    #[test]
+    fn resolve_skill_isolation_never_fails_closed() {
+        let env = InvocationEnvelope {
+            skill_isolation: Some(test_isolation()),
+            ..Default::default()
+        };
+        for &b in ALL {
+            assert!(
+                resolve_envelope(b, &env).is_ok(),
+                "skill_isolation must never fail closed, but did for {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn isolation_env_codex_home_only() {
+        // codex with an allocated scratch home → CODEX_HOME points at it.
+        let with_home = InvocationEnvelope {
+            skill_isolation: Some(SkillIsolation {
+                codex_home: Some(PathBuf::from("/scratch/codex-home")),
+                ..test_isolation()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            isolation_env_for(Backend::Codex, &with_home),
+            vec![("CODEX_HOME".to_string(), "/scratch/codex-home".to_string())]
+        );
+        // codex without a scratch home → no override (degraded, reported by
+        // the caller — never a half-configured env).
+        let without_home = InvocationEnvelope {
+            skill_isolation: Some(test_isolation()),
+            ..Default::default()
+        };
+        assert!(isolation_env_for(Backend::Codex, &without_home).is_empty());
+        // every other backend never gets CODEX_HOME.
+        for &b in ALL {
+            if b != Backend::Codex {
+                assert!(
+                    isolation_env_for(b, &with_home).is_empty(),
+                    "no isolation env expected for {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn format_capabilities_includes_skill_isolation_row() {
+        let s = format_capabilities(Backend::Claude);
+        assert!(
+            s.lines()
+                .any(|l| l.trim_start().starts_with("skill-isolation")
+                    && l.contains("supported (app-level)")),
+            "claude skill-isolation row missing/wrong:\n{s}"
+        );
+        let s = format_capabilities(Backend::Aikit);
+        assert!(
+            s.lines()
+                .any(|l| l.trim_start().starts_with("skill-isolation") && l.contains("emulated")),
+            "aikit skill-isolation row missing/wrong:\n{s}"
+        );
+    }
+
+    #[test]
+    fn envelope_carries_skill_isolation_and_activates() {
+        let opts = RunOptions::default().with_skill_isolation(test_isolation());
+        let env = InvocationEnvelope::from_options(&opts);
+        assert_eq!(env.skill_isolation, Some(test_isolation()));
+        assert!(
+            env.is_active(),
+            "skill_isolation alone must activate the envelope, or backends never see it"
+        );
     }
 
     #[test]

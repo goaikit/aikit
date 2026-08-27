@@ -333,7 +333,13 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
             argv.push(OsString::from("--add-dir"));
             argv.push(root.as_os_str().to_owned());
         }
-        if e.skip_git_repo_check {
+        // spec 016 D3: scratch isolation workspaces are not git repos and
+        // codex hard-errors ("Not inside a trusted directory") without the
+        // guard skip, so isolation implies it. The user-scope mechanism for
+        // codex is the scratch CODEX_HOME env (see
+        // `invocation::isolation_env_for`), NOT `--ignore-user-config`, which
+        // is a measured no-op for skills (Appendix B).
+        if e.skip_git_repo_check || e.skill_isolation.is_some() {
             argv.push(OsString::from("--skip-git-repo-check"));
         }
         if e.ephemeral {
@@ -359,5 +365,93 @@ fn codex_sandbox_token(policy: SandboxPolicy) -> &'static str {
         SandboxPolicy::ReadOnly => "read-only",
         SandboxPolicy::BoundedWrite => "workspace-write",
         SandboxPolicy::Unrestricted => "danger-full-access",
+    }
+}
+
+#[cfg(test)]
+mod argv_tests {
+    use super::*;
+    use crate::runner::invocation::InvocationEnvelope;
+    use crate::runner::types::SkillIsolation;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    fn ctx(envelope: Option<&InvocationEnvelope>) -> ArgvCtx<'_> {
+        ArgvCtx {
+            model: None,
+            yolo: true,
+            stream: true,
+            events_mode: true,
+            session_id: None,
+            envelope,
+        }
+    }
+
+    fn isolation_envelope() -> InvocationEnvelope {
+        InvocationEnvelope {
+            skill_isolation: Some(SkillIsolation {
+                workspace_root: PathBuf::from("/scratch/ws"),
+                skill_path: PathBuf::from("/scratch/ws/.codex/skills/my-skill"),
+                skill_name: "my-skill".to_string(),
+                codex_home: Some(PathBuf::from("/scratch/codex-home")),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn argv_isolation_adds_skip_git_repo_check() {
+        let env = isolation_envelope();
+        let argv = argv(ctx(Some(&env)));
+        assert!(
+            argv.contains(&OsString::from("--skip-git-repo-check")),
+            "scratch workspaces are not git repos; codex hard-errors without the skip: {argv:?}"
+        );
+    }
+
+    /// Appendix B regression guard: `--ignore-user-config` is a measured
+    /// no-op for skills (`$CODEX_HOME/skills` still loads under it) and must
+    /// never be emitted as the isolation mechanism. The mechanism is the
+    /// scratch `CODEX_HOME` env (see `invocation::isolation_env_for`).
+    #[test]
+    fn argv_isolation_never_emits_ignore_user_config() {
+        let env = isolation_envelope();
+        let argv = argv(ctx(Some(&env)));
+        assert!(
+            !argv.contains(&OsString::from("--ignore-user-config")),
+            "isolation must not use --ignore-user-config as its mechanism: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn argv_isolation_plus_explicit_skip_emits_flag_once() {
+        let env = InvocationEnvelope {
+            skip_git_repo_check: true,
+            ..isolation_envelope()
+        };
+        let argv = argv(ctx(Some(&env)));
+        let count = argv
+            .iter()
+            .filter(|a| *a == &OsString::from("--skip-git-repo-check"))
+            .count();
+        assert_eq!(count, 1, "flag must not be duplicated: {argv:?}");
+    }
+
+    #[test]
+    fn argv_without_isolation_unchanged() {
+        let argv = argv(ctx(Some(&InvocationEnvelope::default())));
+        assert!(!argv.contains(&OsString::from("--skip-git-repo-check")));
+        assert!(!argv.contains(&OsString::from("--ignore-user-config")));
+    }
+
+    #[test]
+    fn argv_bare_still_maps_to_ignore_user_config() {
+        // `bare` keeps its existing (spec 013) mapping — spec 016 leaves it alone.
+        let env = InvocationEnvelope {
+            bare: true,
+            ..Default::default()
+        };
+        let argv = argv(ctx(Some(&env)));
+        assert!(argv.contains(&OsString::from("--ignore-user-config")));
     }
 }

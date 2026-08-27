@@ -46,6 +46,7 @@ where
     config.host_tool_provider = host_tool_provider;
 
     apply_session_options(options, &mut config);
+    apply_isolation_options(options, &mut config);
 
     let gateway = OpenAiCompatProvider::new(config.timeout_secs, config.connect_timeout_secs)
         .map_err(|e| emit_error(prompt, options, &mut on_event, e.to_string()))?;
@@ -82,6 +83,7 @@ where
     let mut config = config_for_injected_gateway(workdir, options);
 
     apply_session_options(options, &mut config);
+    apply_isolation_options(options, &mut config);
 
     let resolved_store = store.unwrap_or_else(SessionStore::open);
     run_with_config_and_gateway(
@@ -143,6 +145,23 @@ fn agents_md_path(workdir: &std::path::Path) -> Option<PathBuf> {
         Some(claude_md)
     } else {
         None
+    }
+}
+
+/// spec 016 D3, aikit row (`Emulated`): under skill isolation the in-process
+/// agent's skill roots are replaced with exactly the scratch skills dir (the
+/// parent of the materialized skill dir). `FilesystemSkillProvider::discover`
+/// reads only the roots it is handed and `AgentConfig::from_env` has no
+/// home-dir discovery — but it does honor `AIKIT_SKILLS_DIR` and a
+/// `<cwd>/.aikit/skills`, so the override must be a *replacement*, not an
+/// append, for the surface to be exactly the skill under test.
+fn apply_isolation_options(options: &RunOptions, config: &mut AgentConfig) {
+    if let Some(iso) = &options.skill_isolation {
+        config.skills_dirs = iso
+            .skill_path
+            .parent()
+            .map(|p| vec![p.to_path_buf()])
+            .unwrap_or_default();
     }
 }
 
@@ -777,6 +796,46 @@ mod tests {
             .expect("session persona should be applied onto AgentConfig");
         assert_eq!(sp.disallowed_tools, Some(vec!["run_bash".to_string()]));
         assert!(sp.tools.is_none());
+    }
+
+    // spec 016 D3, aikit row: skill isolation must REPLACE the agent's skill
+    // roots with exactly the scratch skills dir — appending would keep the
+    // ambient AIKIT_SKILLS_DIR / .aikit/skills surface in play.
+    #[test]
+    fn skill_isolation_replaces_skills_dirs_with_scratch_root_only() {
+        use crate::SkillIsolation;
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_path = tmp.path().join(".aikit/skills/my-skill");
+        let options = RunOptions::default().with_skill_isolation(SkillIsolation {
+            workspace_root: tmp.path().to_path_buf(),
+            skill_path: skill_path.clone(),
+            skill_name: "my-skill".to_string(),
+            codex_home: None,
+        });
+        let mut config = config_for_injected_gateway(tmp.path().to_path_buf(), &options);
+        // Simulate an ambient skills root picked up before isolation applies.
+        config.skills_dirs = vec![PathBuf::from("/home/user/.ambient/skills")];
+
+        apply_isolation_options(&options, &mut config);
+
+        assert_eq!(
+            config.skills_dirs,
+            vec![tmp.path().join(".aikit/skills")],
+            "skills_dirs must be exactly the scratch skills root"
+        );
+    }
+
+    #[test]
+    fn no_isolation_leaves_skills_dirs_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let options = RunOptions::default();
+        let mut config = config_for_injected_gateway(tmp.path().to_path_buf(), &options);
+        config.skills_dirs = vec![PathBuf::from("/home/user/.ambient/skills")];
+        apply_isolation_options(&options, &mut config);
+        assert_eq!(
+            config.skills_dirs,
+            vec![PathBuf::from("/home/user/.ambient/skills")]
+        );
     }
 
     #[test]
