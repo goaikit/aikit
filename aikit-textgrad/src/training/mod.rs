@@ -672,6 +672,93 @@ mod tests {
         assert!(cfg.isolate, "missing isolate key must default to ON (D5)");
     }
 
+    /// spec 016 D7 at the rollout seam, with the REAL runner: the fake agent
+    /// drops a file in its cwd; the rollout's file_exists scorer must score
+    /// against the per-case isolated workspace (where the file is), not the
+    /// nominal per-pass project root (where it is not).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_rollout_scores_against_isolated_per_case_workspace() {
+        use aikit_evals::{AikitEvalRunner, CheckDefinition, ChecksScorer};
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+
+        let bin = TempDir::new().unwrap();
+        let script = bin.path().join("claude");
+        {
+            let mut f = std::fs::File::create(&script).unwrap();
+            writeln!(
+                f,
+                "#!/bin/sh\ntouch dropped.txt\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\",\"session_id\":\"s\"}}'"
+            )
+            .unwrap();
+        }
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let previous_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", bin.path().display(), previous_path),
+        );
+
+        let dir = TempDir::new().unwrap();
+        tokio::fs::write(dir.path().join("history.json"), b"[]")
+            .await
+            .unwrap();
+        let mut artifact = SimpleArtifact {
+            text: "skill text".to_string(),
+        };
+        let mut config = make_config();
+        config.target_agent = "claude".to_string();
+        let mut state = RuntimeState {
+            config: config.clone(),
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score: 0.0,
+            current_score: 0.0,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: "strategy".to_string(),
+        };
+        let scorer = ChecksScorer {
+            checks: vec![CheckDefinition::FileExists {
+                path: PathBuf::from("dropped.txt"),
+                required: true,
+            }],
+        };
+
+        step::run_step(
+            &mut artifact,
+            &[make_eval_case("roll-1", &["train"])],
+            &[make_eval_case("sel-1", &["selection"])],
+            &scorer,
+            &AikitEvalRunner::new(),
+            "scaffold",
+            "strategy",
+            &config,
+            &mut state,
+            dir.path(),
+            "",
+        )
+        .await
+        .unwrap();
+
+        let rollouts: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(dir.path().join("steps/step_0000/rollouts.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let score = rollouts[0]["score"].as_f64().unwrap();
+        assert!(
+            (score - 1.0).abs() < 1e-9,
+            "file_exists must be scored against the isolated per-case workspace, got {score}"
+        );
+        std::env::set_var("PATH", previous_path);
+    }
+
     // ---- AC27: NoSelectionCases ----
 
     #[tokio::test]
