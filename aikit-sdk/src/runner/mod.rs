@@ -1397,11 +1397,15 @@ mod tests {
             "Expected TimedOut, got {:?}",
             result.map(|_| ())
         );
-        // The stub sleeps for 60s; the call must return promptly after the
-        // 500ms timeout (well under the SIGTERM->3s grace->SIGKILL ceiling),
-        // not hang until the child's sleep completes (ADR 0014 / BUG-1).
+        // The stub sleeps for 60s; the call must return after the 500ms
+        // timeout plus at most the SIGTERM->3s grace->SIGKILL ceiling, not
+        // hang until the child's sleep completes (ADR 0014 / BUG-1). The
+        // margin is a safety net, deliberately far looser than the ~3.5s
+        // healthy ceiling so runner load can never trip it on its own, while
+        // the broken path parks for the stub's full 60s — no amount of load
+        // lands in between.
         assert!(
-            elapsed < Duration::from_secs(6),
+            elapsed < Duration::from_secs(30),
             "run_agent_events should return promptly after timeout, took {:?}",
             elapsed
         );
@@ -1687,8 +1691,12 @@ mod tests {
             "external cancel should terminate the run, got {:?}",
             result.map(|_| ())
         );
+        // Safety-net margin, not a latency assertion: a healthy cancel tears
+        // down in well under 4s (SIGTERM->3s grace->SIGKILL ceiling) and the
+        // broken path blocks for the stub's full 60s sleep, so 30s cannot be
+        // tripped by runner load yet still fails fast on a real regression.
         assert!(
-            elapsed < Duration::from_secs(6),
+            elapsed < Duration::from_secs(30),
             "external cancel should return promptly, took {:?}",
             elapsed
         );
