@@ -1,31 +1,147 @@
 //! Eval runner implementation using aikit-sdk
 
-use crate::artifacts::{CaseResult, CaseStatus, CaseTrialsResult, TrialResult};
+use crate::artifacts::{
+    CaseResult, CaseStatus, CaseTrialsResult, IsolationReport, ScopeFidelity, TrialResult,
+};
 use crate::checks::{count_command_events, run_checks, suite_passes, CheckDefinition};
+use crate::codex_home::CodexScratchHome;
 use crate::suite::EvalCase;
 use crate::trace::{agent_events_to_trace, trace_to_jsonl, TraceEvent, TracePayload};
-use aikit_sdk::{run_agent_events, AgentEvent, RunOptions};
+use aikit_sdk::runner::{Backend, KnobSupport};
+use aikit_sdk::{run_agent_events, AgentEvent, RunOptions, SkillIsolation};
 use async_trait::async_trait;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
-/// Options for running a single eval case
+/// Where an isolated case's `SKILL.md` comes from (spec 016 D1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillSource {
+    /// SKILL.md content held in memory (the optimize loop already has it).
+    Inline(String),
+    /// A skill directory on disk containing `SKILL.md` (and support files) —
+    /// the eval path reads it off the skill project.
+    Dir(PathBuf),
+}
+
+/// Environment isolation for one eval case (spec 016 D1).
+///
+/// The skill identity lives *inside* the `Isolated` variant: the runner
+/// cannot materialize a skill it cannot name, and `(Isolated, no skill)` is
+/// unrepresentable by construction rather than a runtime error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IsolationMode {
+    /// Per-case scratch workspace containing only this skill, plus
+    /// per-backend user-scope suppression (spec 016 D2/D3).
+    Isolated {
+        skill_name: String,
+        source: SkillSource,
+    },
+    /// Legacy behaviour: run in `project_root`, inherit everything.
+    Inherit,
+}
+
+/// Options for running a single eval case.
+///
+/// Deliberately has **no `Default` impl** (spec 016 D1): adding a field is a
+/// compile error at every construction site, forcing each caller to make an
+/// explicit isolation decision instead of silently inheriting one.
 #[derive(Debug, Clone)]
 pub struct CaseRunOptions {
     /// Agent key (e.g. "codex", "claude")
     pub agent_key: String,
     /// Optional model override
     pub model: Option<String>,
-    /// Skill project root (used as working directory when no workspace_subdir)
+    /// Skill project root. Under [`IsolationMode::Inherit`] this is the
+    /// working directory; under `Isolated` it is only the source of declared
+    /// `workspace_subdir` fixture contents (spec 016 D2).
     pub project_root: PathBuf,
     /// Timeout in seconds
     pub timeout_seconds: u64,
     /// Per-case trial aggregation pass threshold (0.0-1.0)
     pub pass_threshold: f64,
+    /// Environment isolation for this case (spec 016 D1). See [`IsolationMode`].
+    pub isolation: IsolationMode,
+    /// Where to move a failed scratch workspace so it survives for debugging
+    /// (spec 016 D2). `None` = always delete. The caller owns the policy; the
+    /// runner owns the mechanism.
+    pub retain_workspace_in: Option<PathBuf>,
+}
+
+/// A per-case scratch workspace handed back to the caller so post-run scoring
+/// (e.g. `file_exists` in the optimize path) can still see it. A `Scratch`
+/// workspace is deleted when this value is dropped; a `Retained` one was
+/// moved under the caller's retention dir and survives.
+#[derive(Debug)]
+pub struct CaseWorkspace {
+    root: WorkspaceRoot,
+    working_dir: PathBuf,
+}
+
+#[derive(Debug)]
+enum WorkspaceRoot {
+    Scratch(tempfile::TempDir),
+    Retained(PathBuf),
+}
+
+impl CaseWorkspace {
+    /// Root of the workspace (the parent of e.g. `.claude/skills`).
+    pub fn root(&self) -> &Path {
+        match &self.root {
+            WorkspaceRoot::Scratch(dir) => dir.path(),
+            WorkspaceRoot::Retained(path) => path,
+        }
+    }
+
+    /// The directory the agent ran in (`root` or `root/<workspace_subdir>`).
+    pub fn working_dir(&self) -> &Path {
+        &self.working_dir
+    }
+
+    /// True when the workspace was moved to a retention dir (failed case).
+    pub fn is_retained(&self) -> bool {
+        matches!(self.root, WorkspaceRoot::Retained(_))
+    }
+
+    /// Move a failed scratch workspace under `retain_in` so it survives for
+    /// debugging (spec 016 D2), printing the surviving path.
+    fn retain_into(self, retain_in: &Path, case_id: &str) -> CaseWorkspace {
+        let subdir_rel = self
+            .working_dir
+            .strip_prefix(self.root())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        match self.root {
+            WorkspaceRoot::Retained(_) => self,
+            WorkspaceRoot::Scratch(dir) => {
+                let mut dest = retain_in.join(format!("workspace-{case_id}"));
+                let mut n = 1;
+                while dest.exists() {
+                    n += 1;
+                    dest = retain_in.join(format!("workspace-{case_id}-{n}"));
+                }
+                let src = dir.keep();
+                let root = match std::fs::create_dir_all(retain_in)
+                    .and_then(|_| std::fs::rename(&src, &dest))
+                {
+                    Ok(()) => dest,
+                    Err(_) => src, // cross-device or IO failure: keep in place
+                };
+                eprintln!(
+                    "eval: retained failed isolated workspace for case '{case_id}' at {}",
+                    root.display()
+                );
+                let working_dir = root.join(subdir_rel);
+                CaseWorkspace {
+                    root: WorkspaceRoot::Retained(root),
+                    working_dir,
+                }
+            }
+        }
+    }
 }
 
 /// Raw output from running a case
@@ -35,6 +151,13 @@ pub struct CaseRunOutput {
     pub stderr: Vec<u8>,
     pub exit_code: Option<i32>,
     pub timed_out: bool,
+    /// The scratch workspace the case ran in, when isolated (spec 016 D2).
+    /// Kept alive on the output so callers that score post-run (the optimize
+    /// path) still see the filesystem; dropped ⇒ deleted (unless retained).
+    pub workspace: Option<CaseWorkspace>,
+    /// What environment the case actually got (spec 016 D6). Report-only —
+    /// see [`IsolationReport`]; must never feed a `CheckResult`.
+    pub isolation: Option<IsolationReport>,
 }
 
 /// Errors during case execution
@@ -71,8 +194,30 @@ pub trait EvalRunner: Send + Sync {
 }
 
 /// Default runner: `aikit_sdk::run_agent_events` inside `spawn_blocking` with SDK timeout/cwd.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct AikitEvalRunner;
+///
+/// Holds the run-scoped codex scratch `CODEX_HOME` (spec 016 D3): allocated
+/// lazily on the first isolated codex case, shared by every clone of this
+/// runner, and dropped (write-back check + unconditional deletion — it holds
+/// credentials) when the last clone goes away at the end of the eval run.
+#[derive(Debug, Clone, Default)]
+pub struct AikitEvalRunner {
+    codex_home: Arc<OnceLock<Option<CodexScratchHome>>>,
+}
+
+impl AikitEvalRunner {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The scratch `CODEX_HOME` path, allocating it on first use. `None` when
+    /// allocation failed (already warned loudly); user scope then degrades.
+    fn codex_home_path(&self) -> Option<PathBuf> {
+        self.codex_home
+            .get_or_init(CodexScratchHome::allocate)
+            .as_ref()
+            .map(|h| h.path().to_path_buf())
+    }
+}
 
 /// Result of agent execution within spawn_blocking
 struct AgentExecutionResult {
@@ -110,7 +255,7 @@ impl EvalRunner for AikitEvalRunner {
             let case_clone = case.clone();
             let opts_clone = opts.clone();
             let checks_vec = checks.to_vec();
-            let runner = *self;
+            let runner = self.clone();
 
             join_set.spawn(async move {
                 let Ok(_permit) = permit.acquire().await else {
@@ -185,6 +330,202 @@ impl EvalRunner for AikitEvalRunner {
     }
 }
 
+/// Outcome of preparing an isolated workspace (spec 016 D2).
+enum IsolationSetup {
+    /// Scratch workspace ready; `payload` is the spec-016 D3 envelope knob.
+    Ready {
+        workspace: CaseWorkspace,
+        payload: SkillIsolation,
+    },
+    /// Isolation could not be achieved on this backend (e.g. opencode has no
+    /// skills deploy path); the case degrades to `Inherit` with the recorded
+    /// reason — it never silently claims isolation (spec 016 D4).
+    Degraded { reason: String },
+}
+
+/// Materialize the skill under test into a fresh scratch workspace (spec 016
+/// D2): deploy via the agent catalog's canonical skills path, then honor
+/// `workspace_subdir` *inside* the scratch root by copying the declared
+/// fixture contents from `project_root/<subdir>`.
+fn setup_isolated_workspace(
+    agent_key: &str,
+    skill_name: &str,
+    source: &SkillSource,
+    workspace_subdir: Option<&Path>,
+    project_root: &Path,
+    codex_home: Option<PathBuf>,
+) -> Result<IsolationSetup, String> {
+    let skill_md = match source {
+        SkillSource::Inline(text) => text.clone(),
+        SkillSource::Dir(dir) => std::fs::read_to_string(dir.join("SKILL.md")).map_err(|e| {
+            format!(
+                "EVAL_ISOLATION_SOURCE_UNREADABLE: cannot read {}: {e}",
+                dir.join("SKILL.md").display()
+            )
+        })?,
+    };
+
+    let scratch = tempfile::TempDir::new()
+        .map_err(|e| format!("EVAL_ISOLATION_WORKSPACE: cannot create scratch workspace: {e}"))?;
+
+    // The in-process aikit agent is not a deploy-catalog row; its skills root
+    // is `<workdir>/.aikit/skills` (AgentConfig::from_env) and isolation is
+    // emulated by pointing `AgentConfig.skills_dirs` at exactly that root.
+    let skill_md_path = if agent_key == "aikit" {
+        let dir = scratch.path().join(".aikit/skills").join(skill_name);
+        std::fs::create_dir_all(&dir)
+            .and_then(|_| {
+                let p = dir.join("SKILL.md");
+                std::fs::write(&p, &skill_md).map(|_| p)
+            })
+            .map_err(|e| format!("EVAL_ISOLATION_WORKSPACE: cannot materialize skill: {e}"))?
+    } else {
+        match aikit_sdk::deploy_skill(agent_key, scratch.path(), skill_name, &skill_md, None) {
+            Ok(p) => p,
+            Err(aikit_sdk::DeployError::UnsupportedConcept { .. }) => {
+                return Ok(IsolationSetup::Degraded {
+                    reason: format!(
+                        "agent '{agent_key}' has no skills path in the deploy catalog; \
+                         running with the inherited environment instead"
+                    ),
+                });
+            }
+            Err(aikit_sdk::DeployError::AgentNotFound(_)) => {
+                return Ok(IsolationSetup::Degraded {
+                    reason: format!(
+                        "agent '{agent_key}' is not in the deploy catalog; \
+                         running with the inherited environment instead"
+                    ),
+                });
+            }
+            Err(e) => {
+                return Err(format!(
+                    "EVAL_ISOLATION_WORKSPACE: cannot materialize skill: {e}"
+                ));
+            }
+        }
+    };
+    let skill_dir = skill_md_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| skill_md_path.clone());
+
+    // A Dir source may ship support files next to SKILL.md — copy them too.
+    if let SkillSource::Dir(dir) = source {
+        copy_dir_contents(dir, &skill_dir, &["SKILL.md"])
+            .map_err(|e| format!("EVAL_ISOLATION_WORKSPACE: cannot copy skill files: {e}"))?;
+    }
+
+    // `workspace_subdir` keeps its meaning — a relative path inside the run
+    // workspace — but under isolation the run workspace is the scratch dir,
+    // not `project_root` (the one user-visible semantic shift, spec 016 D2).
+    let working_dir = match workspace_subdir {
+        Some(subdir) => {
+            let dest = scratch.path().join(subdir);
+            std::fs::create_dir_all(&dest)
+                .map_err(|e| format!("EVAL_ISOLATION_WORKSPACE: cannot create subdir: {e}"))?;
+            let fixture_src = project_root.join(subdir);
+            if fixture_src.is_dir() {
+                copy_dir_contents(&fixture_src, &dest, &[])
+                    .map_err(|e| format!("EVAL_ISOLATION_WORKSPACE: cannot copy fixtures: {e}"))?;
+            }
+            dest
+        }
+        None => scratch.path().to_path_buf(),
+    };
+
+    let payload = SkillIsolation {
+        workspace_root: scratch.path().to_path_buf(),
+        skill_path: skill_dir,
+        skill_name: skill_name.to_string(),
+        codex_home,
+    };
+    Ok(IsolationSetup::Ready {
+        workspace: CaseWorkspace {
+            root: WorkspaceRoot::Scratch(scratch),
+            working_dir,
+        },
+        payload,
+    })
+}
+
+/// Recursively copy the contents of `src` into `dst`, skipping top-level
+/// names in `skip`.
+fn copy_dir_contents(src: &Path, dst: &Path, skip: &[&str]) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if skip.iter().any(|s| name == std::ffi::OsStr::new(s)) {
+            continue;
+        }
+        let target = dst.join(&name);
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            copy_dir_contents(&entry.path(), &target, &[])?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort parse of claude's `system`/`init` event skills list from
+/// captured stdout (spec 016 D6).
+///
+/// **REPORT-ONLY.** The capability listing is worthless as evidence of skill
+/// *invocation* — feeding it to scoring produced the spec-015 false-pass bug.
+/// It is exactly the right evidence of *environment*, and that is all it may
+/// ever be used for: nothing derived from this function may feed a
+/// `CheckResult`.
+pub fn parse_claude_ambient_skills(stdout: &str) -> Vec<String> {
+    claude_init_event(stdout)
+        .and_then(|init| {
+            init.get("skills").and_then(|s| s.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|e| {
+                        e.as_str()
+                            .map(str::to_string)
+                            .or_else(|| e.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                    })
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// Best-effort agent version from claude's init event (report-only, see
+/// [`parse_claude_ambient_skills`]).
+fn parse_claude_agent_version(stdout: &str) -> Option<String> {
+    claude_init_event(stdout)?
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+fn claude_init_event(stdout: &str) -> Option<serde_json::Value> {
+    stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .find(|v| {
+            v.get("type").and_then(|t| t.as_str()) == Some("system")
+                && v.get("subtype").and_then(|t| t.as_str()) == Some("init")
+        })
+}
+
+/// The per-backend user-scope mechanism label for the report (spec 016 D6).
+fn isolation_mechanism(backend: Backend) -> Option<&'static str> {
+    match backend.skill_isolation_support() {
+        KnobSupport::Unsupported => None,
+        _ => Some(match backend {
+            Backend::Claude => "--setting-sources project",
+            Backend::Codex => "scratch CODEX_HOME",
+            Backend::Pi => "--no-skills --skill",
+            Backend::Aikit => "AgentConfig.skills_dirs override",
+            Backend::Gemini | Backend::Cursor | Backend::OpenCode => unreachable!(),
+        }),
+    }
+}
+
 impl AikitEvalRunner {
     async fn run_case_inner(
         &self,
@@ -196,11 +537,87 @@ impl AikitEvalRunner {
         let model = opts.model.clone();
         let prompt = case.prompt.clone();
         let timeout_secs = opts.timeout_seconds;
+        let requested = matches!(opts.isolation, IsolationMode::Isolated { .. });
 
-        let working_dir = match &case.workspace_subdir {
-            Some(subdir) => opts.project_root.join(subdir),
-            None => opts.project_root.clone(),
-        };
+        // ── spec 016 D2: prepare the per-case scratch workspace ─────────────
+        // The workspace is bound to `workspace` (a local that outlives the
+        // agent run below) — a dropped TempDir deletes the dir mid-run.
+        let mut workspace: Option<CaseWorkspace> = None;
+        let mut payload: Option<SkillIsolation> = None;
+        let mut degrade_reason: Option<String> = None;
+
+        if let IsolationMode::Isolated { skill_name, source } = &opts.isolation {
+            let codex_home = if agent_key == "codex" {
+                self.codex_home_path()
+            } else {
+                None
+            };
+            match setup_isolated_workspace(
+                &agent_key,
+                skill_name,
+                source,
+                case.workspace_subdir.as_deref(),
+                &opts.project_root,
+                codex_home,
+            ) {
+                Ok(IsolationSetup::Ready {
+                    workspace: ws,
+                    payload: p,
+                }) => {
+                    workspace = Some(ws);
+                    payload = Some(p);
+                }
+                Ok(IsolationSetup::Degraded { reason }) => {
+                    eprintln!(
+                        "warning: skill isolation degraded to inherit on agent '{agent_key}': \
+                         {reason}"
+                    );
+                    degrade_reason = Some(reason);
+                }
+                Err(message) => {
+                    // A broken isolation setup must be an Error, not a silent
+                    // fall-through to the ambient environment.
+                    let output = CaseRunOutput {
+                        stdout: vec![],
+                        stderr: message.clone().into_bytes(),
+                        exit_code: None,
+                        timed_out: false,
+                        workspace: None,
+                        isolation: None,
+                    };
+                    let result = CaseResult {
+                        id: case.id.clone(),
+                        status: CaseStatus::Error,
+                        command_count: None,
+                        input_tokens: None,
+                        output_tokens: None,
+                        check_results: vec![],
+                        error_message: Some(message),
+                    };
+                    return (output, result, String::new());
+                }
+            }
+            // D4: backends without a user-scope mechanism still run — project
+            // scope is isolated, and the gap is said out loud plus recorded.
+            if workspace.is_some()
+                && Backend::from_key(&agent_key)
+                    .map(|b| b.skill_isolation_support() == KnobSupport::Unsupported)
+                    .unwrap_or(true)
+            {
+                eprintln!(
+                    "warning: agent '{agent_key}' cannot isolate user-scope skills; project \
+                     scope is isolated, user scope is not (recorded in the isolation report)"
+                );
+            }
+        }
+
+        let working_dir = workspace
+            .as_ref()
+            .map(|w| w.working_dir().to_path_buf())
+            .unwrap_or_else(|| match &case.workspace_subdir {
+                Some(subdir) => opts.project_root.join(subdir),
+                None => opts.project_root.clone(),
+            });
 
         let mut run_opts = RunOptions::new()
             .with_yolo(true)
@@ -208,6 +625,9 @@ impl AikitEvalRunner {
             .with_timeout(Duration::from_secs(timeout_secs))
             .with_current_dir(working_dir.clone())
             .with_emit_token_usage_events(true);
+        if let Some(p) = payload.clone() {
+            run_opts = run_opts.with_skill_isolation(p);
+        }
         if let Some(model_name) = model {
             if !model_name.trim().is_empty() {
                 run_opts = run_opts.with_model(model_name);
@@ -228,7 +648,7 @@ impl AikitEvalRunner {
         // produced output.
         let mut exec_error: Option<String> = None;
 
-        let (run_output, trace_events, token_usage) = match spawn_result.await {
+        let (mut run_output, trace_events, token_usage) = match spawn_result.await {
             Ok(exec_result) => match exec_result.result {
                 Ok(run_result) => {
                     let token_usage = run_result.token_usage.clone();
@@ -238,6 +658,8 @@ impl AikitEvalRunner {
                         stderr: run_result.stderr,
                         exit_code,
                         timed_out: false,
+                        workspace: None,
+                        isolation: None,
                     };
                     let trace = agent_events_to_trace(&exec_result.events);
                     (output, trace, token_usage)
@@ -255,6 +677,8 @@ impl AikitEvalRunner {
                         stderr,
                         exit_code: None,
                         timed_out: true,
+                        workspace: None,
+                        isolation: None,
                     };
                     if output.stderr.is_empty() {
                         let fallback = format!("Case timed out after {}s", timeout.as_secs());
@@ -263,6 +687,8 @@ impl AikitEvalRunner {
                             stderr: fallback.into_bytes(),
                             exit_code: None,
                             timed_out: true,
+                            workspace: None,
+                            isolation: None,
                         };
                         (output, trace, None)
                     } else {
@@ -278,6 +704,8 @@ impl AikitEvalRunner {
                         stderr: message.into_bytes(),
                         exit_code: None,
                         timed_out: false,
+                        workspace: None,
+                        isolation: None,
                     };
                     (output, trace, None)
                 }
@@ -290,6 +718,8 @@ impl AikitEvalRunner {
                     stderr: message.into_bytes(),
                     exit_code: None,
                     timed_out: false,
+                    workspace: None,
+                    isolation: None,
                 };
                 (output, vec![], None)
             }
@@ -317,7 +747,7 @@ impl AikitEvalRunner {
 
         let case_result = CaseResult {
             id: case.id.clone(),
-            status,
+            status: status.clone(),
             command_count: Some(command_count),
             input_tokens: token_usage.as_ref().map(|u| u.input_tokens),
             output_tokens: token_usage.as_ref().map(|u| u.output_tokens),
@@ -332,7 +762,96 @@ impl AikitEvalRunner {
             },
         };
 
+        // ── spec 016 D2 retention: delete on success (via drop), move under
+        // the caller's retention dir on failure so the case is debuggable.
+        let workspace = match workspace {
+            Some(ws) if status != CaseStatus::Passed => match &opts.retain_workspace_in {
+                Some(retain_in) => Some(ws.retain_into(retain_in, &case.id)),
+                None => Some(ws),
+            },
+            other => other,
+        };
+
+        // ── spec 016 D6: record what the case actually got (report-only).
+        run_output.isolation = Some(build_isolation_report(
+            &opts.agent_key,
+            requested,
+            degrade_reason,
+            workspace.as_ref().map(|w| w.root().to_path_buf()),
+            payload.as_ref(),
+            &stdout_str,
+        ));
+        run_output.workspace = workspace;
+
         (run_output, case_result, trace_jsonl)
+    }
+}
+
+/// Assemble the spec-016 D6 [`IsolationReport`] for one case. Pure and
+/// report-only: nothing here may feed a `CheckResult`.
+fn build_isolation_report(
+    agent_key: &str,
+    requested: bool,
+    degrade_reason: Option<String>,
+    workspace_root: Option<PathBuf>,
+    payload: Option<&SkillIsolation>,
+    stdout: &str,
+) -> IsolationReport {
+    let backend = Backend::from_key(agent_key);
+    let project_scope = if requested && workspace_root.is_some() {
+        ScopeFidelity::Isolated
+    } else {
+        ScopeFidelity::Inherited
+    };
+    let (user_scope, mechanism, degrade_reason) = if !requested || workspace_root.is_none() {
+        (ScopeFidelity::Inherited, None, degrade_reason)
+    } else {
+        match backend.map(|b| b.skill_isolation_support()) {
+            Some(KnobSupport::Unsupported) | None => (ScopeFidelity::Unsupported, None, {
+                Some(degrade_reason.unwrap_or_else(|| {
+                    format!("agent '{agent_key}' has no user-scope isolation mechanism")
+                }))
+            }),
+            Some(_) => {
+                // codex's mechanism is the scratch CODEX_HOME; if it could
+                // not be allocated the user scope silently inheriting would
+                // be a lie — record it.
+                let codex_degraded = backend == Some(Backend::Codex)
+                    && payload.map(|p| p.codex_home.is_none()).unwrap_or(true);
+                if codex_degraded {
+                    (
+                        ScopeFidelity::Inherited,
+                        None,
+                        Some(
+                            "scratch CODEX_HOME could not be allocated; codex user scope not \
+                             isolated"
+                                .to_string(),
+                        ),
+                    )
+                } else {
+                    (
+                        ScopeFidelity::Isolated,
+                        backend.and_then(isolation_mechanism).map(str::to_string),
+                        degrade_reason,
+                    )
+                }
+            }
+        }
+    };
+    let ambient_skills = if backend == Some(Backend::Claude) {
+        parse_claude_ambient_skills(stdout)
+    } else {
+        Vec::new()
+    };
+    IsolationReport {
+        requested,
+        project_scope,
+        user_scope,
+        mechanism,
+        agent_version: parse_claude_agent_version(stdout),
+        ambient_skills,
+        workspace_root,
+        degrade_reason,
     }
 }
 
@@ -342,7 +861,7 @@ pub async fn run_eval_case(
     opts: &CaseRunOptions,
     checks: &[CheckDefinition],
 ) -> (CaseRunOutput, CaseResult, String) {
-    AikitEvalRunner.run_case(case, opts, checks).await
+    AikitEvalRunner::new().run_case(case, opts, checks).await
 }
 
 #[cfg(test)]
@@ -352,20 +871,58 @@ mod tests {
     use std::path::Path;
 
     #[cfg(unix)]
-    fn write_fake_claude(dir: &Path) {
+    fn write_fake_agent(dir: &Path, name: &str, body: &str) {
         use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
-        let path = dir.join("claude");
+        let path = dir.join(name);
         let mut file = std::fs::File::create(&path).unwrap();
-        writeln!(
-            file,
-            "#!/bin/sh\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\",\"session_id\":\"stub-session\"}}'"
-        )
-        .unwrap();
+        writeln!(file, "#!/bin/sh\n{body}").unwrap();
         let mut perms = file.metadata().unwrap().permissions();
         perms.set_mode(0o755);
         file.set_permissions(perms).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn write_fake_claude(dir: &Path) {
+        write_fake_agent(
+            dir,
+            "claude",
+            r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"stub-session"}'"#,
+        );
+    }
+
+    /// Prepend `dir` to PATH for the duration of the test (nextest runs each
+    /// test in its own process, so this cannot race another test).
+    #[cfg(unix)]
+    fn prepend_path(dir: &Path) {
+        let previous = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", dir.display(), previous));
+    }
+
+    fn isolated_opts(agent_key: &str, project_root: PathBuf) -> CaseRunOptions {
+        CaseRunOptions {
+            agent_key: agent_key.to_string(),
+            model: None,
+            project_root,
+            timeout_seconds: 10,
+            pass_threshold: 1.0,
+            isolation: IsolationMode::Isolated {
+                skill_name: "my-skill".to_string(),
+                source: SkillSource::Inline("# My Skill\n".to_string()),
+            },
+            retain_workspace_in: None,
+        }
+    }
+
+    fn simple_case(id: &str) -> EvalCase {
+        EvalCase {
+            id: id.to_string(),
+            prompt: "p".to_string(),
+            should_trigger: true,
+            tags: vec![],
+            workspace_subdir: None,
+        }
     }
 
     /// Stub runner for trait wiring tests (no aikit).
@@ -386,6 +943,8 @@ mod tests {
                 stderr: vec![],
                 exit_code: Some(0),
                 timed_out: false,
+                workspace: None,
+                isolation: None,
             };
             let result = CaseResult {
                 id: case.id.clone(),
@@ -457,6 +1016,8 @@ mod tests {
             project_root: PathBuf::from("/tmp"),
             timeout_seconds: 1,
             pass_threshold: 1.0,
+            isolation: IsolationMode::Inherit,
+            retain_workspace_in: None,
         };
         let runner = StubEvalRunner;
         let (out, res, trace) = runner.run_case(&case, &opts, &[]).await;
@@ -473,6 +1034,8 @@ mod tests {
             project_root: PathBuf::from("/tmp"),
             timeout_seconds: 300,
             pass_threshold: 1.0,
+            isolation: IsolationMode::Inherit,
+            retain_workspace_in: None,
         };
         assert_eq!(opts.agent_key, "codex");
         assert_eq!(opts.model, Some("gpt-4".to_string()));
@@ -504,6 +1067,8 @@ mod tests {
             project_root: project.path().to_path_buf(),
             timeout_seconds: 5,
             pass_threshold: 1.0,
+            isolation: IsolationMode::Inherit,
+            retain_workspace_in: None,
         };
         let case = EvalCase {
             id: "required-matrix".to_string(),
@@ -512,7 +1077,7 @@ mod tests {
             tags: vec![],
             workspace_subdir: None,
         };
-        let runner = AikitEvalRunner;
+        let runner = AikitEvalRunner::new();
 
         let required_fail_checks = vec![CheckDefinition::FileExists {
             path: PathBuf::from("missing-required.txt"),
@@ -570,6 +1135,8 @@ mod tests {
             project_root: project.path().to_path_buf(),
             timeout_seconds: 5,
             pass_threshold: 1.0,
+            isolation: IsolationMode::Inherit,
+            retain_workspace_in: None,
         };
         let case = EvalCase {
             id: "agent-failure".to_string(),
@@ -593,7 +1160,7 @@ mod tests {
                 required: true,
             },
         ];
-        let runner = AikitEvalRunner;
+        let runner = AikitEvalRunner::new();
 
         let (_out, result, _trace) = runner.run_case_inner(&case, &opts, &checks).await;
 
@@ -618,6 +1185,8 @@ mod tests {
             project_root: PathBuf::from("/tmp"),
             timeout_seconds: 5,
             pass_threshold: 1.0,
+            isolation: IsolationMode::Inherit,
+            retain_workspace_in: None,
         };
         let case = EvalCase {
             id: "agent-failure-trials".to_string(),
@@ -631,7 +1200,7 @@ mod tests {
             expected: false,
             required: true,
         }];
-        let runner = AikitEvalRunner;
+        let runner = AikitEvalRunner::new();
 
         let trials_result = runner
             .run_case_trials(&case, &opts, &checks, 2, Some(1))
@@ -660,6 +1229,8 @@ mod tests {
             project_root: PathBuf::from("/tmp"),
             timeout_seconds: 1,
             pass_threshold: 1.0,
+            isolation: IsolationMode::Inherit,
+            retain_workspace_in: None,
         };
         let runner = StubEvalRunner;
         let (_out, res, _trace) = runner.run_case(&case, &opts, &[]).await;
@@ -690,6 +1261,8 @@ mod tests {
             project_root: PathBuf::from("/tmp"),
             timeout_seconds: 1,
             pass_threshold: 1.0,
+            isolation: IsolationMode::Inherit,
+            retain_workspace_in: None,
         };
         let runner = StubEvalRunner;
         let trials_result = runner.run_case_trials(&case, &opts, &[], 2, None).await;
@@ -697,5 +1270,483 @@ mod tests {
             assert_eq!(trial.input_tokens, Some(100));
             assert_eq!(trial.output_tokens, Some(50));
         }
+    }
+
+    // ───────────────────────── spec 016 isolation tests ─────────────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_isolated_case_deploys_skill_workspace_lives_and_deletes_on_success() {
+        let bin = tempfile::tempdir().unwrap();
+        // The fake agent proves the workspace existed AT INVOCATION TIME by
+        // writing a marker into its cwd (a dropped TempDir would make this
+        // fail like a flaky agent), and emits a real-shaped init event.
+        write_fake_agent(
+            bin.path(),
+            "claude",
+            concat!(
+                "touch invoked-here.txt\n",
+                r#"printf '%s\n' '{"type":"system","subtype":"init","skills":["my-skill"],"version":"9.9.9"}'"#,
+                "\n",
+                r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s"}'"#,
+            ),
+        );
+        prepend_path(bin.path());
+
+        let project = tempfile::tempdir().unwrap();
+        let opts = isolated_opts("claude", project.path().to_path_buf());
+        let runner = AikitEvalRunner::new();
+        let (output, result, _trace) = runner
+            .run_case_inner(&simple_case("iso-1"), &opts, &[])
+            .await;
+
+        assert_eq!(
+            result.status,
+            CaseStatus::Passed,
+            "err: {:?}",
+            result.error_message
+        );
+        let ws = output
+            .workspace
+            .as_ref()
+            .expect("isolated case must carry its workspace");
+        assert_ne!(ws.root(), project.path(), "must not run in project_root");
+        // Skill-under-test survival: deploy path exists inside the scratch root.
+        let skill_md = ws.root().join(".claude/skills/my-skill/SKILL.md");
+        assert!(
+            skill_md.exists(),
+            "skill under test must be materialized in the scratch root"
+        );
+        assert_eq!(std::fs::read_to_string(&skill_md).unwrap(), "# My Skill\n");
+        // Workspace lifetime: the agent's cwd existed when it ran.
+        assert!(
+            ws.working_dir().join("invoked-here.txt").exists(),
+            "scratch dir must exist at the moment the agent is invoked"
+        );
+        // D6 report.
+        let report = output
+            .isolation
+            .as_ref()
+            .expect("isolation report must be present");
+        assert!(report.requested);
+        assert_eq!(report.project_scope, ScopeFidelity::Isolated);
+        assert_eq!(report.user_scope, ScopeFidelity::Isolated);
+        assert_eq!(
+            report.mechanism.as_deref(),
+            Some("--setting-sources project")
+        );
+        assert_eq!(report.agent_version.as_deref(), Some("9.9.9"));
+        assert_eq!(report.ambient_skills, vec!["my-skill".to_string()]);
+        assert_eq!(report.workspace_root.as_deref(), Some(ws.root()));
+        assert!(report.degrade_reason.is_none());
+
+        // Delete on success: dropping the output removes the scratch dir.
+        let root = ws.root().to_path_buf();
+        drop(output);
+        assert!(
+            !root.exists(),
+            "successful case's scratch workspace must be deleted"
+        );
+    }
+
+    /// The discriminating test (spec 016 Testing Decisions): skill-a lives in
+    /// the scratch workspace, skill-b only in the ambient environment. The
+    /// fake agent reports skill-b exactly when the isolation mechanism
+    /// (`--setting-sources project`) is absent from its argv — so skill-b
+    /// showing up under Isolated would prove the flag never reached the
+    /// agent. This is the only test that proves isolation *happened* rather
+    /// than that a flag was *passed*.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_discriminating_ambient_skill_absent_under_isolated_present_under_inherit() {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_agent(
+            bin.path(),
+            "claude",
+            concat!(
+                "case \"$*\" in\n",
+                "  *\"--setting-sources project\"*) skills='[\"skill-a\"]' ;;\n",
+                "  *) skills='[\"skill-a\",\"skill-b\"]' ;;\n",
+                "esac\n",
+                "printf '{\"type\":\"system\",\"subtype\":\"init\",\"skills\":%s}\\n' \"$skills\"\n",
+                r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s"}'"#,
+            ),
+        );
+        prepend_path(bin.path());
+        let project = tempfile::tempdir().unwrap();
+        let runner = AikitEvalRunner::new();
+
+        let mut opts = isolated_opts("claude", project.path().to_path_buf());
+        let (isolated_out, _r, _t) = runner
+            .run_case_inner(&simple_case("disc"), &opts, &[])
+            .await;
+        let isolated_skills = &isolated_out.isolation.as_ref().unwrap().ambient_skills;
+        assert!(
+            !isolated_skills.iter().any(|s| s == "skill-b"),
+            "ambient skill-b must be absent under Isolated: {isolated_skills:?}"
+        );
+        assert!(isolated_skills.iter().any(|s| s == "skill-a"));
+
+        opts.isolation = IsolationMode::Inherit;
+        let (inherit_out, _r, _t) = runner
+            .run_case_inner(&simple_case("disc"), &opts, &[])
+            .await;
+        let inherit_skills = &inherit_out.isolation.as_ref().unwrap().ambient_skills;
+        assert!(
+            inherit_skills.iter().any(|s| s == "skill-b"),
+            "ambient skill-b must be present under Inherit: {inherit_skills:?}"
+        );
+        let inherit_report = inherit_out.isolation.as_ref().unwrap();
+        assert!(!inherit_report.requested);
+        assert_eq!(inherit_report.project_scope, ScopeFidelity::Inherited);
+        assert_eq!(inherit_report.user_scope, ScopeFidelity::Inherited);
+    }
+
+    /// spec 016 D2's one user-visible semantic shift: `workspace_subdir`
+    /// resolves inside the SCRATCH root under isolation, with the declared
+    /// fixture contents copied over from `project_root/<subdir>`.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_workspace_subdir_resolves_inside_scratch_root_with_fixtures() {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_claude(bin.path());
+        prepend_path(bin.path());
+
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join("sub/nested")).unwrap();
+        std::fs::write(project.path().join("sub/fixture.txt"), "f").unwrap();
+        std::fs::write(project.path().join("sub/nested/deep.txt"), "d").unwrap();
+
+        let opts = isolated_opts("claude", project.path().to_path_buf());
+        let case = EvalCase {
+            workspace_subdir: Some(PathBuf::from("sub")),
+            ..simple_case("subdir")
+        };
+        let checks = vec![CheckDefinition::FileExists {
+            path: PathBuf::from("fixture.txt"),
+            required: true,
+        }];
+        let runner = AikitEvalRunner::new();
+        let (output, result, _trace) = runner.run_case_inner(&case, &opts, &checks).await;
+
+        assert_eq!(
+            result.status,
+            CaseStatus::Passed,
+            "fixture must be visible to file_exists: {:?}",
+            result.check_results
+        );
+        let ws = output.workspace.as_ref().unwrap();
+        assert!(
+            ws.working_dir().starts_with(ws.root()),
+            "subdir must be INSIDE the scratch root"
+        );
+        assert!(ws.working_dir().ends_with("sub"));
+        assert_ne!(
+            ws.working_dir(),
+            project.path().join("sub"),
+            "must not run in project_root/sub"
+        );
+        assert!(
+            ws.working_dir().join("nested/deep.txt").exists(),
+            "nested fixtures must be copied"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_failed_isolated_case_workspace_is_retained_and_printed_path_survives() {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_claude(bin.path());
+        prepend_path(bin.path());
+
+        let project = tempfile::tempdir().unwrap();
+        let retain = tempfile::tempdir().unwrap();
+        let mut opts = isolated_opts("claude", project.path().to_path_buf());
+        opts.retain_workspace_in = Some(retain.path().to_path_buf());
+        let checks = vec![CheckDefinition::FileExists {
+            path: PathBuf::from("never-created.txt"),
+            required: true,
+        }];
+        let runner = AikitEvalRunner::new();
+        let (output, result, _trace) = runner
+            .run_case_inner(&simple_case("fail-1"), &opts, &checks)
+            .await;
+
+        assert_eq!(result.status, CaseStatus::Failed);
+        let ws = output
+            .workspace
+            .as_ref()
+            .expect("failed workspace must survive on the output");
+        assert!(ws.is_retained());
+        assert!(
+            ws.root().starts_with(retain.path()),
+            "retained under the caller's dir: {:?}",
+            ws.root()
+        );
+        assert!(ws.root().join(".claude/skills/my-skill/SKILL.md").exists());
+        let root = ws.root().to_path_buf();
+        drop(output);
+        assert!(root.exists(), "retained workspace must outlive the output");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_failed_isolated_case_without_retain_dir_is_deleted() {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_claude(bin.path());
+        prepend_path(bin.path());
+
+        let project = tempfile::tempdir().unwrap();
+        let opts = isolated_opts("claude", project.path().to_path_buf());
+        let checks = vec![CheckDefinition::FileExists {
+            path: PathBuf::from("never-created.txt"),
+            required: true,
+        }];
+        let runner = AikitEvalRunner::new();
+        let (output, result, _trace) = runner
+            .run_case_inner(&simple_case("fail-2"), &opts, &checks)
+            .await;
+        assert_eq!(result.status, CaseStatus::Failed);
+        let root = output.workspace.as_ref().unwrap().root().to_path_buf();
+        drop(output);
+        assert!(
+            !root.exists(),
+            "retain_workspace_in: None must always delete"
+        );
+    }
+
+    /// spec 016 D4: opencode has no skills path in the deploy catalog —
+    /// isolation degrades to Inherit with an explicit recorded reason, and
+    /// never silently claims isolation.
+    #[tokio::test]
+    async fn test_opencode_isolation_degrades_with_recorded_reason() {
+        let project = tempfile::tempdir().unwrap();
+        let opts = isolated_opts("opencode", project.path().to_path_buf());
+        let runner = AikitEvalRunner::new();
+        let (output, _result, _trace) = runner.run_case_inner(&simple_case("oc"), &opts, &[]).await;
+
+        assert!(
+            output.workspace.is_none(),
+            "no scratch workspace can hold the skill"
+        );
+        let report = output
+            .isolation
+            .as_ref()
+            .expect("degraded run must still report");
+        assert!(report.requested);
+        assert_eq!(
+            report.project_scope,
+            ScopeFidelity::Inherited,
+            "must not claim isolation"
+        );
+        assert!(
+            report
+                .degrade_reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("deploy catalog"),
+            "degradation reason must be recorded: {:?}",
+            report.degrade_reason
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_dir_source_copies_skill_md_and_support_files() {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_claude(bin.path());
+        prepend_path(bin.path());
+
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("SKILL.md"), "# From Dir\n").unwrap();
+        std::fs::create_dir_all(source.path().join("scripts")).unwrap();
+        std::fs::write(source.path().join("scripts/helper.py"), "print('hi')\n").unwrap();
+
+        let project = tempfile::tempdir().unwrap();
+        let mut opts = isolated_opts("claude", project.path().to_path_buf());
+        opts.isolation = IsolationMode::Isolated {
+            skill_name: "dir-skill".to_string(),
+            source: SkillSource::Dir(source.path().to_path_buf()),
+        };
+        let runner = AikitEvalRunner::new();
+        let (output, result, _trace) = runner
+            .run_case_inner(&simple_case("dir-1"), &opts, &[])
+            .await;
+
+        assert_eq!(
+            result.status,
+            CaseStatus::Passed,
+            "err: {:?}",
+            result.error_message
+        );
+        let ws = output.workspace.as_ref().unwrap();
+        let skill_dir = ws.root().join(".claude/skills/dir-skill");
+        assert_eq!(
+            std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap(),
+            "# From Dir\n"
+        );
+        assert!(
+            skill_dir.join("scripts/helper.py").exists(),
+            "support files must be copied"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dir_source_missing_skill_md_is_case_error_not_silent_inherit() {
+        let source = tempfile::tempdir().unwrap(); // no SKILL.md
+        let project = tempfile::tempdir().unwrap();
+        let mut opts = isolated_opts("claude", project.path().to_path_buf());
+        opts.isolation = IsolationMode::Isolated {
+            skill_name: "ghost".to_string(),
+            source: SkillSource::Dir(source.path().to_path_buf()),
+        };
+        let runner = AikitEvalRunner::new();
+        let (_output, result, _trace) = runner
+            .run_case_inner(&simple_case("ghost"), &opts, &[])
+            .await;
+        assert_eq!(result.status, CaseStatus::Error);
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("EVAL_ISOLATION_SOURCE_UNREADABLE"),
+            "explicit user input must fail loudly: {:?}",
+            result.error_message
+        );
+    }
+
+    #[test]
+    fn test_codex_scratch_home_allocated_once_per_runner() {
+        let fake_home = tempfile::tempdir().unwrap();
+        std::fs::write(fake_home.path().join("auth.json"), b"{}").unwrap();
+        std::env::set_var("CODEX_HOME", fake_home.path());
+
+        let runner = AikitEvalRunner::new();
+        let first = runner.codex_home_path().expect("allocation must succeed");
+        let second = runner.codex_home_path().expect("second call must reuse");
+        assert_eq!(
+            first, second,
+            "scratch CODEX_HOME must be allocated ONCE per run"
+        );
+        assert!(first.join("auth.json").exists());
+        assert_ne!(
+            first,
+            fake_home.path(),
+            "must be a scratch copy, not the real home"
+        );
+
+        let clone = runner.clone();
+        drop(runner);
+        assert!(first.exists(), "still alive while a clone exists");
+        drop(clone);
+        assert!(
+            !first.exists(),
+            "credentials dir must be deleted when the run ends"
+        );
+        std::env::remove_var("CODEX_HOME");
+    }
+
+    // ---- build_isolation_report fidelity matrix (spec 016 D4/D6) ----
+
+    #[test]
+    fn test_report_unsupported_backends_isolate_project_scope_only() {
+        // gemini/cursor: no user-scope mechanism — run anyway, project scope
+        // isolated, user scope recorded as unsupported (never claimed).
+        for agent in ["gemini", "cursor"] {
+            let payload = SkillIsolation {
+                workspace_root: PathBuf::from("/scratch"),
+                skill_path: PathBuf::from("/scratch/skills/s"),
+                skill_name: "s".to_string(),
+                codex_home: None,
+            };
+            let report = build_isolation_report(
+                agent,
+                true,
+                None,
+                Some(PathBuf::from("/scratch")),
+                Some(&payload),
+                "",
+            );
+            assert_eq!(report.project_scope, ScopeFidelity::Isolated, "{agent}");
+            assert_eq!(report.user_scope, ScopeFidelity::Unsupported, "{agent}");
+            assert!(report.mechanism.is_none(), "{agent}");
+            assert!(
+                report.degrade_reason.is_some(),
+                "{agent}: the unsupported user scope must be recorded"
+            );
+        }
+    }
+
+    #[test]
+    fn test_report_codex_without_scratch_home_is_inherited_user_scope() {
+        let payload = SkillIsolation {
+            workspace_root: PathBuf::from("/scratch"),
+            skill_path: PathBuf::from("/scratch/.codex/skills/s"),
+            skill_name: "s".to_string(),
+            codex_home: None, // allocation failed
+        };
+        let report = build_isolation_report(
+            "codex",
+            true,
+            None,
+            Some(PathBuf::from("/scratch")),
+            Some(&payload),
+            "",
+        );
+        assert_eq!(report.project_scope, ScopeFidelity::Isolated);
+        assert_eq!(
+            report.user_scope,
+            ScopeFidelity::Inherited,
+            "codex without a scratch CODEX_HOME must not claim user-scope isolation"
+        );
+        assert!(report
+            .degrade_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("CODEX_HOME"));
+    }
+
+    #[test]
+    fn test_report_codex_with_scratch_home_is_isolated() {
+        let payload = SkillIsolation {
+            workspace_root: PathBuf::from("/scratch"),
+            skill_path: PathBuf::from("/scratch/.codex/skills/s"),
+            skill_name: "s".to_string(),
+            codex_home: Some(PathBuf::from("/scratch-home")),
+        };
+        let report = build_isolation_report(
+            "codex",
+            true,
+            None,
+            Some(PathBuf::from("/scratch")),
+            Some(&payload),
+            "",
+        );
+        assert_eq!(report.user_scope, ScopeFidelity::Isolated);
+        assert_eq!(report.mechanism.as_deref(), Some("scratch CODEX_HOME"));
+    }
+
+    // ---- parse_claude_ambient_skills (report-only, spec 016 D6) ----
+
+    #[test]
+    fn test_parse_claude_ambient_skills_string_and_object_forms() {
+        let strings = r#"{"type":"system","subtype":"init","skills":["a","b"]}"#;
+        assert_eq!(parse_claude_ambient_skills(strings), vec!["a", "b"]);
+
+        let objects = r#"{"type":"system","subtype":"init","skills":[{"name":"x"},{"name":"y"}]}"#;
+        assert_eq!(parse_claude_ambient_skills(objects), vec!["x", "y"]);
+
+        let mixed_stream = "not json\n{\"type\":\"assistant\"}\n{\"type\":\"system\",\"subtype\":\"init\",\"skills\":[\"only\"]}\n";
+        assert_eq!(parse_claude_ambient_skills(mixed_stream), vec!["only"]);
+    }
+
+    #[test]
+    fn test_parse_claude_ambient_skills_empty_when_unobservable() {
+        assert!(parse_claude_ambient_skills("").is_empty());
+        assert!(
+            parse_claude_ambient_skills("{\"type\":\"system\",\"subtype\":\"init\"}").is_empty()
+        );
+        assert!(parse_claude_ambient_skills("{\"type\":\"result\"}").is_empty());
     }
 }

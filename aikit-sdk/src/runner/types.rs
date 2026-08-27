@@ -246,13 +246,50 @@ pub struct RunOptions {
     /// JSON Schema for typed final output (`--output-schema`); validated by
     /// aikit when the Backend cannot enforce it natively (spec 013 D4).
     pub output_schema: Option<serde_json::Value>,
-    /// Skip auto-discovery of user config/hooks/skills/MCP for reproducible
-    /// runs (`--bare`; codex `--ignore-user-config`, claude `--bare`, spec 013 D6).
+    /// Minimal-startup mode (`--bare`; codex `--ignore-user-config`, claude
+    /// `--bare`, spec 013 D6): skip user config/hooks/plugin-sync/`CLAUDE.md`
+    /// auto-discovery where the backend supports it.
+    ///
+    /// **`bare` is NOT skill isolation** (spec 016, measured): claude `--bare`
+    /// drops *project* skills — including a skill under test — while keeping
+    /// plugins loaded, and restricts auth to `ANTHROPIC_API_KEY` (OAuth/keychain
+    /// users hard-fail with "Not logged in"); codex `--ignore-user-config` skips
+    /// only `config.toml` and still loads `$CODEX_HOME/skills`; pi's mapping
+    /// emits `--no-skills`, which removes the skill under test. For a
+    /// reproducible skill surface with auth intact, use
+    /// [`RunOptions::skill_isolation`] instead.
     pub bare: bool,
     /// Do not persist the session (`--ephemeral`; codex `--ephemeral`, spec 013 D6).
     pub ephemeral: bool,
     /// Skip the headless git-repository guard (`--skip-git-repo-check`, spec 013 D6).
     pub skip_git_repo_check: bool,
+    /// Restrict the agent's skill surface to exactly the materialized skill the
+    /// payload names (spec 016 D3). `None` = inherit the ambient environment
+    /// (legacy behaviour). A convenience/fidelity knob: backends that cannot
+    /// honor it run anyway and the caller reports the achieved fidelity — it is
+    /// never rejected by `resolve_envelope` (spec 016 D4).
+    pub skill_isolation: Option<SkillIsolation>,
+}
+
+/// Payload for [`RunOptions::skill_isolation`] (spec 016 D3). Carries the
+/// scratch skill location because pi's mechanism needs `--skill <path>` — a
+/// boolean cannot express a path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillIsolation {
+    /// Root of the scratch workspace (spec 016 D2), i.e. the parent of the
+    /// agent's skills dir (e.g. of `.claude/skills`).
+    pub workspace_root: std::path::PathBuf,
+    /// Directory of the materialized skill (the parent of the `SKILL.md` that
+    /// `deploy_skill` returned).
+    pub skill_path: std::path::PathBuf,
+    pub skill_name: String,
+    /// codex only: scratch `CODEX_HOME` holding a copied `auth.json`, allocated
+    /// once per eval run by the caller (spec 016 D3 codex mechanism —
+    /// `--ignore-user-config` is a measured no-op for skills). Contains
+    /// credentials: never retained, never logged. `None` on every other
+    /// backend, and on codex when no scratch home could be allocated (the run
+    /// then degrades to inherited user scope, reported honestly).
+    pub codex_home: Option<std::path::PathBuf>,
 }
 
 impl Default for RunOptions {
@@ -276,6 +313,7 @@ impl Default for RunOptions {
             bare: false,
             ephemeral: false,
             skip_git_repo_check: false,
+            skill_isolation: None,
         }
     }
 }
@@ -390,6 +428,12 @@ impl RunOptions {
     /// Skip the git-repo guard (spec 013 D6 `--skip-git-repo-check`).
     pub fn with_skip_git_repo_check(mut self, skip: bool) -> Self {
         self.skip_git_repo_check = skip;
+        self
+    }
+
+    /// Restrict the skill surface to one materialized skill (spec 016 D3).
+    pub fn with_skill_isolation(mut self, isolation: SkillIsolation) -> Self {
+        self.skill_isolation = Some(isolation);
         self
     }
 }

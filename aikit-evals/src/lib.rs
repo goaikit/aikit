@@ -8,6 +8,7 @@
 
 pub mod artifacts;
 pub mod checks;
+pub(crate) mod codex_home;
 pub mod config;
 pub mod runner;
 pub mod scoring;
@@ -17,7 +18,8 @@ pub mod trace;
 pub use artifacts::{
     allocate_run_dir, read_case_results, read_summary, write_case_artifacts,
     write_case_trials_summary, write_summary, write_trial_artifacts, ArtifactsError, CaseResult,
-    CaseStatus, CaseSummary, CaseTrialsResult, RunArtifacts, SummaryResult, TrialResult,
+    CaseStatus, CaseSummary, CaseTrialsResult, IsolationReport, RunArtifacts, ScopeFidelity,
+    SummaryResult, TrialResult,
 };
 pub use checks::{
     count_command_events, count_raw_json_events, load_checks, run_checks, suite_passes,
@@ -25,7 +27,8 @@ pub use checks::{
 };
 pub use config::{resolve_from_input, EvalConfig, EvalConfigError, EvalConfigInput};
 pub use runner::{
-    run_eval_case, AikitEvalRunner, CaseRunOptions, CaseRunOutput, EvalRunner, RunnerError,
+    parse_claude_ambient_skills, run_eval_case, AikitEvalRunner, CaseRunOptions, CaseRunOutput,
+    CaseWorkspace, EvalRunner, IsolationMode, RunnerError, SkillSource,
 };
 pub use scoring::{item_score, score_cases, split_score, ChecksScorer, GateMetric, Scorer};
 pub use suite::{load_suite, EvalCase, EvalSuite, SuiteError};

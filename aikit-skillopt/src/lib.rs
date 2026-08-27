@@ -176,6 +176,10 @@ mod tests {
     struct ScriptedEvalRunner {
         outcomes: Mutex<VecDeque<ScriptedOutcome>>,
         calls: AtomicUsize,
+        /// Every `CaseRunOptions.isolation` the loop handed us, in call order
+        /// (spec 016 D7: proves the isolation field arrives at the scoring
+        /// sites — without this capture, D7 is unenforced).
+        captured_isolation: Mutex<Vec<aikit_evals::IsolationMode>>,
     }
 
     impl ScriptedEvalRunner {
@@ -183,11 +187,16 @@ mod tests {
             Self {
                 outcomes: Mutex::new(outcomes.into_iter().collect()),
                 calls: AtomicUsize::new(0),
+                captured_isolation: Mutex::new(Vec::new()),
             }
         }
 
         fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        fn captured_isolation(&self) -> Vec<aikit_evals::IsolationMode> {
+            self.captured_isolation.lock().unwrap().clone()
         }
     }
 
@@ -196,10 +205,14 @@ mod tests {
         async fn run_case(
             &self,
             case: &EvalCase,
-            _opts: &CaseRunOptions,
+            opts: &CaseRunOptions,
             _checks: &[CheckDefinition],
         ) -> (CaseRunOutput, CaseResult, String) {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.captured_isolation
+                .lock()
+                .unwrap()
+                .push(opts.isolation.clone());
             let outcome = self.outcomes.lock().unwrap().pop_front().expect(
                 "ScriptedEvalRunner queue exhausted — expected call count no longer matches",
             );
@@ -208,6 +221,8 @@ mod tests {
                 stderr: vec![],
                 exit_code: Some(0),
                 timed_out: matches!(outcome, ScriptedOutcome::TimedOut),
+                workspace: None,
+                isolation: None,
             };
             // Checks score the canonical trace, never raw stdout, so the double has to put
             // its markers where a real agent's output actually lands. `stdout_to_trace` is
@@ -313,6 +328,7 @@ mod tests {
             timeout_seconds: 30,
             parallel: Some(1),
             artifact_stem: "skill".to_string(),
+            isolate: true,
         }
     }
 
@@ -346,7 +362,7 @@ mod tests {
     async fn test_train_skill_end_to_end() {
         let dir = TempDir::new().unwrap();
         let inputs = make_inputs(&dir);
-        let result = train_skill(inputs, &AikitEvalRunner).await;
+        let result = train_skill(inputs, &AikitEvalRunner::new()).await;
         assert!(result.is_ok(), "train_skill failed: {result:?}");
         let outcome = result.unwrap();
         let expected_path = dir.path().join("best_skill.md");
@@ -359,7 +375,7 @@ mod tests {
     async fn test_best_skill_md_content_matches_outcome() {
         let dir = TempDir::new().unwrap();
         let inputs = make_inputs(&dir);
-        let outcome = train_skill(inputs, &AikitEvalRunner).await.unwrap();
+        let outcome = train_skill(inputs, &AikitEvalRunner::new()).await.unwrap();
         let on_disk = std::fs::read_to_string(&outcome.best_artifact_path).unwrap();
         assert_eq!(on_disk, outcome.best_text);
     }
@@ -616,6 +632,8 @@ mod tests {
             project_root: std::path::PathBuf::from("/tmp"),
             timeout_seconds: 1,
             pass_threshold: 0.5,
+            isolation: aikit_evals::IsolationMode::Inherit,
+            retain_workspace_in: None,
         };
 
         let result = runner.run_case_trials(&case, &opts, &[], 3, None).await;
@@ -640,6 +658,65 @@ mod tests {
         // 1 initial-score call + 1 rollout (1 train case, 1 selection case, gate_trials=1,
         // n_epochs=1). The gate is skipped because the stubbed optimizer applies no edits.
         assert_eq!(runner.call_count(), 2);
+    }
+
+    // ---- spec 016 D5/D7: isolation threads through the optimize loop ----
+
+    /// spec 016 D7 enforcement: every scoring call the loop makes (initial
+    /// score + rollout here; the gate shares the same `scoring_opts`
+    /// construction path in aikit-textgrad and is skipped for no-edit
+    /// candidates since #159) must arrive with `IsolationMode::Isolated`
+    /// carrying the skill under test as an inline source.
+    #[tokio::test]
+    async fn test_isolation_mode_reaches_every_scoring_call() {
+        use aikit_evals::{IsolationMode, SkillSource};
+        use ScriptedOutcome::*;
+        let dir = TempDir::new().unwrap();
+        let inputs = make_scripted_inputs(&dir, 1);
+        let runner = ScriptedEvalRunner::new(vec![Score1, Score1]);
+
+        train_skill(inputs, &runner).await.unwrap();
+
+        let captured = runner.captured_isolation();
+        assert_eq!(captured.len(), 2, "initial score + one rollout");
+        for (i, iso) in captured.iter().enumerate() {
+            match iso {
+                IsolationMode::Isolated { skill_name, source } => {
+                    assert_eq!(skill_name, "test-skill", "call {i}");
+                    match source {
+                        SkillSource::Inline(text) => assert!(
+                            text.contains("Test Skill"),
+                            "call {i}: inline source must carry the artifact text"
+                        ),
+                        other => panic!("call {i}: expected Inline source, got {other:?}"),
+                    }
+                }
+                IsolationMode::Inherit => {
+                    panic!("call {i}: scoring call arrived WITHOUT isolation (spec 016 D7)")
+                }
+            }
+        }
+    }
+
+    /// The opt-out (`isolate: false`, downstream --no-isolation) restores the
+    /// legacy inherit behaviour at every scoring call.
+    #[tokio::test]
+    async fn test_isolate_false_scoring_calls_inherit() {
+        use aikit_evals::IsolationMode;
+        use ScriptedOutcome::*;
+        let dir = TempDir::new().unwrap();
+        let mut inputs = make_scripted_inputs(&dir, 1);
+        inputs.config.isolate = false;
+        let runner = ScriptedEvalRunner::new(vec![Score1, Score1]);
+
+        train_skill(inputs, &runner).await.unwrap();
+
+        let captured = runner.captured_isolation();
+        assert_eq!(captured.len(), 2);
+        assert!(
+            captured.iter().all(|iso| *iso == IsolationMode::Inherit),
+            "isolate: false must restore legacy Inherit everywhere: {captured:?}"
+        );
     }
 
     // AC-10: no epoch/gate/edit logic in this crate.

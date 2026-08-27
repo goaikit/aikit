@@ -23,8 +23,8 @@ pub mod usage;
 pub use types::{
     AgentAvailabilityReason, AgentEvent, AgentEventPayload, AgentEventStream, AgentStatus,
     KnobSupport, MessageKind, MessagePhase, MessageRole, OutputMode, ProgressSink, QuotaCategory,
-    QuotaExceededInfo, RunError, RunOptions, RunResult, SandboxPolicy, StreamMessage, TokenUsage,
-    UsageSource,
+    QuotaExceededInfo, RunError, RunOptions, RunResult, SandboxPolicy, SkillIsolation,
+    StreamMessage, TokenUsage, UsageSource,
 };
 
 pub use argv::{is_runnable, runnable_agents};
@@ -43,8 +43,8 @@ pub use codex_session::{
     open_codex_session, CodexControlHandle, CodexSession, CodexSessionError, CodexSessionOptions,
 };
 pub use invocation::{
-    exit_code_for, format_capabilities, resolve_envelope, sandbox_env_for, InvocationEnvelope,
-    UnsupportedKnob,
+    exit_code_for, format_capabilities, isolation_env_for, resolve_envelope, sandbox_env_for,
+    InvocationEnvelope, UnsupportedKnob,
 };
 pub use pi_session::{
     open_pi_session, PiControlHandle, PiSession, PiSessionError, PiSessionOptions,

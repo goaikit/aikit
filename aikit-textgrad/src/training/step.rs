@@ -2,9 +2,7 @@
 
 use std::path::Path;
 
-use aikit_evals::{
-    item_score, score_cases, split_score, CaseRunOptions, EvalCase, EvalRunner, Scorer,
-};
+use aikit_evals::{item_score, score_cases, split_score, EvalCase, EvalRunner, Scorer};
 use aikit_sdk::{AgentRunner, Pipeline};
 
 use crate::edit::{apply_budgeted, Edit, Patch, SkipRecord};
@@ -14,7 +12,7 @@ use crate::training::state::{
     append_history, ensure_step_dir, save_accepted_artifact, sha256_hex, RejectedPatch,
     RuntimeState, StepRecord,
 };
-use crate::training::Optimizable;
+use crate::training::{scoring_opts, Optimizable};
 
 const PATCH_SCHEMA: &str = r#"{
   "type": "object",
@@ -223,23 +221,23 @@ pub(super) async fn run_step(
     let hash_before = sha256_hex(&text_before);
 
     // ------------------------------------------------------------------
-    // ROLLOUT: materialize artifact into per-rollout workspaces, run,
-    // score each trajectory.
+    // ROLLOUT: per-case workspaces, run, score each trajectory. Under
+    // isolation (spec 016 D5, the default) the eval runner materializes the
+    // skill per case; otherwise the legacy per-case materialize applies.
     // ------------------------------------------------------------------
     let mut trajectories: Vec<Trajectory> = Vec::new();
     for case in step_cases {
-        let ws = tempfile::TempDir::new().map_err(TextgradError::Io)?;
-        artifact.materialize(ws.path()).await?;
-        let opts = CaseRunOptions {
-            agent_key: config.target_agent.clone(),
-            model: config.target_model.clone(),
-            project_root: ws.path().to_path_buf(),
-            timeout_seconds: config.timeout_seconds,
-            pass_threshold: config.pass_threshold,
-        };
+        let (opts, ws) = scoring_opts(artifact, config).await?;
         let (output, _case_result, trace_jsonl) = runner.run_case(case, &opts, &[]).await;
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let check_results = scorer.score(&stdout, &trace_jsonl, ws.path());
+        // Score against the workspace the case actually ran in: the runner's
+        // per-case scratch dir under isolation, the materialized ws otherwise.
+        let score_dir = output
+            .workspace
+            .as_ref()
+            .map(|w| w.working_dir().to_path_buf())
+            .unwrap_or_else(|| ws.path().to_path_buf());
+        let check_results = scorer.score(&stdout, &trace_jsonl, &score_dir);
         let score = item_score(&check_results, &config.gate_metric);
         trajectories.push(Trajectory {
             case_id: case.id.clone(),
@@ -288,31 +286,27 @@ pub(super) async fn run_step(
     let mut accepted = false;
 
     if !no_edit {
-        let gate_opts = CaseRunOptions {
-            agent_key: config.target_agent.clone(),
-            model: config.target_model.clone(),
-            project_root: run_dir.to_path_buf(),
-            timeout_seconds: config.timeout_seconds,
-            pass_threshold: config.pass_threshold,
-        };
-
-        // Temporarily set candidate text to materialize into the gate workspace.
+        // Temporarily set the candidate text so the shared scoring path (spec
+        // 016 D7) carries it — as the inline skill source under isolation, or
+        // by materializing it under the legacy path. The former dead
+        // `gate_opts`/`gate_opts_ws` pair is collapsed into this one call;
+        // under isolation the gate now gets a fresh workspace PER CASE
+        // (matching the rollout loop and eval), not one per scoring pass —
+        // the cross-case file_exists contamination fix.
         let original_text = artifact.text().to_string();
         artifact.set_text(candidate_text.clone());
-        let gate_ws = tempfile::TempDir::new().map_err(TextgradError::Io)?;
-        let mat_result = artifact.materialize(gate_ws.path()).await;
-        if mat_result.is_err() {
-            artifact.set_text(original_text.clone());
-            mat_result?;
-        }
-        let gate_opts_ws = CaseRunOptions {
-            project_root: gate_ws.path().to_path_buf(),
-            ..gate_opts
+        let gate_setup = scoring_opts(artifact, config).await;
+        let (gate_opts, _gate_ws) = match gate_setup {
+            Ok(setup) => setup,
+            Err(e) => {
+                artifact.set_text(original_text.clone());
+                return Err(e);
+            }
         };
         let gate_results = score_cases(
             runner,
             selection_cases,
-            &gate_opts_ws,
+            &gate_opts,
             scorer,
             config.gate_trials,
             config.parallel,
@@ -447,6 +441,7 @@ mod tests {
                 timeout_seconds: 30,
                 parallel: Some(1),
                 artifact_stem: "artifact".to_string(),
+                isolate: true,
             },
             epoch: 0,
             step_in_epoch: 0,

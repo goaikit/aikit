@@ -367,6 +367,17 @@ pub(crate) fn argv(ctx: crate::runner::backends::argv_spec::ArgvCtx) -> Vec<OsSt
         if env.ephemeral {
             argv.push(OsString::from("--no-session"));
         }
+        // spec 016 D3: skill isolation is the PAIR `--no-skills --skill
+        // <path>` — both or neither. `--no-skills` alone removes the skill
+        // under test (the `bare` trap in mirror image); `--skill` loads the
+        // materialized copy explicitly, bypassing pi's folder-trust gate,
+        // which would silently skip ambient discovery in an untrusted scratch
+        // workspace anyway (Appendix B).
+        if let Some(iso) = env.skill_isolation.as_ref() {
+            argv.push(OsString::from("--no-skills"));
+            argv.push(OsString::from("--skill"));
+            argv.push(iso.skill_path.as_os_str().to_owned());
+        }
     }
     argv
 }
@@ -819,6 +830,102 @@ mod tests {
                 "--no-session"
             ]
         );
+    }
+
+    // ---- spec 016 skill isolation ----------------------------------------
+
+    fn isolation_envelope() -> InvocationEnvelope {
+        use crate::runner::types::SkillIsolation;
+        InvocationEnvelope {
+            skill_isolation: Some(SkillIsolation {
+                workspace_root: std::path::PathBuf::from("/scratch/ws"),
+                skill_path: std::path::PathBuf::from("/scratch/ws/.pi/skills/my-skill"),
+                skill_name: "my-skill".to_string(),
+                codex_home: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn argv_isolation_emits_no_skills_paired_with_skill_path() {
+        let env = isolation_envelope();
+        let argv = argv(ArgvCtx {
+            model: None,
+            yolo: false,
+            stream: false,
+            events_mode: false,
+            session_id: None,
+            envelope: Some(&env),
+        });
+        let s: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
+        let no_skills = s
+            .iter()
+            .position(|a| *a == "--no-skills")
+            .expect("--no-skills must be emitted under isolation");
+        assert_eq!(
+            s[no_skills + 1],
+            "--skill",
+            "--no-skills must be immediately paired with --skill: {s:?}"
+        );
+        assert_eq!(
+            s[no_skills + 2],
+            "/scratch/ws/.pi/skills/my-skill",
+            "--skill must carry the materialized skill path: {s:?}"
+        );
+    }
+
+    /// spec 016 pairing regression guard: the isolation path must never emit
+    /// `--no-skills` without a paired `--skill` — alone it reproduces the
+    /// `--bare` failure (the skill under test disappears). Exercised across
+    /// envelope/ctx combinations so a refactor can't sneak an unpaired flag
+    /// in through one branch.
+    #[test]
+    fn argv_isolation_no_skills_never_unpaired() {
+        let base = isolation_envelope();
+        let with_ephemeral = InvocationEnvelope {
+            ephemeral: true,
+            ..isolation_envelope()
+        };
+        let model = "anthropic/claude-sonnet-4".to_string();
+        let ctxs = [
+            (None, None, &base),
+            (Some(&model), Some("sess-1"), &base),
+            (None, None, &with_ephemeral),
+        ];
+        for (model, session_id, env) in ctxs {
+            let argv = argv(ArgvCtx {
+                model,
+                yolo: false,
+                stream: false,
+                events_mode: false,
+                session_id,
+                envelope: Some(env),
+            });
+            let s: Vec<&str> = argv.iter().map(|a| a.to_str().unwrap()).collect();
+            if let Some(pos) = s.iter().position(|a| *a == "--no-skills") {
+                assert!(
+                    s.get(pos + 1) == Some(&"--skill") && s.get(pos + 2).is_some(),
+                    "--no-skills unpaired in {s:?}"
+                );
+            } else {
+                panic!("isolation envelope must emit --no-skills: {s:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn argv_without_isolation_or_bare_emits_neither_flag() {
+        let argv = argv(ArgvCtx {
+            model: None,
+            yolo: false,
+            stream: false,
+            events_mode: false,
+            session_id: None,
+            envelope: Some(&InvocationEnvelope::default()),
+        });
+        assert!(!argv.contains(&OsString::from("--no-skills")));
+        assert!(!argv.contains(&OsString::from("--skill")));
     }
 
     // ---- capability honesty (spec 014 testing decisions) -----------------

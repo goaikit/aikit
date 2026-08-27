@@ -363,7 +363,7 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
     SPEC.push_model(&mut argv, ctx.model);
     // spec 013 D1/D6: claude honors read-only cooperatively via --allowedTools
     // (AppLevel fidelity — claude has no OS sandbox), and --bare for
-    // reproducible runs.
+    // minimal-startup runs.
     if let Some(e) = ctx.envelope {
         if matches!(e.sandbox, Some(p) if p.as_kebab_str() == "read-only") {
             argv.push(OsString::from("--allowedTools"));
@@ -371,6 +371,14 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
         }
         if e.bare {
             argv.push(OsString::from("--bare"));
+        }
+        // spec 016 D3: skill isolation maps to `--setting-sources project` —
+        // measured to drop user/plugin skills while retaining the project
+        // skill under test and OAuth auth. It must NEVER map to `--bare`,
+        // which drops the skill under test and breaks OAuth (Appendix A).
+        if e.skill_isolation.is_some() {
+            argv.push(OsString::from("--setting-sources"));
+            argv.push(OsString::from("project"));
         }
     }
     let fmt = if ctx.events_mode {
@@ -390,6 +398,93 @@ pub(crate) fn argv(ctx: ArgvCtx) -> Vec<OsString> {
     }
     SPEC.push_session_flag(&mut argv, ctx.session_id);
     argv
+}
+
+#[cfg(test)]
+mod argv_tests {
+    use super::*;
+    use crate::runner::invocation::InvocationEnvelope;
+    use crate::runner::types::SkillIsolation;
+    use std::path::PathBuf;
+
+    fn ctx(envelope: Option<&InvocationEnvelope>) -> ArgvCtx<'_> {
+        ArgvCtx {
+            model: None,
+            yolo: true,
+            stream: true,
+            events_mode: true,
+            session_id: None,
+            envelope,
+        }
+    }
+
+    fn isolation_envelope() -> InvocationEnvelope {
+        InvocationEnvelope {
+            skill_isolation: Some(SkillIsolation {
+                workspace_root: PathBuf::from("/scratch/ws"),
+                skill_path: PathBuf::from("/scratch/ws/.claude/skills/my-skill"),
+                skill_name: "my-skill".to_string(),
+                codex_home: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn strs(argv: &[OsString]) -> Vec<&str> {
+        argv.iter().map(|a| a.to_str().unwrap()).collect()
+    }
+
+    #[test]
+    fn argv_isolation_emits_setting_sources_project() {
+        let env = isolation_envelope();
+        let argv = argv(ctx(Some(&env)));
+        let s = strs(&argv);
+        let pos = s
+            .iter()
+            .position(|a| *a == "--setting-sources")
+            .expect("--setting-sources must be emitted under isolation");
+        assert_eq!(
+            s[pos + 1],
+            "project",
+            "--setting-sources must be scoped to 'project'"
+        );
+    }
+
+    /// The `bare` trap regression guard (spec 016): claude isolation must
+    /// NEVER be implemented via `--bare` — measured to drop the skill under
+    /// test, keep plugins, and break OAuth auth (Appendix A).
+    #[test]
+    fn argv_isolation_never_emits_bare() {
+        let env = isolation_envelope();
+        let argv = argv(ctx(Some(&env)));
+        assert!(
+            !argv.contains(&OsString::from("--bare")),
+            "isolation must not emit --bare: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn argv_without_isolation_emits_no_setting_sources() {
+        for envelope in [None, Some(InvocationEnvelope::default())] {
+            let argv = argv(ctx(envelope.as_ref()));
+            assert!(
+                !argv.contains(&OsString::from("--setting-sources")),
+                "no isolation → no --setting-sources: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn argv_bare_stays_distinct_from_isolation() {
+        // `bare` keeps its existing mapping and does not drag isolation in.
+        let env = InvocationEnvelope {
+            bare: true,
+            ..Default::default()
+        };
+        let argv = argv(ctx(Some(&env)));
+        assert!(argv.contains(&OsString::from("--bare")));
+        assert!(!argv.contains(&OsString::from("--setting-sources")));
+    }
 }
 
 #[cfg(all(test, feature = "claude-sdk"))]

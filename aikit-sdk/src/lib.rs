@@ -496,7 +496,7 @@ pub use runner::{
     run_builtin_agent, runnable_agents, AgentAvailabilityReason, AgentEvent, AgentEventPayload,
     AgentEventStream, AgentStatus, BackendCapabilities, MessageKind, MessagePhase, MessageRole,
     OutputMode, ProgressSink, QuotaCategory, QuotaExceededInfo, RunError, RunOptions, RunResult,
-    StreamMessage, TokenUsage, UsageSource,
+    SkillIsolation, StreamMessage, TokenUsage, UsageSource,
 };
 
 pub mod run_progress;

@@ -14,7 +14,10 @@ pub use state::{RejectedPatch, RuntimeState, StepRecord, TrainingOutcome};
 
 use std::path::Path;
 
-use aikit_evals::{score_cases, split_score, CaseRunOptions, EvalCase, EvalRunner, Scorer};
+use aikit_evals::{
+    score_cases, split_score, CaseRunOptions, EvalCase, EvalRunner, IsolationMode, Scorer,
+    SkillSource,
+};
 use async_trait::async_trait;
 
 use config::validate_config;
@@ -31,6 +34,49 @@ pub trait Optimizable: Send + Sync {
     fn set_text(&mut self, text: String);
     /// Write the artifact to `workspace` so the target agent can run against it.
     async fn materialize(&self, workspace: &Path) -> anyhow::Result<()>;
+    /// The skill name this artifact deploys as. Under isolation (spec 016
+    /// D5/D7) the eval runner materializes the skill itself and needs its
+    /// name; no default — every artifact must state its identity.
+    fn skill_name(&self) -> &str;
+}
+
+/// Build the `CaseRunOptions` for one scoring pass (spec 016 D5/D7). The ONE
+/// construction path shared by rollouts, the gate, baseline and final scores,
+/// so "isolated" means the same thing everywhere.
+///
+/// Under `config.isolate` (default) the eval runner materializes the artifact
+/// text as the skill under test into a fresh **per-case** scratch workspace —
+/// which is what fixes the gate's former per-pass shared workspace (cross-case
+/// `file_exists` contamination, spec 016 D7). The returned `TempDir` is the
+/// nominal project root (fixture source only) and must be kept alive for the
+/// pass; under `isolate: false` it is the legacy materialized shared
+/// workspace.
+pub(crate) async fn scoring_opts(
+    artifact: &dyn Optimizable,
+    config: &RunConfig,
+) -> Result<(CaseRunOptions, tempfile::TempDir), TextgradError> {
+    let ws = tempfile::TempDir::new().map_err(TextgradError::Io)?;
+    let isolation = if config.isolate {
+        IsolationMode::Isolated {
+            skill_name: artifact.skill_name().to_string(),
+            source: SkillSource::Inline(artifact.text().to_string()),
+        }
+    } else {
+        artifact.materialize(ws.path()).await?;
+        IsolationMode::Inherit
+    };
+    Ok((
+        CaseRunOptions {
+            agent_key: config.target_agent.clone(),
+            model: config.target_model.clone(),
+            project_root: ws.path().to_path_buf(),
+            timeout_seconds: config.timeout_seconds,
+            pass_threshold: config.pass_threshold,
+            isolation,
+            retain_workspace_in: None,
+        },
+        ws,
+    ))
 }
 
 // ---- case-split extraction ----
@@ -96,15 +142,9 @@ async fn compute_initial_score(
     runner: &dyn EvalRunner,
     config: &RunConfig,
 ) -> Result<f64, TextgradError> {
-    let ws = tempfile::TempDir::new().map_err(TextgradError::Io)?;
-    artifact.materialize(ws.path()).await?;
-    let opts = CaseRunOptions {
-        agent_key: config.target_agent.clone(),
-        model: config.target_model.clone(),
-        project_root: ws.path().to_path_buf(),
-        timeout_seconds: config.timeout_seconds,
-        pass_threshold: config.pass_threshold,
-    };
+    // spec 016 D7: per-CASE workspaces via the shared scoring path (the
+    // runner materializes the skill per case under isolation).
+    let (opts, _ws) = scoring_opts(artifact, config).await?;
     let results = score_cases(
         runner,
         selection_cases,
@@ -394,15 +434,8 @@ async fn compute_final_score(
     if test_cases.is_empty() {
         return Ok(best_score);
     }
-    let ws = tempfile::TempDir::new().map_err(TextgradError::Io)?;
-    artifact.materialize(ws.path()).await?;
-    let opts = CaseRunOptions {
-        agent_key: config.target_agent.clone(),
-        model: config.target_model.clone(),
-        project_root: ws.path().to_path_buf(),
-        timeout_seconds: config.timeout_seconds,
-        pass_threshold: config.pass_threshold,
-    };
+    // spec 016 D7: same per-case scoring path as the gate and baseline.
+    let (opts, _ws) = scoring_opts(artifact, config).await?;
     let results = score_cases(
         runner,
         test_cases,
@@ -442,6 +475,9 @@ mod tests {
         async fn materialize(&self, workspace: &Path) -> anyhow::Result<()> {
             tokio::fs::write(workspace.join("artifact.md"), self.text.as_bytes()).await?;
             Ok(())
+        }
+        fn skill_name(&self) -> &str {
+            "simple-artifact"
         }
     }
 
@@ -483,6 +519,8 @@ mod tests {
                 stderr: vec![],
                 exit_code: Some(0),
                 timed_out: false,
+                workspace: None,
+                isolation: None,
             };
             let result = CaseResult {
                 id: case.id.clone(),
@@ -558,6 +596,7 @@ mod tests {
             timeout_seconds: 30,
             parallel: Some(1),
             artifact_stem: "artifact".to_string(),
+            isolate: true,
         }
     }
 
@@ -566,6 +605,158 @@ mod tests {
             scaffold: "scaffold".to_string(),
             strategy: "initial strategy".to_string(),
         }
+    }
+
+    // ---- spec 016 D5/D7: the shared scoring-opts construction path ----
+
+    /// `scoring_opts` is the ONE construction path for rollouts, the gate,
+    /// baseline and final scores. Under isolation it must carry the CURRENT
+    /// artifact text (for the gate that is the candidate, because run_step
+    /// sets the artifact text before calling) as an inline skill source.
+    #[tokio::test]
+    async fn test_scoring_opts_isolated_carries_current_artifact_text() {
+        use aikit_evals::{IsolationMode, SkillSource};
+        let artifact = SimpleArtifact {
+            text: "candidate text".to_string(),
+        };
+        let config = make_config();
+        let (opts, ws) = scoring_opts(&artifact, &config).await.unwrap();
+        match &opts.isolation {
+            IsolationMode::Isolated { skill_name, source } => {
+                assert_eq!(skill_name, "simple-artifact");
+                assert_eq!(
+                    source,
+                    &SkillSource::Inline("candidate text".to_string()),
+                    "the inline source must be the artifact text AT CALL TIME"
+                );
+            }
+            IsolationMode::Inherit => panic!("isolate: true must construct Isolated"),
+        }
+        assert!(opts.retain_workspace_in.is_none());
+        // Under isolation the artifact is NOT materialized into the nominal
+        // project root — the runner materializes per case instead.
+        assert!(
+            !ws.path().join("artifact.md").exists(),
+            "no per-pass shared materialization under isolation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_scoring_opts_isolate_false_materializes_legacy_shared_ws() {
+        use aikit_evals::IsolationMode;
+        let artifact = SimpleArtifact {
+            text: "legacy".to_string(),
+        };
+        let mut config = make_config();
+        config.isolate = false;
+        let (opts, ws) = scoring_opts(&artifact, &config).await.unwrap();
+        assert!(matches!(opts.isolation, IsolationMode::Inherit));
+        assert_eq!(opts.project_root, ws.path());
+        assert!(
+            ws.path().join("artifact.md").exists(),
+            "legacy path must materialize into the shared workspace"
+        );
+    }
+
+    /// spec 016 D5: `isolate` defaults ON when absent — a pre-016 persisted
+    /// runtime_state.json resumes with isolation enabled rather than
+    /// silently keeping the untrustworthy legacy environment.
+    #[test]
+    fn test_runconfig_isolate_defaults_true_when_missing() {
+        let mut v = serde_json::to_value(make_config()).unwrap();
+        assert!(
+            v.as_object_mut().unwrap().remove("isolate").is_some(),
+            "isolate must serialize"
+        );
+        let cfg: RunConfig = serde_json::from_value(v).unwrap();
+        assert!(cfg.isolate, "missing isolate key must default to ON (D5)");
+    }
+
+    /// spec 016 D7 at the rollout seam, with the REAL runner: the fake agent
+    /// drops a file in its cwd; the rollout's file_exists scorer must score
+    /// against the per-case isolated workspace (where the file is), not the
+    /// nominal per-pass project root (where it is not).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_rollout_scores_against_isolated_per_case_workspace() {
+        use aikit_evals::{AikitEvalRunner, CheckDefinition, ChecksScorer};
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::path::PathBuf;
+
+        let bin = TempDir::new().unwrap();
+        let script = bin.path().join("claude");
+        {
+            let mut f = std::fs::File::create(&script).unwrap();
+            writeln!(
+                f,
+                "#!/bin/sh\ntouch dropped.txt\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\",\"session_id\":\"s\"}}'"
+            )
+            .unwrap();
+        }
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let previous_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", bin.path().display(), previous_path),
+        );
+
+        let dir = TempDir::new().unwrap();
+        tokio::fs::write(dir.path().join("history.json"), b"[]")
+            .await
+            .unwrap();
+        let mut artifact = SimpleArtifact {
+            text: "skill text".to_string(),
+        };
+        let mut config = make_config();
+        config.target_agent = "claude".to_string();
+        let mut state = RuntimeState {
+            config: config.clone(),
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score: 0.0,
+            current_score: 0.0,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: "strategy".to_string(),
+        };
+        let scorer = ChecksScorer {
+            checks: vec![CheckDefinition::FileExists {
+                path: PathBuf::from("dropped.txt"),
+                required: true,
+            }],
+        };
+
+        step::run_step(
+            &mut artifact,
+            &[make_eval_case("roll-1", &["train"])],
+            &[make_eval_case("sel-1", &["selection"])],
+            &scorer,
+            &AikitEvalRunner::new(),
+            "scaffold",
+            "strategy",
+            &config,
+            &mut state,
+            dir.path(),
+            "",
+        )
+        .await
+        .unwrap();
+
+        let rollouts: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(dir.path().join("steps/step_0000/rollouts.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let score = rollouts[0]["score"].as_f64().unwrap();
+        assert!(
+            (score - 1.0).abs() < 1e-9,
+            "file_exists must be scored against the isolated per-case workspace, got {score}"
+        );
+        std::env::set_var("PATH", previous_path);
     }
 
     // ---- AC27: NoSelectionCases ----

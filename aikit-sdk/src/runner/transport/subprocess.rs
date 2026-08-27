@@ -128,6 +128,13 @@ pub(crate) fn connect(
         cmd.env(k, v);
     }
 
+    // spec 016 D3: apply backend skill-isolation env (codex scratch
+    // CODEX_HOME). The value is a path only; the scratch home's contents are
+    // credentials and are never logged.
+    for (k, v) in crate::runner::invocation::isolation_env_for(backend, &envelope) {
+        cmd.env(k, v);
+    }
+
     // BUG-4 (ADR 0014): spawn the agent CLI as the leader of its own process
     // group. Termination is escalated over the whole group (see
     // `kill_process_group` below), which reaps grandchildren (tools the

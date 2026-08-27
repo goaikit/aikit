@@ -212,6 +212,7 @@ mod tests {
             timeout_seconds: 30,
             parallel: Some(1),
             artifact_stem: "artifact".to_string(),
+            isolate: true,
         }
     }
 
