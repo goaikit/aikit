@@ -2,13 +2,13 @@
 
 use std::path::Path;
 
-use aikit_evals::{score_cases, split_score, CaseRunOptions, EvalCase, EvalRunner, Scorer};
+use aikit_evals::{score_cases, split_score, EvalCase, EvalRunner, Scorer};
 use aikit_sdk::{AgentRunner, Pipeline};
 
 use crate::edit::{PROTECTED_BEGIN, PROTECTED_END};
 use crate::training::config::{RunConfig, SlowUpdateMode, TextgradError};
 use crate::training::state::{ensure_epoch_dir, RuntimeState};
-use crate::training::Optimizable;
+use crate::training::{scoring_opts, Optimizable};
 
 const PROTECTED_REGION_SCHEMA: &str = r#"{
   "type": "object",
@@ -137,21 +137,17 @@ pub(super) async fn run_slow_update(
             let accepted = match &config.slow_update_mode {
                 SlowUpdateMode::ForceAccept => true,
                 SlowUpdateMode::Gated => {
-                    // Score the candidate on the selection split.
+                    // Score the candidate on the selection split through the
+                    // shared per-case scoring path (spec 016 D5/D7).
                     let original_text = artifact.text().to_string();
                     artifact.set_text(candidate_text.clone());
-                    let gate_ws = tempfile::TempDir::new().map_err(TextgradError::Io)?;
-                    let mat_result = artifact.materialize(gate_ws.path()).await;
-                    if mat_result.is_err() {
-                        artifact.set_text(original_text.clone());
-                        mat_result?;
-                    }
-                    let gate_opts = CaseRunOptions {
-                        agent_key: config.target_agent.clone(),
-                        model: config.target_model.clone(),
-                        project_root: gate_ws.path().to_path_buf(),
-                        timeout_seconds: config.timeout_seconds,
-                        pass_threshold: config.pass_threshold,
+                    let gate_setup = scoring_opts(artifact, config).await;
+                    let (gate_opts, _gate_ws) = match gate_setup {
+                        Ok(setup) => setup,
+                        Err(e) => {
+                            artifact.set_text(original_text.clone());
+                            return Err(e);
+                        }
                     };
                     let results = score_cases(
                         runner,

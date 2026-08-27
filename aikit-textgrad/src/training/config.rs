@@ -42,6 +42,18 @@ pub struct RunConfig {
     pub parallel: Option<u32>,
     /// Stem for artifact filenames: `best_{stem}.md`, `{stem}s/{stem}_vNNNN.md`.
     pub artifact_stem: String,
+    /// Environment isolation for every eval-scoring pass (spec 016 D5):
+    /// rollouts, the gate, baseline and final scores all construct
+    /// `IsolationMode::Isolated` when true (the default). `false` restores
+    /// the full legacy behaviour — shared ambient environment AND the gate's
+    /// per-pass shared workspace. Downstream `--no-isolation` plumbs here.
+    /// Defaulted on deserialization so pre-016 persisted runtime states resume.
+    #[serde(default = "default_isolate")]
+    pub isolate: bool,
+}
+
+fn default_isolate() -> bool {
+    true
 }
 
 /// Controls how Slow Update applies the revised protected region.

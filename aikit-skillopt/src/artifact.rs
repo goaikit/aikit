@@ -32,6 +32,10 @@ impl Optimizable for SkillArtifact {
         self.text = t;
     }
 
+    fn skill_name(&self) -> &str {
+        &self.skill_name
+    }
+
     async fn materialize(&self, workspace: &Path) -> anyhow::Result<()> {
         deploy_skill(
             &self.target_agent,
