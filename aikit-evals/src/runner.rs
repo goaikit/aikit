@@ -1647,6 +1647,86 @@ mod tests {
         std::env::remove_var("CODEX_HOME");
     }
 
+    // ---- build_isolation_report fidelity matrix (spec 016 D4/D6) ----
+
+    #[test]
+    fn test_report_unsupported_backends_isolate_project_scope_only() {
+        // gemini/cursor: no user-scope mechanism — run anyway, project scope
+        // isolated, user scope recorded as unsupported (never claimed).
+        for agent in ["gemini", "cursor"] {
+            let payload = SkillIsolation {
+                workspace_root: PathBuf::from("/scratch"),
+                skill_path: PathBuf::from("/scratch/skills/s"),
+                skill_name: "s".to_string(),
+                codex_home: None,
+            };
+            let report = build_isolation_report(
+                agent,
+                true,
+                None,
+                Some(PathBuf::from("/scratch")),
+                Some(&payload),
+                "",
+            );
+            assert_eq!(report.project_scope, ScopeFidelity::Isolated, "{agent}");
+            assert_eq!(report.user_scope, ScopeFidelity::Unsupported, "{agent}");
+            assert!(report.mechanism.is_none(), "{agent}");
+            assert!(
+                report.degrade_reason.is_some(),
+                "{agent}: the unsupported user scope must be recorded"
+            );
+        }
+    }
+
+    #[test]
+    fn test_report_codex_without_scratch_home_is_inherited_user_scope() {
+        let payload = SkillIsolation {
+            workspace_root: PathBuf::from("/scratch"),
+            skill_path: PathBuf::from("/scratch/.codex/skills/s"),
+            skill_name: "s".to_string(),
+            codex_home: None, // allocation failed
+        };
+        let report = build_isolation_report(
+            "codex",
+            true,
+            None,
+            Some(PathBuf::from("/scratch")),
+            Some(&payload),
+            "",
+        );
+        assert_eq!(report.project_scope, ScopeFidelity::Isolated);
+        assert_eq!(
+            report.user_scope,
+            ScopeFidelity::Inherited,
+            "codex without a scratch CODEX_HOME must not claim user-scope isolation"
+        );
+        assert!(report
+            .degrade_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("CODEX_HOME"));
+    }
+
+    #[test]
+    fn test_report_codex_with_scratch_home_is_isolated() {
+        let payload = SkillIsolation {
+            workspace_root: PathBuf::from("/scratch"),
+            skill_path: PathBuf::from("/scratch/.codex/skills/s"),
+            skill_name: "s".to_string(),
+            codex_home: Some(PathBuf::from("/scratch-home")),
+        };
+        let report = build_isolation_report(
+            "codex",
+            true,
+            None,
+            Some(PathBuf::from("/scratch")),
+            Some(&payload),
+            "",
+        );
+        assert_eq!(report.user_scope, ScopeFidelity::Isolated);
+        assert_eq!(report.mechanism.as_deref(), Some("scratch CODEX_HOME"));
+    }
+
     // ---- parse_claude_ambient_skills (report-only, spec 016 D6) ----
 
     #[test]
