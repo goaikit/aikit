@@ -98,6 +98,11 @@ impl CheckDefinition {
 /// Result of a single check
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {
+    /// The check's TYPE (e.g. `"trigger_expectation"`), not a unique id: a
+    /// suite with two same-typed checks yields two results with the same
+    /// `check_name`. Result vectors are ordered like the check list they ran,
+    /// so identity is positional — keying results by name collapses same-typed
+    /// checks (see `scoring::score_cases`).
     pub check_name: String,
     pub passed: bool,
     #[serde(default = "default_required")]

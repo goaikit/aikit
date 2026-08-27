@@ -1,9 +1,6 @@
 //! Scalar reward, gate-metric reduction, and pluggable Scorer trait.
 
 use std::path::Path;
-use std::sync::Arc;
-
-use tokio::sync::Semaphore;
 
 use crate::checks::{run_checks, suite_passes, CheckDefinition, CheckResult};
 use crate::runner::{CaseRunOptions, EvalRunner};
@@ -90,13 +87,26 @@ pub fn split_score(items: &[Vec<CheckResult>], metric: &GateMetric) -> f64 {
     sum / items.len() as f64
 }
 
-/// Run `trials` trials per case concurrently (bounded by `max_parallelism`), score each trial
-/// with `scorer`, and return per-check majority-vote aggregated results for each case.
+/// Run `trials` trials per case, score each trial with `scorer`, and return per-check
+/// majority-vote aggregated results for each case.
+///
+/// Execution is **sequential**: one trial at a time, cases in order. `max_parallelism` is
+/// accepted so callers can thread their `parallel` configuration through unchanged, but it
+/// is not honored here — bounded parallelism exists only in the eval case runner
+/// (`runner::run_cases`). Honoring it in this path would turn gate/holdout scoring into
+/// N concurrent agent spawns by default, which is a deliberate non-goal for now.
 ///
 /// Majority-vote rule: a check is `passed = true` for a case iff it passed in strictly more
-/// than half of the trials. Ties (equal pass and fail counts) count as not passed.
+/// than half of the trials. Ties (equal pass and fail counts) count as not passed. A trial
+/// that produced no result at a check's position (for example a spawn failure that yielded
+/// an empty result vector) still counts toward the denominator, so a missing trial is a
+/// fail vote, never a free pass.
 ///
-/// Returns one `Vec<CheckResult>` per input case in the same order as `cases`.
+/// Returns one `Vec<CheckResult>` per input case in the same order as `cases`. Result
+/// entries correspond **positionally** to the check list every trial ran: `check_name`
+/// holds the check TYPE (e.g. `"trigger_expectation"`), so two same-typed checks produce
+/// two entries with the same name — consumers must key results by position, not by name,
+/// or same-typed checks will collapse into one.
 pub async fn score_cases(
     runner: &dyn EvalRunner,
     cases: &[EvalCase],
@@ -109,36 +119,27 @@ pub async fn score_cases(
         return vec![];
     }
 
-    let max_parallel = max_parallelism
-        .unwrap_or_else(|| num_cpus::get().max(1) as u32)
-        .max(1) as usize;
-    let semaphore = Arc::new(Semaphore::new(max_parallel));
+    let _ = max_parallelism; // see rustdoc: accepted but not honored in this path
 
     let mut all_trial_results: Vec<Vec<Vec<CheckResult>>> = vec![Vec::new(); cases.len()];
 
     for (case_idx, case) in cases.iter().enumerate() {
         for _ in 0..trials {
-            let trial_check_results = match semaphore.acquire().await {
-                Err(_) => vec![],
-                Ok(_permit) => {
-                    let (output, _case_result, trace_jsonl) =
-                        runner.run_case(case, opts, &[]).await;
-                    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                    // spec 016 D2/D7: an isolated case ran in its own scratch
-                    // workspace — score against THAT directory (the output
-                    // keeps it alive until after scoring), falling back to
-                    // the legacy project-root resolution under Inherit.
-                    let working_dir = output
-                        .workspace
-                        .as_ref()
-                        .map(|w| w.working_dir().to_path_buf())
-                        .unwrap_or_else(|| match &case.workspace_subdir {
-                            Some(subdir) => opts.project_root.join(subdir),
-                            None => opts.project_root.clone(),
-                        });
-                    scorer.score(&stdout, &trace_jsonl, &working_dir)
-                }
-            };
+            let (output, _case_result, trace_jsonl) = runner.run_case(case, opts, &[]).await;
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            // spec 016 D2/D7: an isolated case ran in its own scratch
+            // workspace — score against THAT directory (the output
+            // keeps it alive until after scoring), falling back to
+            // the legacy project-root resolution under Inherit.
+            let working_dir = output
+                .workspace
+                .as_ref()
+                .map(|w| w.working_dir().to_path_buf())
+                .unwrap_or_else(|| match &case.workspace_subdir {
+                    Some(subdir) => opts.project_root.join(subdir),
+                    None => opts.project_root.clone(),
+                });
+            let trial_check_results = scorer.score(&stdout, &trace_jsonl, &working_dir);
             all_trial_results[case_idx].push(trial_check_results);
         }
     }
@@ -194,7 +195,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::path::PathBuf;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use crate::artifacts::{CaseResult, CaseStatus, CaseTrialsResult, TrialResult};
     use crate::runner::CaseRunOutput;
