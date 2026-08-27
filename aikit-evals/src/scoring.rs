@@ -124,10 +124,18 @@ pub async fn score_cases(
                     let (output, _case_result, trace_jsonl) =
                         runner.run_case(case, opts, &[]).await;
                     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                    let working_dir = match &case.workspace_subdir {
-                        Some(subdir) => opts.project_root.join(subdir),
-                        None => opts.project_root.clone(),
-                    };
+                    // spec 016 D2/D7: an isolated case ran in its own scratch
+                    // workspace — score against THAT directory (the output
+                    // keeps it alive until after scoring), falling back to
+                    // the legacy project-root resolution under Inherit.
+                    let working_dir = output
+                        .workspace
+                        .as_ref()
+                        .map(|w| w.working_dir().to_path_buf())
+                        .unwrap_or_else(|| match &case.workspace_subdir {
+                            Some(subdir) => opts.project_root.join(subdir),
+                            None => opts.project_root.clone(),
+                        });
                     scorer.score(&stdout, &trace_jsonl, &working_dir)
                 }
             };
@@ -237,6 +245,8 @@ mod tests {
             project_root: PathBuf::from("/tmp"),
             timeout_seconds: 1,
             pass_threshold: 1.0,
+            isolation: crate::runner::IsolationMode::Inherit,
+            retain_workspace_in: None,
         }
     }
 
@@ -438,6 +448,8 @@ mod tests {
                 stderr: vec![],
                 exit_code: Some(0),
                 timed_out: false,
+                workspace: None,
+                isolation: None,
             };
             let result = CaseResult {
                 id: case.id.clone(),
@@ -660,6 +672,109 @@ mod tests {
                 "1/3 trials passing must not reach majority for either check"
             );
         }
+    }
+
+    /// spec 016 D7: the cross-case `file_exists` contamination test. Case A's
+    /// agent creates a file; case B's `file_exists` on that file must NOT see
+    /// it under per-case isolated workspaces. The `Inherit` half is the
+    /// negative check: reverting to the shared directory makes case B pass on
+    /// case A's leftovers, which is exactly the defect (ordering deciding the
+    /// score) that per-case workspaces remove.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_score_cases_per_case_workspaces_prevent_file_exists_contamination() {
+        use crate::runner::{AikitEvalRunner, IsolationMode, SkillSource};
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        // Fake claude: touches a file named by its prompt (read from stdin).
+        let bin = tempfile::tempdir().unwrap();
+        let script = bin.path().join("claude");
+        {
+            // Scoped so the handle is closed before the script is exec'd
+            // (an open-for-write executable spawns with ETXTBSY).
+            let mut f = std::fs::File::create(&script).unwrap();
+            writeln!(
+                f,
+                "#!/bin/sh\np=$(cat)\ntouch \"$p\"\nprintf '%s\\n' '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\",\"session_id\":\"s\"}}'"
+            )
+            .unwrap();
+        }
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+        let previous_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!("{}:{}", bin.path().display(), previous_path),
+        );
+
+        let case_a = EvalCase {
+            id: "case-a".to_string(),
+            prompt: "marker-a.txt".to_string(),
+            should_trigger: true,
+            tags: vec![],
+            workspace_subdir: None,
+        };
+        let case_b = EvalCase {
+            id: "case-b".to_string(),
+            prompt: "marker-b.txt".to_string(),
+            should_trigger: true,
+            tags: vec![],
+            workspace_subdir: None,
+        };
+        let cases = vec![case_a, case_b];
+        // Both cases are scored on "did marker-a.txt appear in MY workspace".
+        let scorer = ChecksScorer {
+            checks: vec![CheckDefinition::FileExists {
+                path: PathBuf::from("marker-a.txt"),
+                required: true,
+            }],
+        };
+        let runner = AikitEvalRunner::new();
+        let project = tempfile::tempdir().unwrap();
+
+        // Isolated: per-case workspaces — case B must NOT see case A's file.
+        let isolated_opts = CaseRunOptions {
+            agent_key: "claude".to_string(),
+            model: None,
+            project_root: project.path().to_path_buf(),
+            timeout_seconds: 10,
+            pass_threshold: 1.0,
+            isolation: IsolationMode::Isolated {
+                skill_name: "contamination-skill".to_string(),
+                source: SkillSource::Inline("# s\n".to_string()),
+            },
+            retain_workspace_in: None,
+        };
+        let isolated = score_cases(&runner, &cases, &isolated_opts, &scorer, 1, Some(1)).await;
+        assert!(
+            isolated[0][0].passed,
+            "case A created marker-a.txt in its own workspace: {:?}",
+            isolated
+        );
+        assert!(
+            !isolated[1][0].passed,
+            "case B must NOT see case A's file under per-case workspaces"
+        );
+
+        // Inherit (the negative check): one shared directory — case B passes
+        // on case A's leftover file, demonstrating the contamination.
+        let shared = tempfile::tempdir().unwrap();
+        let inherit_opts = CaseRunOptions {
+            isolation: IsolationMode::Inherit,
+            project_root: shared.path().to_path_buf(),
+            ..isolated_opts
+        };
+        let inherited = score_cases(&runner, &cases, &inherit_opts, &scorer, 1, Some(1)).await;
+        assert!(inherited[0][0].passed);
+        assert!(
+            inherited[1][0].passed,
+            "shared-dir contamination: case B sees case A's file — the defect the isolated \
+             path must not reproduce"
+        );
+
+        std::env::set_var("PATH", previous_path);
     }
 
     #[tokio::test]

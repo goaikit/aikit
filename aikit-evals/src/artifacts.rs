@@ -63,6 +63,54 @@ pub struct CaseTrialsResult {
     pub pass_rate: f64,
 }
 
+/// Achieved isolation fidelity for one scope (spec 016 D6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScopeFidelity {
+    /// The scope was actually isolated for this run.
+    Isolated,
+    /// The scope ran against the ambient environment (legacy behaviour, or a
+    /// recorded degradation — see [`IsolationReport::degrade_reason`]).
+    Inherited,
+    /// The backend has no mechanism for this scope; the run proceeded anyway
+    /// and says so honestly (spec 016 D4).
+    Unsupported,
+}
+
+/// What environment a run *actually* got, per scope (spec 016 D6).
+///
+/// **Report-only.** Every field here — `ambient_skills` in particular — is
+/// evidence of *environment*, never evidence of *invocation*: the agent's
+/// capability listing produced false passes when it fed scoring (spec 015),
+/// so nothing in this struct may ever feed a `CheckResult` or otherwise
+/// influence pass/fail. Do not "fix" this back into the spec-015 bug.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IsolationReport {
+    /// Was `IsolationMode::Isolated` asked for?
+    pub requested: bool,
+    /// Project scope (`<cwd>/.claude/skills`, `CLAUDE.md`, `.mcp.json`, …).
+    pub project_scope: ScopeFidelity,
+    /// User scope (`~/.claude/skills`, plugins, user settings, …).
+    pub user_scope: ScopeFidelity,
+    /// The per-backend mechanism used (e.g. `--setting-sources project`).
+    pub mechanism: Option<String>,
+    /// Agent version, when observable from the run output.
+    pub agent_version: Option<String>,
+    /// Skills the agent reported loading (best-effort, parsed from claude's
+    /// `system`/`init` event). An empty vec means "not observable on this
+    /// backend" and must be rendered as such — never as "nothing was loaded".
+    #[serde(default)]
+    pub ambient_skills: Vec<String>,
+    /// Root of the scratch workspace the case ran in, when isolated.
+    pub workspace_root: Option<PathBuf>,
+    /// Why isolation degraded below what was requested (e.g. opencode has no
+    /// skills path in the deploy catalog). `None` when nothing degraded.
+    /// Additive to the spec-016 D6 shape so a degraded run never *silently*
+    /// claims isolation (D4).
+    #[serde(default)]
+    pub degrade_reason: Option<String>,
+}
+
 /// Aggregated run summary
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SummaryResult {
@@ -83,6 +131,11 @@ pub struct SummaryResult {
     pub run_dir: PathBuf,
     pub checks_path: Option<PathBuf>,
     pub skill_project_root: PathBuf,
+    /// Environment contract for the run (spec 016 D6). Additive: pre-016
+    /// summaries deserialize as `None`, which renders as "unknown" — never as
+    /// "not isolated".
+    #[serde(default)]
+    pub isolation: Option<IsolationReport>,
     pub cases: Vec<CaseSummary>,
 }
 
@@ -559,6 +612,16 @@ mod tests {
             run_dir: dir.path().to_path_buf(),
             checks_path: None,
             skill_project_root: dir.path().to_path_buf(),
+            isolation: Some(IsolationReport {
+                requested: true,
+                project_scope: ScopeFidelity::Isolated,
+                user_scope: ScopeFidelity::Isolated,
+                mechanism: Some("--setting-sources project".to_string()),
+                agent_version: Some("2.1.215".to_string()),
+                ambient_skills: vec!["probe-skill".to_string()],
+                workspace_root: Some(dir.path().to_path_buf()),
+                degrade_reason: None,
+            }),
             cases: vec![],
         };
 
@@ -566,5 +629,51 @@ mod tests {
         let read = read_summary(dir.path()).unwrap();
         assert_eq!(read.total_cases, 2);
         assert!(read.suite_pass);
+        let iso = read.isolation.expect("isolation block must round-trip");
+        assert!(iso.requested);
+        assert_eq!(iso.project_scope, ScopeFidelity::Isolated);
+        assert_eq!(iso.ambient_skills, vec!["probe-skill".to_string()]);
+    }
+
+    /// spec 016 D6 back-compat: a pre-change summary.json with no `isolation`
+    /// key must read as `None` (rendered "unknown"), never fail to parse.
+    #[test]
+    fn test_summary_backcompat_missing_isolation_reads_none() {
+        let dir = TempDir::new().unwrap();
+        let pre_016 = r#"{
+            "suite_pass": true,
+            "agent": "claude",
+            "model": null,
+            "total_cases": 1,
+            "passed": 1,
+            "failed": 0,
+            "run_dir": "/tmp/run",
+            "checks_path": null,
+            "skill_project_root": "/tmp/proj",
+            "cases": []
+        }"#;
+        std::fs::write(dir.path().join("summary.json"), pre_016).unwrap();
+
+        let read = read_summary(dir.path()).expect("pre-016 summary.json must still parse");
+        assert!(
+            read.isolation.is_none(),
+            "missing isolation key must deserialize as None, not a default claim"
+        );
+    }
+
+    #[test]
+    fn test_scope_fidelity_serializes_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ScopeFidelity::Unsupported).unwrap(),
+            "\"unsupported\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ScopeFidelity::Isolated).unwrap(),
+            "\"isolated\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ScopeFidelity::Inherited).unwrap(),
+            "\"inherited\""
+        );
     }
 }
