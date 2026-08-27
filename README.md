@@ -22,6 +22,14 @@ built-in `aikit` agent, or anything else in the catalog.
 - **Session sync (optional)** — `aikit session sync` uploads the transcripts
   Claude Code and Codex already write to disk, secret-scrubbed and
   content-addressed, to S3-compatible blob storage (one-shot or `--watch`).
+- **Evals and skill optimization (libraries)** —
+  [`aikit-evals`](aikit-evals/) runs eval suites against live agents and
+  scores the captured trajectories with deterministic checks (including the
+  structural `skill_invoked` check), isolating each case in a scratch
+  workspace so results are reproducible across machines;
+  [`aikit-textgrad`](aikit-textgrad/) and [`aikit-skillopt`](aikit-skillopt/)
+  build a text-gradient optimization loop on top of it. These power
+  `fastskill eval` / `fastskill optimize` downstream.
 - **Templates and package management** — `aikit init` scaffolds a
   Spec-Driven Development project; `aikit install/update/remove/list` manage
   packaged commands, skills, and agent definitions from GitHub or a local
