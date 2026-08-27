@@ -1,13 +1,18 @@
 # Contributing to AIKIT
 
-This repository is a Cargo workspace (`members = [".", "aikit-sdk", "aikit-py", "aikit-agent", "aikit-evals", "aikit-magictool"]`):
+This repository is a Cargo workspace (`members = [".", "aikit-sdk", "aikit-py", "aikit-agent", "aikit-agent-codex", "aikit-evals", "aikit-magictool", "aikit-textgrad", "aikit-skillopt", "aikit-session-capture", "aikit-session-sync"]`):
 
 - `aikit` (root CLI, crate `aikit-cli`): package install/init/build/publish, checks, release, run, serve, spec entry points. Commands are registered with `cli-framework` (`CommandSpec`) in `src/cli/mod.rs`.
 - `aikit-sdk`: reusable Rust gateway for catalog, deploy, agent run/event APIs, the structured agent pipeline, and session store
 - `aikit-py`: Python bindings and package over the SDK
 - `aikit-agent`: in-process agent runtime used by `aikit agent run --agent aikit`
-- `aikit-evals`: evaluation harness for agent runs
+- `aikit-agent-codex`: codex backend support for the in-process runtime
+- `aikit-evals`: evaluation harness for agent runs — suites, deterministic checks (`skill_invoked`, `trigger_expectation`, …), majority-vote trial scoring, and per-case environment isolation (spec 016)
 - `aikit-magictool`: reusable magic-tool HTTP layer (one-shot and multi-turn form-fill); mounted on `aikit serve` when the root crate is built with `--features tools`
+- `aikit-textgrad`: artifact-agnostic text-gradient optimization loop driven by `aikit-evals`
+- `aikit-skillopt`: skill-document optimization on top of `aikit-textgrad`
+- `aikit-session-capture`: watches agent session files and parses them into a canonical form
+- `aikit-session-sync`: syncs captured sessions to object storage (S3-compatible)
 
 ## Prerequisites
 
