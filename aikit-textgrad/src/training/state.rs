@@ -36,9 +36,20 @@ pub struct StepRecord {
     pub epoch: u32,
     pub hash_before: String,
     pub hash_after: String,
+    /// Score of the model in effect *after* this step: advances to the gate score only on
+    /// an accepted step; on a rejected or skipped step it keeps the previous value, so it
+    /// equals `score_candidate` only when `accepted` is true.
     pub score_current: f64,
+    /// Gate score of this step's candidate (for a skipped no-edit step: the best-known
+    /// score of the identical text, since no gate ran).
     pub score_candidate: f64,
     pub accepted: bool,
+    /// True when the step produced no textual change (`apply_budgeted` applied nothing).
+    /// The gate is skipped for such steps — scoring a byte-identical artifact could only
+    /// promote `best_score` on evaluation noise — so they are never accepted and
+    /// `score_candidate` is recorded as the best-known score of that identical text.
+    #[serde(default)]
+    pub no_edit: bool,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
 }
@@ -52,6 +63,9 @@ pub struct TrainingOutcome {
     pub final_score: f64,
     /// Path to `best_{stem}.md` inside `run_dir`.
     pub best_artifact_path: PathBuf,
+    /// Number of optimizer steps executed by this invocation (for a resume, only the
+    /// steps run after the checkpoint). `0` would indicate the loop never executed.
+    pub steps_run: u32,
 }
 
 // ---- I/O helpers ----
@@ -88,10 +102,24 @@ pub async fn read_runtime_state(run_dir: &Path) -> Result<RuntimeState, Textgrad
 }
 
 /// Append a `StepRecord` to `run_dir/history.json`.
+///
+/// A missing file starts a fresh history, but a *present* file that cannot be read or
+/// parsed is an error: silently replacing it would wipe the run's accepted-step record.
 pub async fn append_history(run_dir: &Path, record: &StepRecord) -> Result<(), std::io::Error> {
     let path = run_dir.join("history.json");
-    let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-    let mut records: Vec<serde_json::Value> = serde_json::from_str(&existing).unwrap_or_default();
+    let mut records: Vec<serde_json::Value> = match tokio::fs::read_to_string(&path).await {
+        Ok(existing) => serde_json::from_str(&existing).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "history.json exists but is unparseable ({e}); refusing to overwrite it \
+                     — inspect or move the file aside to continue"
+                ),
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e),
+    };
     if let Ok(v) = serde_json::to_value(record) {
         records.push(v);
     }
@@ -256,6 +284,54 @@ mod tests {
     #[test]
     fn test_sha256_hex_different_for_different_inputs() {
         assert_ne!(sha256_hex("hello"), sha256_hex("world"));
+    }
+
+    fn make_record(global_step: u32) -> StepRecord {
+        StepRecord {
+            global_step,
+            epoch: 0,
+            hash_before: "a".to_string(),
+            hash_after: "b".to_string(),
+            score_current: 0.5,
+            score_candidate: 0.6,
+            accepted: true,
+            no_edit: false,
+            input_tokens: None,
+            output_tokens: None,
+        }
+    }
+
+    // T7: a present-but-unparseable history.json must never be silently wiped.
+    #[tokio::test]
+    async fn test_append_history_refuses_to_overwrite_corrupt_file() {
+        let dir = TempDir::new().unwrap();
+        let corrupt = b"{not json[".to_vec();
+        tokio::fs::write(dir.path().join("history.json"), &corrupt)
+            .await
+            .unwrap();
+
+        let result = append_history(dir.path(), &make_record(0)).await;
+        assert!(result.is_err(), "corrupt history.json must be an error");
+
+        // The corrupt file must be left in place for inspection, byte-for-byte.
+        let on_disk = tokio::fs::read(dir.path().join("history.json"))
+            .await
+            .unwrap();
+        assert_eq!(on_disk, corrupt, "corrupt history.json must not be touched");
+    }
+
+    #[tokio::test]
+    async fn test_append_history_starts_fresh_when_missing() {
+        let dir = TempDir::new().unwrap();
+        append_history(dir.path(), &make_record(0)).await.unwrap();
+        append_history(dir.path(), &make_record(1)).await.unwrap();
+
+        let bytes = tokio::fs::read(dir.path().join("history.json"))
+            .await
+            .unwrap();
+        let records: Vec<StepRecord> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].global_step, 1);
     }
 
     #[tokio::test]

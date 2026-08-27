@@ -181,6 +181,19 @@ fn select_ranked_pool(edits: Vec<Edit>) -> Vec<Edit> {
     ranked
 }
 
+/// Settle score bookkeeping after a gate run.
+///
+/// On accept the candidate becomes the current model, so `best_score` and
+/// `current_score` both advance to the gate score. On reject the candidate is discarded
+/// and the model in effect is unchanged, so neither score moves — `current_score` must
+/// never absorb the score of a candidate that was thrown away.
+fn settle_gate_scores(state: &mut RuntimeState, gate_score: f64, accepted: bool) {
+    if accepted {
+        state.best_score = gate_score;
+        state.current_score = gate_score;
+    }
+}
+
 fn format_skip_feedback(skips: &[SkipRecord]) -> String {
     if skips.is_empty() {
         return String::new();
@@ -261,62 +274,75 @@ pub(super) async fn run_step(
 
     // ------------------------------------------------------------------
     // GATE: score candidate on the selection split.
+    //
+    // Skipped entirely when the candidate is byte-identical to the text before the step
+    // (apply_budgeted applied nothing): gate runs are nondeterministic, so re-scoring an
+    // identical artifact can exceed `best_score + epsilon` on pure noise, promoting
+    // best_score — and ratcheting the acceptance bar — for a non-change. A skipped step
+    // is never accepted and never touches the rejected-edit buffer (nothing was actually
+    // tried; intra-patch skips already reach the optimizer via skip feedback), matching
+    // the pre-existing rule that an empty ranked pool records nothing.
     // ------------------------------------------------------------------
-    let gate_opts = CaseRunOptions {
-        agent_key: config.target_agent.clone(),
-        model: config.target_model.clone(),
-        project_root: run_dir.to_path_buf(),
-        timeout_seconds: config.timeout_seconds,
-        pass_threshold: config.pass_threshold,
-    };
+    let no_edit = candidate_text == text_before;
+    let mut gate_score = None;
+    let mut accepted = false;
 
-    // Temporarily set candidate text to materialize into the gate workspace.
-    let original_text = artifact.text().to_string();
-    artifact.set_text(candidate_text.clone());
-    let gate_ws = tempfile::TempDir::new().map_err(TextgradError::Io)?;
-    let mat_result = artifact.materialize(gate_ws.path()).await;
-    if mat_result.is_err() {
-        artifact.set_text(original_text.clone());
-        mat_result?;
-    }
-    let gate_opts_ws = CaseRunOptions {
-        project_root: gate_ws.path().to_path_buf(),
-        ..gate_opts
-    };
-    let gate_results = score_cases(
-        runner,
-        selection_cases,
-        &gate_opts_ws,
-        scorer,
-        config.gate_trials,
-        config.parallel,
-    )
-    .await;
-    let gate_score = split_score(&gate_results, &config.gate_metric);
+    if !no_edit {
+        let gate_opts = CaseRunOptions {
+            agent_key: config.target_agent.clone(),
+            model: config.target_model.clone(),
+            project_root: run_dir.to_path_buf(),
+            timeout_seconds: config.timeout_seconds,
+            pass_threshold: config.pass_threshold,
+        };
 
-    let accepted = gate_score > state.best_score + config.gate_epsilon;
+        // Temporarily set candidate text to materialize into the gate workspace.
+        let original_text = artifact.text().to_string();
+        artifact.set_text(candidate_text.clone());
+        let gate_ws = tempfile::TempDir::new().map_err(TextgradError::Io)?;
+        let mat_result = artifact.materialize(gate_ws.path()).await;
+        if mat_result.is_err() {
+            artifact.set_text(original_text.clone());
+            mat_result?;
+        }
+        let gate_opts_ws = CaseRunOptions {
+            project_root: gate_ws.path().to_path_buf(),
+            ..gate_opts
+        };
+        let gate_results = score_cases(
+            runner,
+            selection_cases,
+            &gate_opts_ws,
+            scorer,
+            config.gate_trials,
+            config.parallel,
+        )
+        .await;
+        let score = split_score(&gate_results, &config.gate_metric);
+        gate_score = Some(score);
 
-    if accepted {
-        // Leave artifact with candidate text.
-        state.best_score = gate_score;
-        let best_path =
-            save_accepted_artifact(run_dir, &config.artifact_stem, &candidate_text).await?;
-        let _ = best_path; // path is written; best_artifact_path is tracked by caller
-    } else {
-        // Restore original text.
-        artifact.set_text(original_text);
-        // Push to rejected edit buffer if there were actual edits proposed.
-        if !ranked_pool.is_empty() {
-            let score_delta = gate_score - state.best_score;
-            state.rejected_edit_buffer.push(RejectedPatch {
-                patch: ranked_pool.clone(),
-                text_snapshot: candidate_text.clone(),
-                score_delta,
-            });
+        accepted = score > state.best_score + config.gate_epsilon;
+        settle_gate_scores(state, score, accepted);
+
+        if accepted {
+            // Leave artifact with candidate text.
+            let best_path =
+                save_accepted_artifact(run_dir, &config.artifact_stem, &candidate_text).await?;
+            let _ = best_path; // path is written; best_artifact_path is tracked by caller
+        } else {
+            // Restore original text.
+            artifact.set_text(original_text);
+            // Push to rejected edit buffer if there were actual edits proposed.
+            if !ranked_pool.is_empty() {
+                let score_delta = score - state.best_score;
+                state.rejected_edit_buffer.push(RejectedPatch {
+                    patch: ranked_pool.clone(),
+                    text_snapshot: candidate_text.clone(),
+                    score_delta,
+                });
+            }
         }
     }
-
-    state.current_score = gate_score;
 
     // ------------------------------------------------------------------
     // Write step artifacts.
@@ -356,9 +382,11 @@ pub(super) async fn run_step(
     .await?;
 
     let gate_info = serde_json::json!({
+        // `score` is null when the gate was skipped for a no-edit candidate.
         "score": gate_score,
         "best_score": state.best_score,
         "accepted": accepted,
+        "skipped_no_edit": no_edit,
     });
     tokio::fs::write(
         step_dir.join("gate.json"),
@@ -375,8 +403,11 @@ pub(super) async fn run_step(
         hash_before,
         hash_after,
         score_current: state.current_score,
-        score_candidate: gate_score,
+        // For a skipped no-edit step the candidate is the current best text, so its
+        // best-known score is recorded rather than a fresh (never-run) gate score.
+        score_candidate: gate_score.unwrap_or(state.best_score),
         accepted,
+        no_edit,
         input_tokens: None,
         output_tokens: None,
     };
@@ -388,4 +419,69 @@ pub(super) async fn run_step(
 /// Format intra-patch skips from the previous step into a human-readable feedback note.
 pub(super) fn build_skip_feedback(skips: &[SkipRecord]) -> String {
     format_skip_feedback(skips)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::training::config::SlowUpdateMode;
+
+    fn make_state(best_score: f64, current_score: f64) -> RuntimeState {
+        RuntimeState {
+            config: RunConfig {
+                n_epochs: 1,
+                batch_size: 1,
+                accumulation: 1,
+                aggregate_group_size: 2,
+                lr_0: 2,
+                pass_threshold: 0.5,
+                gate_metric: aikit_evals::GateMetric::Soft,
+                gate_trials: 1,
+                gate_epsilon: 0.01,
+                slow_update_mode: SlowUpdateMode::ForceAccept,
+                protected_soft_cap_chars: 500,
+                target_agent: "stub".to_string(),
+                target_model: None,
+                optimizer_agent: "stub-opt".to_string(),
+                optimizer_model: None,
+                timeout_seconds: 30,
+                parallel: Some(1),
+                artifact_stem: "artifact".to_string(),
+            },
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score,
+            current_score,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: "strategy".to_string(),
+        }
+    }
+
+    // T8: a rejected candidate is discarded, so the scores of the model still in effect
+    // must not move — before the fix, current_score was set to the (rejected) gate score
+    // unconditionally, making StepRecord.score_current always equal score_candidate.
+    #[test]
+    fn test_settle_gate_scores_reject_leaves_current_and_best() {
+        let mut state = make_state(0.8, 0.8);
+        settle_gate_scores(&mut state, 0.3, false);
+        assert!(
+            (state.current_score - 0.8).abs() < 1e-9,
+            "reject must not move current_score, got {}",
+            state.current_score
+        );
+        assert!(
+            (state.best_score - 0.8).abs() < 1e-9,
+            "reject must not move best_score, got {}",
+            state.best_score
+        );
+    }
+
+    #[test]
+    fn test_settle_gate_scores_accept_advances_both() {
+        let mut state = make_state(0.5, 0.5);
+        settle_gate_scores(&mut state, 0.9, true);
+        assert!((state.best_score - 0.9).abs() < 1e-9);
+        assert!((state.current_score - 0.9).abs() < 1e-9);
+    }
 }

@@ -236,6 +236,9 @@ pub async fn run_training(
     if splits.selection.is_empty() {
         return Err(TextgradError::NoSelectionCases);
     }
+    if splits.train.is_empty() {
+        return Err(TextgradError::NoTrainingCases);
+    }
 
     // Create run-dir structure.
     init_run_dir(run_dir, &config).await?;
@@ -300,6 +303,7 @@ pub async fn run_training(
         best_score: state.best_score,
         final_score,
         best_artifact_path,
+        steps_run: state.global_step,
     })
 }
 
@@ -314,10 +318,17 @@ pub async fn resume_training(
 ) -> Result<TrainingOutcome, TextgradError> {
     let state = read_runtime_state(run_dir).await?;
 
+    // The persisted config is as untrusted as a caller-supplied one: e.g. gate_trials = 0
+    // would make every gate score a vacuous 1.0 (zero trials → empty results).
+    validate_config(&state.config)?;
+
     let config = state.config.clone();
     let splits = split_cases(suite);
     if splits.selection.is_empty() {
         return Err(TextgradError::NoSelectionCases);
+    }
+    if splits.train.is_empty() {
+        return Err(TextgradError::NoTrainingCases);
     }
 
     let best_artifact_path = run_dir.join(format!("best_{}.md", config.artifact_stem));
@@ -330,6 +341,7 @@ pub async fn resume_training(
 
     let start_epoch = state.epoch;
     let start_step = state.step_in_epoch;
+    let steps_before_resume = state.global_step;
 
     let mut state_mut = state;
     let mut prompts_mut = prompts;
@@ -367,6 +379,7 @@ pub async fn resume_training(
         best_score: state_mut.best_score,
         final_score,
         best_artifact_path,
+        steps_run: state_mut.global_step - steps_before_resume,
     })
 }
 
@@ -436,6 +449,22 @@ mod tests {
     impl Scorer for EmptyScorer {
         fn score(&self, _stdout: &str, _trace: &str, _wd: &Path) -> Vec<CheckResult> {
             vec![]
+        }
+    }
+
+    /// Scorer that emits one *real* required check with a fixed verdict, so scores come
+    /// from an actual check result rather than the vacuous empty-set 1.0.
+    struct FixedScorer {
+        passed: bool,
+    }
+    impl Scorer for FixedScorer {
+        fn score(&self, _stdout: &str, _trace: &str, _wd: &Path) -> Vec<CheckResult> {
+            vec![CheckResult {
+                check_name: "fixed".to_string(),
+                passed: self.passed,
+                required: true,
+                message: None,
+            }]
         }
     }
 
@@ -564,6 +593,134 @@ mod tests {
         );
     }
 
+    // ---- T5: f64 config fields must be finite and in range ----
+
+    #[test]
+    fn test_invalid_config_gate_epsilon_nan() {
+        // NaN epsilon: `score > best + NaN` is false forever — no candidate ever accepted.
+        let mut config = make_config();
+        config.gate_epsilon = f64::NAN;
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn test_invalid_config_gate_epsilon_negative() {
+        // Negative epsilon accepts equal-or-worse candidates; best_score can drift down.
+        let mut config = make_config();
+        config.gate_epsilon = -0.1;
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn test_invalid_config_pass_threshold_nan_or_out_of_range() {
+        let mut config = make_config();
+        config.pass_threshold = f64::NAN;
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+        config.pass_threshold = 1.5;
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn test_invalid_config_mixed_hard_weight_non_finite_or_out_of_range() {
+        let mut config = make_config();
+        config.gate_metric = aikit_evals::GateMetric::Mixed {
+            hard_weight: f64::NAN,
+        };
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+        config.gate_metric = aikit_evals::GateMetric::Mixed { hard_weight: 2.0 };
+        assert!(matches!(
+            config::validate_config(&config),
+            Err(TextgradError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn test_valid_config_accepts_sensible_f64_fields() {
+        let mut config = make_config();
+        config.gate_epsilon = 0.0;
+        config.pass_threshold = 1.0;
+        config.gate_metric = aikit_evals::GateMetric::Mixed { hard_weight: 0.5 };
+        assert!(config::validate_config(&config).is_ok());
+    }
+
+    // ---- T3: NoTrainingCases ----
+
+    #[tokio::test]
+    async fn test_no_training_cases_returns_error() {
+        let dir = TempDir::new().unwrap();
+        // Zero train cases: steps_per_epoch would be 0, the loop would never execute, and
+        // run_training would return Ok(best_score = initial) — a silent success.
+        let suite = vec![make_eval_case("sel-1", &["selection"])];
+        let mut artifact = SimpleArtifact {
+            text: "hello".to_string(),
+        };
+        let result = run_training(
+            &mut artifact,
+            &suite,
+            &EmptyScorer,
+            &StubRunner,
+            make_prompts(),
+            make_config(),
+            dir.path(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(TextgradError::NoTrainingCases)),
+            "expected NoTrainingCases, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resume_no_training_cases_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config();
+        init_run_dir(dir.path(), &config).await.unwrap();
+        let state = RuntimeState {
+            config: config.clone(),
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score: 0.5,
+            current_score: 0.5,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: "saved strategy".to_string(),
+        };
+        write_runtime_state(dir.path(), &state).await.unwrap();
+
+        let suite = vec![make_eval_case("sel-1", &["selection"])];
+        let mut artifact = SimpleArtifact {
+            text: "hello".to_string(),
+        };
+        let result = resume_training(
+            dir.path(),
+            &mut artifact,
+            &suite,
+            &EmptyScorer,
+            &StubRunner,
+            make_prompts(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(TextgradError::NoTrainingCases)),
+            "expected NoTrainingCases, got {result:?}"
+        );
+    }
+
     // ---- AC28: InvalidConfig ----
 
     #[tokio::test]
@@ -613,6 +770,50 @@ mod tests {
         assert!(matches!(result, Err(TextgradError::InvalidConfig(_))));
     }
 
+    // ---- T4: resume must validate the persisted config ----
+
+    #[tokio::test]
+    async fn test_resume_rejects_invalid_persisted_config() {
+        let dir = TempDir::new().unwrap();
+        let mut config = make_config();
+        // gate_trials = 0 makes score_cases run zero trials: majority_vote over an empty
+        // trial set yields empty results, so every gate item_score is a vacuous 1.0.
+        config.gate_trials = 0;
+        init_run_dir(dir.path(), &config).await.unwrap();
+        let state = RuntimeState {
+            config: config.clone(),
+            epoch: 0,
+            step_in_epoch: 0,
+            global_step: 0,
+            best_score: 0.5,
+            current_score: 0.5,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: "saved strategy".to_string(),
+        };
+        write_runtime_state(dir.path(), &state).await.unwrap();
+
+        let suite = vec![
+            make_eval_case("train-1", &["train"]),
+            make_eval_case("sel-1", &["selection"]),
+        ];
+        let mut artifact = SimpleArtifact {
+            text: "hello".to_string(),
+        };
+        let result = resume_training(
+            dir.path(),
+            &mut artifact,
+            &suite,
+            &EmptyScorer,
+            &StubRunner,
+            make_prompts(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(TextgradError::InvalidConfig(_))),
+            "expected InvalidConfig for persisted gate_trials=0, got {result:?}"
+        );
+    }
+
     // ---- AC14: complete 1-epoch run produces run-dir layout and monotonic best_score ----
 
     #[tokio::test]
@@ -630,7 +831,7 @@ mod tests {
         let result = run_training(
             &mut artifact,
             &suite,
-            &EmptyScorer,
+            &FixedScorer { passed: true },
             &StubRunner,
             make_prompts(),
             config,
@@ -669,14 +870,18 @@ mod tests {
 
         // Monotonic best_score (AC25): initial score ≥ 0, outcome score ≥ initial
         assert!(outcome.best_score >= 0.0);
-        // With EmptyScorer (empty check_results → item_score = 1.0) initial score = 1.0.
-        // Gate can only accept if gate_score > 1.0 + 0.01, which is impossible.
-        // So best_score stays at 1.0.
+        // FixedScorer emits one real required check that passes, so the initial score is a
+        // non-vacuous 1.0. The stub optimizer proposes no edits, so no candidate can ever
+        // beat it and best_score stays at 1.0.
         assert!(
             (outcome.best_score - 1.0).abs() < 1e-9,
             "expected best_score = 1.0, got {}",
             outcome.best_score
         );
+
+        // T3: the outcome reports how many optimizer steps actually ran
+        // (1 train case, batch=1, accum=1, 1 epoch → exactly 1 step).
+        assert_eq!(outcome.steps_run, 1, "expected exactly one step to run");
     }
 
     // ---- AC15: resume after checkpoint ----

@@ -27,6 +27,21 @@ pub struct SkillOptInputs {
     pub run_dir: PathBuf,
 }
 
+/// Reject an empty check set at the skillopt boundary.
+///
+/// With zero checks every case's `item_score` is a vacuous 1.0, so `best_score` starts at
+/// 1.0 and the gate condition (`score > best + epsilon`) is unsatisfiable — the whole
+/// training run would be a silent no-op that still returns `Ok`.
+fn validate_checks(checks: &[CheckDefinition]) -> anyhow::Result<()> {
+    if checks.is_empty() {
+        anyhow::bail!(
+            "SKILLOPT_EMPTY_CHECKS: checks must be non-empty — with zero checks every case \
+             scores a vacuous 1.0 and the gate can never accept, so training would be a no-op"
+        );
+    }
+    Ok(())
+}
+
 /// Run a complete training loop for a skill document from scratch.
 ///
 /// `runner` drives every eval-case execution the loop performs (initial score, per-step
@@ -36,6 +51,7 @@ pub async fn train_skill(
     inputs: SkillOptInputs,
     runner: &dyn EvalRunner,
 ) -> anyhow::Result<TrainingOutcome> {
+    validate_checks(&inputs.checks)?;
     let mut artifact = SkillArtifact::from_existing(
         inputs.initial_skill_md,
         inputs.skill_name,
@@ -72,6 +88,7 @@ pub async fn resume_skill(
     config: RunConfig,
     runner: &dyn EvalRunner,
 ) -> anyhow::Result<TrainingOutcome> {
+    validate_checks(&checks)?;
     let mut artifact =
         SkillArtifact::from_existing(initial_skill_md, skill_name, config.target_agent.clone());
     let scorer = ChecksScorer { checks };
@@ -307,18 +324,19 @@ mod tests {
                 make_eval_case("train-1", &["train"]),
                 make_eval_case("sel-1", &["selection"]),
             ],
-            checks: vec![],
+            // Non-empty by construction: an empty check set is rejected at the boundary
+            // (SKILLOPT_EMPTY_CHECKS) because it makes every score a vacuous 1.0.
+            checks: score_markers(),
             config: make_config(),
             run_dir: dir.path().to_path_buf(),
         }
     }
 
-    /// Like [`make_inputs`], but wired for [`ScriptedEvalRunner`]: uses the two-marker checks
-    /// so scores are controllable, and `n_epochs` steps (batch=1, one train case) so the queue
-    /// has exactly one rollout+gate pair per epoch.
+    /// Like [`make_inputs`], but wired for [`ScriptedEvalRunner`]: `n_epochs` steps
+    /// (batch=1, one train case) so the scripted queue maps one-to-one onto the loop's
+    /// `run_case` calls.
     fn make_scripted_inputs(dir: &TempDir, n_epochs: u32) -> SkillOptInputs {
         let mut inputs = make_inputs(dir);
-        inputs.checks = score_markers();
         inputs.config.n_epochs = n_epochs;
         inputs
     }
@@ -388,7 +406,7 @@ mod tests {
             "# Test Skill\n\nOriginal.".to_string(),
             "test-skill".to_string(),
             suite,
-            vec![],
+            score_markers(),
             config,
             &runner,
         )
@@ -439,105 +457,144 @@ mod tests {
         );
     }
 
-    // ---- F6 payoff: genuine GATE accept/reject coverage via ScriptedEvalRunner ----
+    // T2: an empty check set makes every item_score a vacuous 1.0, so best_score starts at
+    // 1.0 and the gate (`> best + epsilon`) can never accept — the whole run would be a
+    // silent no-op returning Ok. Both entry points must reject it up front.
+    #[tokio::test]
+    async fn test_train_skill_empty_checks_rejected() {
+        let dir = TempDir::new().unwrap();
+        let mut inputs = make_inputs(&dir);
+        inputs.checks = vec![];
+        // Validation fails before the runner is ever touched — empty queue proves it.
+        let result = train_skill(inputs, &ScriptedEvalRunner::new(vec![])).await;
+        assert!(result.is_err(), "empty checks must be rejected");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("SKILLOPT_EMPTY_CHECKS"),
+            "expected SKILLOPT_EMPTY_CHECKS in: {err}"
+        );
+    }
 
     #[tokio::test]
-    async fn test_gate_accepts_improving_scores() {
+    async fn test_resume_skill_empty_checks_rejected() {
+        let dir = TempDir::new().unwrap();
+        let config = make_config();
+        init_run_dir(dir.path(), &config).await.unwrap();
+        let state = RuntimeState {
+            config: config.clone(),
+            epoch: config.n_epochs,
+            step_in_epoch: 0,
+            global_step: 1,
+            best_score: 0.9,
+            current_score: 0.9,
+            rejected_edit_buffer: vec![],
+            optimizer_strategy: "saved strategy".to_string(),
+        };
+        write_runtime_state(dir.path(), &state).await.unwrap();
+
+        let result = resume_skill(
+            dir.path().to_path_buf(),
+            "# Test Skill\n\nOriginal.".to_string(),
+            "test-skill".to_string(),
+            vec![
+                make_eval_case("train-1", &["train"]),
+                make_eval_case("sel-1", &["selection"]),
+            ],
+            vec![],
+            config,
+            &ScriptedEvalRunner::new(vec![]),
+        )
+        .await;
+        assert!(result.is_err(), "empty checks must be rejected on resume");
+        let err = format!("{}", result.unwrap_err());
+        assert!(
+            err.contains("SKILLOPT_EMPTY_CHECKS"),
+            "expected SKILLOPT_EMPTY_CHECKS in: {err}"
+        );
+    }
+
+    // ---- F6 / T6: gate integrity for no-edit candidates via ScriptedEvalRunner ----
+    //
+    // The stub optimizer agent never produces a patch in tests, so every step's candidate
+    // is byte-identical to the current text. The gate MUST therefore be skipped: the gate
+    // agent is nondeterministic, and scoring an identical artifact could exceed
+    // best_score + epsilon on pure noise, promoting best_score and ratcheting the
+    // acceptance bar for an unchanged artifact. (The genuine accept path now requires a
+    // real optimizer that produces edits; its decision arithmetic is unit-tested in
+    // aikit-textgrad step.rs instead.)
+
+    #[tokio::test]
+    async fn test_no_edit_candidate_skips_gate_and_never_promotes_best_score() {
         use ScriptedOutcome::*;
         let dir = TempDir::new().unwrap();
-        let inputs = make_scripted_inputs(&dir, 2);
+        let inputs = make_scripted_inputs(&dir, 1);
+        // Queue a would-be gate call scoring 1.0. Before the no-edit skip, the gate ran on
+        // the identical artifact, saw 1.0 > 0.0 + epsilon, and "accepted" a non-change.
         let runner = ScriptedEvalRunner::new(vec![
             Score0, // initial score = 0.0
-            Score1, Score1, // epoch0: rollout (irrelevant), gate = 0.5 -> accept (best=0.5)
-            Score1, Score2, // epoch1: rollout (irrelevant), gate = 1.0 -> accept (best=1.0)
+            Score1, // epoch0 rollout
+            Score2, // would-be gate = 1.0 — must never be consumed
         ]);
 
         let outcome = train_skill(inputs, &runner).await.unwrap();
         assert!(
-            (outcome.best_score - 1.0).abs() < 1e-9,
-            "expected best_score 1.0, got {}",
+            (outcome.best_score - 0.0).abs() < 1e-9,
+            "no-edit candidate must not promote best_score, got {}",
             outcome.best_score
+        );
+        assert_eq!(
+            runner.call_count(),
+            2,
+            "gate must not run for a no-edit candidate (initial + rollout only)"
         );
 
         let history = read_history(&dir).await;
-        assert_eq!(history.len(), 2);
-        assert!(
-            history[0].accepted && history[1].accepted,
-            "both steps should accept"
-        );
-        assert!((history[0].score_candidate - 0.5).abs() < 1e-9);
-        assert!((history[1].score_candidate - 1.0).abs() < 1e-9);
+        assert_eq!(history.len(), 1);
+        assert!(!history[0].accepted, "no-edit step must not be accepted");
+        assert!(history[0].no_edit, "step must be recorded as no-edit");
     }
 
     #[tokio::test]
-    async fn test_gate_rejects_flat_or_regressing_scores() {
+    async fn test_no_edit_steps_recorded_across_epochs() {
         use ScriptedOutcome::*;
         let dir = TempDir::new().unwrap();
         let inputs = make_scripted_inputs(&dir, 2);
         let runner = ScriptedEvalRunner::new(vec![
             Score1, // initial score = 0.5
-            Score0, Score0, // epoch0: rollout, gate = 0.0 -> reject (best stays 0.5)
-            Score0, Score1, // epoch1: rollout, gate = 0.5 (not > 0.5+epsilon) -> reject
+            Score0, // epoch0 rollout (gate skipped: no edits)
+            Score2, // epoch1 rollout (gate skipped: no edits)
         ]);
 
         let outcome = train_skill(inputs, &runner).await.unwrap();
         assert!(
             (outcome.best_score - 0.5).abs() < 1e-9,
-            "expected best_score to stay at 0.5, got {}",
+            "best_score must stay at the initial 0.5, got {}",
             outcome.best_score
         );
+        assert_eq!(runner.call_count(), 3, "initial + one rollout per epoch");
 
         let history = read_history(&dir).await;
         assert_eq!(history.len(), 2);
         assert!(
-            !history[0].accepted && !history[1].accepted,
-            "neither step should accept"
+            history.iter().all(|r| !r.accepted && r.no_edit),
+            "every no-edit step must be recorded as skipped and unaccepted"
         );
     }
 
     #[tokio::test]
-    async fn test_gate_tracks_max_through_mixed_trajectory() {
-        use ScriptedOutcome::*;
-        let dir = TempDir::new().unwrap();
-        let inputs = make_scripted_inputs(&dir, 3);
-        let runner = ScriptedEvalRunner::new(vec![
-            Score0, // initial score = 0.0
-            Score1, Score1, // epoch0: gate = 0.5 -> accept (best=0.5)
-            Score1, Score0, // epoch1: gate = 0.0 -> reject (best stays 0.5)
-            Score1, Score2, // epoch2: gate = 1.0 -> accept (best=1.0)
-        ]);
-
-        let outcome = train_skill(inputs, &runner).await.unwrap();
-        assert!(
-            (outcome.best_score - 1.0).abs() < 1e-9,
-            "best_score must track the max seen (1.0), got {}",
-            outcome.best_score
-        );
-
-        let history = read_history(&dir).await;
-        assert_eq!(history.len(), 3);
-        let accepted: Vec<bool> = history.iter().map(|r| r.accepted).collect();
-        assert_eq!(
-            accepted,
-            vec![true, false, true],
-            "expected improve/reject/improve pattern, got {accepted:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_gate_rejects_timed_out_rollout_without_panicking() {
+    async fn test_timed_out_rollout_does_not_crash_loop() {
         use ScriptedOutcome::*;
         let dir = TempDir::new().unwrap();
         let inputs = make_scripted_inputs(&dir, 1);
         let runner = ScriptedEvalRunner::new(vec![
-            Score1, // initial score = 0.5
-            Score1, TimedOut, // rollout (irrelevant), gate times out -> empty stdout -> 0.0
+            Score1,   // initial score = 0.5
+            TimedOut, // rollout times out -> empty stdout -> trajectory score 0.0
         ]);
 
         let outcome = train_skill(inputs, &runner).await.unwrap();
         assert!(
             (outcome.best_score - 0.5).abs() < 1e-9,
-            "a timed-out gate call must be treated as a reject, not crash the loop"
+            "a timed-out rollout must not change best_score or crash the loop"
         );
 
         let history = read_history(&dir).await;
@@ -572,17 +629,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_scripted_runner_call_count_matches_rollout_and_gate_calls() {
+    async fn test_scripted_runner_call_count_matches_loop_calls() {
         use ScriptedOutcome::*;
         let dir = TempDir::new().unwrap();
         let inputs = make_scripted_inputs(&dir, 1);
-        let runner = ScriptedEvalRunner::new(vec![Score1, Score1, Score1]);
+        let runner = ScriptedEvalRunner::new(vec![Score1, Score1]);
 
         train_skill(inputs, &runner).await.unwrap();
 
-        // 1 initial-score call + 1 rollout + 1 gate call (1 train case, 1 selection case,
-        // gate_trials=1, n_epochs=1).
-        assert_eq!(runner.call_count(), 3);
+        // 1 initial-score call + 1 rollout (1 train case, 1 selection case, gate_trials=1,
+        // n_epochs=1). The gate is skipped because the stubbed optimizer applies no edits.
+        assert_eq!(runner.call_count(), 2);
     }
 
     // AC-10: no epoch/gate/edit logic in this crate.

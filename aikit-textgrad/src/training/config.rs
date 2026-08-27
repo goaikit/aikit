@@ -67,6 +67,11 @@ pub struct OptimizerPrompts {
 pub enum TextgradError {
     #[error("TEXTGRAD_NO_SELECTION_CASES: EvalSuite has zero cases tagged 'selection'")]
     NoSelectionCases,
+    #[error(
+        "TEXTGRAD_NO_TRAIN_CASES: EvalSuite has zero training cases (tagged 'train' or \
+         untagged) — the training loop would never execute and return a silent success"
+    )]
+    NoTrainingCases,
     #[error("TEXTGRAD_INVALID_CONFIG: {0}")]
     InvalidConfig(String),
     #[error("TEXTGRAD_RESUME_STATE_CORRUPT: {0}")]
@@ -77,7 +82,8 @@ pub enum TextgradError {
     Io(#[from] std::io::Error),
 }
 
-/// Validate `RunConfig` fields that must be non-zero.
+/// Validate `RunConfig`: integer fields that must be non-zero, and float fields that must
+/// be finite and in the range the loop assumes.
 pub fn validate_config(config: &RunConfig) -> Result<(), TextgradError> {
     if config.batch_size == 0 {
         return Err(TextgradError::InvalidConfig(
@@ -106,6 +112,32 @@ pub fn validate_config(config: &RunConfig) -> Result<(), TextgradError> {
         return Err(TextgradError::InvalidConfig(
             "aggregate_group_size must be > 0".to_string(),
         ));
+    }
+    // A NaN epsilon makes every accept comparison (`score > best + epsilon`) false forever;
+    // a negative one accepts equal-or-worse candidates, letting best_score drift down.
+    if !config.gate_epsilon.is_finite() || config.gate_epsilon < 0.0 {
+        return Err(TextgradError::InvalidConfig(format!(
+            "gate_epsilon must be finite and >= 0 (got {})",
+            config.gate_epsilon
+        )));
+    }
+    // pass_threshold is compared against pass rates and item scores in [0, 1]; NaN makes
+    // every comparison false and values outside [0, 1] are always-pass / always-fail.
+    if !config.pass_threshold.is_finite() || !(0.0..=1.0).contains(&config.pass_threshold) {
+        return Err(TextgradError::InvalidConfig(format!(
+            "pass_threshold must be finite and within [0, 1] (got {})",
+            config.pass_threshold
+        )));
+    }
+    // item_score clamps Mixed weights defensively, but a non-finite or out-of-range weight
+    // in an explicit config is a caller mistake worth failing loudly on.
+    if let GateMetric::Mixed { hard_weight } = &config.gate_metric {
+        if !hard_weight.is_finite() || !(0.0..=1.0).contains(hard_weight) {
+            return Err(TextgradError::InvalidConfig(format!(
+                "gate_metric Mixed hard_weight must be finite and within [0, 1] (got \
+                 {hard_weight})"
+            )));
+        }
     }
     Ok(())
 }
