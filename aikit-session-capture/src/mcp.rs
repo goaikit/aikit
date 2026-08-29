@@ -181,6 +181,8 @@ where
         validator: None,
         expose_mcp: true,
         expose_chat: true,
+        meta: None,
+        visibility: None,
         execute: Arc::new(move |ctx, args| {
             let f = f.clone();
             Box::pin(async move {
