@@ -244,6 +244,8 @@ pub fn build_app() -> Result<AikitApp> {
             })),
             expose_mcp: false,
             expose_chat: false,
+            meta: None,
+            visibility: None,
             execute: Arc::new(|_ctx, args| {
                 Box::pin(async move {
                     let typed = McpAddArgs::from_arg_value_map(&args);
