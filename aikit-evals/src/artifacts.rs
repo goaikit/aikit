@@ -1,6 +1,7 @@
 //! Artifact layout and persistence for eval runs
 
 use crate::checks::CheckResult;
+use aikit_sdk::TerminalOutcome;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -26,6 +27,45 @@ impl std::fmt::Display for CaseStatus {
     }
 }
 
+/// The agent's own report of how the run ended, as recorded in the artifact.
+///
+/// Present only when the backend's decoder emits a terminal frame. Absent means
+/// "not recorded", never "succeeded" — see [`aikit_sdk::BackendCapabilities`]'s
+/// `terminal_event` flag for which backends can supply it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TerminalRecord {
+    pub outcome: TerminalOutcome,
+    /// Machine-readable reason from the agent (`stop_reason`, `subtype`,
+    /// `stopReason`, or the event name for codex).
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// Human-readable failure text, when the agent supplied one.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Numbers the runner already receives and previously narrowed away.
+///
+/// Every field is `Option` and `#[serde(default)]`: absent means this version
+/// or this backend did not record it, never zero (ADR 0020).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TokenBreakdown {
+    #[serde(default)]
+    pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_creation_tokens: Option<u64>,
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
+}
+
+impl TokenBreakdown {
+    pub fn is_empty(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
 /// Per-case result
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaseResult {
@@ -37,6 +77,21 @@ pub struct CaseResult {
     #[serde(default)]
     pub check_results: Vec<CheckResult>,
     pub error_message: Option<String>,
+    /// Process exit code, captured by the runner since Phase 0 and never
+    /// persisted until now. `None` when the run never reached a process exit.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// The agent's own terminal report, when its decoder emits one.
+    #[serde(default)]
+    pub terminal: Option<TerminalRecord>,
+    /// Vendor-reported cost, summed over terminal frames. **Never estimated**
+    /// from a local price table: `None` means the backend reported nothing.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// Cache and reasoning token counts the runner receives alongside the
+    /// input/output pair above.
+    #[serde(default)]
+    pub tokens: TokenBreakdown,
 }
 
 /// Per-trial result for a case
@@ -50,6 +105,21 @@ pub struct TrialResult {
     #[serde(default)]
     pub check_results: Vec<CheckResult>,
     pub error_message: Option<String>,
+    /// Process exit code, captured by the runner since Phase 0 and never
+    /// persisted until now. `None` when the run never reached a process exit.
+    #[serde(default)]
+    pub exit_code: Option<i32>,
+    /// The agent's own terminal report, when its decoder emits one.
+    #[serde(default)]
+    pub terminal: Option<TerminalRecord>,
+    /// Vendor-reported cost, summed over terminal frames. **Never estimated**
+    /// from a local price table: `None` means the backend reported nothing.
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+    /// Cache and reasoning token counts the runner receives alongside the
+    /// input/output pair above.
+    #[serde(default)]
+    pub tokens: TokenBreakdown,
 }
 
 /// Aggregated results for a case across multiple trials
@@ -60,7 +130,69 @@ pub struct CaseTrialsResult {
     pub aggregated_status: CaseStatus,
     pub pass_count: u32,
     pub total_trials: u32,
+    /// Passing trials over **scored** trials. Trials with outcome `error`
+    /// produced no measurement and are excluded from both sides of the ratio.
     pub pass_rate: f64,
+    /// Trials excluded from `pass_rate` because they errored. Recorded, never
+    /// silently dropped: the outage rate is itself a result.
+    #[serde(default)]
+    pub error_count: u32,
+    /// `total_trials - error_count`, i.e. the denominator of `pass_rate`.
+    /// Zero means the case produced no measurement at all and takes the
+    /// verdict `CaseStatus::Error`.
+    #[serde(default)]
+    pub scored_trials: u32,
+}
+
+/// Fold a case's trials into its verdict.
+///
+/// One implementation, called by the real runner and by every test double, so
+/// the rate cannot drift between them.
+///
+/// - `error` trials are excluded from both sides of `pass_rate`.
+/// - A case with no scored trials left is `CaseStatus::Error`, not a 0% fail:
+///   a total outage must not read as a case the agent got wrong, and must not
+///   quietly vanish from the denominator one level up either.
+pub fn aggregate_trials(
+    case_id: &str,
+    mut trials: Vec<TrialResult>,
+    total_trials: u32,
+    pass_threshold: f64,
+) -> CaseTrialsResult {
+    trials.sort_by_key(|t| t.trial_id);
+    let error_count = trials
+        .iter()
+        .filter(|t| t.status == CaseStatus::Error)
+        .count() as u32;
+    let pass_count = trials
+        .iter()
+        .filter(|t| t.status == CaseStatus::Passed)
+        .count() as u32;
+    let total_trials = total_trials.max(1);
+    let scored_trials = total_trials.saturating_sub(error_count);
+    let pass_rate = if scored_trials == 0 {
+        0.0
+    } else {
+        pass_count as f64 / scored_trials as f64
+    };
+    let aggregated_status = if scored_trials == 0 {
+        CaseStatus::Error
+    } else if pass_rate >= pass_threshold {
+        CaseStatus::Passed
+    } else {
+        CaseStatus::Failed
+    };
+
+    CaseTrialsResult {
+        id: case_id.to_string(),
+        trials,
+        aggregated_status,
+        pass_count,
+        total_trials,
+        pass_rate,
+        error_count,
+        scored_trials,
+    }
 }
 
 /// Achieved isolation fidelity for one scope (spec 016 D6).
@@ -153,6 +285,12 @@ pub struct CaseSummary {
     pub total_trials: Option<u32>,
     #[serde(default)]
     pub pass_rate: Option<f64>,
+    /// Trials excluded from `pass_rate` because they errored.
+    #[serde(default)]
+    pub error_count: Option<u32>,
+    /// Denominator of `pass_rate`. `Some(0)` means the case has no measurement.
+    #[serde(default)]
+    pub scored_trials: Option<u32>,
     #[serde(default)]
     pub trials: Vec<TrialResult>,
 }
@@ -248,6 +386,10 @@ fn case_result_to_trial(case: &CaseResult, trial_id: u32) -> TrialResult {
         output_tokens: case.output_tokens,
         check_results: case.check_results.clone(),
         error_message: case.error_message.clone(),
+        exit_code: case.exit_code,
+        terminal: case.terminal.clone(),
+        cost_usd: case.cost_usd,
+        tokens: case.tokens.clone(),
     }
 }
 
@@ -267,20 +409,10 @@ pub fn write_case_artifacts(
     let trial_dir =
         write_trial_artifacts(run_dir, case_id, 1, stdout, stderr, trace_jsonl, &trial)?;
 
-    let pass_count = if result.status == CaseStatus::Passed {
-        1
-    } else {
-        0
-    };
-    let pass_rate = pass_count as f64;
-    let aggregated = CaseTrialsResult {
-        id: result.id.clone(),
-        trials: vec![trial],
-        aggregated_status: result.status.clone(),
-        pass_count,
-        total_trials: 1,
-        pass_rate,
-    };
+    // One trial, folded by the same rule as any other case (`aggregate_trials`):
+    // a single errored trial leaves zero scored trials, so the case is `error`,
+    // not a 0% failure.
+    let aggregated = aggregate_trials(&result.id, vec![trial], 1, 1.0);
     write_case_trials_summary(run_dir, case_id, &aggregated)?;
 
     Ok(trial_dir)
@@ -345,6 +477,16 @@ pub fn read_case_results(run_dir: &Path) -> Result<Vec<CaseResult>, ArtifactsErr
                         .map(|t| t.check_results.clone())
                         .unwrap_or_default(),
                     error_message: representative.and_then(|t| t.error_message.clone()),
+                    exit_code: representative.and_then(|t| t.exit_code),
+                    terminal: representative.and_then(|t| t.terminal.clone()),
+                    // Cost is summed across trials, not taken from the
+                    // representative one: the case cost what every trial cost.
+                    cost_usd: aggregated
+                        .trials
+                        .iter()
+                        .filter_map(|t| t.cost_usd)
+                        .fold(None::<f64>, |acc, v| Some(acc.unwrap_or(0.0) + v)),
+                    tokens: representative.map(|t| t.tokens.clone()).unwrap_or_default(),
                 });
                 continue;
             }
@@ -421,6 +563,10 @@ mod tests {
                     output_tokens: Some(50),
                     check_results: vec![],
                     error_message: None,
+                    cost_usd: None,
+                    exit_code: None,
+                    terminal: None,
+                    tokens: Default::default(),
                 },
                 TrialResult {
                     trial_id: 2,
@@ -430,12 +576,18 @@ mod tests {
                     output_tokens: Some(80),
                     check_results: vec![],
                     error_message: None,
+                    cost_usd: None,
+                    exit_code: None,
+                    terminal: None,
+                    tokens: Default::default(),
                 },
             ],
             aggregated_status: CaseStatus::Passed,
             pass_count: 2,
             total_trials: 2,
             pass_rate: 1.0,
+            error_count: 0,
+            scored_trials: 0,
         };
         let json = serde_json::to_string_pretty(&trials_result).unwrap();
         std::fs::write(case_dir.join("aggregated.json"), json).unwrap();
@@ -470,11 +622,17 @@ mod tests {
                 output_tokens: None,
                 check_results: vec![],
                 error_message: Some("timeout".to_string()),
+                cost_usd: None,
+                exit_code: None,
+                terminal: None,
+                tokens: Default::default(),
             }],
             aggregated_status: CaseStatus::Error,
             pass_count: 0,
             total_trials: 1,
             pass_rate: 0.0,
+            error_count: 0,
+            scored_trials: 0,
         };
         let json = serde_json::to_string_pretty(&trials_result).unwrap();
         std::fs::write(case_dir.join("aggregated.json"), json).unwrap();
@@ -507,8 +665,13 @@ mod tests {
                 passed: true,
                 required: true,
                 message: None,
+                not_observable: None,
             }],
             error_message: None,
+            cost_usd: None,
+            exit_code: None,
+            terminal: None,
+            tokens: Default::default(),
         };
         let failing_trial = TrialResult {
             trial_id: 2,
@@ -521,8 +684,13 @@ mod tests {
                 passed: false,
                 required: true,
                 message: Some("File 'out.txt' does not exist".to_string()),
+                not_observable: None,
             }],
             error_message: Some("something went wrong".to_string()),
+            cost_usd: None,
+            exit_code: None,
+            terminal: None,
+            tokens: Default::default(),
         };
         let trials_result = CaseTrialsResult {
             id: "case-repr".to_string(),
@@ -531,6 +699,8 @@ mod tests {
             pass_count: 1,
             total_trials: 2,
             pass_rate: 0.5,
+            error_count: 0,
+            scored_trials: 0,
         };
         write_case_trials_summary(dir.path(), "case-repr", &trials_result).unwrap();
 
@@ -577,13 +747,20 @@ mod tests {
                     passed: true,
                     required: true,
                     message: None,
+                    not_observable: None,
                 }],
                 error_message: None,
+                cost_usd: None,
+                exit_code: None,
+                terminal: None,
+                tokens: Default::default(),
             }],
             aggregated_status: CaseStatus::Passed,
             pass_count: 1,
             total_trials: 1,
             pass_rate: 1.0,
+            error_count: 0,
+            scored_trials: 0,
         };
         write_case_trials_summary(dir.path(), "case-allpass", &trials_result).unwrap();
 
@@ -675,5 +852,171 @@ mod tests {
             serde_json::to_string(&ScopeFidelity::Inherited).unwrap(),
             "\"inherited\""
         );
+    }
+
+    // ── R4: errored trials are excluded from the rate ──────────────────────
+
+    fn trial(id: u32, status: CaseStatus) -> TrialResult {
+        TrialResult {
+            trial_id: id,
+            status,
+            command_count: None,
+            input_tokens: None,
+            output_tokens: None,
+            check_results: vec![],
+            error_message: None,
+            exit_code: None,
+            terminal: None,
+            cost_usd: None,
+            tokens: TokenBreakdown::default(),
+        }
+    }
+
+    #[test]
+    fn test_pass_rate_is_over_scored_trials_not_all_trials() {
+        // Two passes and one outage. Counting the outage would report 0.67 and
+        // blame the skill for a provider timeout; excluding it reports 1.0 and
+        // says separately that one trial produced no measurement.
+        let trials = vec![
+            trial(1, CaseStatus::Passed),
+            trial(2, CaseStatus::Error),
+            trial(3, CaseStatus::Passed),
+        ];
+        let out = aggregate_trials("c1", trials, 3, 1.0);
+
+        assert_eq!(out.error_count, 1);
+        assert_eq!(out.scored_trials, 2);
+        assert_eq!(out.pass_count, 2);
+        assert_eq!(out.pass_rate, 1.0);
+        assert_eq!(out.aggregated_status, CaseStatus::Passed);
+        assert_eq!(
+            out.total_trials, 3,
+            "the excluded trial is still reported, never silently dropped"
+        );
+    }
+
+    #[test]
+    fn test_pass_rate_moves_when_the_errored_trial_is_counted_instead() {
+        // The same three trials with the outage recorded as a failure — what
+        // the engine did before R1 — score differently. This is the gap the
+        // whole change exists to close.
+        let as_failed = aggregate_trials(
+            "c1",
+            vec![
+                trial(1, CaseStatus::Passed),
+                trial(2, CaseStatus::Failed),
+                trial(3, CaseStatus::Passed),
+            ],
+            3,
+            1.0,
+        );
+        assert!((as_failed.pass_rate - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(as_failed.aggregated_status, CaseStatus::Failed);
+        assert_eq!(as_failed.error_count, 0);
+        assert_eq!(as_failed.scored_trials, 3);
+    }
+
+    #[test]
+    fn test_case_with_no_scored_trials_is_error_not_failed() {
+        let out = aggregate_trials(
+            "c1",
+            vec![trial(1, CaseStatus::Error), trial(2, CaseStatus::Error)],
+            2,
+            1.0,
+        );
+        assert_eq!(out.aggregated_status, CaseStatus::Error);
+        assert_eq!(out.scored_trials, 0);
+        assert_eq!(out.pass_rate, 0.0);
+    }
+
+    #[test]
+    fn test_aggregate_trials_orders_trials_by_id() {
+        let out = aggregate_trials(
+            "c1",
+            vec![
+                trial(3, CaseStatus::Passed),
+                trial(1, CaseStatus::Passed),
+                trial(2, CaseStatus::Passed),
+            ],
+            3,
+            1.0,
+        );
+        let ids: Vec<u32> = out.trials.iter().map(|t| t.trial_id).collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    // ── R5 / ADR 0020: the schema is additive ──────────────────────────────
+
+    #[test]
+    fn test_trial_result_written_before_this_version_still_deserializes() {
+        // Exactly the artifact an older aikit-evals wrote. Every field added
+        // by R5 must be absent-tolerant, or a committed fixture stops loading.
+        let old = r#"{
+            "trial_id": 1,
+            "status": "passed",
+            "command_count": 3,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "check_results": [],
+            "error_message": null
+        }"#;
+        let parsed: TrialResult = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.trial_id, 1);
+        assert_eq!(parsed.exit_code, None);
+        assert!(parsed.terminal.is_none());
+        assert_eq!(parsed.cost_usd, None);
+        assert_eq!(parsed.tokens, TokenBreakdown::default());
+        assert!(
+            parsed.tokens.is_empty(),
+            "absent means not recorded, never zero"
+        );
+    }
+
+    #[test]
+    fn test_case_trials_result_written_before_this_version_still_deserializes() {
+        let old = r#"{
+            "id": "c1",
+            "trials": [],
+            "aggregated_status": "passed",
+            "pass_count": 2,
+            "total_trials": 2,
+            "pass_rate": 1.0
+        }"#;
+        let parsed: CaseTrialsResult = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.error_count, 0);
+        assert_eq!(parsed.scored_trials, 0);
+    }
+
+    #[test]
+    fn test_terminal_and_cost_round_trip_through_the_artifact() {
+        let mut t = trial(1, CaseStatus::Failed);
+        t.exit_code = Some(0);
+        t.cost_usd = Some(0.012_5);
+        t.terminal = Some(TerminalRecord {
+            outcome: TerminalOutcome::Error,
+            reason: Some("error".to_string()),
+            message: Some("Request timed out.".to_string()),
+        });
+        t.tokens = TokenBreakdown {
+            total_tokens: Some(120),
+            cache_read_tokens: Some(80),
+            cache_creation_tokens: None,
+            reasoning_tokens: Some(4),
+        };
+        let round: TrialResult = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(round.cost_usd, Some(0.012_5));
+        assert_eq!(round.exit_code, Some(0));
+        let term = round.terminal.unwrap();
+        assert_eq!(term.outcome, TerminalOutcome::Error);
+        assert_eq!(term.message.as_deref(), Some("Request timed out."));
+        assert_eq!(round.tokens.cache_read_tokens, Some(80));
+        assert_eq!(round.tokens.cache_creation_tokens, None);
+    }
+
+    #[test]
+    fn test_case_status_error_serializes_lowercase() {
+        // Serialized into every artifact; ADR 0020 forbids renaming it later.
+        let json = serde_json::to_string(&CaseStatus::Error).unwrap();
+        assert_eq!(json, "\"error\"");
     }
 }

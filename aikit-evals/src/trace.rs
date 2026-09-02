@@ -1,6 +1,6 @@
 //! Trace event types for eval case execution
 
-use aikit_sdk::{AgentEvent, AgentEventPayload};
+use aikit_sdk::{AgentEvent, AgentEventPayload, TerminalOutcome};
 use serde::{Deserialize, Serialize};
 
 /// A single line in a trace.jsonl file
@@ -47,6 +47,26 @@ pub enum TracePayload {
         call_id: String,
         output: serde_json::Value,
         is_error: bool,
+    },
+    /// The agent's own report that a turn or run finished, decoded from the
+    /// line the backend already sends (claude `result`, codex `turn.*`, pi
+    /// `turn_end`).
+    ///
+    /// This is the evidence that separates "the agent answered badly" from
+    /// "there is no answer to score". Several CLIs report a provider failure
+    /// here and still exit zero, so without it a dead run is indistinguishable
+    /// from a quiet one — and a dead run passes every negative check.
+    ///
+    /// `cost_usd` is per frame, not cumulative: pi emits one frame per turn.
+    /// Sum them; never take the last one.
+    Terminal {
+        outcome: TerminalOutcome,
+        #[serde(default)]
+        reason: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+        #[serde(default)]
+        cost_usd: Option<f64>,
     },
     /// An `AgentEventPayload` variant this crate does not model yet.
     ///
@@ -125,6 +145,17 @@ pub fn agent_events_to_trace(events: &[AgentEvent]) -> Vec<TraceEvent> {
                     tool_name: tool_name.clone(),
                     input: tool_input.clone(),
                 },
+                AgentEventPayload::Terminal {
+                    outcome,
+                    reason,
+                    message,
+                    cost_usd,
+                } => TracePayload::Terminal {
+                    outcome: *outcome,
+                    reason: reason.clone(),
+                    message: message.clone(),
+                    cost_usd: *cost_usd,
+                },
                 AgentEventPayload::ToolResult {
                     call_id,
                     output,
@@ -183,6 +214,53 @@ pub fn stdout_to_trace(stdout: &[u8]) -> Vec<TraceEvent> {
     }
 
     events
+}
+
+/// The agent's own verdict on the run, or `None` when it never gave one.
+///
+/// **The last status-bearing terminal event decides.** pi emits one per turn,
+/// so a run that errors on turn two and recovers on turn three is a success;
+/// taking the first frame, or any frame that reports an error, would call it a
+/// failure. A backend that emits exactly one frame is unaffected by the rule.
+pub fn terminal_outcome(
+    events: &[TraceEvent],
+) -> Option<(TerminalOutcome, Option<String>, Option<String>)> {
+    events.iter().rev().find_map(|e| match &e.payload {
+        TracePayload::Terminal {
+            outcome,
+            reason,
+            message,
+            ..
+        } => Some((*outcome, reason.clone(), message.clone())),
+        _ => None,
+    })
+}
+
+/// Vendor-reported cost for the run, summed over terminal frames.
+///
+/// `None` when no frame carried a cost: absent means the backend reported
+/// nothing, never zero. Never estimated from token counts and a price table —
+/// a stale estimate is indistinguishable from a real number once it is written
+/// to an artifact (ADR 0020).
+pub fn terminal_cost_usd(events: &[TraceEvent]) -> Option<f64> {
+    let mut total: Option<f64> = None;
+    for e in events {
+        if let TracePayload::Terminal {
+            cost_usd: Some(c), ..
+        } = &e.payload
+        {
+            total = Some(total.unwrap_or(0.0) + c);
+        }
+    }
+    total
+}
+
+/// Parse a trace JSONL blob back into events, discarding unparseable lines.
+pub fn parse_trace_jsonl(trace_jsonl: &str) -> Vec<TraceEvent> {
+    trace_jsonl
+        .lines()
+        .filter_map(|line| serde_json::from_str::<TraceEvent>(line).ok())
+        .collect()
 }
 
 /// Serialize trace events to JSONL format
@@ -583,6 +661,145 @@ mod tests {
             count, 0,
             "count_raw_json_events must return 0 for token_usage_line-only traces, got: {}",
             count
+        );
+    }
+
+    // ── R2: the terminal frame survives normalization ──────────────────────
+
+    fn terminal_event(
+        seq: usize,
+        outcome: TerminalOutcome,
+        reason: &str,
+        cost: Option<f64>,
+    ) -> TraceEvent {
+        TraceEvent {
+            seq,
+            payload: TracePayload::Terminal {
+                outcome,
+                reason: Some(reason.to_string()),
+                message: None,
+                cost_usd: cost,
+            },
+        }
+    }
+
+    #[test]
+    fn test_terminal_payload_survives_the_jsonl_round_trip() {
+        let events = vec![TraceEvent {
+            seq: 0,
+            payload: TracePayload::Terminal {
+                outcome: TerminalOutcome::Error,
+                reason: Some("error".to_string()),
+                message: Some("Request timed out.".to_string()),
+                cost_usd: Some(0.000_909_72),
+            },
+        }];
+        let parsed = parse_trace_jsonl(&trace_to_jsonl(&events));
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0].payload {
+            TracePayload::Terminal {
+                outcome,
+                reason,
+                message,
+                cost_usd,
+            } => {
+                assert_eq!(*outcome, TerminalOutcome::Error);
+                assert_eq!(reason.as_deref(), Some("error"));
+                assert_eq!(message.as_deref(), Some("Request timed out."));
+                assert_eq!(*cost_usd, Some(0.000_909_72));
+            }
+            other => panic!("expected Terminal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_last_status_bearing_terminal_event_decides_the_run() {
+        // pi emits one frame per turn. A run that errors and then recovers is
+        // a success, so the decision reads the last frame, not the first.
+        let recovered = vec![
+            terminal_event(0, TerminalOutcome::Error, "error", None),
+            terminal_event(1, TerminalOutcome::Success, "end_turn", None),
+        ];
+        assert_eq!(
+            terminal_outcome(&recovered).map(|(o, _, _)| o),
+            Some(TerminalOutcome::Success)
+        );
+
+        let gave_up = vec![
+            terminal_event(0, TerminalOutcome::Success, "end_turn", None),
+            terminal_event(1, TerminalOutcome::Error, "error", None),
+        ];
+        assert_eq!(
+            terminal_outcome(&gave_up).map(|(o, _, _)| o),
+            Some(TerminalOutcome::Error)
+        );
+    }
+
+    #[test]
+    fn test_terminal_outcome_is_none_when_the_stream_carried_no_frame() {
+        let events = vec![TraceEvent {
+            seq: 0,
+            payload: TracePayload::RawLine {
+                line: "hello".to_string(),
+            },
+        }];
+        assert!(terminal_outcome(&events).is_none());
+    }
+
+    #[test]
+    fn test_cost_sums_per_turn_frames() {
+        // pi reports cost per turn, not cumulatively, so the run's cost is the
+        // sum of its frames.
+        let events = vec![
+            terminal_event(0, TerminalOutcome::Success, "end_turn", Some(0.000_909_72)),
+            terminal_event(1, TerminalOutcome::Success, "end_turn", Some(0.008_472_96)),
+            terminal_event(2, TerminalOutcome::Success, "end_turn", Some(0.003_537_52)),
+        ];
+        let total = terminal_cost_usd(&events).unwrap();
+        assert!((total - 0.012_920_2).abs() < 1e-9, "{total}");
+    }
+
+    #[test]
+    fn test_cost_is_none_when_no_frame_reported_one() {
+        // Absent, never zero: a backend that reports nothing must not look
+        // like a run that was free (ADR 0020, R5).
+        let events = vec![terminal_event(
+            0,
+            TerminalOutcome::Success,
+            "end_turn",
+            None,
+        )];
+        assert_eq!(terminal_cost_usd(&events), None);
+    }
+
+    #[test]
+    fn test_agent_terminal_event_becomes_a_trace_terminal_payload() {
+        // The defect this whole change starts from: the agent said
+        // `stopReason: error` and normalization dropped it.
+        use aikit_sdk::AgentEventStream;
+        let events = vec![AgentEvent {
+            agent_key: "pi".to_string(),
+            seq: 0,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::Terminal {
+                outcome: TerminalOutcome::Error,
+                reason: Some("error".to_string()),
+                message: Some("Request timed out.".to_string()),
+                cost_usd: Some(0.001),
+            },
+        }];
+        let trace = agent_events_to_trace(&events);
+        assert_eq!(trace.len(), 1);
+        assert!(
+            matches!(
+                &trace[0].payload,
+                TracePayload::Terminal {
+                    outcome: TerminalOutcome::Error,
+                    ..
+                }
+            ),
+            "{:?}",
+            trace[0].payload
         );
     }
 }

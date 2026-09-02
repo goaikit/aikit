@@ -24,7 +24,7 @@ pub use types::{
     AgentAvailabilityReason, AgentEvent, AgentEventPayload, AgentEventStream, AgentStatus,
     KnobSupport, MessageKind, MessagePhase, MessageRole, OutputMode, ProgressSink, QuotaCategory,
     QuotaExceededInfo, RunError, RunOptions, RunResult, SandboxPolicy, SkillIsolation,
-    StreamMessage, TokenUsage, UsageSource,
+    StreamMessage, TerminalOutcome, TokenUsage, UsageSource,
 };
 
 pub use argv::{is_runnable, runnable_agents};
@@ -549,6 +549,17 @@ where
                                     call_id,
                                     output,
                                     is_error,
+                                },
+                                backend::Decoded::Terminal {
+                                    outcome,
+                                    reason,
+                                    message,
+                                    cost_usd,
+                                } => AgentEventPayload::Terminal {
+                                    outcome,
+                                    reason,
+                                    message,
+                                    cost_usd,
                                 },
                             };
                             let frame_event = AgentEvent {
@@ -1282,6 +1293,7 @@ mod tests {
                 AgentEventPayload::AikitStepFinish { .. } => "aikit_step_finish",
                 AgentEventPayload::Result { .. } => "result",
                 AgentEventPayload::SessionStarted { .. } => "session_started",
+                AgentEventPayload::Terminal { .. } => "terminal",
             };
             payloads.push(kind.to_string());
         });

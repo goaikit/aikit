@@ -629,6 +629,20 @@ pub enum MessageRole {
     User,
 }
 
+/// How a run ended, as the agent itself reported it.
+///
+/// This is the agent's own verdict on its run, not a verdict on the work: an
+/// agent that completes cleanly having done the wrong thing is
+/// [`TerminalOutcome::Success`] here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalOutcome {
+    /// The agent finished its run.
+    Success,
+    /// The agent reported its own terminal failure.
+    Error,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
@@ -759,6 +773,31 @@ pub enum AgentEventPayload {
     /// implicitly (no `session_id` in `RunOptions`) and need to learn the new
     /// id without parsing stderr.
     SessionStarted { session_id: String },
+    /// The agent's own report that the run reached a terminal state.
+    ///
+    /// Decoded from the line each CLI already sends to say how it finished
+    /// (claude `result`, codex `turn.completed`/`turn.failed`, pi `turn_end`).
+    /// Backends whose decoder emits this declare
+    /// [`BackendCapabilities::terminal_event`].
+    ///
+    /// A run may carry more than one — pi emits one per turn — and the **last
+    /// one decides**, so a run that errors and then recovers is not an error.
+    Terminal {
+        outcome: TerminalOutcome,
+        /// The backend's own machine-readable reason, verbatim
+        /// (`stop_reason`, `subtype`, `stopReason`, event type). Not normalised.
+        reason: Option<String>,
+        /// Human-readable failure text when the backend supplies one.
+        message: Option<String>,
+        /// Cost **the vendor reported at this frame**, in USD, or `None` when
+        /// the backend reports none. Never estimated from a price table.
+        ///
+        /// Per-frame, not per-run: claude reports one run total on its single
+        /// `result`, pi reports one per turn on each `turn_end`. A consumer
+        /// wanting the run's cost sums every terminal frame, which is correct
+        /// for both.
+        cost_usd: Option<f64>,
+    },
 }
 
 /// A single event emitted by a streaming agent run.

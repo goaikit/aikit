@@ -16,14 +16,15 @@ pub mod suite;
 pub mod trace;
 
 pub use artifacts::{
-    allocate_run_dir, read_case_results, read_summary, write_case_artifacts,
+    aggregate_trials, allocate_run_dir, read_case_results, read_summary, write_case_artifacts,
     write_case_trials_summary, write_summary, write_trial_artifacts, ArtifactsError, CaseResult,
     CaseStatus, CaseSummary, CaseTrialsResult, IsolationReport, RunArtifacts, ScopeFidelity,
-    SummaryResult, TrialResult,
+    SummaryResult, TerminalRecord, TokenBreakdown, TrialResult,
 };
 pub use checks::{
-    count_command_events, count_raw_json_events, load_checks, run_checks, suite_passes,
-    CheckDefinition, CheckResult, ChecksError, ChecksToml,
+    count_command_events, count_raw_json_events, effective_checks, load_checks, run_checks,
+    run_checks_in_context, suite_passes, unobservable_required, validate_case_checks, CheckContext,
+    CheckDefinition, CheckResult, ChecksError, ChecksToml, NotObservable,
 };
 pub use config::{resolve_from_input, EvalConfig, EvalConfigError, EvalConfigInput};
 pub use runner::{

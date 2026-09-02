@@ -130,6 +130,25 @@ impl RunProgress {
                 let truncated = truncate(&text, self.config.max_text_width);
                 self.add_row(format!("{} {}", prefix, truncated));
             }
+            // A successful terminal frame is not news: the run ending is already
+            // visible. A failing one is the only notice the operator gets that the
+            // agent gave up, since several CLIs report a provider failure and still
+            // exit zero.
+            AgentEventPayload::Terminal {
+                outcome,
+                reason,
+                message,
+                ..
+            } => {
+                if *outcome == crate::runner::TerminalOutcome::Error {
+                    let detail = message
+                        .as_deref()
+                        .or(reason.as_deref())
+                        .unwrap_or("agent reported failure");
+                    let truncated = truncate(detail, self.config.max_text_width);
+                    self.add_row(format!("[error] {}", truncated));
+                }
+            }
             AgentEventPayload::QuotaExceeded { info, .. } => {
                 let truncated = truncate(&info.raw_message, self.config.max_text_width);
                 self.add_row(format!("[quota] {}", truncated));

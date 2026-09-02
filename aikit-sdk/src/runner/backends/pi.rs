@@ -15,7 +15,7 @@ use crate::runner::backends::quota_match::{infer_quota_category, truncate_messag
 use crate::runner::capabilities::BackendCapabilities;
 use crate::runner::types::{
     AgentEventPayload, AgentEventStream, MessageKind, MessagePhase, MessageRole, QuotaExceededInfo,
-    StreamMessage, TokenUsage, UsageSource,
+    StreamMessage, TerminalOutcome, TokenUsage, UsageSource,
 };
 
 pub(crate) const KEY: &str = "pi";
@@ -29,7 +29,10 @@ pub(crate) const BINARY_CANDIDATES: &[&str] = &["pi"];
 //   - structured_tools: `tool_execution_start`/`tool_execution_end` decode to
 //     `ToolUse`/`ToolResult`;
 //   - reasoning: `thinking_delta` decodes to a `Reasoning` frame;
-//   - resumable_sessions: the `--session` spawn flag resumes a prior session.
+//   - resumable_sessions: the `--session` spawn flag resumes a prior session;
+//   - terminal_event: `turn_end` carries `stopReason`/`errorMessage` and
+//     decodes to a `Terminal` frame, so a stream that ends without one
+//     did not complete (R3).
 // `file_changes`/`context_compression` are intentionally `false` for v1
 // (edits fold into `ToolResult`; compaction surfaces as a status message).
 // `false -> true` is a non-breaking change later.
@@ -38,7 +41,8 @@ pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_structured_tools()
     .with_reasoning()
     .with_interruptible()
-    .with_resumable_sessions();
+    .with_resumable_sessions()
+    .with_terminal_event();
 
 /// Keywords that signal a quota / rate-limit condition, matched
 /// case-insensitively against a line's text. No Pi-specific error object is
@@ -161,6 +165,30 @@ pub(crate) fn decode(
                         raw_line_seq,
                     )));
                 }
+                // Pi states the turn's outcome on the turn itself. A provider
+                // failure that exhausts pi's internal retries lands here as
+                // `stopReason: "error"` while the process still exits 0 — the
+                // whole reason this frame exists. One frame per turn: a run
+                // that errors and then recovers is not an errored run, so the
+                // consumer takes the last.
+                let stop_reason = str_field(message, "stopReason");
+                let is_error = stop_reason.as_deref() == Some("error");
+                out.push(Decoded::Terminal {
+                    outcome: if is_error {
+                        TerminalOutcome::Error
+                    } else {
+                        TerminalOutcome::Success
+                    },
+                    reason: stop_reason,
+                    message: str_field(message, "errorMessage"),
+                    // Per-turn, not cumulative: verified against a recorded
+                    // 3-turn run whose costs were 0.0009 / 0.0085 / 0.0035.
+                    cost_usd: message
+                        .get("usage")
+                        .and_then(|u| u.get("cost"))
+                        .and_then(|c| c.get("total"))
+                        .and_then(|v| v.as_f64()),
+                });
             }
         }
         "tool_execution_start" => {
@@ -446,7 +474,8 @@ mod tests {
             r#"{"type":"turn_end","message":{"content":[{"type":"text","text":"Hello "},{"type":"text","text":"world"}]}}"#,
         );
         let out = decode(&v, STDOUT, 0);
-        assert_eq!(out.len(), 1);
+        // The text frame, then the turn's terminal outcome (R2).
+        assert_eq!(out.len(), 2, "{out:?}");
         if let Decoded::Stream(m) = &out[0] {
             assert_eq!(m.text, "Hello world");
             assert_eq!(m.phase, MessagePhase::Final);
@@ -454,13 +483,23 @@ mod tests {
         } else {
             panic!("expected Stream");
         }
+        assert!(
+            matches!(
+                &out[1],
+                Decoded::Terminal {
+                    outcome: TerminalOutcome::Success,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
     }
 
     #[test]
     fn decode_turn_end_bare_string_content() {
         let v = json(r#"{"type":"turn_end","message":{"content":"plain"}}"#);
         let out = decode(&v, STDOUT, 0);
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.len(), 2, "{out:?}");
         if let Decoded::Stream(m) = &out[0] {
             assert_eq!(m.text, "plain");
         } else {
@@ -469,9 +508,22 @@ mod tests {
     }
 
     #[test]
-    fn decode_turn_end_empty_text_yields_nothing() {
+    fn decode_turn_end_empty_text_yields_only_the_terminal_frame() {
         let v = json(r#"{"type":"turn_end","message":{"content":[]}}"#);
-        assert!(decode(&v, STDOUT, 0).is_empty());
+        let out = decode(&v, STDOUT, 0);
+        // No text to report, but the turn still ended, and its outcome is the
+        // whole point of R2: a turn that errored has no text either.
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(
+            matches!(
+                &out[0],
+                Decoded::Terminal {
+                    outcome: TerminalOutcome::Success,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
     }
 
     #[test]

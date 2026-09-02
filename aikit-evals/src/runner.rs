@@ -1,14 +1,21 @@
 //! Eval runner implementation using aikit-sdk
 
 use crate::artifacts::{
-    CaseResult, CaseStatus, CaseTrialsResult, IsolationReport, ScopeFidelity, TrialResult,
+    aggregate_trials, CaseResult, CaseStatus, CaseTrialsResult, IsolationReport, ScopeFidelity,
+    TerminalRecord, TokenBreakdown, TrialResult,
 };
-use crate::checks::{count_command_events, run_checks, suite_passes, CheckDefinition};
+use crate::checks::{
+    count_command_events, effective_checks, run_checks_in_context, suite_passes, CheckContext,
+    CheckDefinition,
+};
 use crate::codex_home::CodexScratchHome;
 use crate::suite::EvalCase;
-use crate::trace::{agent_events_to_trace, trace_to_jsonl, TraceEvent, TracePayload};
+use crate::trace::{
+    agent_events_to_trace, terminal_cost_usd, terminal_outcome, trace_to_jsonl, TraceEvent,
+    TracePayload,
+};
 use aikit_sdk::runner::{Backend, KnobSupport};
-use aikit_sdk::{run_agent_events, AgentEvent, RunOptions, SkillIsolation};
+use aikit_sdk::{run_agent_events, AgentEvent, RunOptions, SkillIsolation, TerminalOutcome};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -269,6 +276,10 @@ impl EvalRunner for AikitEvalRunner {
                         error_message: Some(
                             "EVAL_PARALLEL_EXHAUSTION: semaphore closed".to_string(),
                         ),
+                        exit_code: None,
+                        terminal: None,
+                        cost_usd: None,
+                        tokens: TokenBreakdown::default(),
                     };
                 };
                 let (_output, case_result, _trace) = runner
@@ -282,6 +293,10 @@ impl EvalRunner for AikitEvalRunner {
                     output_tokens: case_result.output_tokens,
                     check_results: case_result.check_results,
                     error_message: case_result.error_message,
+                    exit_code: case_result.exit_code,
+                    terminal: case_result.terminal,
+                    cost_usd: case_result.cost_usd,
+                    tokens: case_result.tokens,
                 }
             });
         }
@@ -301,32 +316,16 @@ impl EvalRunner for AikitEvalRunner {
                         output_tokens: None,
                         check_results: vec![],
                         error_message: Some(format!("EVAL_PARALLEL_EXHAUSTION: {}", e)),
+                        exit_code: None,
+                        terminal: None,
+                        cost_usd: None,
+                        tokens: TokenBreakdown::default(),
                     });
                 }
             }
         }
 
-        trials.sort_by_key(|t| t.trial_id);
-        let pass_count = trials
-            .iter()
-            .filter(|t| t.status == CaseStatus::Passed)
-            .count() as u32;
-        let total_trials = trial_count.max(1);
-        let pass_rate = pass_count as f64 / total_trials as f64;
-        let aggregated_status = if pass_rate >= opts.pass_threshold {
-            CaseStatus::Passed
-        } else {
-            CaseStatus::Failed
-        };
-
-        CaseTrialsResult {
-            id: case.id.clone(),
-            trials,
-            aggregated_status,
-            pass_count,
-            total_trials,
-            pass_rate,
-        }
+        aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)
     }
 }
 
@@ -593,6 +592,10 @@ impl AikitEvalRunner {
                         output_tokens: None,
                         check_results: vec![],
                         error_message: Some(message),
+                        exit_code: None,
+                        terminal: None,
+                        cost_usd: None,
+                        tokens: TokenBreakdown::default(),
                     };
                     return (output, result, String::new());
                 }
@@ -728,12 +731,70 @@ impl AikitEvalRunner {
         let trace_jsonl = trace_to_jsonl(&trace_events);
         let stdout_str = String::from_utf8_lossy(&run_output.stdout).to_string();
         let command_count = count_command_events(&trace_jsonl);
-        let check_results = run_checks(checks, &stdout_str, &trace_jsonl, &working_dir);
+
+        let backend = Backend::from_key(&opts.agent_key);
+        let capabilities = backend.map(|b| b.capabilities());
+        let skill_path = payload
+            .as_ref()
+            .map(|p| p.skill_path.to_string_lossy().to_string());
+        let ctx = CheckContext {
+            backend: &opts.agent_key,
+            structured_tools: capabilities.map(|c| c.structured_tools).unwrap_or(true),
+            // `Option::is_none_or` is stable since 1.82; the workspace MSRV
+            // is 1.75.
+            typed_skill_tool: match backend {
+                Some(b) => b == Backend::Claude,
+                None => true,
+            },
+            skill_path: skill_path.as_deref(),
+        };
+        // Per-case selection plus the check implied by `should_trigger`.
+        let case_checks = effective_checks(checks, &case.id, case.should_trigger);
+        let check_results = run_checks_in_context(&case_checks, &trace_jsonl, &working_dir, &ctx);
         let all_passed = suite_passes(&check_results);
 
-        let status = if run_output.timed_out || exec_error.is_some() {
+        // ── the agent's own verdict ─────────────────────────────────────────
+        // Recorded whether or not it decides the status, because it is the only
+        // record of *why* a run that exited zero produced nothing.
+        let terminal =
+            terminal_outcome(&trace_events).map(|(outcome, reason, message)| TerminalRecord {
+                outcome,
+                reason,
+                message,
+            });
+        let cost_usd = terminal_cost_usd(&trace_events);
+
+        // A run that produced no measurement is `error`, never `failed` and
+        // never `passed`. Over an empty trace a negative expectation passes and
+        // a tool-call ceiling passes, so an outage would score as perfect
+        // restraint; on a positive suite the same outage scores as total
+        // failure. Polarity decides the direction of the lie, which is why no
+        // default is safe and the transport signal has to decide.
+        let no_measurement = if run_output.timed_out || exec_error.is_some() {
+            // Transport failure: nothing reached us.
+            true
+        } else if run_output.exit_code.is_some_and(|c| c != 0) {
+            // The process itself failed.
+            true
+        } else if terminal
+            .as_ref()
+            .is_some_and(|t| t.outcome == TerminalOutcome::Error)
+        {
+            // The agent said so. pi retries a provider timeout three times,
+            // gives up, and still exits zero — this is the only signal.
+            true
+        } else {
+            // Stream ended with no terminal event. Only an error on a backend
+            // that declares it emits one: three backends are wrapped as
+            // text-only and emit no structured frames at all, and marking every
+            // one of their trials `error` would be a lie about them rather than
+            // a measurement (their flag flips the day their decoder is fixed).
+            terminal.is_none() && capabilities.is_some_and(|c| c.terminal_event)
+        };
+
+        let status = if no_measurement {
             CaseStatus::Error
-        } else if checks.is_empty() {
+        } else if case_checks.is_empty() {
             if run_output.exit_code == Some(0) {
                 CaseStatus::Passed
             } else {
@@ -757,8 +818,25 @@ impl AikitEvalRunner {
                     "EVAL_CASE_TIMEOUT: Case timed out after {}s",
                     timeout_secs
                 ))
+            } else if let Some(message) = exec_error {
+                Some(message)
+            } else if status == CaseStatus::Error {
+                Some(no_measurement_reason(
+                    &run_output,
+                    terminal.as_ref(),
+                    &opts.agent_key,
+                ))
             } else {
-                exec_error
+                None
+            },
+            exit_code: run_output.exit_code,
+            terminal,
+            cost_usd,
+            tokens: TokenBreakdown {
+                total_tokens: token_usage.as_ref().and_then(|u| u.total_tokens),
+                cache_read_tokens: token_usage.as_ref().and_then(|u| u.cache_read_tokens),
+                cache_creation_tokens: token_usage.as_ref().and_then(|u| u.cache_creation_tokens),
+                reasoning_tokens: token_usage.as_ref().and_then(|u| u.reasoning_tokens),
             },
         };
 
@@ -784,6 +862,29 @@ impl AikitEvalRunner {
         run_output.workspace = workspace;
 
         (run_output, case_result, trace_jsonl)
+    }
+}
+
+/// Say *why* a trial produced no measurement, in the artifact rather than only
+/// in a log line nobody reads back.
+fn no_measurement_reason(
+    output: &CaseRunOutput,
+    terminal: Option<&TerminalRecord>,
+    agent_key: &str,
+) -> String {
+    if let Some(code) = output.exit_code.filter(|c| *c != 0) {
+        return format!("EVAL_TRIAL_ERROR: agent exited {code}");
+    }
+    match terminal {
+        Some(t) if t.outcome == TerminalOutcome::Error => {
+            let detail = t
+                .message
+                .as_deref()
+                .or(t.reason.as_deref())
+                .unwrap_or("no detail");
+            format!("EVAL_TRIAL_ERROR: agent reported failure: {detail}")
+        }
+        _ => format!("EVAL_TRIAL_ERROR: agent '{agent_key}' stream ended with no terminal event"),
     }
 }
 
@@ -915,11 +1016,18 @@ mod tests {
         }
     }
 
+    /// A case for tests about plumbing (staging, workspaces, exit codes), run
+    /// against a fake agent that never reads the skill.
+    ///
+    /// `should_trigger` is `false` because under R7 the column is scored: it
+    /// generates a `skill_invoked` check with matching polarity, and claiming
+    /// `true` here would assert an invocation the stub cannot make. Tests
+    /// about triggering itself set the column explicitly.
     fn simple_case(id: &str) -> EvalCase {
         EvalCase {
             id: id.to_string(),
             prompt: "p".to_string(),
-            should_trigger: true,
+            should_trigger: false,
             tags: vec![],
             workspace_subdir: None,
         }
@@ -954,6 +1062,10 @@ mod tests {
                 output_tokens: Some(50),
                 check_results: vec![],
                 error_message: None,
+                cost_usd: None,
+                exit_code: None,
+                terminal: None,
+                tokens: Default::default(),
             };
             (out, result, trace_jsonl)
         }
@@ -977,27 +1089,13 @@ mod tests {
                     output_tokens: result.output_tokens,
                     check_results: result.check_results,
                     error_message: result.error_message,
+                    cost_usd: None,
+                    exit_code: None,
+                    terminal: None,
+                    tokens: Default::default(),
                 });
             }
-            let pass_count = trials
-                .iter()
-                .filter(|t| t.status == CaseStatus::Passed)
-                .count() as u32;
-            let total_trials = trial_count.max(1);
-            let pass_rate = pass_count as f64 / total_trials as f64;
-            let aggregated_status = if pass_rate >= opts.pass_threshold {
-                CaseStatus::Passed
-            } else {
-                CaseStatus::Failed
-            };
-            CaseTrialsResult {
-                id: case.id.clone(),
-                trials,
-                aggregated_status,
-                pass_count,
-                total_trials,
-                pass_rate,
-            }
+            aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)
         }
     }
 
@@ -1073,7 +1171,9 @@ mod tests {
         let case = EvalCase {
             id: "required-matrix".to_string(),
             prompt: "p".to_string(),
-            should_trigger: true,
+            // Not about triggering: the fake agent reads no skill, and under
+            // R7 a `true` here would add a `skill_invoked` check that fails.
+            should_trigger: false,
             tags: vec![],
             workspace_subdir: None,
         };
@@ -1082,6 +1182,7 @@ mod tests {
         let required_fail_checks = vec![CheckDefinition::FileExists {
             path: PathBuf::from("missing-required.txt"),
             required: true,
+            cases: None,
         }];
         let (_out, required_fail, _trace) = runner
             .run_case_inner(&case, &opts, &required_fail_checks)
@@ -1092,10 +1193,12 @@ mod tests {
             CheckDefinition::FileExists {
                 path: PathBuf::from("present.txt"),
                 required: true,
+                cases: None,
             },
             CheckDefinition::FileExists {
                 path: PathBuf::from("missing-optional.txt"),
                 required: false,
+                cases: None,
             },
         ];
         let (_out, optional_fail, _trace) = runner
@@ -1113,6 +1216,7 @@ mod tests {
         let all_optional_failing_checks = vec![CheckDefinition::FileExists {
             path: PathBuf::from("missing-optional-only.txt"),
             required: false,
+            cases: None,
         }];
         let (_out, all_optional, _trace) = runner
             .run_case_inner(&case, &opts, &all_optional_failing_checks)
@@ -1150,14 +1254,17 @@ mod tests {
                 pattern: "never-happens".to_string(),
                 expected: false,
                 required: true,
+                cases: None,
             },
             CheckDefinition::MaxToolCalls {
                 limit: 10,
                 required: true,
+                cases: None,
             },
             CheckDefinition::FileExists {
                 path: PathBuf::from("preexisting.txt"),
                 required: true,
+                cases: None,
             },
         ];
         let runner = AikitEvalRunner::new();
@@ -1176,9 +1283,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_run_case_trials_counts_agent_failure_like_timeout_error() {
+    async fn test_run_case_trials_all_errored_yields_case_verdict_error() {
         // Aggregation over trials must treat exec-failure Errors as it treats
-        // timeout Errors: not passed, so the case fails its threshold.
+        // timeout Errors. With every trial errored there is no scored trial
+        // left, so the case verdict is `error` and not `failed` (R4): calling
+        // it `failed` would blame the skill for an outage.
         let opts = CaseRunOptions {
             agent_key: "definitely-not-a-real-agent".to_string(),
             model: None,
@@ -1199,6 +1308,7 @@ mod tests {
             pattern: "never-happens".to_string(),
             expected: false,
             required: true,
+            cases: None,
         }];
         let runner = AikitEvalRunner::new();
 
@@ -1207,7 +1317,13 @@ mod tests {
             .await;
 
         assert_eq!(trials_result.pass_count, 0);
-        assert_eq!(trials_result.aggregated_status, CaseStatus::Failed);
+        assert_eq!(trials_result.aggregated_status, CaseStatus::Error);
+        assert_eq!(trials_result.error_count, 2);
+        assert_eq!(trials_result.scored_trials, 0);
+        assert_eq!(
+            trials_result.pass_rate, 0.0,
+            "no scored trial means no rate to report, never a division by zero"
+        );
         for trial in &trials_result.trials {
             assert_eq!(trial.status, CaseStatus::Error);
             assert!(trial.error_message.is_some());
@@ -1425,6 +1541,7 @@ mod tests {
         let checks = vec![CheckDefinition::FileExists {
             path: PathBuf::from("fixture.txt"),
             required: true,
+            cases: None,
         }];
         let runner = AikitEvalRunner::new();
         let (output, result, _trace) = runner.run_case_inner(&case, &opts, &checks).await;
@@ -1466,6 +1583,7 @@ mod tests {
         let checks = vec![CheckDefinition::FileExists {
             path: PathBuf::from("never-created.txt"),
             required: true,
+            cases: None,
         }];
         let runner = AikitEvalRunner::new();
         let (output, result, _trace) = runner
@@ -1501,6 +1619,7 @@ mod tests {
         let checks = vec![CheckDefinition::FileExists {
             path: PathBuf::from("never-created.txt"),
             required: true,
+            cases: None,
         }];
         let runner = AikitEvalRunner::new();
         let (output, result, _trace) = runner
@@ -1748,5 +1867,143 @@ mod tests {
             parse_claude_ambient_skills("{\"type\":\"system\",\"subtype\":\"init\"}").is_empty()
         );
         assert!(parse_claude_ambient_skills("{\"type\":\"result\"}").is_empty());
+    }
+
+    // ── R1 / R3: a trial that produced no measurement is `error` ───────────
+
+    /// Run one case against a throwaway agent script and return its result.
+    #[cfg(unix)]
+    async fn run_one_case_with(agent: &str, script: &str) -> CaseResult {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_agent(bin.path(), agent, script);
+        prepend_path(bin.path());
+        let project = tempfile::tempdir().unwrap();
+        let opts = CaseRunOptions {
+            agent_key: agent.to_string(),
+            model: None,
+            project_root: project.path().to_path_buf(),
+            timeout_seconds: 5,
+            pass_threshold: 1.0,
+            isolation: IsolationMode::Inherit,
+            retain_workspace_in: None,
+        };
+        let runner = AikitEvalRunner::new();
+        let (_out, result, _trace) = runner.run_case_inner(&simple_case("m1"), &opts, &[]).await;
+        result
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_agent_reported_failure_is_error_not_failed() {
+        // The defect in one test: the agent exits zero and says it failed.
+        // Before R1 this scored `failed` and was averaged in as a wrong
+        // answer; the four dead trials in the 210-trial sweep were exactly
+        // this shape.
+        let errored = run_one_case_with(
+                "claude",
+                r#"printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Request timed out.","session_id":"s"}'"#,
+            )
+        .await;
+
+        assert_eq!(errored.status, CaseStatus::Error, "{errored:?}");
+        assert_eq!(errored.exit_code, Some(0), "the process itself exited fine");
+        let message = errored.error_message.unwrap();
+        assert!(message.starts_with("EVAL_TRIAL_ERROR:"), "{message}");
+        let terminal = errored.terminal.expect("the agent's verdict is recorded");
+        assert_eq!(terminal.outcome, TerminalOutcome::Error);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_the_same_trial_without_the_error_flag_is_not_error() {
+        // The negative half: identical shape, `is_error` false. If this also
+        // scored `error`, the rule above would be measuring nothing.
+        let clean = run_one_case_with(
+                "claude",
+                r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s"}'"#,
+            )
+        .await;
+
+        assert_ne!(clean.status, CaseStatus::Error, "{clean:?}");
+        assert_eq!(
+            clean.terminal.map(|t| t.outcome),
+            Some(TerminalOutcome::Success)
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_clean_exit_with_no_answer_is_failed_not_error() {
+        // A skill failure, not an outage: the agent completed and said
+        // nothing useful. Text absence must never be the discriminator.
+        let empty = run_one_case_with(
+                "claude",
+                r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"s"}'"#,
+            )
+        .await;
+
+        assert_ne!(empty.status, CaseStatus::Error, "{empty:?}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_nonzero_exit_is_error() {
+        // Deliberately `gemini`, which declares no terminal event: on `claude`
+        // the missing-terminal rule would reach `error` on its own and this
+        // test would pass with the exit-code rule deleted.
+        let failed = run_one_case_with("gemini", "echo boom >&2\nexit 3").await;
+
+        assert_eq!(failed.status, CaseStatus::Error, "{failed:?}");
+        assert_eq!(failed.exit_code, Some(3));
+        assert!(
+            failed.error_message.unwrap().contains("exited 3"),
+            "the reason names the exit code"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_the_same_backend_exiting_zero_is_not_error() {
+        // The negative half of the test above: same backend, same silence on
+        // stdout, exit 0. Without this the exit-code rule could be "always
+        // error on gemini" and nothing would notice.
+        let clean = run_one_case_with("gemini", "echo boom >&2\nexit 0").await;
+
+        assert_ne!(clean.status, CaseStatus::Error, "{clean:?}");
+        assert_eq!(clean.exit_code, Some(0));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_missing_terminal_event_is_error_only_where_one_is_declared() {
+        // claude declares `terminal_event`, so a stream that ends without one
+        // did not complete.
+        let claude = run_one_case_with("claude", r#"printf '%s\n' 'just some text'"#).await;
+        assert_eq!(claude.status, CaseStatus::Error, "{claude:?}");
+        assert!(claude
+            .error_message
+            .unwrap()
+            .contains("stream ended with no terminal event"));
+
+        // gemini is wrapped as text-only and declares nothing, so the same
+        // stream says nothing about the outcome. Marking it `error` would be a
+        // statement about the decoder, not the run.
+        let gemini = run_one_case_with("gemini", r#"printf '%s\n' 'just some text'"#).await;
+        assert_ne!(gemini.status, CaseStatus::Error, "{gemini:?}");
+        assert!(gemini.terminal.is_none());
+    }
+
+    #[test]
+    fn test_only_backends_that_decode_a_terminal_frame_declare_the_flag() {
+        // ADR 0019: the flag describes the decoder, never the roadmap.
+        for backend in aikit_sdk::runner::backend::ALL {
+            let declared = backend.capabilities().terminal_event;
+            let expected = matches!(backend, Backend::Claude | Backend::Codex | Backend::Pi);
+            assert_eq!(
+                declared, expected,
+                "{:?} declares terminal_event={declared}",
+                backend
+            );
+        }
     }
 }

@@ -452,8 +452,8 @@ async fn compute_final_score(
 mod tests {
     use super::*;
     use aikit_evals::{
-        CaseResult, CaseRunOptions, CaseRunOutput, CaseStatus, CaseTrialsResult, CheckDefinition,
-        CheckResult, EvalCase, EvalRunner, Scorer, TrialResult,
+        aggregate_trials, CaseResult, CaseRunOptions, CaseRunOutput, CaseStatus, CaseTrialsResult,
+        CheckDefinition, CheckResult, EvalCase, EvalRunner, Scorer, TrialResult,
     };
     use std::path::Path;
     use tempfile::TempDir;
@@ -500,6 +500,7 @@ mod tests {
                 passed: self.passed,
                 required: true,
                 message: None,
+                not_observable: None,
             }]
         }
     }
@@ -530,6 +531,10 @@ mod tests {
                 output_tokens: None,
                 check_results: vec![],
                 error_message: None,
+                cost_usd: None,
+                exit_code: None,
+                terminal: None,
+                tokens: Default::default(),
             };
             (out, result, String::new())
         }
@@ -553,16 +558,13 @@ mod tests {
                     output_tokens: result.output_tokens,
                     check_results: result.check_results,
                     error_message: result.error_message,
+                    cost_usd: None,
+                    exit_code: None,
+                    terminal: None,
+                    tokens: Default::default(),
                 });
             }
-            CaseTrialsResult {
-                id: case.id.clone(),
-                trials,
-                aggregated_status: CaseStatus::Passed,
-                pass_count: trial_count,
-                total_trials: trial_count,
-                pass_rate: 1.0,
-            }
+            aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)
         }
     }
 
@@ -726,6 +728,7 @@ mod tests {
             checks: vec![CheckDefinition::FileExists {
                 path: PathBuf::from("dropped.txt"),
                 required: true,
+                cases: None,
             }],
         };
 

@@ -108,8 +108,8 @@ pub async fn resume_skill(
 mod tests {
     use super::*;
     use aikit_evals::{
-        stdout_to_trace, trace_to_jsonl, AikitEvalRunner, CaseResult, CaseRunOptions,
-        CaseRunOutput, CaseStatus, CaseTrialsResult, EvalCase, TrialResult,
+        aggregate_trials, stdout_to_trace, trace_to_jsonl, AikitEvalRunner, CaseResult,
+        CaseRunOptions, CaseRunOutput, CaseStatus, CaseTrialsResult, EvalCase, TrialResult,
     };
     use aikit_textgrad::training::state::{init_run_dir, write_runtime_state, RuntimeState};
     use aikit_textgrad::training::{SlowUpdateMode, StepRecord};
@@ -161,11 +161,13 @@ mod tests {
             CheckDefinition::CommandContains {
                 pattern: "M1".to_string(),
                 required: true,
+                cases: None,
             },
             CheckDefinition::TriggerExpectation {
                 pattern: "M2".to_string(),
                 expected: true,
                 required: true,
+                cases: None,
             },
         ]
     }
@@ -237,6 +239,10 @@ mod tests {
                 output_tokens: None,
                 check_results: vec![],
                 error_message: None,
+                cost_usd: None,
+                exit_code: None,
+                terminal: None,
+                tokens: Default::default(),
             };
             (output, result, trace_jsonl)
         }
@@ -260,27 +266,13 @@ mod tests {
                     output_tokens: result.output_tokens,
                     check_results: result.check_results,
                     error_message: result.error_message,
+                    cost_usd: None,
+                    exit_code: None,
+                    terminal: None,
+                    tokens: Default::default(),
                 });
             }
-            let pass_count = trials
-                .iter()
-                .filter(|t| t.status == CaseStatus::Passed)
-                .count() as u32;
-            let total_trials = trial_count.max(1);
-            let pass_rate = pass_count as f64 / total_trials as f64;
-            let aggregated_status = if pass_rate >= opts.pass_threshold {
-                CaseStatus::Passed
-            } else {
-                CaseStatus::Failed
-            };
-            CaseTrialsResult {
-                id: case.id.clone(),
-                trials,
-                aggregated_status,
-                pass_count,
-                total_trials,
-                pass_rate,
-            }
+            aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)
         }
     }
 
