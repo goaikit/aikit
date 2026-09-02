@@ -112,6 +112,30 @@ _Avoid_: Grader, evaluator (that's the run harness), reward model
 One structured invocation the target agent made during a rollout, decoded from its output as a `ToolUse` frame and recorded in the trace. What the `max_tool_calls` check counts, alongside `raw_json` lines for backends that still emit tool calls as raw JSON. An agent's text, reasoning and token-usage events are **not** tool calls — counting prose as activity is the specific bug this vocabulary exists to prevent (see [ADR 0019](docs/adr/0019-codex-decode-emits-typed-tool-frames.md)). The eval artifact field is still named `command_count`, deliberately: renaming a config knob does not justify breaking artifact readers.
 _Avoid_: Command (it is not necessarily a shell command), action, step
 
+**Case**:
+The unit of evaluation: one prompt, together with the starting fixtures (`workspace_subdir`) and tags that travel with it, under a stable `id`. A case declares *what to ask*, never *what counts as success* — checks are configured separately and apply suite-wide. The `should_trigger` column is documentation only: it is parsed and carried into the case, and no check consults it, so a case marked `false` asserts nothing by itself. A negative expectation is expressed as a check with `expected = false`.
+_Avoid_: Test, test case, task, item, sample, prompt (that is one field of a case)
+
+**Trial**:
+One execution of one case — a fresh rollout workspace, one **Agent run** (see `docs/GLOSSARY.md`), one trace, one set of check results — and the recorded unit a scorer reads. Cases are executed over N trials to damp target-agent nondeterminism (`run_case_trials`); a single trial cannot distinguish reliable behaviour from a lucky sample.
+_Avoid_: Run (reserved for the training run, the run directory, and the SDK's agent run), attempt, repetition, sample
+
+**Check**:
+One deterministic assertion evaluated against a trial's canonical trace after execution: substring presence or absence (`trigger_expectation`, `command_contains`), a structured skill invocation (`skill_invoked`), a file's existence (`file_exists`), or a ceiling on tool calls (`max_tool_calls`). Checks read the trace only, never raw agent stdout — an agent's startup capability listing must not satisfy an assertion that the skill ran. A check is `required`, meaning its failure fails the trial, or advisory. Because the trace echoes every file the agent read, a pattern that also occurs in the skill document matches whenever the agent merely opens it, and proves nothing about the answer.
+_Avoid_: Oracle, assertion, test, validator, rule
+
+**Suite**:
+The set of cases loaded for one evaluation, carrying their split roles. A suite holds cases and nothing else: checks are configured separately and apply to **every** case in it, so two cases needing different assertions cannot share a suite — distinct expectations require distinct suites.
+_Avoid_: Benchmark (that is the environment: cases plus a scorer), test suite, collection
+
+**Trial outcome**:
+The recorded verdict for one trial. `passed` — every required check passed. `failed` — the trial produced a valid measurement and at least one required check did not pass. `error` — **no valid measurement exists**: the run timed out or the agent could not be executed, so the trace cannot be scored. `skipped` is reserved and currently never produced. The distinction that carries weight is `failed` versus `error`: over an empty or truncated trace a negative-expectation check and a tool-call ceiling both pass *vacuously*, so a run that never produced output must never reduce to a pass — and must not be averaged into a rate as though it were a wrong answer either. One type, `CaseStatus`, currently carries both this and the **Case verdict** below at four sites (`TrialResult`, `CaseResult`, `CaseSummary`, `CaseTrialsResult.aggregated_status`); the vocabulary separates them deliberately, and the shared type is recorded debt, not ratified design.
+_Avoid_: Grade, verdict (reserved for the case level), score (a scalar in [0,1], not an outcome)
+
+**Case verdict**:
+The reduction of a case's trial outcomes to one status: the pass rate — passing trials over total trials — compared against a pass threshold the caller supplies. Today a trial with outcome `error` counts as non-passing in that rate. This is the per-item result a gate metric reduces further to a split-level score.
+_Avoid_: Case status (the field name — it does not say which level it means), aggregate, rollup
+
 **Gate metric**:
 How a scorer's per-item results are reduced to a split-level score: `hard` (per-item full-pass → 1/0, averaged = accuracy), `soft` (per-item fraction of required checks passed, averaged), or `mixed` (weighted combination). Selectable at runtime.
 _Avoid_: Reward, score mode
