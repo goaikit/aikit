@@ -92,6 +92,23 @@ pub struct CaseResult {
     /// input/output pair above.
     #[serde(default)]
     pub tokens: TokenBreakdown,
+    /// Where the skill document was staged for **this trial**, so an offline
+    /// re-score can rebuild the same [`CheckContext`](crate::checks::CheckContext)
+    /// the run used.
+    ///
+    /// Per trial, not per run: under isolation every trial stages into its own
+    /// scratch directory, so a single run-level path would name one arbitrary
+    /// trial's temp dir and fail to match every other trial's trace.
+    ///
+    /// Deliberately its own field and not read off [`IsolationReport`], which
+    /// is report-only: nothing in that struct may reach a `CheckResult`. This
+    /// path is a fact the runner recorded about what it staged, not something
+    /// the agent reported about itself.
+    ///
+    /// `None` means "this version did not record it", never "no skill was
+    /// staged".
+    #[serde(default)]
+    pub skill_path: Option<PathBuf>,
 }
 
 /// Per-trial result for a case
@@ -120,6 +137,23 @@ pub struct TrialResult {
     /// input/output pair above.
     #[serde(default)]
     pub tokens: TokenBreakdown,
+    /// Where the skill document was staged for **this trial**, so an offline
+    /// re-score can rebuild the same [`CheckContext`](crate::checks::CheckContext)
+    /// the run used.
+    ///
+    /// Per trial, not per run: under isolation every trial stages into its own
+    /// scratch directory, so a single run-level path would name one arbitrary
+    /// trial's temp dir and fail to match every other trial's trace.
+    ///
+    /// Deliberately its own field and not read off [`IsolationReport`], which
+    /// is report-only: nothing in that struct may reach a `CheckResult`. This
+    /// path is a fact the runner recorded about what it staged, not something
+    /// the agent reported about itself.
+    ///
+    /// `None` means "this version did not record it", never "no skill was
+    /// staged".
+    #[serde(default)]
+    pub skill_path: Option<PathBuf>,
 }
 
 /// Aggregated results for a case across multiple trials
@@ -291,6 +325,18 @@ pub struct CaseSummary {
     /// Denominator of `pass_rate`. `Some(0)` means the case has no measurement.
     #[serde(default)]
     pub scored_trials: Option<u32>,
+    /// The case's `should_trigger` column, recorded so an offline re-score can
+    /// rebuild the same effective check list the run scored against.
+    ///
+    /// Under R7 this column generates an implicit skill-invocation check, so a
+    /// scorer that cannot see it silently drops that check and reports a
+    /// different verdict than the run did.
+    ///
+    /// `None` means "this version did not record it", never `false`. A scorer
+    /// reading `None` must fall back to the explicit checks alone, which is
+    /// what pre-R7 artifacts were scored with.
+    #[serde(default)]
+    pub should_trigger: Option<bool>,
     #[serde(default)]
     pub trials: Vec<TrialResult>,
 }
@@ -390,6 +436,7 @@ fn case_result_to_trial(case: &CaseResult, trial_id: u32) -> TrialResult {
         terminal: case.terminal.clone(),
         cost_usd: case.cost_usd,
         tokens: case.tokens.clone(),
+        skill_path: case.skill_path.clone(),
     }
 }
 
@@ -487,6 +534,7 @@ pub fn read_case_results(run_dir: &Path) -> Result<Vec<CaseResult>, ArtifactsErr
                         .filter_map(|t| t.cost_usd)
                         .fold(None::<f64>, |acc, v| Some(acc.unwrap_or(0.0) + v)),
                     tokens: representative.map(|t| t.tokens.clone()).unwrap_or_default(),
+                    skill_path: representative.and_then(|t| t.skill_path.clone()),
                 });
                 continue;
             }
@@ -567,6 +615,7 @@ mod tests {
                     exit_code: None,
                     terminal: None,
                     tokens: Default::default(),
+                    skill_path: None,
                 },
                 TrialResult {
                     trial_id: 2,
@@ -580,6 +629,7 @@ mod tests {
                     exit_code: None,
                     terminal: None,
                     tokens: Default::default(),
+                    skill_path: None,
                 },
             ],
             aggregated_status: CaseStatus::Passed,
@@ -626,6 +676,7 @@ mod tests {
                 exit_code: None,
                 terminal: None,
                 tokens: Default::default(),
+                skill_path: None,
             }],
             aggregated_status: CaseStatus::Error,
             pass_count: 0,
@@ -672,6 +723,7 @@ mod tests {
             exit_code: None,
             terminal: None,
             tokens: Default::default(),
+            skill_path: None,
         };
         let failing_trial = TrialResult {
             trial_id: 2,
@@ -691,6 +743,7 @@ mod tests {
             exit_code: None,
             terminal: None,
             tokens: Default::default(),
+            skill_path: None,
         };
         let trials_result = CaseTrialsResult {
             id: "case-repr".to_string(),
@@ -754,6 +807,7 @@ mod tests {
                 exit_code: None,
                 terminal: None,
                 tokens: Default::default(),
+                skill_path: None,
             }],
             aggregated_status: CaseStatus::Passed,
             pass_count: 1,
@@ -838,6 +892,107 @@ mod tests {
         );
     }
 
+    /// ADR 0020, additive: an artifact written before R7/R8 carries neither
+    /// `skill_path` nor a case's `should_trigger`, and both must read as
+    /// "not recorded" rather than as a claim.
+    ///
+    /// `should_trigger: None` reaching a scorer as `false` would be the worst
+    /// of the two: `false` asserts the skill must *not* fire, so every case in
+    /// a pre-R7 run would gain an inverted check nobody wrote and the whole
+    /// suite would invert.
+    #[test]
+    fn test_summary_backcompat_missing_skill_path_and_should_trigger_read_none() {
+        let dir = TempDir::new().unwrap();
+        let pre_r7 = r#"{
+            "suite_pass": true,
+            "agent": "claude",
+            "model": null,
+            "total_cases": 1,
+            "passed": 1,
+            "failed": 0,
+            "run_dir": "/tmp/run",
+            "checks_path": null,
+            "skill_project_root": "/tmp/proj",
+            "cases": [{
+                "id": "eval-skill",
+                "status": "passed",
+                "command_count": 3,
+                "input_tokens": 10,
+                "output_tokens": 20
+            }]
+        }"#;
+        std::fs::write(dir.path().join("summary.json"), pre_r7).unwrap();
+
+        let read = read_summary(dir.path()).expect("pre-R7 summary.json must still parse");
+        assert!(
+            read.cases[0].trials.is_empty(),
+            "the fixture has no trials block; the assertions below are about the case"
+        );
+        assert!(
+            read.cases[0].should_trigger.is_none(),
+            "a missing should_trigger must stay None; Some(false) would invent an inverted check"
+        );
+    }
+
+    /// The same two fields survive a write/read cycle, so a scorer reading a
+    /// current artifact rebuilds the context the run actually used.
+    #[test]
+    fn test_skill_path_and_should_trigger_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let staged = dir.path().join("skills/fastskill/SKILL.md");
+        let summary = SummaryResult {
+            suite_pass: false,
+            suite_pass_rate: Some(0.0),
+            agent: "pi".to_string(),
+            model: None,
+            total_cases: 1,
+            passed: 0,
+            failed: 1,
+            trials_per_case: Some(1),
+            parallel: None,
+            pass_threshold: Some(1.0),
+            run_dir: dir.path().to_path_buf(),
+            checks_path: None,
+            skill_project_root: dir.path().to_path_buf(),
+            isolation: None,
+            cases: vec![CaseSummary {
+                id: "no-trigger".to_string(),
+                status: CaseStatus::Failed,
+                command_count: None,
+                input_tokens: None,
+                output_tokens: None,
+                pass_count: Some(0),
+                total_trials: Some(1),
+                pass_rate: Some(0.0),
+                error_count: Some(0),
+                scored_trials: Some(1),
+                should_trigger: Some(false),
+                trials: vec![TrialResult {
+                    trial_id: 1,
+                    status: CaseStatus::Failed,
+                    command_count: None,
+                    input_tokens: None,
+                    output_tokens: None,
+                    check_results: vec![],
+                    error_message: None,
+                    exit_code: Some(0),
+                    terminal: None,
+                    cost_usd: None,
+                    tokens: TokenBreakdown::default(),
+                    skill_path: Some(staged.clone()),
+                }],
+            }],
+        };
+
+        write_summary(dir.path(), &summary).unwrap();
+        let read = read_summary(dir.path()).unwrap();
+        assert_eq!(
+            read.cases[0].trials[0].skill_path.as_deref(),
+            Some(staged.as_path())
+        );
+        assert_eq!(read.cases[0].should_trigger, Some(false));
+    }
+
     #[test]
     fn test_scope_fidelity_serializes_snake_case() {
         assert_eq!(
@@ -869,6 +1024,7 @@ mod tests {
             terminal: None,
             cost_usd: None,
             tokens: TokenBreakdown::default(),
+            skill_path: None,
         }
     }
 

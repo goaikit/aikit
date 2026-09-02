@@ -10,7 +10,16 @@ pub struct EvalCase {
     pub id: String,
     /// Prompt to send to the agent
     pub prompt: String,
-    /// Whether the skill should trigger (documentation-only; checks.toml is authoritative for pass/fail)
+    /// Whether the skill under test is expected to be invoked for this case.
+    ///
+    /// **Scored.** This column generates an implicit per-case skill-invocation
+    /// check with matching polarity (see
+    /// [`effective_checks`](crate::checks::effective_checks)), so a case marked
+    /// `false` asserts that the skill stayed out of the way rather than
+    /// asserting nothing. An explicit `skill_invoked` check on the same case
+    /// replaces the implicit one, and
+    /// [`validate_case_checks`](crate::checks::validate_case_checks) rejects
+    /// the pair when the two contradict each other.
     pub should_trigger: bool,
     /// Tags for filtering
     pub tags: Vec<String>,

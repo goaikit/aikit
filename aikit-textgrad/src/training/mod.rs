@@ -535,6 +535,7 @@ mod tests {
                 exit_code: None,
                 terminal: None,
                 tokens: Default::default(),
+                skill_path: None,
             };
             (out, result, String::new())
         }
@@ -562,6 +563,7 @@ mod tests {
                     exit_code: None,
                     terminal: None,
                     tokens: Default::default(),
+                    skill_path: None,
                 });
             }
             aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)

@@ -243,6 +243,7 @@ mod tests {
                 exit_code: None,
                 terminal: None,
                 tokens: Default::default(),
+                skill_path: None,
             };
             (output, result, trace_jsonl)
         }
@@ -270,6 +271,7 @@ mod tests {
                     exit_code: None,
                     terminal: None,
                     tokens: Default::default(),
+                    skill_path: None,
                 });
             }
             aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)

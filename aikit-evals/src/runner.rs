@@ -280,6 +280,7 @@ impl EvalRunner for AikitEvalRunner {
                         terminal: None,
                         cost_usd: None,
                         tokens: TokenBreakdown::default(),
+                        skill_path: None,
                     };
                 };
                 let (_output, case_result, _trace) = runner
@@ -297,6 +298,7 @@ impl EvalRunner for AikitEvalRunner {
                     terminal: case_result.terminal,
                     cost_usd: case_result.cost_usd,
                     tokens: case_result.tokens,
+                    skill_path: case_result.skill_path,
                 }
             });
         }
@@ -320,6 +322,7 @@ impl EvalRunner for AikitEvalRunner {
                         terminal: None,
                         cost_usd: None,
                         tokens: TokenBreakdown::default(),
+                        skill_path: None,
                     });
                 }
             }
@@ -596,6 +599,7 @@ impl AikitEvalRunner {
                         terminal: None,
                         cost_usd: None,
                         tokens: TokenBreakdown::default(),
+                        skill_path: None,
                     };
                     return (output, result, String::new());
                 }
@@ -838,6 +842,10 @@ impl AikitEvalRunner {
                 cache_creation_tokens: token_usage.as_ref().and_then(|u| u.cache_creation_tokens),
                 reasoning_tokens: token_usage.as_ref().and_then(|u| u.reasoning_tokens),
             },
+            // Recorded per trial because each isolated trial stages the skill
+            // into its own scratch directory: this is the path that appears in
+            // *this* trace, and no other trial's.
+            skill_path: payload.as_ref().map(|p| p.skill_path.clone()),
         };
 
         // ── spec 016 D2 retention: delete on success (via drop), move under
@@ -1066,6 +1074,7 @@ mod tests {
                 exit_code: None,
                 terminal: None,
                 tokens: Default::default(),
+                skill_path: None,
             };
             (out, result, trace_jsonl)
         }
@@ -1093,6 +1102,7 @@ mod tests {
                     exit_code: None,
                     terminal: None,
                     tokens: Default::default(),
+                    skill_path: None,
                 });
             }
             aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)
@@ -1890,6 +1900,94 @@ mod tests {
         let runner = AikitEvalRunner::new();
         let (_out, result, _trace) = runner.run_case_inner(&simple_case("m1"), &opts, &[]).await;
         result
+    }
+
+    /// R8: an offline re-score has only the artifacts, so the staged skill
+    /// directory has to be one of them.
+    ///
+    /// Without it, `skill_invoked` on a backend with no typed `Skill` tool has
+    /// nothing to match on, and the scorer silently disagrees with the run that
+    /// wrote the trace. Per trial, not per run: each isolated trial stages into
+    /// its own scratch directory.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_an_isolated_run_records_the_staged_skill_path_on_the_trial() {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_claude(bin.path());
+        prepend_path(bin.path());
+        let project = tempfile::tempdir().unwrap();
+        let opts = isolated_opts("claude", project.path().to_path_buf());
+
+        let runner = AikitEvalRunner::new();
+        let (_out, result, _trace) = runner.run_case_inner(&simple_case("m1"), &opts, &[]).await;
+
+        let staged = result
+            .skill_path
+            .expect("an isolated run stages the skill somewhere");
+        assert_eq!(
+            staged.file_name().and_then(|n| n.to_str()),
+            Some("my-skill"),
+            "the recorded path is the staged skill directory: {staged:?}"
+        );
+    }
+
+    /// Every trial of a multi-trial case carries its own staged path.
+    ///
+    /// The per-case fold is where the path could quietly be dropped: the
+    /// default-trial runner maps a `CaseResult` onto a `TrialResult` field by
+    /// field, and a field left off that map is invisible until a scorer
+    /// disagrees with the run months later.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_every_trial_of_a_case_carries_its_own_staged_path() {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_claude(bin.path());
+        prepend_path(bin.path());
+        let project = tempfile::tempdir().unwrap();
+        let opts = isolated_opts("claude", project.path().to_path_buf());
+
+        let runner = AikitEvalRunner::new();
+        let trials_result = runner
+            .run_case_trials(&simple_case("m1"), &opts, &[], 2, Some(1))
+            .await;
+
+        assert_eq!(trials_result.trials.len(), 2);
+        let staged: Vec<_> = trials_result
+            .trials
+            .iter()
+            .map(|t| {
+                t.skill_path
+                    .clone()
+                    .unwrap_or_else(|| panic!("trial {} lost its staged path", t.trial_id))
+            })
+            .collect();
+        for path in &staged {
+            assert_eq!(path.file_name().and_then(|n| n.to_str()), Some("my-skill"));
+        }
+        assert_ne!(
+            staged[0], staged[1],
+            "each trial stages into its own scratch dir, which is why the path \
+             is recorded per trial and not once per run"
+        );
+    }
+
+    /// The negative half: nothing was staged, so `None` is the honest answer.
+    /// A placeholder here would be worse than nothing — the scorer would match
+    /// traces against a path that never existed.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_an_inheriting_run_records_no_staged_skill_path() {
+        let inherited = run_one_case_with(
+            "claude",
+            r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s"}'"#,
+        )
+        .await;
+
+        assert!(
+            inherited.skill_path.is_none(),
+            "IsolationMode::Inherit stages nothing: {:?}",
+            inherited.skill_path
+        );
     }
 
     #[cfg(unix)]
