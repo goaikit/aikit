@@ -14,7 +14,7 @@ use crate::runner::backends::quota_match::{match_quota, JsonPat, RawPat};
 use crate::runner::capabilities::BackendCapabilities;
 use crate::runner::types::{
     AgentEventPayload, AgentEventStream, MessageKind, MessagePhase, MessageRole, QuotaExceededInfo,
-    StreamMessage, TokenUsage, UsageSource,
+    StreamMessage, TerminalOutcome, TokenUsage, UsageSource,
 };
 
 pub(crate) const KEY: &str = "claude";
@@ -35,7 +35,8 @@ const BASE_CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_hooks()
     .with_server_tools()
     .with_subagents()
-    .with_passive_capture();
+    .with_passive_capture()
+    .with_terminal_event();
 
 #[cfg(not(all(feature = "agent-adapters", feature = "claudecode")))]
 const BASE_CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
@@ -47,7 +48,8 @@ const BASE_CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_mcp_routing()
     .with_hooks()
     .with_server_tools()
-    .with_subagents();
+    .with_subagents()
+    .with_terminal_event();
 
 // History (spec 008 §4): `history_store` flips on only when `claude-sdk` is
 // enabled — the same feature that compiles in `history::claude::ClaudeHistory`
@@ -195,6 +197,21 @@ pub(crate) fn map_message(
             }
         }
         Message::Result(r) => {
+            // The agent's own verdict on the run. Claude states it three ways
+            // and `is_error` is the authoritative one; `subtype` and
+            // `stop_reason` are carried verbatim as the reason, unnormalised.
+            let outcome = if r.is_error {
+                TerminalOutcome::Error
+            } else {
+                TerminalOutcome::Success
+            };
+            let reason = r
+                .stop_reason
+                .clone()
+                .or_else(|| Some(r.subtype.clone()))
+                .filter(|s| !s.is_empty());
+            let message = if r.is_error { r.result.clone() } else { None };
+            let cost_usd = r.total_cost_usd;
             if let Some(text) = r.result {
                 out.push(Decoded::Stream(sm(
                     text,
@@ -205,6 +222,12 @@ pub(crate) fn map_message(
                     raw_line_seq,
                 )));
             }
+            out.push(Decoded::Terminal {
+                outcome,
+                reason,
+                message,
+                cost_usd,
+            });
         }
         // System / StreamEvent / RateLimit / Task* / Hook / Mirror carry no
         // message text in the legacy contract: rate-limit is surfaced by
@@ -255,6 +278,34 @@ fn lenient_decode(
     }
 
     if line_type == "result" {
+        let is_error = value
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let reason = value
+            .get("stop_reason")
+            .or_else(|| value.get("subtype"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let message = if is_error {
+            value
+                .get("result")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+        let cost_usd = value.get("total_cost_usd").and_then(|v| v.as_f64());
+        results.push(Decoded::Terminal {
+            outcome: if is_error {
+                TerminalOutcome::Error
+            } else {
+                TerminalOutcome::Success
+            },
+            reason,
+            message,
+            cost_usd,
+        });
         if let Some(result_text) = value.get("result").and_then(|v| v.as_str()) {
             let turn_id = value
                 .get("session_id")
@@ -584,7 +635,8 @@ mod sdk_tests {
             "type": "result", "subtype": "success", "duration_ms": 1, "duration_api_ms": 1,
             "is_error": false, "num_turns": 1, "session_id": "sess-9", "result": "done"
         }));
-        assert_eq!(out.len(), 1);
+        // The final text, then the run's terminal outcome (R2).
+        assert_eq!(out.len(), 2, "{out:?}");
         match &out[0] {
             Decoded::Stream(m) => {
                 assert_eq!(m.text, "done");
@@ -593,6 +645,16 @@ mod sdk_tests {
             }
             other => panic!("expected Final Stream, got {other:?}"),
         }
+        assert!(
+            matches!(
+                &out[1],
+                Decoded::Terminal {
+                    outcome: TerminalOutcome::Success,
+                    ..
+                }
+            ),
+            "{out:?}"
+        );
     }
 
     #[test]

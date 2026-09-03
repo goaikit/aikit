@@ -699,6 +699,17 @@ fn decoded_to_payload(frame: Decoded) -> AgentEventPayload {
             output,
             is_error,
         },
+        Decoded::Terminal {
+            outcome,
+            reason,
+            message,
+            cost_usd,
+        } => AgentEventPayload::Terminal {
+            outcome,
+            reason,
+            message,
+            cost_usd,
+        },
     }
 }
 

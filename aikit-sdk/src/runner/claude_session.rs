@@ -484,6 +484,17 @@ fn decoded_to_payload(frame: Decoded) -> AgentEventPayload {
             output,
             is_error,
         },
+        Decoded::Terminal {
+            outcome,
+            reason,
+            message,
+            cost_usd,
+        } => AgentEventPayload::Terminal {
+            outcome,
+            reason,
+            message,
+            cost_usd,
+        },
     }
 }
 
@@ -636,7 +647,9 @@ mod tests {
 
         let events: Vec<_> = rx.into_iter().collect();
         assert!(!closed);
-        assert_eq!(seq, 3);
+        // Session start, the final text, the run's terminal outcome (R2), the
+        // step-finish marker.
+        assert_eq!(seq, 4);
         assert!(matches!(
             events[0].payload,
             AgentEventPayload::SessionStarted { ref session_id } if session_id == "sess-9"
@@ -647,8 +660,19 @@ mod tests {
                 if message.phase == crate::runner::types::MessagePhase::Final
                     && message.text == "done"
         ));
+        assert!(
+            matches!(
+                events[2].payload,
+                AgentEventPayload::Terminal {
+                    outcome: crate::runner::types::TerminalOutcome::Success,
+                    ..
+                }
+            ),
+            "{:?}",
+            events[2].payload
+        );
         assert!(matches!(
-            events[2].payload,
+            events[3].payload,
             AgentEventPayload::AikitStepFinish {
                 iteration: 0,
                 ref finish_reason

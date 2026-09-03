@@ -169,10 +169,22 @@ fn majority_vote(trial_results: Vec<Vec<CheckResult>>, total_trials: usize) -> V
                 .first()
                 .map(|r| r.check_name.clone())
                 .unwrap_or_default();
-            let pass_count = contributors.iter().filter(|r| r.passed).count();
+            // A check the backend cannot observe contributes no vote. When
+            // every trial said so, the aggregate says so too rather than
+            // reporting a 0/N failure the agent had no part in.
+            let not_observable = contributors
+                .iter()
+                .all(|r| !r.is_observable())
+                .then(|| contributors.first().and_then(|r| r.not_observable.clone()))
+                .flatten();
+            let votes: Vec<&&CheckResult> =
+                contributors.iter().filter(|r| r.is_observable()).collect();
+            let pass_count = votes.iter().filter(|r| r.passed).count();
             let required = contributors.iter().any(|r| r.required);
-            let passed = pass_count > total_trials / 2;
-            let message = if passed {
+            let passed = not_observable.is_none() && pass_count > votes.len() / 2;
+            let message = if let Some(n) = &not_observable {
+                Some(format!("not observable: {}", n.reason))
+            } else if passed {
                 None
             } else {
                 Some(format!(
@@ -185,6 +197,7 @@ fn majority_vote(trial_results: Vec<Vec<CheckResult>>, total_trials: usize) -> V
                 passed,
                 required,
                 message,
+                not_observable,
             }
         })
         .collect()
@@ -197,7 +210,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
 
-    use crate::artifacts::{CaseResult, CaseStatus, CaseTrialsResult, TrialResult};
+    use crate::artifacts::{
+        aggregate_trials, CaseResult, CaseStatus, CaseTrialsResult, TrialResult,
+    };
     use crate::runner::CaseRunOutput;
     use crate::suite::EvalCase;
     use async_trait::async_trait;
@@ -208,6 +223,7 @@ mod tests {
             passed: true,
             required: true,
             message: None,
+            not_observable: None,
         }
     }
 
@@ -217,6 +233,7 @@ mod tests {
             passed: false,
             required: true,
             message: Some("fail".to_string()),
+            not_observable: None,
         }
     }
 
@@ -226,6 +243,7 @@ mod tests {
             passed: false,
             required: false,
             message: Some("optional fail".to_string()),
+            not_observable: None,
         }
     }
 
@@ -260,6 +278,7 @@ mod tests {
             pattern: "hello".to_string(),
             expected: true,
             required: true,
+            cases: None,
         }];
         let scorer = ChecksScorer {
             checks: checks.clone(),
@@ -460,6 +479,11 @@ mod tests {
                 output_tokens: None,
                 check_results: vec![],
                 error_message: None,
+                cost_usd: None,
+                exit_code: None,
+                terminal: None,
+                tokens: Default::default(),
+                skill_path: None,
             };
             (out, result, String::new())
         }
@@ -483,27 +507,14 @@ mod tests {
                     output_tokens: result.output_tokens,
                     check_results: result.check_results,
                     error_message: result.error_message,
+                    cost_usd: None,
+                    exit_code: None,
+                    terminal: None,
+                    tokens: Default::default(),
+                    skill_path: None,
                 });
             }
-            let pass_count = trials
-                .iter()
-                .filter(|t| t.status == CaseStatus::Passed)
-                .count() as u32;
-            let total_trials = trial_count.max(1);
-            let pass_rate = pass_count as f64 / total_trials as f64;
-            let aggregated_status = if pass_rate >= opts.pass_threshold {
-                CaseStatus::Passed
-            } else {
-                CaseStatus::Failed
-            };
-            CaseTrialsResult {
-                id: case.id.clone(),
-                trials,
-                aggregated_status,
-                pass_count,
-                total_trials,
-                pass_rate,
-            }
+            aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)
         }
     }
 
@@ -730,6 +741,7 @@ mod tests {
             checks: vec![CheckDefinition::FileExists {
                 path: PathBuf::from("marker-a.txt"),
                 required: true,
+                cases: None,
             }],
         };
         let runner = AikitEvalRunner::new();

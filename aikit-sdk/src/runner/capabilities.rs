@@ -59,6 +59,17 @@ pub struct BackendCapabilities {
     /// without `history_store`. Distinct because a store may be read-only.
     /// Spec 008.
     pub history_mutations: bool,
+    /// The decoder emits a status-bearing [`Decoded::Terminal`] frame for a
+    /// completed run.
+    ///
+    /// `false` = this Backend's outcome is not observable from its stream, so
+    /// a stream that ends without one says nothing. `true` = a run whose
+    /// stream ends with no terminal frame did not complete, and a consumer may
+    /// treat that as an error.
+    ///
+    /// Like every flag here this describes the decoder as it actually is: a
+    /// flag that outruns its decoder is a bug, not a roadmap (ADR 0019).
+    pub terminal_event: bool,
 }
 
 impl BackendCapabilities {
@@ -79,6 +90,7 @@ impl BackendCapabilities {
         supports_tool_policy: false,
         history_store: false,
         history_mutations: false,
+        terminal_event: false,
     };
 
     pub const fn with_bidirectional(mut self) -> Self {
@@ -146,6 +158,12 @@ impl BackendCapabilities {
     /// (rename/tag) via `HistoryMutator` (spec 008 §4).
     pub const fn with_history_mutations(mut self) -> Self {
         self.history_mutations = true;
+        self
+    }
+    /// Declare that this Backend's decoder emits a status-bearing terminal
+    /// frame. Only set it where a decoder actually does.
+    pub const fn with_terminal_event(mut self) -> Self {
+        self.terminal_event = true;
         self
     }
 }

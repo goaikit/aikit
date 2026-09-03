@@ -12,7 +12,7 @@ use crate::runner::backends::quota_match::{match_quota, JsonPat, RawPat};
 use crate::runner::capabilities::BackendCapabilities;
 use crate::runner::types::{
     AgentEventPayload, AgentEventStream, MessageKind, MessagePhase, MessageRole, QuotaExceededInfo,
-    SandboxPolicy, StreamMessage, TokenUsage, UsageSource,
+    SandboxPolicy, StreamMessage, TerminalOutcome, TokenUsage, UsageSource,
 };
 
 pub(crate) const KEY: &str = "codex";
@@ -29,7 +29,8 @@ pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_file_changes()
     .with_interruptible()
     .with_resumable_sessions()
-    .with_passive_capture();
+    .with_passive_capture()
+    .with_terminal_event();
 
 #[cfg(not(all(feature = "agent-adapters", feature = "codex")))]
 pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
@@ -38,7 +39,8 @@ pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
     .with_reasoning()
     .with_file_changes()
     .with_interruptible()
-    .with_resumable_sessions();
+    .with_resumable_sessions()
+    .with_terminal_event();
 
 const SPEC: ArgvSpec = ArgvSpec {
     binary: "codex",
@@ -146,29 +148,49 @@ pub(crate) fn decode(
         }
         // ── Failure events — surface so a failed turn is never a silent empty run ──
         "error" => {
-            if let Some(msg) = value.get("message").and_then(|v| v.as_str()) {
-                results.push(mk(
-                    msg.to_string(),
-                    MessageRole::System,
-                    MessageKind::Status,
-                ));
+            let msg = value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if let Some(ref m) = msg {
+                results.push(mk(m.clone(), MessageRole::System, MessageKind::Status));
             }
+            // A stream-level error is terminal: codex emits no `turn.completed`
+            // after one, so without this the run would look merely quiet.
+            results.push(Decoded::Terminal {
+                outcome: TerminalOutcome::Error,
+                reason: Some("error".to_string()),
+                message: msg,
+                cost_usd: None,
+            });
         }
         "turn.failed" => {
-            if let Some(msg) = value
+            let msg = value
                 .get("error")
                 .and_then(|e| e.get("message"))
                 .and_then(|v| v.as_str())
-            {
-                results.push(mk(
-                    msg.to_string(),
-                    MessageRole::System,
-                    MessageKind::Status,
-                ));
+                .map(|s| s.to_string());
+            if let Some(ref m) = msg {
+                results.push(mk(m.clone(), MessageRole::System, MessageKind::Status));
             }
+            results.push(Decoded::Terminal {
+                outcome: TerminalOutcome::Error,
+                reason: Some("turn.failed".to_string()),
+                message: msg,
+                cost_usd: None,
+            });
         }
         // ── Lifecycle frames carry no message text — intentionally ignored ──────
-        "thread.started" | "turn.started" | "turn.completed" | "item.started" => {}
+        // A completed turn is the agent's own statement that it finished.
+        "turn.completed" => {
+            results.push(Decoded::Terminal {
+                outcome: TerminalOutcome::Success,
+                reason: Some("turn.completed".to_string()),
+                message: None,
+                cost_usd: None,
+            });
+        }
+        "thread.started" | "turn.started" | "item.started" => {}
         // ── Legacy codex schema (older CLI): message / action / output ──────────
         "message" => {
             let role_str = value.get("role").and_then(|v| v.as_str()).unwrap_or("");

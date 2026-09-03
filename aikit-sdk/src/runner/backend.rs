@@ -40,6 +40,17 @@ pub enum Decoded {
         output: serde_json::Value,
         is_error: bool,
     },
+    /// The agent's own report that the run reached a terminal state.
+    ///
+    /// Only decoders declaring [`BackendCapabilities::terminal_event`] emit
+    /// this. Where a backend reports per-turn (pi), one frame per turn is
+    /// emitted and the last one decides.
+    Terminal {
+        outcome: crate::runner::types::TerminalOutcome,
+        reason: Option<String>,
+        message: Option<String>,
+        cost_usd: Option<f64>,
+    },
 }
 
 /// A runnable agent. Closed set; parse from a key with [`Backend::from_key`].

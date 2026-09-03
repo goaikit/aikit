@@ -20,13 +20,16 @@ pub(crate) const BINARY_CANDIDATES: &[&str] = &["opencode", "opencode-desktop"];
 // `passive_capture` flips on only when both `agent-adapters` and the
 // `opencode` adapter feature are enabled. Spec 010 §17.2.
 #[cfg(all(feature = "agent-adapters", feature = "opencode"))]
-pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE
-    .with_structured_tools()
-    .with_passive_capture();
+// NOT `.with_structured_tools()`: `decode` maps a `tool_use` line to a text
+// `StreamMessage` and discards the tool name, so no `Decoded::ToolUse` is ever
+// produced. The flag was aspirational and it now gates real behaviour — a
+// check that needs tool frames must see this Backend cannot supply them
+// (ADR 0019: a capability flag describes the decoder, not the roadmap).
+pub(crate) const CAPABILITIES: BackendCapabilities =
+    BackendCapabilities::NONE.with_passive_capture();
 
 #[cfg(not(all(feature = "agent-adapters", feature = "opencode")))]
-pub(crate) const CAPABILITIES: BackendCapabilities =
-    BackendCapabilities::NONE.with_structured_tools();
+pub(crate) const CAPABILITIES: BackendCapabilities = BackendCapabilities::NONE;
 
 const SPEC: ArgvSpec = ArgvSpec {
     binary: "opencode",
