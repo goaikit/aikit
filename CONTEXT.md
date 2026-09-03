@@ -108,41 +108,8 @@ _Avoid_: Target, trainable, document interface
 The reward function of a benchmark environment: maps one trajectory to a result the gate can reduce to a scalar in [0,1]. An interface — the built-in `ChecksScorer` derives the scalar from the deterministic checks engine. New benchmarks supply their own scorer without touching the training loop.
 _Avoid_: Grader, evaluator (that's the run harness), reward model
 
-**Tool call**:
-One structured invocation the target agent made during a rollout, decoded from its output as a `ToolUse` frame and recorded in the trace. What the `max_tool_calls` check counts, alongside `raw_json` lines for backends that still emit tool calls as raw JSON. An agent's text, reasoning and token-usage events are **not** tool calls — counting prose as activity is the specific bug this vocabulary exists to prevent (see [ADR 0019](docs/adr/0019-codex-decode-emits-typed-tool-frames.md)). The eval artifact field is still named `command_count`, deliberately: renaming a config knob does not justify breaking artifact readers.
-_Avoid_: Command (it is not necessarily a shell command), action, step
-
-**Case**:
-The unit of evaluation: one prompt, together with the starting fixtures (`workspace_subdir`) and tags that travel with it, under a stable `id`. A case declares *what to ask*, and one thing about what counts as success: its `should_trigger` column, which asserts whether the skill is expected to be invoked at all. Every other assertion is a check, configured separately. `should_trigger` generates a skill-invocation check with matching polarity, so a case marked `false` asserts that the skill stayed out of it; a case whose explicit checks contradict the column is rejected rather than silently resolved one way.
-_Avoid_: Test, test case, task, item, sample, prompt (that is one field of a case)
-
-**Trial**:
-One execution of one case — a fresh rollout workspace, one **Agent run** (see `docs/GLOSSARY.md`), one trace, one set of check results — and the recorded unit a scorer reads. Cases are executed over N trials to damp target-agent nondeterminism (`run_case_trials`); a single trial cannot distinguish reliable behaviour from a lucky sample.
-_Avoid_: Run (reserved for the training run, the run directory, and the SDK's agent run), attempt, repetition, sample
-
-**Check**:
-One deterministic assertion evaluated against a trial's canonical trace after execution: substring presence or absence (`trigger_expectation`, `command_contains`), a structured skill invocation (`skill_invoked`), a file's existence (`file_exists`), or a ceiling on tool calls (`max_tool_calls`). Checks read the trace only, never raw agent stdout — an agent's startup capability listing must not satisfy an assertion that the skill ran. A check is `required`, meaning its failure fails the trial, or advisory, and it applies to every case in its suite unless it names the cases it targets. Because the trace echoes every file the agent read, a pattern that also occurs in the skill document matches whenever the agent merely opens it, and proves nothing about the answer.
-_Avoid_: Oracle, assertion, test, validator, rule
-
-**Suite**:
-The set of cases loaded for one evaluation, carrying their split roles. A suite holds cases and nothing else; checks are configured separately and default to applying to every case in it. A check may name the cases it targets instead, so two cases needing different assertions can share a suite rather than forcing one suite per assertion.
-_Avoid_: Benchmark (that is the environment: cases plus a scorer), test suite, collection
-
-**Trial outcome**:
-The recorded verdict for one trial. `passed` — every required check passed. `failed` — the trial produced a valid measurement and at least one required check did not pass. `error` — **no valid measurement exists**, decided on transport and terminal signal rather than inferred from the content of the output: the run timed out, the agent could not be executed, the process exited non-zero, the agent's own **Terminal event** reported failure, or the stream ended with no terminal event on a backend that declares it emits one. An agent that exits cleanly having answered with nothing is `failed`, not `error` — that is a real skill failure and scores as one, and text absence is never the discriminator. `skipped` is reserved and currently never produced. The distinction that carries weight is `failed` versus `error`: over an empty or truncated trace a negative-expectation check and a tool-call ceiling both pass *vacuously*, so a run that never produced output must never reduce to a pass — and must not be averaged into a rate as though it were a wrong answer either. One type, `CaseStatus`, currently carries both this and the **Case verdict** below at four sites (`TrialResult`, `CaseResult`, `CaseSummary`, `CaseTrialsResult.aggregated_status`); the vocabulary separates them deliberately, and the shared type is recorded debt, not ratified design.
-_Avoid_: Grade, verdict (reserved for the case level), score (a scalar in [0,1], not an outcome)
-
-**Case verdict**:
-The reduction of a case's trial outcomes to one status: the pass rate — passing trials over **scored** trials, where scored excludes those with outcome `error` — compared against a pass threshold the caller supplies. The count of excluded trials is recorded on the case rather than dropped, because the outage rate is itself a signal. A case whose every trial errored has no scored trials and takes the verdict `error`; it is excluded from the split score and reported by name, since silently dropping it would move the vacuity hazard up one level, where a total outage scores 100% over zero cases. This is the per-item result a gate metric reduces further to a split-level score.
-_Avoid_: Case status (the field name — it does not say which level it means), aggregate, rollup
-
-**Terminal event**:
-The one frame in a trial's trace that carries the agent's own verdict on the run: an outcome (success or error), a machine-readable reason, an optional message, and the vendor-reported cost when the agent states one. Every backend puts this on the wire; a backend counts as emitting one only where its decoder actually produces the frame, which a capability flag declares. The **last** status-bearing terminal event decides the run, because a backend that emits one per turn may error and then recover. Cost is recorded only as the vendor reported it and is absent otherwise, never estimated from a local price table — a stale estimate is indistinguishable from a real number once it is written to an artifact.
-_Avoid_: Final event, result line, exit status (that is the process's, not the agent's), completion
-
-**Not observable**:
-A check's third result, distinct from pass and fail: the evidence it reads cannot exist on the backend the trial ran against, so no verdict about the agent is available. A skill-invocation check and a tool-call ceiling both read decoded tool frames; on a backend whose decoder emits none, the first can only fail and the second can only pass, and neither is a measurement. A not-observable check is excluded from the suite's verdict rather than counted either way. It describes the decoder, never the agent, and it is not `skipped` — that outcome stays reserved.
-_Avoid_: Skipped, N/A, inconclusive, unsupported (that is a scope's isolation fidelity)
+**Case, Trial, Check, Suite, Trial outcome, Case verdict, Terminal event, Not observable, Tool call**:
+Defined in the [Skill Evaluation](aikit-evals/CONTEXT.md) context, which owns the vocabulary of running one case and judging what happened. This context consumes them through the Scorer: a case's trial outcomes reach the loop already reduced to a case verdict.
 
 **Gate metric**:
 How a scorer's per-item results are reduced to a split-level score: `hard` (per-item full-pass → 1/0, averaged = accuracy), `soft` (per-item fraction of required checks passed, averaged), or `mixed` (weighted combination). Selectable at runtime.
