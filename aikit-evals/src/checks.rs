@@ -275,6 +275,11 @@ pub struct CheckResult {
     /// the check ran; it never means "observable" was not checked.
     #[serde(default)]
     pub not_observable: Option<NotObservable>,
+    /// A judge's `overall` on a `judge:<name>` row (spec eval-judge R9).
+    /// `None` on every deterministic check, and on a gated judge row whose
+    /// judgment errored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<f64>,
 }
 
 impl CheckResult {
@@ -289,6 +294,13 @@ impl CheckResult {
 pub struct ChecksToml {
     #[serde(rename = "check", default)]
     pub checks: Vec<CheckDefinition>,
+    /// `[[judge]]` tables (spec eval-judge R5). Unknown keys inside one are a
+    /// parse error, so a judge cannot be quietly ignored by a misspelling.
+    #[serde(rename = "judge", default)]
+    pub judges: Vec<crate::judge::JudgeDefinition>,
+    /// `[judge_defaults]` (spec eval-judge R3).
+    #[serde(default)]
+    pub judge_defaults: Option<crate::judge::JudgeDefaults>,
 }
 
 /// Errors loading checks configuration
@@ -301,6 +313,12 @@ pub enum ChecksError {
 }
 
 /// Load check definitions from a TOML file
+/// Load the whole checks file: deterministic checks and judge declarations.
+pub fn load_checks_file(path: &std::path::Path) -> Result<ChecksToml, ChecksError> {
+    let content = std::fs::read_to_string(path)?;
+    Ok(toml::from_str(&content)?)
+}
+
 pub fn load_checks(path: &std::path::Path) -> Result<Vec<CheckDefinition>, ChecksError> {
     let content = std::fs::read_to_string(path)?;
     let parsed: ChecksToml = toml::from_str(&content)?;
@@ -353,6 +371,7 @@ pub fn run_checks_in_context(
                 required: check.is_required(),
                 message: Some(format!("not observable: {}", not_observable.reason)),
                 not_observable: Some(not_observable),
+                score: None,
             },
             None => run_single_check(check, trace_jsonl, working_dir, ctx),
         })
@@ -504,6 +523,7 @@ fn run_single_check(
                 required,
                 message,
                 not_observable: None,
+                score: None,
             }
         }
         CheckDefinition::CommandContains { pattern, .. } => {
@@ -519,6 +539,7 @@ fn run_single_check(
                 required,
                 message,
                 not_observable: None,
+                score: None,
             }
         }
         CheckDefinition::SkillInvoked {
@@ -547,6 +568,7 @@ fn run_single_check(
                 required,
                 message,
                 not_observable: None,
+                score: None,
             }
         }
         CheckDefinition::FileExists { path, .. } => {
@@ -563,6 +585,7 @@ fn run_single_check(
                 required,
                 message,
                 not_observable: None,
+                score: None,
             }
         }
         CheckDefinition::MaxToolCalls { limit, .. } => {
@@ -579,6 +602,7 @@ fn run_single_check(
                 required,
                 message,
                 not_observable: None,
+                score: None,
             }
         }
     }
@@ -1172,6 +1196,7 @@ skill = "greeting-helper"
                 required: true,
                 message: None,
                 not_observable: None,
+                score: None,
             },
             CheckResult {
                 check_name: "b".to_string(),
@@ -1179,6 +1204,7 @@ skill = "greeting-helper"
                 required: true,
                 message: None,
                 not_observable: None,
+                score: None,
             },
         ];
         assert!(suite_passes(&results));
@@ -1193,6 +1219,7 @@ skill = "greeting-helper"
                 required: true,
                 message: None,
                 not_observable: None,
+                score: None,
             },
             CheckResult {
                 check_name: "b".to_string(),
@@ -1200,6 +1227,7 @@ skill = "greeting-helper"
                 required: true,
                 message: Some("failed".to_string()),
                 not_observable: None,
+                score: None,
             },
         ];
         assert!(!suite_passes(&results));
@@ -1214,6 +1242,7 @@ skill = "greeting-helper"
                 required: true,
                 message: None,
                 not_observable: None,
+                score: None,
             },
             CheckResult {
                 check_name: "optional".to_string(),
@@ -1221,6 +1250,7 @@ skill = "greeting-helper"
                 required: false,
                 message: Some("advisory".to_string()),
                 not_observable: None,
+                score: None,
             },
         ];
 
@@ -1497,6 +1527,7 @@ limit = 2
                 required: true,
                 message: None,
                 not_observable: None,
+                score: None,
             },
             CheckResult {
                 check_name: "max_tool_calls".to_string(),
@@ -1506,6 +1537,7 @@ limit = 2
                 not_observable: Some(NotObservable {
                     reason: "no tool frames".to_string(),
                 }),
+                score: None,
             },
         ];
         assert!(

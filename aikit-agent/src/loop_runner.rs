@@ -1090,6 +1090,7 @@ mod tests {
                     }],
                     finish_reason: Some("tool_calls".to_string()),
                     usage: None,
+                    model: None,
                 })
             }
             fn stream(&self, req: LlmRequest) -> Result<LlmStreamHandle, LlmError> {

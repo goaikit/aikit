@@ -488,6 +488,10 @@ pub use runner::{open_pi_session, PiControlHandle, PiSession, PiSessionError, Pi
 // Re-export host tool types so cli-framework can depend on aikit-sdk alone.
 pub use aikit_agent::{HostToolDefinition, HostToolProvider};
 
+/// The native LLM gateway (`aikit_agent::llm`), re-exported so `aikit-evals`
+/// can make a judge call without a new dependency edge (spec eval-judge R1).
+pub use aikit_agent::llm;
+
 pub use aikit_agent::loop_runner::run_with_context;
 pub use aikit_agent_adapter::{run_aikit_agent, run_aikit_agent_with_gateway};
 pub use runner::{
@@ -514,6 +518,7 @@ pub use paths::{
 };
 
 pub mod agent_runner;
+pub mod conversation;
 pub mod pipeline;
 pub mod report;
 pub mod template;
@@ -522,6 +527,11 @@ pub mod validation;
 #[cfg(any(test, feature = "testing"))]
 pub use agent_runner::CapturedPrompts;
 pub use agent_runner::{AgentDetector, AgentInfo, AgentRunner};
+pub use conversation::{
+    Corrective,
+    is_retryable_transport, AttemptKind, ConversationAttempt, ConversationError,
+    ConversationPipeline, ConversationResult,
+};
 pub use pipeline::{OutputFormat, Pipeline, PipelineError, PipelineResult};
 pub use report::ReportRenderer;
 pub use template::TemplateRenderer;

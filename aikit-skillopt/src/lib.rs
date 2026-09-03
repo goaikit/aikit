@@ -273,6 +273,7 @@ mod tests {
                     terminal: None,
                     tokens: Default::default(),
                     skill_path: None,
+                    judge_excluded: false,
                 });
             }
             aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)
@@ -294,6 +295,7 @@ mod tests {
             should_trigger: true,
             tags: tags.iter().map(|s| s.to_string()).collect(),
             workspace_subdir: None,
+            extra: Default::default(),
         }
     }
 

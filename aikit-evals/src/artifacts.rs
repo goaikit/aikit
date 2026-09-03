@@ -3,6 +3,7 @@
 use crate::checks::CheckResult;
 use aikit_sdk::TerminalOutcome;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -154,6 +155,11 @@ pub struct TrialResult {
     /// staged".
     #[serde(default)]
     pub skill_path: Option<PathBuf>,
+    /// A gated judge rendered no judgment for this trial (spec eval-judge R9):
+    /// the trial is neither scored nor an `error`. Set by `judge`, never by
+    /// the runner.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub judge_excluded: bool,
 }
 
 /// Aggregated results for a case across multiple trials
@@ -176,6 +182,33 @@ pub struct CaseTrialsResult {
     /// verdict `CaseStatus::Error`.
     #[serde(default)]
     pub scored_trials: u32,
+    /// Non-error trials a gated judge could not judge, excluded from
+    /// `scored_trials` like errors are (spec eval-judge R9).
+    #[serde(default)]
+    pub judge_excluded_count: u32,
+    /// Judge scores reduced across judged trials, keyed by judge name (spec
+    /// eval-judge R12). A judge with no judgment on this case has no entry.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scores: BTreeMap<String, JudgeCaseScores>,
+}
+
+/// One judge's scores reduced over a case's judged trials (spec eval-judge R12).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JudgeCaseScores {
+    /// Mean of the latest judgment's `overall` across judged trials.
+    pub overall: f64,
+    /// How many trials the means are over.
+    pub judged_trials: u32,
+    /// Per criterion: scale criteria by mean, bool criteria by strict majority.
+    pub criteria: BTreeMap<String, f64>,
+}
+
+/// Judge token totals for a run (spec eval-judge R12).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JudgeTokenTotals {
+    pub input: u64,
+    pub output: u64,
+    pub total: u64,
 }
 
 /// Fold a case's trials into its verdict.
@@ -183,7 +216,8 @@ pub struct CaseTrialsResult {
 /// One implementation, called by the real runner and by every test double, so
 /// the rate cannot drift between them.
 ///
-/// - `error` trials are excluded from both sides of `pass_rate`.
+/// - `error` trials are excluded from both sides of `pass_rate`, and so are
+///   trials a gated judge could not judge (`judge_excluded`).
 /// - A case with no scored trials left is `CaseStatus::Error`, not a 0% fail:
 ///   a total outage must not read as a case the agent got wrong, and must not
 ///   quietly vanish from the denominator one level up either.
@@ -198,12 +232,21 @@ pub fn aggregate_trials(
         .iter()
         .filter(|t| t.status == CaseStatus::Error)
         .count() as u32;
+    // A gated judge that rendered no judgment excludes the trial from the
+    // measurement the same way an error does (spec eval-judge R9); an errored
+    // trial is counted once, as an error.
+    let judge_excluded_count = trials
+        .iter()
+        .filter(|t| t.status != CaseStatus::Error && t.judge_excluded)
+        .count() as u32;
     let pass_count = trials
         .iter()
-        .filter(|t| t.status == CaseStatus::Passed)
+        .filter(|t| t.status == CaseStatus::Passed && !t.judge_excluded)
         .count() as u32;
     let total_trials = total_trials.max(1);
-    let scored_trials = total_trials.saturating_sub(error_count);
+    let scored_trials = total_trials
+        .saturating_sub(error_count)
+        .saturating_sub(judge_excluded_count);
     let pass_rate = if scored_trials == 0 {
         0.0
     } else {
@@ -226,6 +269,8 @@ pub fn aggregate_trials(
         pass_rate,
         error_count,
         scored_trials,
+        judge_excluded_count,
+        scores: BTreeMap::new(),
     }
 }
 
@@ -302,6 +347,25 @@ pub struct SummaryResult {
     /// "not isolated".
     #[serde(default)]
     pub isolation: Option<IsolationReport>,
+    /// Trial-judge pairs whose latest judgment is an error (spec eval-judge R12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_errors: Option<u32>,
+    /// Trial-judge pairs skipped because the trial errored (spec eval-judge R8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_skipped_trials: Option<u32>,
+    /// Tokens spent on every judgment recorded in this run, all attempts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_tokens: Option<JudgeTokenTotals>,
+    /// Judge cost, only when a gateway reported one; never estimated (ADR 0020).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_cost_usd: Option<f64>,
+    /// `git rev-parse HEAD` of the skill project when the run started.
+    /// `None` means not recorded (older run, or not a git checkout).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_git_sha: Option<String>,
+    /// Whether that checkout had uncommitted changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_dirty: Option<bool>,
     pub cases: Vec<CaseSummary>,
 }
 
@@ -337,6 +401,12 @@ pub struct CaseSummary {
     /// what pre-R7 artifacts were scored with.
     #[serde(default)]
     pub should_trigger: Option<bool>,
+    /// See [`CaseTrialsResult::judge_excluded_count`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judge_excluded_count: Option<u32>,
+    /// See [`CaseTrialsResult::scores`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub scores: BTreeMap<String, JudgeCaseScores>,
     #[serde(default)]
     pub trials: Vec<TrialResult>,
 }
@@ -454,6 +524,7 @@ fn case_result_to_trial(case: &CaseResult, trial_id: u32) -> TrialResult {
         cost_usd: case.cost_usd,
         tokens: case.tokens.clone(),
         skill_path: case.skill_path.clone(),
+        judge_excluded: false,
     }
 }
 
@@ -580,6 +651,42 @@ pub fn read_case_results(run_dir: &Path) -> Result<Vec<CaseResult>, ArtifactsErr
     Ok(results)
 }
 
+/// What `git` says about the skill project at run time (spec eval-judge,
+/// scorecard identity): recorded so a score can be tied to a skill revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillGitIdentity {
+    /// `git rev-parse HEAD`, full sha.
+    pub sha: String,
+    /// `git status --porcelain` printed anything.
+    pub dirty: bool,
+}
+
+/// Ask git about `root`. `None` when git is missing, `root` is not inside a
+/// checkout, or either command fails — never a guess.
+pub fn skill_git_identity(root: &Path) -> Option<SkillGitIdentity> {
+    let git = |args: &[&str]| -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    let sha = git(&["rev-parse", "HEAD"])?.trim().to_string();
+    if sha.len() != 40 || !sha.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let status = git(&["status", "--porcelain"])?;
+    Some(SkillGitIdentity {
+        sha,
+        dirty: !status.trim().is_empty(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +751,7 @@ mod tests {
                     terminal: None,
                     tokens: Default::default(),
                     skill_path: None,
+                    judge_excluded: false,
                 },
                 TrialResult {
                     trial_id: 2,
@@ -658,6 +766,7 @@ mod tests {
                     terminal: None,
                     tokens: Default::default(),
                     skill_path: None,
+                    judge_excluded: false,
                 },
             ],
             aggregated_status: CaseStatus::Passed,
@@ -666,6 +775,8 @@ mod tests {
             pass_rate: 1.0,
             error_count: 0,
             scored_trials: 0,
+            judge_excluded_count: 0,
+            scores: Default::default(),
         };
         let json = serde_json::to_string_pretty(&trials_result).unwrap();
         std::fs::write(case_dir.join("aggregated.json"), json).unwrap();
@@ -705,6 +816,7 @@ mod tests {
                 terminal: None,
                 tokens: Default::default(),
                 skill_path: None,
+                judge_excluded: false,
             }],
             aggregated_status: CaseStatus::Error,
             pass_count: 0,
@@ -712,6 +824,8 @@ mod tests {
             pass_rate: 0.0,
             error_count: 0,
             scored_trials: 0,
+            judge_excluded_count: 0,
+            scores: Default::default(),
         };
         let json = serde_json::to_string_pretty(&trials_result).unwrap();
         std::fs::write(case_dir.join("aggregated.json"), json).unwrap();
@@ -745,6 +859,7 @@ mod tests {
                 required: true,
                 message: None,
                 not_observable: None,
+                score: None,
             }],
             error_message: None,
             cost_usd: None,
@@ -752,6 +867,7 @@ mod tests {
             terminal: None,
             tokens: Default::default(),
             skill_path: None,
+            judge_excluded: false,
         };
         let failing_trial = TrialResult {
             trial_id: 2,
@@ -765,6 +881,7 @@ mod tests {
                 required: true,
                 message: Some("File 'out.txt' does not exist".to_string()),
                 not_observable: None,
+                score: None,
             }],
             error_message: Some("something went wrong".to_string()),
             cost_usd: None,
@@ -772,6 +889,7 @@ mod tests {
             terminal: None,
             tokens: Default::default(),
             skill_path: None,
+            judge_excluded: false,
         };
         let trials_result = CaseTrialsResult {
             id: "case-repr".to_string(),
@@ -782,6 +900,8 @@ mod tests {
             pass_rate: 0.5,
             error_count: 0,
             scored_trials: 0,
+            judge_excluded_count: 0,
+            scores: Default::default(),
         };
         write_case_trials_summary(dir.path(), "case-repr", &trials_result).unwrap();
 
@@ -829,6 +949,7 @@ mod tests {
                     required: true,
                     message: None,
                     not_observable: None,
+                    score: None,
                 }],
                 error_message: None,
                 cost_usd: None,
@@ -836,6 +957,7 @@ mod tests {
                 terminal: None,
                 tokens: Default::default(),
                 skill_path: None,
+                judge_excluded: false,
             }],
             aggregated_status: CaseStatus::Passed,
             pass_count: 1,
@@ -843,6 +965,8 @@ mod tests {
             pass_rate: 1.0,
             error_count: 0,
             scored_trials: 0,
+            judge_excluded_count: 0,
+            scores: Default::default(),
         };
         write_case_trials_summary(dir.path(), "case-allpass", &trials_result).unwrap();
 
@@ -882,6 +1006,12 @@ mod tests {
                 degrade_reason: None,
             }),
             cases: vec![],
+            judge_errors: None,
+            judge_skipped_trials: None,
+            judge_tokens: None,
+            judge_cost_usd: None,
+            skill_git_sha: None,
+            skill_dirty: None,
         };
 
         write_summary(dir.path(), &summary).unwrap();
@@ -1008,8 +1138,17 @@ mod tests {
                     cost_usd: None,
                     tokens: TokenBreakdown::default(),
                     skill_path: Some(staged.clone()),
+                    judge_excluded: false,
                 }],
+                judge_excluded_count: None,
+                scores: Default::default(),
             }],
+            judge_errors: None,
+            judge_skipped_trials: None,
+            judge_tokens: None,
+            judge_cost_usd: None,
+            skill_git_sha: None,
+            skill_dirty: None,
         };
 
         write_summary(dir.path(), &summary).unwrap();
@@ -1053,6 +1192,7 @@ mod tests {
             cost_usd: None,
             tokens: TokenBreakdown::default(),
             skill_path: None,
+            judge_excluded: false,
         }
     }
 
@@ -1111,6 +1251,109 @@ mod tests {
         assert_eq!(out.aggregated_status, CaseStatus::Error);
         assert_eq!(out.scored_trials, 0);
         assert_eq!(out.pass_rate, 0.0);
+    }
+
+    #[test]
+    fn test_a_judge_excluded_trial_leaves_the_rate_and_is_reported() {
+        // A gated judge that rendered no judgment removes the trial from the
+        // measurement (spec eval-judge R9). Counting it as a failure would
+        // blame the skill for the judge's outage.
+        let mut excluded = trial(2, CaseStatus::Passed);
+        excluded.judge_excluded = true;
+        let out = aggregate_trials(
+            "c1",
+            vec![
+                trial(1, CaseStatus::Passed),
+                excluded,
+                trial(3, CaseStatus::Failed),
+            ],
+            3,
+            0.5,
+        );
+
+        assert_eq!(out.judge_excluded_count, 1);
+        assert_eq!(out.scored_trials, 2);
+        assert_eq!(out.pass_count, 1, "the excluded pass does not count");
+        assert_eq!(out.pass_rate, 0.5);
+        assert_eq!(out.aggregated_status, CaseStatus::Passed);
+        assert_eq!(out.total_trials, 3, "it is still reported");
+        assert_eq!(out.error_count, 0, "exclusion is not an error");
+    }
+
+    #[test]
+    fn test_a_case_whose_every_trial_is_excluded_is_an_error() {
+        let mut a = trial(1, CaseStatus::Passed);
+        a.judge_excluded = true;
+        let mut b = trial(2, CaseStatus::Passed);
+        b.judge_excluded = true;
+        let out = aggregate_trials("c1", vec![a, b], 2, 1.0);
+
+        assert_eq!(out.judge_excluded_count, 2);
+        assert_eq!(out.scored_trials, 0);
+        assert_eq!(
+            out.aggregated_status,
+            CaseStatus::Error,
+            "nothing was measured, so the case has no verdict"
+        );
+    }
+
+    #[test]
+    fn test_an_errored_trial_is_counted_once_even_when_also_excluded() {
+        let mut both = trial(1, CaseStatus::Error);
+        both.judge_excluded = true;
+        let out = aggregate_trials("c1", vec![both, trial(2, CaseStatus::Passed)], 2, 1.0);
+
+        assert_eq!(out.error_count, 1);
+        assert_eq!(
+            out.judge_excluded_count, 0,
+            "an error is not also an exclusion"
+        );
+        assert_eq!(out.scored_trials, 1);
+        assert_eq!(out.pass_rate, 1.0);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn test_skill_git_identity_reports_the_sha_and_whether_the_tree_is_dirty() {
+        let dir = TempDir::new().unwrap();
+        assert!(
+            skill_git_identity(dir.path()).is_none(),
+            "a directory outside a checkout has no identity, and never a guess"
+        );
+
+        git(dir.path(), &["init", "--initial-branch=main"]);
+        git(dir.path(), &["config", "user.email", "t@example.com"]);
+        git(dir.path(), &["config", "user.name", "Test"]);
+        std::fs::write(dir.path().join("SKILL.md"), "# skill\n").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-m", "first"]);
+
+        let clean = skill_git_identity(dir.path()).expect("a committed checkout has an identity");
+        assert_eq!(clean.sha.len(), 40);
+        assert!(clean.sha.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(!clean.dirty);
+
+        std::fs::write(dir.path().join("SKILL.md"), "# skill\nedited\n").unwrap();
+        let dirty = skill_git_identity(dir.path()).expect("still a checkout");
+        assert_eq!(dirty.sha, clean.sha, "an edit does not move HEAD");
+        assert!(
+            dirty.dirty,
+            "an uncommitted edit makes the run unreproducible"
+        );
     }
 
     #[test]
@@ -1223,6 +1466,7 @@ mod tests {
                 reasoning_tokens: None,
             },
             skill_path: None,
+            judge_excluded: false,
         }
     }
 

@@ -10,6 +10,7 @@ pub mod artifacts;
 pub mod checks;
 pub(crate) mod codex_home;
 pub mod config;
+pub mod judge;
 pub mod runner;
 pub mod scoring;
 pub mod suite;
@@ -17,17 +18,24 @@ pub mod trace;
 pub(crate) mod workspace_diff;
 
 pub use artifacts::{
-    aggregate_trials, allocate_run_dir, read_case_results, read_summary, write_case_artifacts,
-    write_case_trials_summary, write_summary, write_trial_artifacts, ArtifactsError, CaseResult,
-    CaseStatus, CaseSummary, CaseTrialsResult, IsolationReport, RunArtifacts, ScopeFidelity,
+    aggregate_trials, allocate_run_dir, read_case_results, read_summary, skill_git_identity,
+    write_case_artifacts, write_case_trials_summary, write_summary, write_trial_artifacts,
+    ArtifactsError, CaseResult, CaseStatus, CaseSummary, CaseTrialsResult, IsolationReport,
+    JudgeCaseScores, JudgeTokenTotals, RunArtifacts, ScopeFidelity, SkillGitIdentity,
     SummaryResult, TerminalRecord, TokenBreakdown, TrialArtifacts, TrialResult,
 };
 pub use checks::{
-    count_command_events, count_raw_json_events, effective_checks, load_checks, run_checks,
-    run_checks_in_context, suite_passes, unobservable_required, validate_case_checks, CheckContext,
-    CheckDefinition, CheckResult, ChecksError, ChecksToml, NotObservable,
+    count_command_events, count_raw_json_events, effective_checks, load_checks, load_checks_file,
+    run_checks, run_checks_in_context, suite_passes, unobservable_required, validate_case_checks,
+    CheckContext, CheckDefinition, CheckResult, ChecksError, ChecksToml, NotObservable,
 };
 pub use config::{resolve_from_input, EvalConfig, EvalConfigError, EvalConfigInput};
+pub use judge::{
+    judge_run_dir, resolve_judges, validate_judges, AttemptRecord, Criterion, CriterionDefinition,
+    CriterionKind, IssueLevel, JudgeDefaults, JudgeDefinition, JudgeError, JudgeOutcome,
+    JudgeRunOptions, JudgeRunReport, Judgment, JudgmentIdentity, JudgmentUsage, ResolvedJudge,
+    SuitePassRule, TrialJudgeOutcome, ValidationIssue,
+};
 pub use runner::{
     parse_claude_ambient_skills, run_eval_case, AikitEvalRunner, CaseRunOptions, CaseRunOutput,
     CaseWorkspace, EvalRunner, IsolationMode, RunnerError, SkillSource,
