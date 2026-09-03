@@ -225,6 +225,7 @@ mod tests {
                 timed_out: matches!(outcome, ScriptedOutcome::TimedOut),
                 workspace: None,
                 isolation: None,
+                workspace_diff: None,
             };
             // Checks score the canonical trace, never raw stdout, so the double has to put
             // its markers where a real agent's output actually lands. `stdout_to_trace` is

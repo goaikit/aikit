@@ -14,12 +14,13 @@ pub mod runner;
 pub mod scoring;
 pub mod suite;
 pub mod trace;
+pub(crate) mod workspace_diff;
 
 pub use artifacts::{
     aggregate_trials, allocate_run_dir, read_case_results, read_summary, write_case_artifacts,
     write_case_trials_summary, write_summary, write_trial_artifacts, ArtifactsError, CaseResult,
     CaseStatus, CaseSummary, CaseTrialsResult, IsolationReport, RunArtifacts, ScopeFidelity,
-    SummaryResult, TerminalRecord, TokenBreakdown, TrialResult,
+    SummaryResult, TerminalRecord, TokenBreakdown, TrialArtifacts, TrialResult,
 };
 pub use checks::{
     count_command_events, count_raw_json_events, effective_checks, load_checks, run_checks,

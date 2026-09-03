@@ -470,6 +470,7 @@ mod tests {
                 timed_out: false,
                 workspace: None,
                 isolation: None,
+                workspace_diff: None,
             };
             let result = CaseResult {
                 id: case.id.clone(),

@@ -32,8 +32,21 @@ pub enum TracePayload {
         source: String,
         raw_agent_line_seq: u64,
     },
-    /// Canonical text output from the agent (not a command)
-    Message { text: String, role: String },
+    /// Canonical text output from the agent (not a command).
+    ///
+    /// `kind` and `phase` are the SDK's `StreamMessage.kind` and `.phase` tags
+    /// (`message`/`reasoning`/`tool_output`/`status`; `delta`/`final`). They
+    /// are what tells the final answer apart from the streamed delta of the
+    /// same text. Traces written before they existed read back as `None`, and
+    /// a reader that needs them must say so rather than guess.
+    Message {
+        text: String,
+        role: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
+    },
     /// A structured tool invocation decoded from the agent's output.
     /// This is what `max_tool_calls` counts.
     ToolUse {
@@ -126,6 +139,8 @@ pub fn agent_events_to_trace(events: &[AgentEvent]) -> Vec<TraceEvent> {
                 AgentEventPayload::StreamMessage(message) => TracePayload::Message {
                     text: message.text.clone(),
                     role: enum_tag(&message.role),
+                    kind: Some(enum_tag(&message.kind)),
+                    phase: Some(enum_tag(&message.phase)),
                 },
                 AgentEventPayload::ToolUse {
                     call_id,
@@ -801,5 +816,76 @@ mod tests {
             "{:?}",
             trace[0].payload
         );
+    }
+
+    fn stream_message_at(seq: u64, text: &str, phase: aikit_sdk::MessagePhase) -> AgentEvent {
+        use aikit_sdk::{AgentEventStream, MessageKind, MessageRole, StreamMessage};
+        AgentEvent {
+            agent_key: "claude".to_string(),
+            seq,
+            stream: AgentEventStream::Stdout,
+            payload: AgentEventPayload::StreamMessage(StreamMessage {
+                text: text.to_string(),
+                phase,
+                role: MessageRole::Assistant,
+                kind: MessageKind::Message,
+                source: AgentEventStream::Stdout,
+                raw_line_seq: seq,
+                turn_id: None,
+            }),
+        }
+    }
+
+    /// The SDK decodes an assistant `text` block and the terminal `result`
+    /// frame to the same text and tells them apart only by `phase`. Dropping
+    /// it made every trial's final answer appear twice in `trace.jsonl`.
+    #[test]
+    fn test_message_payload_carries_kind_and_phase() {
+        use aikit_sdk::MessagePhase;
+        let events = vec![
+            stream_message_at(0, "The answer.", MessagePhase::Delta),
+            stream_message_at(1, "The answer.", MessagePhase::Final),
+        ];
+        let jsonl = trace_to_jsonl(&agent_events_to_trace(&events));
+        assert!(jsonl.contains(r#""phase":"delta""#), "{jsonl}");
+        assert!(jsonl.contains(r#""phase":"final""#), "{jsonl}");
+        assert!(jsonl.contains(r#""kind":"message""#), "{jsonl}");
+
+        let parsed = parse_trace_jsonl(&jsonl);
+        let finals: Vec<&TraceEvent> = parsed
+            .iter()
+            .filter(|ev| {
+                matches!(&ev.payload, TracePayload::Message { phase: Some(p), .. } if p == "final")
+            })
+            .collect();
+        assert_eq!(finals.len(), 1, "exactly one final answer: {jsonl}");
+        assert_eq!(finals[0].seq, 1);
+    }
+
+    /// Run directories written before `kind`/`phase` existed must still read,
+    /// and reading them must not invent the fields.
+    #[test]
+    fn test_legacy_message_without_kind_or_phase_still_parses() {
+        let legacy = r#"{"seq":0,"payload":{"type":"message","text":"hi","role":"assistant"}}"#;
+        let parsed = parse_trace_jsonl(legacy);
+        assert_eq!(parsed.len(), 1);
+        match &parsed[0].payload {
+            TracePayload::Message {
+                text,
+                role,
+                kind,
+                phase,
+            } => {
+                assert_eq!(text, "hi");
+                assert_eq!(role, "assistant");
+                assert!(
+                    kind.is_none() && phase.is_none(),
+                    "absent fields must read as None, not a guess"
+                );
+            }
+            other => panic!("expected a message payload, got {other:?}"),
+        }
+        let again = trace_to_jsonl(&parsed);
+        assert!(!again.contains("phase"), "{again}");
     }
 }

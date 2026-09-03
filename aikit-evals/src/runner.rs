@@ -86,6 +86,9 @@ pub struct CaseRunOptions {
 pub struct CaseWorkspace {
     root: WorkspaceRoot,
     working_dir: PathBuf,
+    /// Every file under `root` as seeded, before the agent ran: the baseline
+    /// `workspace.diff` is taken against (spec eval-judge R10).
+    seed: crate::workspace_diff::TreeSnapshot,
 }
 
 #[derive(Debug)]
@@ -111,6 +114,13 @@ impl CaseWorkspace {
     /// True when the workspace was moved to a retention dir (failed case).
     pub fn is_retained(&self) -> bool {
         matches!(self.root, WorkspaceRoot::Retained(_))
+    }
+
+    /// Unified diff of the workspace as it stands now against its seeded
+    /// state (spec eval-judge R10). Empty when the agent changed nothing;
+    /// binary and oversized files are named without their contents.
+    pub fn diff_from_seed(&self) -> std::io::Result<String> {
+        crate::workspace_diff::diff_against_seed(&self.seed, self.root())
     }
 
     /// Move a failed scratch workspace under `retain_in` so it survives for
@@ -145,6 +155,7 @@ impl CaseWorkspace {
                 CaseWorkspace {
                     root: WorkspaceRoot::Retained(root),
                     working_dir,
+                    seed: self.seed,
                 }
             }
         }
@@ -165,6 +176,12 @@ pub struct CaseRunOutput {
     /// What environment the case actually got (spec 016 D6). Report-only —
     /// see [`IsolationReport`]; must never feed a `CheckResult`.
     pub isolation: Option<IsolationReport>,
+    /// Unified diff of the scratch workspace against its seeded state, taken
+    /// before the workspace is discarded (spec eval-judge R10). `None` when
+    /// there was no seeded workspace (inherited or degraded environment): then
+    /// no `workspace.diff` is written, because an empty diff would claim
+    /// "nothing changed" about a tree nobody baselined.
+    pub workspace_diff: Option<String>,
 }
 
 /// Errors during case execution
@@ -436,6 +453,11 @@ fn setup_isolated_workspace(
         None => scratch.path().to_path_buf(),
     };
 
+    // Baseline for `workspace.diff` (spec eval-judge R10): taken once the skill
+    // and fixtures are in place and before the agent runs.
+    let seed = crate::workspace_diff::snapshot_tree(scratch.path())
+        .map_err(|e| format!("EVAL_ISOLATION_WORKSPACE: cannot snapshot seeded workspace: {e}"))?;
+
     let payload = SkillIsolation {
         workspace_root: scratch.path().to_path_buf(),
         skill_path: skill_dir,
@@ -446,6 +468,7 @@ fn setup_isolated_workspace(
         workspace: CaseWorkspace {
             root: WorkspaceRoot::Scratch(scratch),
             working_dir,
+            seed,
         },
         payload,
     })
@@ -586,6 +609,7 @@ impl AikitEvalRunner {
                         timed_out: false,
                         workspace: None,
                         isolation: None,
+                        workspace_diff: None,
                     };
                     let result = CaseResult {
                         id: case.id.clone(),
@@ -667,6 +691,7 @@ impl AikitEvalRunner {
                         timed_out: false,
                         workspace: None,
                         isolation: None,
+                        workspace_diff: None,
                     };
                     let trace = agent_events_to_trace(&exec_result.events);
                     (output, trace, token_usage)
@@ -686,6 +711,7 @@ impl AikitEvalRunner {
                         timed_out: true,
                         workspace: None,
                         isolation: None,
+                        workspace_diff: None,
                     };
                     if output.stderr.is_empty() {
                         let fallback = format!("Case timed out after {}s", timeout.as_secs());
@@ -696,6 +722,7 @@ impl AikitEvalRunner {
                             timed_out: true,
                             workspace: None,
                             isolation: None,
+                            workspace_diff: None,
                         };
                         (output, trace, None)
                     } else {
@@ -713,6 +740,7 @@ impl AikitEvalRunner {
                         timed_out: false,
                         workspace: None,
                         isolation: None,
+                        workspace_diff: None,
                     };
                     (output, trace, None)
                 }
@@ -727,6 +755,7 @@ impl AikitEvalRunner {
                     timed_out: false,
                     workspace: None,
                     isolation: None,
+                    workspace_diff: None,
                 };
                 (output, vec![], None)
             }
@@ -848,6 +877,21 @@ impl AikitEvalRunner {
             skill_path: payload.as_ref().map(|p| p.skill_path.clone()),
         };
 
+        // ── spec eval-judge R10: what the agent wrote, taken before the
+        // workspace is discarded. A passing trial's workspace does not survive,
+        // and this is the only record of it.
+        let workspace_diff = workspace.as_ref().and_then(|ws| match ws.diff_from_seed() {
+            Ok(diff) => Some(diff),
+            Err(e) => {
+                eprintln!(
+                    "warning: could not diff the workspace for case '{}': {e}; \
+                     no workspace.diff will be written for this trial",
+                    case.id
+                );
+                None
+            }
+        });
+
         // ── spec 016 D2 retention: delete on success (via drop), move under
         // the caller's retention dir on failure so the case is debuggable.
         let workspace = match workspace {
@@ -868,6 +912,7 @@ impl AikitEvalRunner {
             &stdout_str,
         ));
         run_output.workspace = workspace;
+        run_output.workspace_diff = workspace_diff;
 
         (run_output, case_result, trace_jsonl)
     }
@@ -1061,6 +1106,7 @@ mod tests {
                 timed_out: false,
                 workspace: None,
                 isolation: None,
+                workspace_diff: None,
             };
             let result = CaseResult {
                 id: case.id.clone(),
@@ -2103,5 +2149,104 @@ mod tests {
                 backend
             );
         }
+    }
+
+    // ───────────────── spec eval-judge R10: workspace.diff ─────────────────
+
+    /// A passing trial's scratch workspace is deleted, so the diff is the only
+    /// record of what the agent wrote. It must be taken before the workspace
+    /// goes, and it must cover both new files and edits to seeded ones.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_isolated_trial_diffs_what_the_agent_wrote_before_the_workspace_goes() {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_agent(
+            bin.path(),
+            "claude",
+            concat!(
+                "printf 'hello from the agent\\n' > note.txt\n",
+                "printf 'edited\\n' >> .claude/skills/my-skill/SKILL.md\n",
+                r#"printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"s"}'"#,
+            ),
+        );
+        prepend_path(bin.path());
+
+        let project = tempfile::tempdir().unwrap();
+        let opts = isolated_opts("claude", project.path().to_path_buf());
+        let (output, result, _trace) = AikitEvalRunner::new()
+            .run_case_inner(&simple_case("diff-1"), &opts, &[])
+            .await;
+        assert_eq!(
+            result.status,
+            CaseStatus::Passed,
+            "err: {:?}",
+            result.error_message
+        );
+
+        let diff = output
+            .workspace_diff
+            .as_deref()
+            .expect("an isolated trial must carry its workspace diff");
+        assert!(
+            diff.contains("--- /dev/null\n+++ b/note.txt\n"),
+            "a new file must be listed:\n{diff}"
+        );
+        assert!(diff.contains("\n+hello from the agent\n"), "{diff}");
+        assert!(
+            diff.contains(
+                "--- a/.claude/skills/my-skill/SKILL.md\n+++ b/.claude/skills/my-skill/SKILL.md\n"
+            ),
+            "an edited seeded file must be diffed against its seeded content:\n{diff}"
+        );
+        assert!(diff.contains("\n+edited\n"), "{diff}");
+    }
+
+    /// An untouched workspace is an empty diff, not a missing one: the file
+    /// exists and says "nothing changed", which is a measurement.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_isolated_trial_that_touches_nothing_has_an_empty_diff() {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_claude(bin.path());
+        prepend_path(bin.path());
+
+        let project = tempfile::tempdir().unwrap();
+        let opts = isolated_opts("claude", project.path().to_path_buf());
+        let (output, result, _trace) = AikitEvalRunner::new()
+            .run_case_inner(&simple_case("diff-2"), &opts, &[])
+            .await;
+        assert_eq!(
+            result.status,
+            CaseStatus::Passed,
+            "err: {:?}",
+            result.error_message
+        );
+        assert_eq!(
+            output.workspace_diff.as_deref(),
+            Some(""),
+            "an untouched workspace must diff to exactly nothing"
+        );
+    }
+
+    /// With no seeded state there is nothing to diff against; the runner must
+    /// say so with `None` rather than hand over an empty diff that would read
+    /// as "nothing changed".
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_inheriting_run_has_no_workspace_diff() {
+        let bin = tempfile::tempdir().unwrap();
+        write_fake_claude(bin.path());
+        prepend_path(bin.path());
+
+        let project = tempfile::tempdir().unwrap();
+        let mut opts = isolated_opts("claude", project.path().to_path_buf());
+        opts.isolation = IsolationMode::Inherit;
+        let (output, _result, _trace) = AikitEvalRunner::new()
+            .run_case_inner(&simple_case("diff-3"), &opts, &[])
+            .await;
+        assert!(
+            output.workspace_diff.is_none(),
+            "no seeded state means no diff, never an empty one"
+        );
     }
 }

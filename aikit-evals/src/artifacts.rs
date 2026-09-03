@@ -386,25 +386,42 @@ pub fn allocate_run_dir(output_dir: &Path, run_id: &str) -> Result<PathBuf, Arti
     Err(ArtifactsError::RunDirExhausted(run_id.to_string()))
 }
 
-/// Write per-trial artifacts (stdout.txt, stderr.txt, trace.jsonl, result.json) under:
-/// `{run_dir}/{case_id}/trial-{trial_id}/`
+/// Everything one trial leaves on disk besides its directory name.
+///
+/// `workspace_diff` is `Some` for every trial that ran in a seeded scratch
+/// workspace, an empty string when the agent changed nothing, and `None` when
+/// there was no seeded state to diff against (inherited or degraded
+/// environment). In the `None` case `workspace.diff` is deliberately not
+/// written (spec eval-judge R10): a reader then sees "no evidence" rather
+/// than "no change".
+#[derive(Debug, Clone, Copy)]
+pub struct TrialArtifacts<'a> {
+    pub stdout: &'a [u8],
+    pub stderr: &'a [u8],
+    pub trace_jsonl: &'a str,
+    pub workspace_diff: Option<&'a str>,
+    pub result: &'a TrialResult,
+}
+
+/// Write per-trial artifacts (stdout.txt, stderr.txt, trace.jsonl,
+/// workspace.diff, result.json) under `{run_dir}/{case_id}/trial-{trial_id}/`.
 pub fn write_trial_artifacts(
     run_dir: &Path,
     case_id: &str,
     trial_id: u32,
-    stdout: &[u8],
-    stderr: &[u8],
-    trace_jsonl: &str,
-    result: &TrialResult,
+    artifacts: &TrialArtifacts<'_>,
 ) -> Result<PathBuf, ArtifactsError> {
     let trial_dir = run_dir.join(case_id).join(format!("trial-{}", trial_id));
     std::fs::create_dir_all(&trial_dir)?;
 
-    std::fs::write(trial_dir.join("stdout.txt"), stdout)?;
-    std::fs::write(trial_dir.join("stderr.txt"), stderr)?;
-    std::fs::write(trial_dir.join("trace.jsonl"), trace_jsonl)?;
+    std::fs::write(trial_dir.join("stdout.txt"), artifacts.stdout)?;
+    std::fs::write(trial_dir.join("stderr.txt"), artifacts.stderr)?;
+    std::fs::write(trial_dir.join("trace.jsonl"), artifacts.trace_jsonl)?;
+    if let Some(diff) = artifacts.workspace_diff {
+        std::fs::write(trial_dir.join("workspace.diff"), diff)?;
+    }
 
-    let result_json = serde_json::to_string_pretty(result)?;
+    let result_json = serde_json::to_string_pretty(artifacts.result)?;
     std::fs::write(trial_dir.join("result.json"), result_json)?;
 
     Ok(trial_dir)
@@ -450,11 +467,22 @@ pub fn write_case_artifacts(
     stdout: &[u8],
     stderr: &[u8],
     trace_jsonl: &str,
+    workspace_diff: Option<&str>,
     result: &CaseResult,
 ) -> Result<PathBuf, ArtifactsError> {
     let trial = case_result_to_trial(result, 1);
-    let trial_dir =
-        write_trial_artifacts(run_dir, case_id, 1, stdout, stderr, trace_jsonl, &trial)?;
+    let trial_dir = write_trial_artifacts(
+        run_dir,
+        case_id,
+        1,
+        &TrialArtifacts {
+            stdout,
+            stderr,
+            trace_jsonl,
+            workspace_diff,
+            result: &trial,
+        },
+    )?;
 
     // One trial, folded by the same rule as any other case (`aggregate_trials`):
     // a single errored trial leaves zero scored trials, so the case is `error`,
@@ -1174,5 +1202,90 @@ mod tests {
         // Serialized into every artifact; ADR 0020 forbids renaming it later.
         let json = serde_json::to_string(&CaseStatus::Error).unwrap();
         assert_eq!(json, "\"error\"");
+    }
+
+    fn a_trial() -> TrialResult {
+        TrialResult {
+            trial_id: 1,
+            status: CaseStatus::Passed,
+            command_count: Some(0),
+            input_tokens: None,
+            output_tokens: None,
+            check_results: vec![],
+            error_message: None,
+            exit_code: Some(0),
+            terminal: None,
+            cost_usd: None,
+            tokens: TokenBreakdown {
+                total_tokens: None,
+                cache_read_tokens: None,
+                cache_creation_tokens: None,
+                reasoning_tokens: None,
+            },
+            skill_path: None,
+        }
+    }
+
+    /// spec eval-judge R10: every seeded trial writes `workspace.diff`, an
+    /// empty one included; a trial with no seeded state writes none.
+    #[test]
+    fn test_workspace_diff_is_written_when_seeded_and_absent_when_not() {
+        let run = tempfile::tempdir().unwrap();
+        let trial = a_trial();
+        let base = TrialArtifacts {
+            stdout: b"out",
+            stderr: b"",
+            trace_jsonl: "",
+            workspace_diff: None,
+            result: &trial,
+        };
+
+        let untouched = write_trial_artifacts(
+            run.path(),
+            "c",
+            1,
+            &TrialArtifacts {
+                workspace_diff: Some(""),
+                ..base
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(untouched.join("workspace.diff")).unwrap(),
+            "",
+            "an untouched workspace still writes the file"
+        );
+
+        let changed = write_trial_artifacts(
+            run.path(),
+            "c",
+            2,
+            &TrialArtifacts {
+                workspace_diff: Some("--- /dev/null\n+++ b/x\n@@ -0,0 +1 @@\n+x\n"),
+                ..base
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(changed.join("workspace.diff")).unwrap(),
+            "--- /dev/null\n+++ b/x\n@@ -0,0 +1 @@\n+x\n"
+        );
+
+        let inherited = write_trial_artifacts(run.path(), "c", 3, &base).unwrap();
+        assert!(
+            !inherited.join("workspace.diff").exists(),
+            "no seeded state must leave the file absent, not empty"
+        );
+
+        for dir in [&untouched, &changed, &inherited] {
+            for name in ["stdout.txt", "stderr.txt", "trace.jsonl", "result.json"] {
+                assert!(
+                    dir.join(name).exists(),
+                    "{name} missing in {}",
+                    dir.display()
+                );
+            }
+        }
+        assert_eq!(std::fs::read(untouched.join("stdout.txt")).unwrap(), b"out");
     }
 }
