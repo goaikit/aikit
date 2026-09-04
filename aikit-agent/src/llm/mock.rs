@@ -135,6 +135,7 @@ impl LlmGateway for MockGateway {
             tool_calls: resp.tool_calls,
             finish_reason: Some(resp.finish_reason),
             usage: None,
+            model: None,
         })
     }
 

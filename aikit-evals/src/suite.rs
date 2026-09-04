@@ -1,5 +1,6 @@
 //! Eval suite loading and CSV parsing
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -25,6 +26,12 @@ pub struct EvalCase {
     pub tags: Vec<String>,
     /// Optional workspace subdirectory (relative to skill project root)
     pub workspace_subdir: Option<PathBuf>,
+    /// Every other column of prompts.csv, by header name (spec eval-judge R2).
+    ///
+    /// A judge prompt reaches these as `{{case.<column>}}`, so a suite can
+    /// carry an expected answer or a reference beside each prompt without the
+    /// engine knowing the column. Never scored by the engine itself.
+    pub extra: BTreeMap<String, String>,
 }
 
 /// A collection of eval cases
@@ -96,6 +103,13 @@ fn parse_prompts_csv(content: &str) -> Result<EvalSuite, SuiteError> {
     let should_trigger_idx = find_col(&headers, "should_trigger")?;
     let tags_idx = headers.iter().position(|h| h.trim() == "tags");
     let workspace_subdir_idx = headers.iter().position(|h| h.trim() == "workspace_subdir");
+    let known = ["id", "prompt", "should_trigger", "tags", "workspace_subdir"];
+    let extra_cols: Vec<(usize, String)> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| (i, h.trim().to_string()))
+        .filter(|(_, h)| !h.is_empty() && !known.contains(&h.as_str()))
+        .collect();
 
     let mut cases = Vec::new();
     let mut seen_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -161,12 +175,18 @@ fn parse_prompts_csv(content: &str) -> Result<EvalSuite, SuiteError> {
             None
         };
 
+        let extra: BTreeMap<String, String> = extra_cols
+            .iter()
+            .filter_map(|(i, name)| cols.get(*i).map(|v| (name.clone(), v.trim().to_string())))
+            .collect();
+
         cases.push(EvalCase {
             id,
             prompt,
             should_trigger,
             tags,
             workspace_subdir,
+            extra,
         });
     }
 
@@ -262,6 +282,39 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_prompts_csv_keeps_unknown_columns_as_extra() {
+        // A judge template renders {{case.<column>}} from these, so a column
+        // the engine does not know about has to survive parsing verbatim.
+        let csv = "id,prompt,should_trigger,tags,workspace_subdir,expected,notes\n\
+                   c1,do the thing,true,correctness,,\"42, give or take\",  spaced  \n\
+                   c2,do it again,false,,,,\n";
+        let suite = parse_prompts_csv(csv).unwrap();
+        let c1 = &suite.cases[0];
+        assert_eq!(c1.extra.get("expected").unwrap(), "42, give or take");
+        assert_eq!(
+            c1.extra.get("notes").unwrap(),
+            "spaced",
+            "values are trimmed"
+        );
+        assert_eq!(
+            c1.extra.len(),
+            2,
+            "only the unknown columns: {:?}",
+            c1.extra
+        );
+        for known in ["id", "prompt", "should_trigger", "tags", "workspace_subdir"] {
+            assert!(
+                !c1.extra.contains_key(known),
+                "{known} is not an extra column"
+            );
+        }
+
+        let c2 = &suite.cases[1];
+        assert_eq!(c2.extra.get("expected").unwrap(), "");
+        assert_eq!(c2.extra.get("notes").unwrap(), "");
+    }
+
+    #[test]
     fn test_parse_prompts_csv_rejects_duplicate_case_ids() {
         let csv = "id,prompt,should_trigger,tags,workspace_subdir\n\
                    test-1,\"Do something\",true,,\n\
@@ -342,6 +395,7 @@ mod tests {
                 should_trigger: true,
                 tags: vec![],
                 workspace_subdir: None,
+                extra: Default::default(),
             },
             EvalCase {
                 id: "b".to_string(),
@@ -349,6 +403,7 @@ mod tests {
                 should_trigger: false,
                 tags: vec![],
                 workspace_subdir: None,
+                extra: Default::default(),
             },
         ];
         let suite = EvalSuite::new(cases);
@@ -366,6 +421,7 @@ mod tests {
                 should_trigger: true,
                 tags: vec!["foo".to_string(), "bar".to_string()],
                 workspace_subdir: None,
+                extra: Default::default(),
             },
             EvalCase {
                 id: "b".to_string(),
@@ -373,6 +429,7 @@ mod tests {
                 should_trigger: false,
                 tags: vec!["baz".to_string()],
                 workspace_subdir: None,
+                extra: Default::default(),
             },
         ];
         let suite = EvalSuite::new(cases);

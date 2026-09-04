@@ -198,6 +198,7 @@ fn majority_vote(trial_results: Vec<Vec<CheckResult>>, total_trials: usize) -> V
                 required,
                 message,
                 not_observable,
+                score: None,
             }
         })
         .collect()
@@ -224,6 +225,7 @@ mod tests {
             required: true,
             message: None,
             not_observable: None,
+            score: None,
         }
     }
 
@@ -234,6 +236,7 @@ mod tests {
             required: true,
             message: Some("fail".to_string()),
             not_observable: None,
+            score: None,
         }
     }
 
@@ -244,6 +247,7 @@ mod tests {
             required: false,
             message: Some("optional fail".to_string()),
             not_observable: None,
+            score: None,
         }
     }
 
@@ -254,6 +258,7 @@ mod tests {
             should_trigger: true,
             tags: vec![],
             workspace_subdir: None,
+            extra: Default::default(),
         }
     }
 
@@ -513,6 +518,7 @@ mod tests {
                     terminal: None,
                     tokens: Default::default(),
                     skill_path: None,
+                    judge_excluded: false,
                 });
             }
             aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)
@@ -728,6 +734,7 @@ mod tests {
             should_trigger: true,
             tags: vec![],
             workspace_subdir: None,
+            extra: Default::default(),
         };
         let case_b = EvalCase {
             id: "case-b".to_string(),
@@ -735,6 +742,7 @@ mod tests {
             should_trigger: true,
             tags: vec![],
             workspace_subdir: None,
+            extra: Default::default(),
         };
         let cases = vec![case_a, case_b];
         // Both cases are scored on "did marker-a.txt appear in MY workspace".

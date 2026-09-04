@@ -115,6 +115,10 @@ pub struct LlmResponse {
     pub tool_calls: Vec<ToolCall>,
     pub finish_reason: Option<String>,
     pub usage: Option<LlmUsage>,
+    /// The model the provider reports having answered with, when the response
+    /// carries one. Recorded beside the model that was *asked for* so an
+    /// artifact can show both; `None` means the provider said nothing.
+    pub model: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -172,7 +176,6 @@ impl Iterator for LlmStreamHandle {
 pub(crate) struct OpenAiResponse {
     #[allow(dead_code)]
     pub id: Option<String>,
-    #[allow(dead_code)]
     pub model: Option<String>,
     pub choices: Vec<OpenAiChoice>,
     pub usage: Option<OpenAiUsage>,

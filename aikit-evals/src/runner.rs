@@ -298,6 +298,7 @@ impl EvalRunner for AikitEvalRunner {
                         cost_usd: None,
                         tokens: TokenBreakdown::default(),
                         skill_path: None,
+                        judge_excluded: false,
                     };
                 };
                 let (_output, case_result, _trace) = runner
@@ -316,6 +317,7 @@ impl EvalRunner for AikitEvalRunner {
                     cost_usd: case_result.cost_usd,
                     tokens: case_result.tokens,
                     skill_path: case_result.skill_path,
+                    judge_excluded: false,
                 }
             });
         }
@@ -340,6 +342,7 @@ impl EvalRunner for AikitEvalRunner {
                         cost_usd: None,
                         tokens: TokenBreakdown::default(),
                         skill_path: None,
+                        judge_excluded: false,
                     });
                 }
             }
@@ -1083,6 +1086,7 @@ mod tests {
             should_trigger: false,
             tags: vec![],
             workspace_subdir: None,
+            extra: Default::default(),
         }
     }
 
@@ -1149,6 +1153,7 @@ mod tests {
                     terminal: None,
                     tokens: Default::default(),
                     skill_path: None,
+                    judge_excluded: false,
                 });
             }
             aggregate_trials(&case.id, trials, trial_count, opts.pass_threshold)
@@ -1163,6 +1168,7 @@ mod tests {
             should_trigger: true,
             tags: vec![],
             workspace_subdir: None,
+            extra: Default::default(),
         };
         let opts = CaseRunOptions {
             agent_key: "agent".to_string(),
@@ -1232,6 +1238,7 @@ mod tests {
             should_trigger: false,
             tags: vec![],
             workspace_subdir: None,
+            extra: Default::default(),
         };
         let runner = AikitEvalRunner::new();
 
@@ -1304,6 +1311,7 @@ mod tests {
             should_trigger: true,
             tags: vec![],
             workspace_subdir: None,
+            extra: Default::default(),
         };
         let checks = vec![
             CheckDefinition::TriggerExpectation {
@@ -1359,6 +1367,7 @@ mod tests {
             should_trigger: true,
             tags: vec![],
             workspace_subdir: None,
+            extra: Default::default(),
         };
         let checks = vec![CheckDefinition::TriggerExpectation {
             pattern: "never-happens".to_string(),
@@ -1394,6 +1403,7 @@ mod tests {
             should_trigger: true,
             tags: vec![],
             workspace_subdir: None,
+            extra: Default::default(),
         };
         let opts = CaseRunOptions {
             agent_key: "agent".to_string(),
@@ -1426,6 +1436,7 @@ mod tests {
             should_trigger: true,
             tags: vec![],
             workspace_subdir: None,
+            extra: Default::default(),
         };
         let opts = CaseRunOptions {
             agent_key: "agent".to_string(),
@@ -1592,6 +1603,7 @@ mod tests {
         let opts = isolated_opts("claude", project.path().to_path_buf());
         let case = EvalCase {
             workspace_subdir: Some(PathBuf::from("sub")),
+            extra: Default::default(),
             ..simple_case("subdir")
         };
         let checks = vec![CheckDefinition::FileExists {

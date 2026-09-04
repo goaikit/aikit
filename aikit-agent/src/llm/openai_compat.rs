@@ -76,7 +76,8 @@ struct OpenAiChatRequest<'a> {
     top_p: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    // Always on the wire, `false` included: a judge (aikit-evals) asserts the
+    // body it sent, and an absent field is not the same statement as `false`.
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
@@ -155,6 +156,7 @@ async fn send_complete(
         .map(|tc| convert_tool_calls(tc))
         .unwrap_or_default();
     let finish_reason = first.and_then(|c| c.finish_reason);
+    let model = resp.model;
     let usage = resp.usage.map(|u| LlmUsage {
         input_tokens: u.prompt_tokens.unwrap_or(0),
         output_tokens: u.completion_tokens.unwrap_or(0),
@@ -166,6 +168,7 @@ async fn send_complete(
         tool_calls,
         finish_reason,
         usage,
+        model,
     })
 }
 
