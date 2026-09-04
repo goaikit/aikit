@@ -202,7 +202,7 @@ impl ConversationPipeline {
         &self,
         base: &LlmRequest,
         gateway: &dyn LlmGateway,
-        corrective: Option<Corrective<>>,
+        corrective: Option<Corrective>,
     ) -> Result<ConversationResult, ConversationError> {
         let schema_value: serde_json::Value = serde_json::from_str(&self.schema)
             .map_err(|e| ConversationError::Schema(format!("schema is not JSON: {}", e)))?;

@@ -528,9 +528,8 @@ pub mod validation;
 pub use agent_runner::CapturedPrompts;
 pub use agent_runner::{AgentDetector, AgentInfo, AgentRunner};
 pub use conversation::{
-    Corrective,
     is_retryable_transport, AttemptKind, ConversationAttempt, ConversationError,
-    ConversationPipeline, ConversationResult,
+    ConversationPipeline, ConversationResult, Corrective,
 };
 pub use pipeline::{OutputFormat, Pipeline, PipelineError, PipelineResult};
 pub use report::ReportRenderer;
