@@ -35,10 +35,16 @@ pub enum Decoded {
         input: serde_json::Value,
     },
     /// A structured tool result, correlated to a prior `ToolUse` by `call_id`.
+    ///
+    /// `duration_ms` / `started_at_ms` are set only when the Dialect carries
+    /// a per-call timing the decoder can read (ADR 0022). No decoder does
+    /// today; every one leaves them `None` rather than guess.
     ToolResult {
         call_id: String,
         output: serde_json::Value,
         is_error: bool,
+        duration_ms: Option<u64>,
+        started_at_ms: Option<i64>,
     },
     /// The agent's own report that the run reached a terminal state.
     ///

@@ -167,6 +167,7 @@ impl TrialView {
                     call_id,
                     output,
                     is_error,
+                    ..
                 } => items.push(Item::ToolResult {
                     call_id,
                     output,

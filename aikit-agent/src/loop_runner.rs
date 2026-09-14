@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::compression::maybe_compress;
 use crate::config::AgentConfig;
@@ -15,7 +16,7 @@ use crate::tools::{
     GitTool, HostToolAdapter, ReadFileTool, ReadSkillTool, RunBashTool, Tool, ToolContext,
     WriteFileTool,
 };
-use crate::AgentInternalEvent;
+use crate::{hook_names, AgentInternalEvent, HookAction, HookPhase};
 
 #[cfg(feature = "fastskill")]
 use crate::skills::FastskillSkillBackend;
@@ -94,15 +95,16 @@ pub(crate) fn run_inner_streaming(
     context.add_turn(Turn::user(prompt));
 
     // 4. Build available tools
-    let tools = build_tools(
+    let built = build_tools_reporting(
         &config,
         Arc::clone(&gateway),
         &skills,
         Arc::clone(&provider),
     );
+    emit_run_start(&config, &context, &built, on_event);
 
     // 5. Main agent loop
-    run_loop(&config, &mut context, &tools, &gateway, on_event)?;
+    run_loop(&config, &mut context, &built.tools, &gateway, on_event)?;
 
     Ok(())
 }
@@ -153,16 +155,74 @@ pub fn run_with_context_streaming(
     }
     context.add_turn(Turn::user(new_prompt));
 
-    let tools = build_tools(
+    let built = build_tools_reporting(
         &config,
         Arc::clone(&gateway),
         &skills,
         Arc::clone(&provider),
     );
+    emit_run_start(&config, &context, &built, &mut on_event);
 
-    run_loop(&config, &mut context, &tools, &gateway, &mut on_event)?;
+    run_loop(&config, &mut context, &built.tools, &gateway, &mut on_event)?;
 
     Ok(())
+}
+
+/// Record the harness in effect before the first model call (ADR 0022): the
+/// `HarnessSnapshot` when `config.capture_harness` is set, then a
+/// `persona_tool_policy` hook if a persona removed tools from the set. The
+/// snapshot comes first because it is what is in effect; the hook explains
+/// how it got that way.
+fn emit_run_start<F: FnMut(AgentInternalEvent)>(
+    config: &AgentConfig,
+    context: &ContextPacket,
+    built: &BuiltTools,
+    on_event: &mut F,
+) {
+    if config.capture_harness {
+        on_event(AgentInternalEvent::HarnessSnapshot {
+            model: config.model.clone(),
+            system_prompt: context.system_instructions.clone(),
+            tools: built.tools.iter().map(|t| t.schema()).collect(),
+            skills: context
+                .skills_summary
+                .iter()
+                .map(|s| s.name.clone())
+                .collect(),
+            hooks: hook_names_for(config),
+        });
+    }
+    if !built.removed_by_persona.is_empty() {
+        on_event(AgentInternalEvent::Hook {
+            phase: HookPhase::RunStart,
+            hook_name: hook_names::PERSONA_TOOL_POLICY.to_string(),
+            action: HookAction::Modified,
+            payload: Some(serde_json::json!({ "removed": built.removed_by_persona })),
+        });
+    }
+}
+
+/// The hooks this run's harness may fire, for the snapshot's `hooks` list.
+fn hook_names_for(config: &AgentConfig) -> Vec<String> {
+    let mut hooks = vec![
+        hook_names::CONTEXT_COMPRESSION.to_string(),
+        hook_names::TOOL_DISPATCH.to_string(),
+    ];
+    let has_policy = config
+        .session_persona
+        .as_ref()
+        .is_some_and(|p| p.tools.is_some() || p.disallowed_tools.is_some());
+    if has_policy {
+        hooks.push(hook_names::PERSONA_TOOL_POLICY.to_string());
+    }
+    hooks
+}
+
+fn epoch_ms_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn run_loop<F: FnMut(AgentInternalEvent)>(
@@ -244,12 +304,33 @@ fn run_loop<F: FnMut(AgentInternalEvent)>(
                     call_id: call_id.clone(),
                 });
 
+                // ADR 0022: a call to a tool the model was never offered is
+                // the loop refusing, not the tool failing. Record the refusal
+                // as a hook before the error result it produces.
+                if !tools.iter().any(|t| t.name() == tool_name) {
+                    on_event(AgentInternalEvent::Hook {
+                        phase: HookPhase::BeforeTool,
+                        hook_name: hook_names::TOOL_DISPATCH.to_string(),
+                        action: HookAction::Blocked,
+                        payload: Some(serde_json::json!({
+                            "call_id": call_id,
+                            "tool_name": tool_name,
+                            "reason": "unknown_tool",
+                        })),
+                    });
+                }
+
+                let started_at_ms = epoch_ms_now();
+                let started = Instant::now();
                 let output = execute_tool(tools, &tool_name, args, &tool_ctx);
+                let duration_ms = started.elapsed().as_millis() as u64;
 
                 on_event(AgentInternalEvent::ToolResult {
                     call_id: call_id.clone(),
                     output: output.content.clone(),
                     is_error: output.is_error,
+                    duration_ms,
+                    started_at_ms,
                 });
 
                 tool_results.push(ContextToolResult {
@@ -357,12 +438,29 @@ fn build_system_instructions(
     Ok(parts.join("\n\n"))
 }
 
+/// The tool set a run was built with, plus what the persona policy removed
+/// from it (ADR 0022), so the removal can be recorded as a hook.
+struct BuiltTools {
+    tools: Vec<Box<dyn Tool>>,
+    removed_by_persona: Vec<String>,
+}
+
+#[cfg(test)]
 fn build_tools(
     config: &AgentConfig,
     gateway: Arc<dyn LlmGateway>,
     skills: &[crate::skills::DiscoveredSkill],
     provider: Arc<dyn SkillProvider>,
 ) -> Vec<Box<dyn Tool>> {
+    build_tools_reporting(config, gateway, skills, provider).tools
+}
+
+fn build_tools_reporting(
+    config: &AgentConfig,
+    gateway: Arc<dyn LlmGateway>,
+    skills: &[crate::skills::DiscoveredSkill],
+    provider: Arc<dyn SkillProvider>,
+) -> BuiltTools {
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(ReadFileTool),
         Box::new(WriteFileTool),
@@ -402,22 +500,33 @@ fn build_tools(
     }
 
     // Apply persona tool policy (hard filter at construction time).
+    let mut removed_by_persona = Vec::new();
     if let Some(ref persona) = config.session_persona {
         if let Some(ref allowlist) = persona.tools {
-            tools.retain(|t| allowlist.iter().any(|a| a == t.name()));
+            tools.retain(|t| {
+                let keep = allowlist.iter().any(|a| a == t.name());
+                if !keep {
+                    removed_by_persona.push(t.name().to_string());
+                }
+                keep
+            });
         }
         if let Some(ref denylist) = persona.disallowed_tools {
             tools.retain(|t| {
                 let keep = !denylist.iter().any(|d| d == t.name());
                 if !keep {
                     tracing::debug!(tool = %t.name(), "persona denylist removed tool");
+                    removed_by_persona.push(t.name().to_string());
                 }
                 keep
             });
         }
     }
 
-    tools
+    BuiltTools {
+        tools,
+        removed_by_persona,
+    }
 }
 
 fn build_llm_request(
@@ -740,6 +849,7 @@ mod tests {
             session_persona: None,
             session_agents: std::collections::HashMap::new(),
             host_tool_provider: None,
+            capture_harness: false,
         }
     }
 
@@ -1028,10 +1138,30 @@ mod tests {
             via_stream.len(),
             "run() and run_streaming() must produce the same number of events"
         );
+        // The two runs execute the tool at different wall-clock instants, so
+        // the measured `started_at_ms` / `duration_ms` (ADR 0022) legitimately
+        // differ; only ordering and content are under test here.
+        fn without_timing(e: &AgentInternalEvent) -> AgentInternalEvent {
+            match e.clone() {
+                AgentInternalEvent::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                    ..
+                } => AgentInternalEvent::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                    duration_ms: 0,
+                    started_at_ms: 0,
+                },
+                other => other,
+            }
+        }
         for (i, (a, b)) in via_vec.iter().zip(via_stream.iter()).enumerate() {
             assert_eq!(
-                format!("{:?}", a),
-                format!("{:?}", b),
+                format!("{:?}", without_timing(a)),
+                format!("{:?}", without_timing(b)),
                 "event #{i} differs between run() and run_streaming(): {a:?} vs {b:?}"
             );
         }
@@ -1398,6 +1528,7 @@ mod tests {
                 call_id,
                 output,
                 is_error,
+                ..
             } = event
             {
                 (call_id == "read_skill_1").then_some((output, *is_error))
@@ -1561,5 +1692,252 @@ mod tests {
             "denylist should exclude host tool: {:?}",
             names
         );
+    }
+}
+
+#[cfg(test)]
+mod harness_tests {
+    //! ADR 0022: the run records the harness that ran it.
+    use super::*;
+    use crate::llm::mock::{MockGateway, MockResponse};
+    use tempfile::TempDir;
+
+    fn config(tmp: &TempDir, capture_harness: bool) -> AgentConfig {
+        AgentConfig {
+            model: "test-model".to_string(),
+            base_url: "http://localhost".to_string(),
+            api_key: "test-key".to_string(),
+            stream: false,
+            max_iterations: 3,
+            max_subagent_depth: 0,
+            context_budget_tokens: 12000,
+            workdir: tmp.path().to_path_buf(),
+            allowed_roots: vec![tmp.path().to_path_buf()],
+            skills_dirs: vec![],
+            agents_md_path: None,
+            timeout_secs: 30,
+            connect_timeout_secs: 5,
+            session_persona: None,
+            session_agents: std::collections::HashMap::new(),
+            host_tool_provider: None,
+            capture_harness,
+        }
+    }
+
+    fn snapshots(events: &[AgentInternalEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, AgentInternalEvent::HarnessSnapshot { .. }))
+            .count()
+    }
+
+    #[test]
+    fn snapshot_is_the_first_event_and_names_prompt_tools_and_hooks() {
+        let tmp = TempDir::new().unwrap();
+        let gw = MockGateway::new(vec![MockResponse::text("done")]);
+        let events = run(config(&tmp, true), "hi", Box::new(gw)).unwrap();
+        match &events[0] {
+            AgentInternalEvent::HarnessSnapshot {
+                model,
+                system_prompt,
+                tools,
+                skills,
+                hooks,
+            } => {
+                assert_eq!(model, "test-model");
+                assert!(system_prompt.contains("You are a helpful AI agent"));
+                let names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
+                assert_eq!(
+                    names,
+                    ["read_file", "write_file", "run_bash", "git", "read_skill"]
+                );
+                assert!(skills.is_empty());
+                assert_eq!(hooks, &["context_compression", "tool_dispatch"]);
+            }
+            other => panic!("expected HarnessSnapshot first, got {other:?}"),
+        }
+        assert_eq!(snapshots(&events), 1, "exactly one snapshot per run");
+    }
+
+    #[test]
+    fn snapshot_is_off_by_default() {
+        let tmp = TempDir::new().unwrap();
+        let gw = MockGateway::new(vec![MockResponse::text("done")]);
+        let events = run(config(&tmp, false), "hi", Box::new(gw)).unwrap();
+        assert_eq!(snapshots(&events), 0);
+    }
+
+    #[test]
+    fn tool_result_carries_the_measured_duration_and_start() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+        let gw = MockGateway::new(vec![
+            MockResponse::tool_call("c1", "read_file", r#"{"path":"note.txt"}"#),
+            MockResponse::text("done"),
+        ]);
+        let before = epoch_ms_now();
+        let events = run(config(&tmp, false), "read it", Box::new(gw)).unwrap();
+        let after = epoch_ms_now();
+        let (duration_ms, started_at_ms) = events
+            .iter()
+            .find_map(|e| match e {
+                AgentInternalEvent::ToolResult {
+                    call_id,
+                    duration_ms,
+                    started_at_ms,
+                    ..
+                } if call_id == "c1" => Some((*duration_ms, *started_at_ms)),
+                _ => None,
+            })
+            .expect("tool result for c1");
+        assert!(
+            (before..=after).contains(&started_at_ms),
+            "started_at_ms {started_at_ms} outside [{before}, {after}]"
+        );
+        assert!(duration_ms <= (after - before) as u64);
+    }
+
+    #[test]
+    fn unknown_tool_is_a_blocked_dispatch_hook_before_its_error_result() {
+        let tmp = TempDir::new().unwrap();
+        let gw = MockGateway::new(vec![
+            MockResponse::tool_call("c1", "no_such_tool", "{}"),
+            MockResponse::text("done"),
+        ]);
+        let events = run(config(&tmp, false), "try", Box::new(gw)).unwrap();
+        let hook_idx = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    AgentInternalEvent::Hook {
+                        phase: HookPhase::BeforeTool,
+                        hook_name,
+                        action: HookAction::Blocked,
+                        payload: Some(p),
+                    } if hook_name == hook_names::TOOL_DISPATCH
+                        && p["tool_name"] == "no_such_tool"
+                        && p["call_id"] == "c1"
+                        && p["reason"] == "unknown_tool"
+                )
+            })
+            .expect("a tool_dispatch hook");
+        let result_idx = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    AgentInternalEvent::ToolResult { call_id, is_error: true, .. } if call_id == "c1"
+                )
+            })
+            .expect("an error result for c1");
+        assert!(
+            hook_idx < result_idx,
+            "the refusal is recorded before its result"
+        );
+    }
+
+    #[test]
+    fn a_known_tool_fires_no_dispatch_hook() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("note.txt"), "hello").unwrap();
+        let gw = MockGateway::new(vec![
+            MockResponse::tool_call("c1", "read_file", r#"{"path":"note.txt"}"#),
+            MockResponse::text("done"),
+        ]);
+        let events = run(config(&tmp, false), "read it", Box::new(gw)).unwrap();
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentInternalEvent::Hook { .. })));
+    }
+}
+
+#[cfg(test)]
+mod persona_hook_tests {
+    //! ADR 0022: a persona's tool policy is a run-start hook and is listed
+    //! in the snapshot's `hooks`.
+    use super::*;
+    use crate::agent_definition::AgentPersona;
+    use crate::llm::mock::{MockGateway, MockResponse};
+    use tempfile::TempDir;
+
+    fn persona(disallowed: &[&str]) -> AgentPersona {
+        AgentPersona {
+            name: "p".to_string(),
+            description: String::new(),
+            prompt: String::new(),
+            tools: None,
+            disallowed_tools: Some(disallowed.iter().map(|s| s.to_string()).collect()),
+            model: None,
+        }
+    }
+
+    fn config(tmp: &TempDir, persona: Option<AgentPersona>) -> AgentConfig {
+        AgentConfig {
+            model: "test-model".to_string(),
+            base_url: "http://localhost".to_string(),
+            api_key: "test-key".to_string(),
+            stream: false,
+            max_iterations: 3,
+            max_subagent_depth: 0,
+            context_budget_tokens: 12000,
+            workdir: tmp.path().to_path_buf(),
+            allowed_roots: vec![tmp.path().to_path_buf()],
+            skills_dirs: vec![],
+            agents_md_path: None,
+            timeout_secs: 30,
+            connect_timeout_secs: 5,
+            session_persona: persona,
+            session_agents: std::collections::HashMap::new(),
+            host_tool_provider: None,
+            capture_harness: true,
+        }
+    }
+
+    #[test]
+    fn removed_tools_are_a_run_start_hook_after_the_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let gw = MockGateway::new(vec![MockResponse::text("done")]);
+        let events = run(
+            config(&tmp, Some(persona(&["git", "run_bash"]))),
+            "hi",
+            Box::new(gw),
+        )
+        .unwrap();
+        match &events[0] {
+            AgentInternalEvent::HarnessSnapshot { tools, hooks, .. } => {
+                let names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
+                assert_eq!(names, ["read_file", "write_file", "read_skill"]);
+                assert!(hooks.iter().any(|h| h == hook_names::PERSONA_TOOL_POLICY));
+            }
+            other => panic!("expected HarnessSnapshot first, got {other:?}"),
+        }
+        assert!(matches!(
+            &events[1],
+            AgentInternalEvent::Hook {
+                phase: HookPhase::RunStart,
+                hook_name,
+                action: HookAction::Modified,
+                payload: Some(p),
+            } if hook_name == hook_names::PERSONA_TOOL_POLICY
+                && p["removed"] == serde_json::json!(["run_bash", "git"])
+        ));
+    }
+
+    #[test]
+    fn a_persona_without_a_policy_fires_no_hook_and_lists_none() {
+        let tmp = TempDir::new().unwrap();
+        let gw = MockGateway::new(vec![MockResponse::text("done")]);
+        let mut p = persona(&[]);
+        p.disallowed_tools = None;
+        let events = run(config(&tmp, Some(p)), "hi", Box::new(gw)).unwrap();
+        assert!(matches!(
+            &events[0],
+            AgentInternalEvent::HarnessSnapshot { hooks, .. }
+                if !hooks.iter().any(|h| h == hook_names::PERSONA_TOOL_POLICY)
+        ));
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentInternalEvent::Hook { .. })));
     }
 }

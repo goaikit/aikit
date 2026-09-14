@@ -224,6 +224,13 @@ pub struct RunOptions {
     /// When true, emit `RawTransportLine` events alongside `StreamMessage`
     /// events for debugging. Off by default.
     pub emit_raw_transport: bool,
+    /// When true, emit one `HarnessSnapshot` event at run start carrying the
+    /// system prompt, tool definitions, model, skills and hooks in effect
+    /// (ADR 0022). Off by default: the snapshot can be large and the prompt
+    /// may be sensitive. Only backends that can see their own harness
+    /// populate it; the in-process `aikit` backend does, external CLIs
+    /// leave it absent rather than reconstruct it.
+    pub capture_harness: bool,
     /// Serialized session persona definition (JSON). Only used for the aikit backend.
     pub session_persona: Option<serde_json::Value>,
     /// Serialized ephemeral agent definitions (JSON map). Only used for the aikit backend.
@@ -302,6 +309,7 @@ impl Default for RunOptions {
             current_dir: None,
             emit_token_usage_events: true,
             emit_raw_transport: false,
+            capture_harness: false,
             session_persona: None,
             session_agents: std::collections::HashMap::new(),
             session_id: None,
@@ -359,6 +367,13 @@ impl RunOptions {
     /// Control whether `RawTransportLine` events are emitted.
     pub fn with_emit_raw_transport(mut self, emit: bool) -> Self {
         self.emit_raw_transport = emit;
+        self
+    }
+
+    /// Control whether a `HarnessSnapshot` event is emitted at run start
+    /// (ADR 0022). Off by default.
+    pub fn with_capture_harness(mut self, capture: bool) -> Self {
+        self.capture_harness = capture;
         self
     }
 
@@ -686,10 +701,23 @@ pub enum AgentEventPayload {
     },
     /// A structured tool result decoded from an external Backend's output.
     /// `call_id` correlates to the originating `ToolUse`.
+    ///
+    /// `duration_ms` and `started_at_ms` are present only when the backend
+    /// itself reported them (ADR 0022). No external decoder sees a per-call
+    /// timestamp today, so they are `None` for every external Backend; the
+    /// SDK never stamps the gap between a `ToolUse` and its `ToolResult`
+    /// arriving, which would measure transport rather than the tool.
     ToolResult {
         call_id: String,
         output: serde_json::Value,
         is_error: bool,
+        /// Wall-clock time the tool took, as the backend measured it.
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        /// Unix epoch milliseconds when the tool started, as the backend
+        /// measured it.
+        #[serde(default)]
+        started_at_ms: Option<i64>,
     },
     /// Normalized token usage extracted from the preceding `JsonLine`.
     /// Emitted immediately after the corresponding `JsonLine` event when
@@ -733,6 +761,13 @@ pub enum AgentEventPayload {
         call_id: String,
         output: String,
         is_error: bool,
+        /// Wall-clock time the tool took, measured around the in-process
+        /// `execute_tool` call (ADR 0022).
+        #[serde(default)]
+        duration_ms: Option<u64>,
+        /// Unix epoch milliseconds when the tool started.
+        #[serde(default)]
+        started_at_ms: Option<i64>,
     },
     /// Built-in aikit agent sub-agent spawn.
     AikitSubagentSpawn {
@@ -798,6 +833,96 @@ pub enum AgentEventPayload {
         /// for both.
         cost_usd: Option<f64>,
     },
+    /// The harness in effect for this run, emitted once at run start when
+    /// [`RunOptions::capture_harness`] is set (ADR 0022).
+    ///
+    /// Only a backend that can see its own harness emits this. The
+    /// in-process `aikit` backend populates every field; an external CLI
+    /// that does not expose its prompt emits nothing rather than a
+    /// reconstruction. Every field except `backend` is optional in meaning:
+    /// absent means "not recorded", never "empty".
+    HarnessSnapshot {
+        /// Backend key (`aikit`, `claude`, ...).
+        backend: String,
+        /// Model name the backend resolved to, when known.
+        #[serde(default)]
+        model: Option<String>,
+        /// The system prompt exactly as the model received it.
+        #[serde(default)]
+        system_prompt: Option<String>,
+        /// Tool definitions offered to the model, after any policy filter.
+        #[serde(default)]
+        tools: Vec<ToolDefinitionSnapshot>,
+        /// Names of the skills discovered for the run.
+        #[serde(default)]
+        skills: Vec<String>,
+        /// Names of the hooks the harness may fire, so a reader can tell
+        /// "no hook fired" from "this harness has no hooks".
+        #[serde(default)]
+        hooks: Vec<String>,
+    },
+    /// A harness hook ran and acted on the run (ADR 0022): a middleware,
+    /// policy filter, or context intervention. `AikitContextCompressed` is
+    /// the one intervention that predates this frame; it keeps its own
+    /// variant and is **not** re-emitted as a `Hook`.
+    Hook {
+        /// Where in the loop the hook ran.
+        phase: HookPhase,
+        /// Stable identifier of the hook (`context_compression`,
+        /// `tool_dispatch`, `persona_tool_policy`, ...).
+        hook_name: String,
+        /// What the hook did.
+        action: HookAction,
+        /// Hook-specific detail, when there is any.
+        #[serde(default)]
+        payload: Option<serde_json::Value>,
+    },
+}
+
+/// Where in the agent loop a [`AgentEventPayload::Hook`] ran (ADR 0022).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HookPhase {
+    /// Before the first model call, while the harness is being assembled.
+    RunStart,
+    /// Before a model call, on the context about to be sent.
+    BeforeModel,
+    /// After a model call, on the response before it is acted on.
+    AfterModel,
+    /// Before a tool executes, on the call the model made.
+    BeforeTool,
+    /// After a tool executed, on its result.
+    AfterTool,
+    /// After the last model call, before the run's result is returned.
+    RunEnd,
+}
+
+/// What a [`AgentEventPayload::Hook`] did (ADR 0022).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum HookAction {
+    /// Added content the model did not produce (a hint, a message).
+    Injected,
+    /// Refused an action the model asked for.
+    Blocked,
+    /// Changed something in place (context, a tool set, a result).
+    Modified,
+    /// Ran and changed nothing; recorded so "it fired" is evidence too.
+    Observed,
+}
+
+/// One tool definition as the model saw it, carried by
+/// [`AgentEventPayload::HarnessSnapshot`] (ADR 0022).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolDefinitionSnapshot {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The JSON Schema of the tool's input, when the backend exposes it.
+    #[serde(default)]
+    pub input_schema: Option<serde_json::Value>,
 }
 
 /// A single event emitted by a streaming agent run.

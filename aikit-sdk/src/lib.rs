@@ -498,9 +498,10 @@ pub use runner::{
     aggregate_token_usage, extract_usage_from_line, get_agent_status, get_installed_agents,
     is_agent_available, is_runnable, normalize_json_line, run_agent, run_agent_events,
     run_builtin_agent, runnable_agents, AgentAvailabilityReason, AgentEvent, AgentEventPayload,
-    AgentEventStream, AgentStatus, BackendCapabilities, MessageKind, MessagePhase, MessageRole,
-    OutputMode, ProgressSink, QuotaCategory, QuotaExceededInfo, RunError, RunOptions, RunResult,
-    SkillIsolation, StreamMessage, TerminalOutcome, TokenUsage, UsageSource,
+    AgentEventStream, AgentStatus, BackendCapabilities, HookAction, HookPhase, MessageKind,
+    MessagePhase, MessageRole, OutputMode, ProgressSink, QuotaCategory, QuotaExceededInfo,
+    RunError, RunOptions, RunResult, SkillIsolation, StreamMessage, TerminalOutcome, TokenUsage,
+    ToolDefinitionSnapshot, UsageSource,
 };
 
 pub mod run_progress;

@@ -1533,3 +1533,24 @@ mod tests {
         assert_eq!(std::fs::read(untouched.join("stdout.txt")).unwrap(), b"out");
     }
 }
+
+#[cfg(test)]
+mod adr_0022_compat_tests {
+    use super::*;
+
+    /// ADR 0020: a `result.json` written before ADR 0022 (and before the
+    /// fields ADR 0020 itself added) still deserializes, with every field
+    /// this version added reading as "not recorded".
+    #[test]
+    fn a_trial_result_written_before_this_change_still_deserializes() {
+        let legacy = r#"{"trial_id":1,"status":"passed","command_count":2,"input_tokens":10,"output_tokens":5,"check_results":[],"error_message":null}"#;
+        let r: TrialResult = serde_json::from_str(legacy).unwrap();
+        assert_eq!(r.trial_id, 1);
+        assert_eq!(r.command_count, Some(2));
+        assert!(r.exit_code.is_none());
+        assert!(r.terminal.is_none());
+        assert!(r.cost_usd.is_none());
+        assert!(r.skill_path.is_none());
+        assert!(!r.judge_excluded);
+    }
+}

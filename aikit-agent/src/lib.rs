@@ -35,6 +35,11 @@ pub enum AgentInternalEvent {
         call_id: String,
         output: String,
         is_error: bool,
+        /// Wall-clock time the tool took, measured around `execute_tool`
+        /// (ADR 0022).
+        duration_ms: u64,
+        /// Unix epoch milliseconds when the tool started.
+        started_at_ms: i64,
     },
     SubagentSpawn {
         subagent_id: String,
@@ -65,6 +70,64 @@ pub enum AgentInternalEvent {
         code: String,
         message: String,
     },
+    /// The harness in effect for this run, emitted once at run start when
+    /// [`AgentConfig::capture_harness`] is set (ADR 0022).
+    HarnessSnapshot {
+        model: String,
+        /// The system prompt exactly as the model receives it.
+        system_prompt: String,
+        /// Tool definitions offered to the model, after the persona filter.
+        tools: Vec<llm::types::ToolDefinition>,
+        /// Names of the skills discovered for the run.
+        skills: Vec<String>,
+        /// Names of the hooks this harness may fire.
+        hooks: Vec<String>,
+    },
+    /// A harness hook acted on the run (ADR 0022). Context compression keeps
+    /// its own [`AgentInternalEvent::ContextCompressed`] frame and is not
+    /// re-emitted as a `Hook`.
+    Hook {
+        phase: HookPhase,
+        hook_name: String,
+        action: HookAction,
+        payload: Option<serde_json::Value>,
+    },
+}
+
+/// Where in the loop a [`AgentInternalEvent::Hook`] ran (ADR 0022).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookPhase {
+    RunStart,
+    BeforeModel,
+    AfterModel,
+    BeforeTool,
+    AfterTool,
+    RunEnd,
+}
+
+/// What a [`AgentInternalEvent::Hook`] did (ADR 0022).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookAction {
+    Injected,
+    Blocked,
+    Modified,
+    Observed,
+}
+
+/// Hook names the in-process agent emits (ADR 0022). Also listed in
+/// [`AgentInternalEvent::HarnessSnapshot::hooks`] so a reader can tell "no
+/// hook fired" from "this harness has no hooks".
+pub mod hook_names {
+    /// Context compression before a model call; recorded by
+    /// `AgentInternalEvent::ContextCompressed`, folded into a `hook` line by
+    /// the eval trace.
+    pub const CONTEXT_COMPRESSION: &str = "context_compression";
+    /// The loop refused a tool call because no tool of that name is in the
+    /// set the model was offered.
+    pub const TOOL_DISPATCH: &str = "tool_dispatch";
+    /// A persona's `tools` / `disallowed_tools` policy removed tools from
+    /// the set at run start.
+    pub const PERSONA_TOOL_POLICY: &str = "persona_tool_policy";
 }
 
 /// Run the agent to completion, collecting every event into a `Vec` returned once the

@@ -64,6 +64,7 @@ fn test_decode_codex_item_command_execution() {
             call_id,
             output,
             is_error,
+            ..
         } => {
             assert_eq!(call_id, "item_1");
             assert_eq!(output, &serde_json::json!("file.txt\n"));
@@ -192,7 +193,7 @@ fn test_decode_codex_legacy_action_output_schema_is_structured() {
     ));
     assert!(matches!(
         &output_out[0],
-        Decoded::ToolResult { call_id, output, is_error }
+        Decoded::ToolResult { call_id, output, is_error, .. }
             if call_id == "codex-legacy-shell"
                 && output == &serde_json::json!({"stdout": "total 0\n", "stderr": ""})
                 && !is_error
@@ -325,7 +326,7 @@ fn test_decode_codex_command_output_without_command_is_kept() {
     assert!(
         matches!(
             &out[0],
-            Decoded::ToolResult { call_id, output, is_error }
+            Decoded::ToolResult { call_id, output, is_error, .. }
                 if call_id == "item_out_only"
                     && output.as_str() == Some("partial output")
                     && *is_error

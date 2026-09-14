@@ -56,10 +56,55 @@ pub enum TracePayload {
     },
     /// The result of a structured tool invocation; `call_id` correlates to the
     /// originating `ToolUse`.
+    ///
+    /// `duration_ms` and `started_at_ms` are what the backend itself measured
+    /// (ADR 0022). The in-process `aikit` agent times its own `execute_tool`;
+    /// every external backend leaves them absent today, and absent means
+    /// "not recorded", never zero. Never derived from frame arrival times.
     ToolResult {
         call_id: String,
         output: serde_json::Value,
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        started_at_ms: Option<i64>,
+    },
+    /// The harness in effect for the run, written once at the head of the
+    /// trace when `CaseRunOptions::capture_harness` is set (ADR 0022).
+    ///
+    /// Only a backend that can see its own harness writes this; an external
+    /// CLI that does not expose its prompt writes nothing rather than a
+    /// reconstruction. Every field but `backend` is optional in meaning.
+    HarnessSnapshot {
+        backend: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
+        #[serde(default)]
+        tools: Vec<TraceToolDefinition>,
+        #[serde(default)]
+        skills: Vec<String>,
+        /// Hooks the harness *may* fire, so "no hook fired" can be told from
+        /// "this harness has no hooks".
+        #[serde(default)]
+        hooks: Vec<String>,
+    },
+    /// A harness hook acted on the run (ADR 0022): a middleware, a policy
+    /// filter, a context intervention. `phase` and `action` are the SDK's
+    /// `HookPhase` / `HookAction` tags rendered as strings, following `role`
+    /// and `kind` on `Message`.
+    ///
+    /// The in-process agent's context compression lands here as
+    /// `hook_name: "context_compression"`, folded from the SDK's own
+    /// `AikitContextCompressed` frame; one intervention is one line.
+    Hook {
+        phase: String,
+        hook_name: String,
+        action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
     },
     /// The agent's own report that a turn or run finished, decoded from the
     /// line the backend already sends (claude `result`, codex `turn.*`, pi
@@ -86,6 +131,17 @@ pub enum TracePayload {
     /// `AgentEventPayload` is `#[non_exhaustive]`, so new SDK variants land
     /// here rather than being silently mislabelled as another payload type.
     Unknown { payload_type: String, raw: String },
+}
+
+/// One tool definition as the model saw it, carried by
+/// [`TracePayload::HarnessSnapshot`] (ADR 0022).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceToolDefinition {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_schema: Option<serde_json::Value>,
 }
 
 /// Render a unit-like enum value as a lowercase string, falling back to its
@@ -175,19 +231,92 @@ pub fn agent_events_to_trace(events: &[AgentEvent]) -> Vec<TraceEvent> {
                     call_id,
                     output,
                     is_error,
+                    duration_ms,
+                    started_at_ms,
                 } => TracePayload::ToolResult {
                     call_id: call_id.clone(),
                     output: output.clone(),
                     is_error: *is_error,
+                    duration_ms: *duration_ms,
+                    started_at_ms: *started_at_ms,
                 },
                 AgentEventPayload::AikitToolResult {
                     call_id,
                     output,
                     is_error,
+                    duration_ms,
+                    started_at_ms,
                 } => TracePayload::ToolResult {
                     call_id: call_id.clone(),
                     output: serde_json::Value::String(output.clone()),
                     is_error: *is_error,
+                    duration_ms: *duration_ms,
+                    started_at_ms: *started_at_ms,
+                },
+                // The in-process agent's text frames are the same message a
+                // `StreamMessage` carries for an external backend; record
+                // them so an aikit run's final answer is found the same way.
+                AgentEventPayload::AikitTextDelta { content, .. } => TracePayload::Message {
+                    text: content.clone(),
+                    role: "assistant".to_string(),
+                    kind: Some("message".to_string()),
+                    phase: Some("delta".to_string()),
+                },
+                AgentEventPayload::AikitTextFinal { content, .. } => TracePayload::Message {
+                    text: content.clone(),
+                    role: "assistant".to_string(),
+                    kind: Some("message".to_string()),
+                    phase: Some("final".to_string()),
+                },
+                // ADR 0022: one intervention, one line. The SDK keeps its
+                // specific compression frame; the trace records it as the
+                // hook it is.
+                AgentEventPayload::AikitContextCompressed {
+                    original_tokens,
+                    compressed_tokens,
+                    turns_summarized,
+                } => TracePayload::Hook {
+                    phase: "before_model".to_string(),
+                    hook_name: "context_compression".to_string(),
+                    action: "modified".to_string(),
+                    payload: Some(serde_json::json!({
+                        "original_tokens": original_tokens,
+                        "compressed_tokens": compressed_tokens,
+                        "turns_summarized": turns_summarized,
+                    })),
+                },
+                AgentEventPayload::Hook {
+                    phase,
+                    hook_name,
+                    action,
+                    payload,
+                } => TracePayload::Hook {
+                    phase: enum_tag(phase),
+                    hook_name: hook_name.clone(),
+                    action: enum_tag(action),
+                    payload: payload.clone(),
+                },
+                AgentEventPayload::HarnessSnapshot {
+                    backend,
+                    model,
+                    system_prompt,
+                    tools,
+                    skills,
+                    hooks,
+                } => TracePayload::HarnessSnapshot {
+                    backend: backend.clone(),
+                    model: model.clone(),
+                    system_prompt: system_prompt.clone(),
+                    tools: tools
+                        .iter()
+                        .map(|t| TraceToolDefinition {
+                            name: t.name.clone(),
+                            description: t.description.clone(),
+                            input_schema: t.input_schema.clone(),
+                        })
+                        .collect(),
+                    skills: skills.clone(),
+                    hooks: hooks.clone(),
                 },
                 // `AgentEventPayload` is `#[non_exhaustive]`; anything not
                 // modelled above is preserved verbatim rather than being
@@ -420,6 +549,8 @@ mod tests {
                     call_id: "item_1".to_string(),
                     output: serde_json::json!("ok"),
                     is_error: false,
+                    duration_ms: None,
+                    started_at_ms: None,
                 },
             },
         ];
@@ -438,7 +569,8 @@ mod tests {
             TracePayload::ToolResult {
                 call_id,
                 output,
-                is_error: false
+                is_error: false,
+                ..
             } if call_id == "item_1" && output == &serde_json::json!("ok")
         ));
     }
@@ -465,6 +597,8 @@ mod tests {
                     call_id: "call_a".to_string(),
                     output: "contents".to_string(),
                     is_error: true,
+                    duration_ms: None,
+                    started_at_ms: None,
                 },
             },
         ];
@@ -485,7 +619,8 @@ mod tests {
             TracePayload::ToolResult {
                 call_id,
                 output,
-                is_error: true
+                is_error: true,
+                ..
             } if call_id == "call_a" && output == &serde_json::json!("contents")
         ));
     }
@@ -606,6 +741,8 @@ mod tests {
                     call_id: "item_1".to_string(),
                     output: serde_json::json!("total 0\n"),
                     is_error: false,
+                    duration_ms: None,
+                    started_at_ms: None,
                 },
             },
         ];
@@ -887,5 +1024,302 @@ mod tests {
         }
         let again = trace_to_jsonl(&parsed);
         assert!(!again.contains("phase"), "{again}");
+    }
+}
+
+#[cfg(test)]
+mod harness_tests {
+    //! ADR 0022: `harness_snapshot`, `hook` and tool durations on the trace,
+    //! and the ADR 0020 property that a trace written before them still reads.
+    use super::*;
+    use crate::checks::count_command_events;
+    use aikit_sdk::{AgentEventStream, HookAction, HookPhase, ToolDefinitionSnapshot};
+
+    fn ev(seq: u64, payload: AgentEventPayload) -> AgentEvent {
+        AgentEvent {
+            agent_key: "aikit".to_string(),
+            seq,
+            stream: AgentEventStream::Stdout,
+            payload,
+        }
+    }
+
+    #[test]
+    fn snapshot_and_hook_frames_become_their_own_payloads_and_round_trip() {
+        let events = vec![
+            ev(
+                0,
+                AgentEventPayload::HarnessSnapshot {
+                    backend: "aikit".to_string(),
+                    model: Some("m".to_string()),
+                    system_prompt: Some("You are".to_string()),
+                    tools: vec![ToolDefinitionSnapshot {
+                        name: "read_file".to_string(),
+                        description: Some("Read".to_string()),
+                        input_schema: Some(serde_json::json!({"type": "object"})),
+                    }],
+                    skills: vec!["demo".to_string()],
+                    hooks: vec!["context_compression".to_string()],
+                },
+            ),
+            ev(
+                1,
+                AgentEventPayload::Hook {
+                    phase: HookPhase::BeforeTool,
+                    hook_name: "tool_dispatch".to_string(),
+                    action: HookAction::Blocked,
+                    payload: Some(serde_json::json!({"tool_name": "nope"})),
+                },
+            ),
+        ];
+        let trace = agent_events_to_trace(&events);
+        let jsonl = trace_to_jsonl(&trace);
+        assert!(jsonl.contains(r#""type":"harness_snapshot""#), "{jsonl}");
+        assert!(jsonl.contains(r#""type":"hook""#), "{jsonl}");
+        assert!(!jsonl.contains(r#""type":"unknown""#), "{jsonl}");
+        assert!(matches!(
+            &trace[1].payload,
+            TracePayload::Hook { phase, hook_name, action, payload: Some(p) }
+                if phase == "before_tool" && hook_name == "tool_dispatch"
+                    && action == "blocked" && p["tool_name"] == "nope"
+        ));
+
+        let back = parse_trace_jsonl(&jsonl);
+        assert_eq!(back.len(), 2);
+        assert!(matches!(
+            &back[0].payload,
+            TracePayload::HarnessSnapshot { backend, model, tools, skills, hooks, .. }
+                if backend == "aikit" && model.as_deref() == Some("m")
+                    && tools.len() == 1 && tools[0].name == "read_file"
+                    && skills == &["demo"] && hooks == &["context_compression"]
+        ));
+        assert_eq!(
+            count_command_events(&jsonl),
+            0,
+            "harness frames are not commands"
+        );
+    }
+
+    #[test]
+    fn context_compression_is_folded_into_one_hook_line() {
+        let events = vec![ev(
+            0,
+            AgentEventPayload::AikitContextCompressed {
+                original_tokens: 100,
+                compressed_tokens: 40,
+                turns_summarized: 3,
+            },
+        )];
+        let trace = agent_events_to_trace(&events);
+        assert_eq!(trace.len(), 1);
+        assert!(matches!(
+            &trace[0].payload,
+            TracePayload::Hook { phase, hook_name, action, payload: Some(p) }
+                if phase == "before_model" && hook_name == "context_compression"
+                    && action == "modified" && p["original_tokens"] == 100
+                    && p["compressed_tokens"] == 40 && p["turns_summarized"] == 3
+        ));
+    }
+
+    #[test]
+    fn aikit_text_frames_are_messages_with_kind_and_phase() {
+        let events = vec![
+            ev(
+                0,
+                AgentEventPayload::AikitTextDelta {
+                    content: "He".to_string(),
+                    turn_id: None,
+                },
+            ),
+            ev(
+                1,
+                AgentEventPayload::AikitTextFinal {
+                    content: "Hello".to_string(),
+                    turn_id: None,
+                },
+            ),
+        ];
+        let trace = agent_events_to_trace(&events);
+        assert!(matches!(
+            &trace[0].payload,
+            TracePayload::Message { text, role, kind: Some(k), phase: Some(p) }
+                if text == "He" && role == "assistant" && k == "message" && p == "delta"
+        ));
+        assert!(matches!(
+            &trace[1].payload,
+            TracePayload::Message { text, role, kind: Some(k), phase: Some(p) }
+                if text == "Hello" && role == "assistant" && k == "message" && p == "final"
+        ));
+    }
+
+    #[test]
+    fn tool_result_duration_is_carried_when_measured_and_omitted_when_absent() {
+        let events = vec![
+            ev(
+                0,
+                AgentEventPayload::AikitToolResult {
+                    call_id: "c1".to_string(),
+                    output: "ok".to_string(),
+                    is_error: false,
+                    duration_ms: Some(12),
+                    started_at_ms: Some(1_700_000_000_000),
+                },
+            ),
+            ev(
+                1,
+                AgentEventPayload::ToolResult {
+                    call_id: "c2".to_string(),
+                    output: serde_json::json!("ok"),
+                    is_error: false,
+                    duration_ms: None,
+                    started_at_ms: None,
+                },
+            ),
+        ];
+        let jsonl = trace_to_jsonl(&agent_events_to_trace(&events));
+        let lines: Vec<&str> = jsonl.lines().collect();
+        assert!(lines[0].contains(r#""duration_ms":12"#), "{}", lines[0]);
+        assert!(
+            lines[0].contains(r#""started_at_ms":1700000000000"#),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            !lines[1].contains("duration_ms"),
+            "absent is omitted: {}",
+            lines[1]
+        );
+        assert!(
+            !lines[1].contains("started_at_ms"),
+            "absent is omitted: {}",
+            lines[1]
+        );
+    }
+
+    /// ADR 0020: the bytes below are what `trace.jsonl` held before ADR 0022.
+    /// They must keep reading, and reading them must not invent the fields
+    /// this change added.
+    #[test]
+    fn a_trace_written_before_adr_0022_still_parses_and_scores_the_same() {
+        const LEGACY: &str = concat!(
+            r#"{"seq":0,"payload":{"type":"tool_use","call_id":"c1","tool_name":"bash","input":{"command":"ls"}}}"#,
+            "\n",
+            r#"{"seq":1,"payload":{"type":"tool_result","call_id":"c1","output":"ok","is_error":false}}"#,
+            "\n",
+            r#"{"seq":2,"payload":{"type":"message","text":"done","role":"assistant"}}"#,
+            "\n",
+            r#"{"seq":3,"payload":{"type":"terminal","outcome":"success","reason":null,"message":null,"cost_usd":null}}"#,
+            "\n",
+            r#"{"seq":4,"payload":{"type":"unknown","payload_type":"aikit_context_compressed","raw":"AikitContextCompressed { original_tokens: 1, compressed_tokens: 1, turns_summarized: 0 }"}}"#,
+        );
+        let events = parse_trace_jsonl(LEGACY);
+        assert_eq!(events.len(), 5, "every legacy line still parses");
+        assert!(matches!(
+            &events[1].payload,
+            TracePayload::ToolResult { call_id, is_error: false, duration_ms: None, started_at_ms: None, .. }
+                if call_id == "c1"
+        ));
+        assert!(matches!(
+            &events[2].payload,
+            TracePayload::Message {
+                kind: None,
+                phase: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            trace_to_jsonl(&events),
+            LEGACY,
+            "re-serialising a legacy trace is byte-identical"
+        );
+        assert_eq!(count_command_events(LEGACY), 1);
+        assert_eq!(
+            terminal_outcome(&events).map(|(o, _, _)| o),
+            Some(TerminalOutcome::Success)
+        );
+    }
+
+    /// The full `trace.jsonl` of an in-process run with `capture_harness`
+    /// on, the way `aikit-evals` writes it. Wall-clock fields and the
+    /// session id are pinned; everything else is the real artifact.
+    #[test]
+    fn in_process_run_trace_jsonl_snapshot() {
+        use aikit_sdk::llm::mock::{MockGateway, MockResponse};
+        use aikit_sdk::session_store::SessionStore;
+        use aikit_sdk::{run_aikit_agent_with_gateway, RunOptions, SkillIsolation};
+
+        // The injected-gateway config still reads these; a developer's shell
+        // must not change the artifact under test.
+        for key in [
+            "AIKIT_STREAM",
+            "AIKIT_MAX_ITERATIONS",
+            "AIKIT_MAX_SUBAGENT_DEPTH",
+            "AIKIT_CONTEXT_BUDGET_TOKENS",
+            "AIKIT_SKILLS_DIR",
+        ] {
+            std::env::remove_var(key);
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let work = tmp.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("note.txt"), "hello from the workspace\n").unwrap();
+        let skill_dir = tmp.path().join("skills").join("demo-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: demo-skill\ndescription: A demo skill for the trace snapshot\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let opts = RunOptions::new()
+            .with_model("test-model")
+            .with_current_dir(work.clone())
+            .with_capture_harness(true)
+            .with_skill_isolation(SkillIsolation {
+                workspace_root: tmp.path().to_path_buf(),
+                skill_path: skill_dir.clone(),
+                skill_name: "demo-skill".to_string(),
+                codex_home: None,
+            });
+        let gw = MockGateway::new(vec![
+            MockResponse::tool_call("call_1", "read_file", r#"{"path":"note.txt"}"#),
+            MockResponse::tool_call("call_2", "no_such_tool", "{}"),
+            MockResponse::text("The note says hello."),
+        ]);
+        let store = SessionStore {
+            sessions_dir: tmp.path().join("sessions"),
+        };
+        let mut events = Vec::new();
+        run_aikit_agent_with_gateway(
+            "Read note.txt and summarise it",
+            &opts,
+            Box::new(gw),
+            Some(store),
+            |ev| events.push(ev),
+        )
+        .unwrap();
+
+        let mut trace = agent_events_to_trace(&events);
+        for e in &mut trace {
+            match &mut e.payload {
+                TracePayload::ToolResult {
+                    duration_ms,
+                    started_at_ms,
+                    ..
+                } => {
+                    assert!(duration_ms.is_some() && started_at_ms.is_some());
+                    *duration_ms = Some(1);
+                    *started_at_ms = Some(1_700_000_000_000);
+                }
+                TracePayload::Unknown { payload_type, raw }
+                    if payload_type == "session_started" =>
+                {
+                    *raw = "[session id]".to_string();
+                }
+                _ => {}
+            }
+        }
+        insta::assert_snapshot!(trace_to_jsonl(&trace));
     }
 }

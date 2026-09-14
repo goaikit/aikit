@@ -154,6 +154,7 @@ impl Tool for SpawnSubagentTool {
             session_persona: None,
             session_agents: std::collections::HashMap::new(),
             host_tool_provider: None,
+            capture_harness: false,
         };
 
         // Run the sub-agent
@@ -251,6 +252,7 @@ mod tests {
             session_persona: None,
             session_agents: std::collections::HashMap::new(),
             host_tool_provider: None,
+            capture_harness: false,
         }
     }
 

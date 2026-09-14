@@ -74,6 +74,7 @@ pub(crate) async fn scoring_opts(
             pass_threshold: config.pass_threshold,
             isolation,
             retain_workspace_in: None,
+            capture_harness: false,
         },
         ws,
     ))

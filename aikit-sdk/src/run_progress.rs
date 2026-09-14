@@ -218,6 +218,14 @@ impl RunProgress {
                 self.add_row(format!("step> {} {}", iteration, finish_reason));
             }
             AgentEventPayload::RawTransportLine { .. } => {}
+            AgentEventPayload::HarnessSnapshot { backend, tools, .. } => {
+                self.add_row(format!("harness> {} with {} tools", backend, tools.len()));
+            }
+            AgentEventPayload::Hook {
+                hook_name, action, ..
+            } => {
+                self.add_row(format!("hook> {} {:?}", hook_name, action).to_lowercase());
+            }
             AgentEventPayload::Result { text, .. } => {
                 let t = text.replace('\n', " ").replace('\r', "");
                 let t = t.trim();

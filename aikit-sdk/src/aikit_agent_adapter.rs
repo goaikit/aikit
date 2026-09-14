@@ -132,6 +132,7 @@ fn config_for_injected_gateway(workdir: PathBuf, options: &RunOptions) -> AgentC
             session_persona: None,
             session_agents: std::collections::HashMap::new(),
             host_tool_provider: None,
+            capture_harness: false,
         },
     )
 }
@@ -208,6 +209,9 @@ fn run_with_config_and_gateway<F>(
 where
     F: FnMut(AgentEvent) + Send,
 {
+    let mut config = config;
+    config.capture_harness = options.capture_harness;
+
     let cwd = options
         .current_dir
         .clone()
@@ -654,12 +658,68 @@ fn convert_event(
             call_id,
             output,
             is_error,
+            duration_ms,
+            started_at_ms,
         } => (
             AgentEventStream::Stdout,
             AgentEventPayload::AikitToolResult {
                 call_id,
                 output,
                 is_error,
+                duration_ms: Some(duration_ms),
+                started_at_ms: Some(started_at_ms),
+            },
+            None,
+        ),
+        AgentInternalEvent::HarnessSnapshot {
+            model,
+            system_prompt,
+            tools,
+            skills,
+            hooks,
+        } => (
+            AgentEventStream::Stdout,
+            AgentEventPayload::HarnessSnapshot {
+                backend: "aikit".to_string(),
+                model: Some(model),
+                system_prompt: Some(system_prompt),
+                tools: tools
+                    .into_iter()
+                    .map(|t| crate::ToolDefinitionSnapshot {
+                        name: t.function.name,
+                        description: t.function.description,
+                        input_schema: Some(t.function.parameters),
+                    })
+                    .collect(),
+                skills,
+                hooks,
+            },
+            None,
+        ),
+        AgentInternalEvent::Hook {
+            phase,
+            hook_name,
+            action,
+            payload,
+        } => (
+            AgentEventStream::Stdout,
+            AgentEventPayload::Hook {
+                phase: match phase {
+                    aikit_agent::HookPhase::RunStart => crate::HookPhase::RunStart,
+                    aikit_agent::HookPhase::BeforeModel => crate::HookPhase::BeforeModel,
+                    aikit_agent::HookPhase::AfterModel => crate::HookPhase::AfterModel,
+                    aikit_agent::HookPhase::BeforeTool => crate::HookPhase::BeforeTool,
+                    aikit_agent::HookPhase::AfterTool => crate::HookPhase::AfterTool,
+                    aikit_agent::HookPhase::RunEnd => crate::HookPhase::RunEnd,
+                },
+                hook_name,
+                action: match action {
+                    aikit_agent::HookAction::Injected => crate::HookAction::Injected,
+                    aikit_agent::HookAction::Blocked => crate::HookAction::Blocked,
+                    aikit_agent::HookAction::Modified => crate::HookAction::Modified,
+                    aikit_agent::HookAction::Observed => crate::HookAction::Observed,
+                },
+                payload,
             },
             None,
         ),

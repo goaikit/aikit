@@ -220,6 +220,8 @@ pub(crate) fn decode(
                     call_id,
                     output,
                     is_error,
+                    duration_ms: None,
+                    started_at_ms: None,
                 });
             }
         }
@@ -559,6 +561,8 @@ mod tests {
                 call_id,
                 output,
                 is_error,
+                duration_ms: None,
+                started_at_ms: None,
             } => {
                 assert_eq!(call_id, "call_1");
                 assert_eq!(output["ok"], true);
