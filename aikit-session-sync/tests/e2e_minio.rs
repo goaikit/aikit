@@ -84,7 +84,7 @@ async fn e2e_sync_round_trips_content_scrubbed_and_envelope_via_minio() {
 
     // MinIO treats each top-level dir under /data as a bucket, so we create the
     // bucket by pre-making the dir, then launch the server in one command.
-    let minio = GenericImage::new("minio/minio", "latest")
+    let minio = GenericImage::new("quay.io/minio/minio", "RELEASE.2025-02-28T09-55-16Z")
         .with_exposed_port(9000.tcp())
         .with_wait_for(WaitFor::message_on_stderr("API:"))
         .with_entrypoint("sh")
