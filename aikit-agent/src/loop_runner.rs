@@ -1138,10 +1138,30 @@ mod tests {
             via_stream.len(),
             "run() and run_streaming() must produce the same number of events"
         );
+        // The two runs execute the tool at different wall-clock instants, so
+        // the measured `started_at_ms` / `duration_ms` (ADR 0022) legitimately
+        // differ; only ordering and content are under test here.
+        fn without_timing(e: &AgentInternalEvent) -> AgentInternalEvent {
+            match e.clone() {
+                AgentInternalEvent::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                    ..
+                } => AgentInternalEvent::ToolResult {
+                    call_id,
+                    output,
+                    is_error,
+                    duration_ms: 0,
+                    started_at_ms: 0,
+                },
+                other => other,
+            }
+        }
         for (i, (a, b)) in via_vec.iter().zip(via_stream.iter()).enumerate() {
             assert_eq!(
-                format!("{:?}", a),
-                format!("{:?}", b),
+                format!("{:?}", without_timing(a)),
+                format!("{:?}", without_timing(b)),
                 "event #{i} differs between run() and run_streaming(): {a:?} vs {b:?}"
             );
         }
