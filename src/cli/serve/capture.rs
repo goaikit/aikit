@@ -32,6 +32,7 @@ use uuid::Uuid;
 
 use aikit_sdk::runner::Backend;
 use aikit_session_capture::{Adapter, CursorStore, EventStore, ParseWarning, Registry, ToolKind};
+use aikit_session_summarize::BriefStore;
 
 use super::error_response;
 
@@ -43,6 +44,8 @@ pub struct CaptureState {
     pub registry: Arc<Registry>,
     pub event_store: Arc<dyn EventStore>,
     pub cursor_store: Arc<dyn CursorStore>,
+    /// Stored session briefs, read-only here (ADR 0022).
+    pub brief_store: Arc<dyn BriefStore>,
     pub scan_jobs: Arc<ScanJobRegistry>,
     /// Last parse timestamp per adapter kind, for the `GET /capture` summary.
     last_parse: Arc<Mutex<HashMap<ToolKind, i64>>>,
@@ -53,11 +56,13 @@ impl CaptureState {
         registry: Registry,
         event_store: Arc<dyn EventStore>,
         cursor_store: Arc<dyn CursorStore>,
+        brief_store: Arc<dyn BriefStore>,
     ) -> Self {
         Self {
             registry: Arc::new(registry),
             event_store,
             cursor_store,
+            brief_store,
             scan_jobs: Arc::new(ScanJobRegistry::default()),
             last_parse: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -357,7 +362,7 @@ async fn get_brief(
         Ok(t) => t,
         Err(resp) => return resp,
     };
-    match cs.event_store.brief_for(tool, &session_id).await {
+    match cs.brief_store.brief_for(tool, &session_id).await {
         Ok(Some(brief)) => json_ok(StatusCode::OK, &brief),
         Ok(None) => error_response(
             StatusCode::NOT_FOUND,
@@ -391,7 +396,7 @@ async fn list_briefs(
         Ok(t) => t,
         Err(resp) => return resp,
     };
-    match cs.event_store.briefs_for(tool, q.limit, q.offset).await {
+    match cs.brief_store.briefs_for(tool, q.limit, q.offset).await {
         Ok(briefs) => json_ok(StatusCode::OK, &briefs),
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -755,7 +760,8 @@ mod tests {
 
     #[tokio::test]
     async fn brief_routes_read_the_store() {
-        use aikit_session_capture::{EventBatch, SessionBrief};
+        use aikit_session_capture::EventBatch;
+        use aikit_session_summarize::{InMemoryBriefStore, SessionBrief};
         use axum::body::to_bytes;
 
         struct NoAdapter;
@@ -790,7 +796,8 @@ mod tests {
             })
             .await
             .unwrap();
-        store
+        let briefs = Arc::new(InMemoryBriefStore::new());
+        briefs
             .put_brief(&SessionBrief {
                 tool: ToolKind::ClaudeCode,
                 session_id: "s1".into(),
@@ -806,7 +813,12 @@ mod tests {
             })
             .await
             .unwrap();
-        let cs = CaptureState::new(registry, store, Arc::new(InMemoryCursorStore::default()));
+        let cs = CaptureState::new(
+            registry,
+            store,
+            Arc::new(InMemoryCursorStore::default()),
+            briefs,
+        );
 
         async fn body_json(resp: Response) -> (StatusCode, serde_json::Value) {
             let status = resp.status();

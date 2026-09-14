@@ -1,11 +1,10 @@
 //! The digest: the bounded, deterministic text a model sees for one
 //! session. Built from the event store, never from a transcript (ADR 0022).
 
-use aikit_session_capture::{
-    ActionKind, ActionStatus, AreaTouch, SessionSummary, ToolEvent, ToolKind,
-};
+use aikit_session_capture::{ActionKind, ActionStatus, SessionSummary, ToolEvent, ToolKind};
 
 use crate::areas::{relative_target, touch_kind};
+use crate::brief::AreaTouch;
 
 /// Character budgets. The defaults keep a digest near 12 000 characters, a
 /// few thousand tokens, whatever the session's size.

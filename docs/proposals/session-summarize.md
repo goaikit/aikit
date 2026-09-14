@@ -28,9 +28,9 @@ primary tag shows up where the tool itself keeps tags.
 
 | Crate | Owns | Why |
 | --- | --- | --- |
-| `aikit-session-capture` (existing) | `SessionBrief`, `AreaTouch`, `TagAssignment` types; three additive `EventStore` methods (`put_brief`, `brief_for`, `briefs_for`) with `InMemoryEventStore` support; the `ingest` module (`parse_and_store_file`, `scan_adapter`) moved out of `aikit serve` so the CLI, serve and the summarizer share one idempotent scan path. | The store contract lives with the store trait, as `SessionSummary` and `FileTouch` already do. The crate stays read-only about tools: it stores briefs, it does not produce them. |
-| `aikit-session-summarize` (new) | Locations, digest builder, area grouping, tag list + mechanical rules + validation, prompt rendering and reply parsing, the batch engine with bounded concurrency. Depends on `aikit-session-capture` and `aikit-agent` (for `LlmGateway`, `OpenAiCompatProvider`, `MockGateway`). | Mirrors `aikit-session-sync`: a sibling consumer of capture with its own responsibility. It never spawns a tool and never reads a transcript. |
-| `aikit-cli` (root) | `aikit session list` / `aikit session summarize`; the SQLite `capture_session_briefs` table; the history-reader prompt source and history-mutator tag mirror (the only place `aikit-sdk` is wired in); two read-only serve routes. | The root already owns the SQLite store and the serve surface. |
+| `aikit-session-capture` (existing) | The `ingest` module (`parse_and_store_file`, `scan_adapter`) moved out of `aikit serve` so the CLI, serve and the summarizer share one idempotent scan path. Nothing about briefs. | The crate stays about parsed events; it neither stores nor produces briefs. |
+| `aikit-session-summarize` (new) | `SessionBrief`, `AreaTouch`, `TagAssignment` and the `BriefStore` trait (`put_brief`, `brief_for`, `briefs_for`) with an `InMemoryBriefStore` for tests; locations, digest builder, area grouping, tag list + mechanical rules + validation, prompt rendering and reply parsing, the batch engine with bounded concurrency. Depends on `aikit-session-capture` and `aikit-agent` (for `LlmGateway`, `OpenAiCompatProvider`, `MockGateway`). | Mirrors `aikit-session-sync`: a sibling consumer of capture with its own responsibility, and the owner of its own record. It never spawns a tool and never reads a transcript. |
+| `aikit-cli` (root) | `aikit session list` / `aikit session summarize`; the SQLite `capture_session_briefs` table, with `SqliteEventStore` implementing `BriefStore` beside `EventStore` on one connection; the history-reader prompt source and history-mutator tag mirror (the only place `aikit-sdk` is wired in); two read-only serve routes. | The root already owns the SQLite store and the serve surface. |
 
 ## CLI
 
@@ -173,7 +173,7 @@ migration. The struct follows ADR 0020: fields are only ever added, with
 
 ## Persistence and mirroring
 
-`put_brief` replaces the row for (tool, session id). After a successful
+`BriefStore::put_brief` replaces the row for (tool, session id). After a successful
 write, when the tool's Backend has a `HistoryMutator` (Claude today) the
 primary tag is written to the backend's tag slot via
 `Backend::history_mutator().tag(...)`; a failure there is a warning, never a
@@ -181,8 +181,8 @@ failed session. `--no-mirror` skips it.
 
 ## Serve
 
-Two read-only routes join the capture router, because they only read the
-store `CaptureState` already holds:
+Two read-only routes join the capture router; `CaptureState` gains a
+`BriefStore` handle (the same SQLite store) beside its event store:
 
 - `GET /api/v1/capture/{backend}/briefs?limit=&offset=`
 - `GET /api/v1/capture/{backend}/sessions/{session_id}/brief` (404 `not_found`

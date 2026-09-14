@@ -4,10 +4,11 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use aikit_session_capture::{ActionKind, TagAssignment, TagSource, ToolEvent};
+use aikit_session_capture::{ActionKind, ToolEvent};
 use serde::Deserialize;
 
 use crate::areas::{relative_target, touch_kind, Touch};
+use crate::brief::{TagAssignment, TagSource};
 
 /// A rule a tag can be bound to. Closed set: a rule name outside it is a
 /// config error, never a silent no-op.

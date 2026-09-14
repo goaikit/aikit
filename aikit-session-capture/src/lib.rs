@@ -27,7 +27,6 @@
 //! [`SecretScrubber`]: scrub::SecretScrubber
 
 pub mod adapter;
-pub mod brief;
 pub mod cursor_offset;
 pub mod event_store;
 pub mod homes;
@@ -50,7 +49,6 @@ pub mod mcp;
 pub mod watch;
 
 pub use adapter::{Adapter, AdapterError, ParseResult, ParseWarning};
-pub use brief::{AreaTouch, SessionBrief, TagAssignment, TagSource};
 pub use cursor_offset::{CursorStore, InMemoryCursorStore, JsonSidecarCursorStore, ParseCursor};
 pub use event_store::{
     EventBatch, EventStore, FileTouch, InMemoryEventStore, SessionSummary, StoreError,

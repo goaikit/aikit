@@ -5,14 +5,13 @@
 use std::sync::Arc;
 
 use aikit_agent::llm::{LlmGateway, LlmMessage, LlmRequest, LlmResponse};
-use aikit_session_capture::{
-    EventStore, SecretScrubber, SessionBrief, SessionSummary, TagAssignment, ToolKind,
-};
+use aikit_session_capture::{EventStore, SecretScrubber, SessionSummary, ToolKind};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::areas::{group_areas, AreaMapping};
+use crate::brief::{BriefStore, SessionBrief, TagAssignment};
 use crate::digest::{build_digest, DigestOptions, PromptsInput};
 use crate::prompt::{corrective_message, parse_reply, user_message, ModelReply, SYSTEM_PROMPT};
 use crate::tags::{mechanical_tags, validate_model_tags, Evidence, TagList, Validated};
@@ -202,13 +201,15 @@ impl Summarizer {
             .map_err(|e| e.to_string())
     }
 
-    /// Summarize one captured session against `store`.
+    /// Summarize one captured session: events come from `events`, the
+    /// brief is looked up in and written to `briefs`.
     pub async fn summarize_one(
         &self,
-        store: &dyn EventStore,
+        events: &dyn EventStore,
+        briefs: &dyn BriefStore,
         session: &SessionSummary,
     ) -> SessionOutcome {
-        let outcome = match self.summarize_inner(store, session).await {
+        let outcome = match self.summarize_inner(events, briefs, session).await {
             Ok(o) => o,
             Err(error) => Outcome::Failed { error },
         };
@@ -221,10 +222,11 @@ impl Summarizer {
 
     async fn summarize_inner(
         &self,
-        store: &dyn EventStore,
+        event_store: &dyn EventStore,
+        briefs: &dyn BriefStore,
         session: &SessionSummary,
     ) -> Result<Outcome, String> {
-        let events = store
+        let events = event_store
             .actions_for_session(session.tool, &session.session_id, u32::MAX, 0)
             .await
             .map_err(|e| format!("reading events: {e}"))?;
@@ -273,7 +275,7 @@ impl Summarizer {
         }
 
         if !self.options.force {
-            if let Some(existing) = store
+            if let Some(existing) = briefs
                 .brief_for(session.tool, &session.session_id)
                 .await
                 .map_err(|e| format!("reading brief: {e}"))?
@@ -338,7 +340,7 @@ impl Summarizer {
             rejected_tags: validated.rejected,
             prompt_source,
         };
-        store
+        briefs
             .put_brief(&brief)
             .await
             .map_err(|e| format!("storing brief: {e}"))?;
@@ -366,7 +368,8 @@ impl Summarizer {
     /// flight. Outcomes come back in the input order.
     pub async fn summarize_many(
         self: &Arc<Self>,
-        store: Arc<dyn EventStore>,
+        events: Arc<dyn EventStore>,
+        briefs: Arc<dyn BriefStore>,
         sessions: Vec<SessionSummary>,
     ) -> Vec<SessionOutcome> {
         let parallel = self.options.parallel.max(1);
@@ -374,11 +377,16 @@ impl Summarizer {
         let mut set: JoinSet<(usize, SessionOutcome)> = JoinSet::new();
         for (i, session) in sessions.into_iter().enumerate() {
             let me = Arc::clone(self);
-            let store = Arc::clone(&store);
+            let events = Arc::clone(&events);
+            let briefs = Arc::clone(&briefs);
             let sem = Arc::clone(&sem);
             set.spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore open");
-                (i, me.summarize_one(store.as_ref(), &session).await)
+                (
+                    i,
+                    me.summarize_one(events.as_ref(), briefs.as_ref(), &session)
+                        .await,
+                )
             });
         }
         let mut out: Vec<(usize, SessionOutcome)> = Vec::new();
@@ -396,9 +404,10 @@ impl Summarizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::brief::{InMemoryBriefStore, TagSource};
     use aikit_agent::llm::mock::{MockGateway, MockResponse};
     use aikit_session_capture::{
-        ActionKind, ActionStatus, EventBatch, InMemoryEventStore, TagSource, ToolEvent,
+        ActionKind, ActionStatus, EventBatch, InMemoryEventStore, ToolEvent,
     };
     use std::path::PathBuf;
 
@@ -421,7 +430,11 @@ mod tests {
         }
     }
 
-    async fn store_with_session() -> (Arc<InMemoryEventStore>, SessionSummary) {
+    async fn store_with_session() -> (
+        Arc<InMemoryEventStore>,
+        Arc<InMemoryBriefStore>,
+        SessionSummary,
+    ) {
         let store = Arc::new(InMemoryEventStore::new());
         let mut prompt = ev(
             "p",
@@ -448,7 +461,7 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        (store, session)
+        (store, Arc::new(InMemoryBriefStore::new()), session)
     }
 
     fn summarizer(responses: Vec<MockResponse>, options: SummarizeOptions) -> Arc<Summarizer> {
@@ -461,11 +474,13 @@ mod tests {
 
     #[tokio::test]
     async fn generates_stores_and_then_skips_unchanged() {
-        let (store, session) = store_with_session().await;
+        let (store, briefs, session) = store_with_session().await;
         let reply = r#"{"summary": "Added a --force flag to the CLI.", "tags": [{"name": "feature", "why": "a new flag was added"}]}"#;
         let s = summarizer(vec![MockResponse::text(reply)], SummarizeOptions::default());
 
-        let out = s.summarize_one(store.as_ref(), &session).await;
+        let out = s
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await;
         let brief = match &out.outcome {
             Outcome::Generated { brief, mirrored } => {
                 assert!(mirrored.is_none(), "no mirror configured");
@@ -483,7 +498,7 @@ mod tests {
         assert_eq!(brief.prompt_source.as_deref(), Some("events"));
         assert_eq!(brief.digest_hash.len(), 64);
         assert_eq!(
-            store
+            briefs
                 .brief_for(ToolKind::Codex, "sess")
                 .await
                 .unwrap()
@@ -492,7 +507,9 @@ mod tests {
         );
 
         // Second run: the mock queue is empty, and it must not be consulted.
-        let again = s.summarize_one(store.as_ref(), &session).await;
+        let again = s
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await;
         assert!(matches!(again.outcome, Outcome::Unchanged { .. }));
 
         // Forced: the empty mock reply is an error, proving the call happened.
@@ -503,13 +520,15 @@ mod tests {
                 ..Default::default()
             },
         );
-        let f = forced.summarize_one(store.as_ref(), &session).await;
+        let f = forced
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await;
         assert!(matches!(f.outcome, Outcome::Failed { .. }));
     }
 
     #[tokio::test]
     async fn dry_run_returns_the_message_and_calls_nothing() {
-        let (store, session) = store_with_session().await;
+        let (store, briefs, session) = store_with_session().await;
         let s = summarizer(
             vec![],
             SummarizeOptions {
@@ -517,7 +536,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        let out = s.summarize_one(store.as_ref(), &session).await;
+        let out = s
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await;
         match out.outcome {
             Outcome::DryRun {
                 user_message,
@@ -531,7 +552,7 @@ mod tests {
             }
             other => panic!("expected DryRun, got {other:?}"),
         }
-        assert!(store
+        assert!(briefs
             .brief_for(ToolKind::Codex, "sess")
             .await
             .unwrap()
@@ -540,14 +561,16 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tag_is_retried_once_then_recorded_as_rejected() {
-        let (store, session) = store_with_session().await;
+        let (store, briefs, session) = store_with_session().await;
         let bad = r#"{"summary": "s", "tags": [{"name": "feature", "why": "x"}, {"name": "enhancement", "why": "y"}]}"#;
         let still_bad = r#"{"summary": "s2", "tags": [{"name": "feature", "why": "x"}, {"name": "enhancement", "why": "y"}]}"#;
         let s = summarizer(
             vec![MockResponse::text(bad), MockResponse::text(still_bad)],
             SummarizeOptions::default(),
         );
-        let out = s.summarize_one(store.as_ref(), &session).await;
+        let out = s
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await;
         match out.outcome {
             Outcome::Generated { brief, .. } => {
                 assert_eq!(brief.summary, "s2", "the retry's reply is used");
@@ -561,7 +584,7 @@ mod tests {
 
     #[tokio::test]
     async fn unparseable_reply_is_retried_and_a_good_second_reply_wins() {
-        let (store, session) = store_with_session().await;
+        let (store, briefs, session) = store_with_session().await;
         let s = summarizer(
             vec![
                 MockResponse::text("Sure! Here is prose without JSON."),
@@ -569,7 +592,9 @@ mod tests {
             ],
             SummarizeOptions::default(),
         );
-        let out = s.summarize_one(store.as_ref(), &session).await;
+        let out = s
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await;
         assert!(
             matches!(out.outcome, Outcome::Generated { ref brief, .. } if brief.summary == "ok")
         );
@@ -581,7 +606,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        let out = twice_bad.summarize_one(store.as_ref(), &session).await;
+        let out = twice_bad
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await;
         assert!(matches!(out.outcome, Outcome::Failed { .. }));
     }
 
@@ -620,6 +647,7 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
+        let briefs = Arc::new(InMemoryBriefStore::new());
         let mirror = Arc::new(RecordingMirror(Default::default()));
         let s = Arc::new(
             Summarizer::new(
@@ -651,7 +679,10 @@ mod tests {
             user_message,
             mechanical,
             ..
-        } = dry.summarize_one(store.as_ref(), &session).await.outcome
+        } = dry
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await
+            .outcome
         {
             assert!(user_message.contains("[REDACTED:anthropic_api_key]"));
             assert!(!user_message.contains("sk-ant-"));
@@ -661,7 +692,9 @@ mod tests {
             panic!("expected DryRun");
         }
 
-        let out = s.summarize_one(store.as_ref(), &session).await;
+        let out = s
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await;
         match out.outcome {
             Outcome::Generated { brief, mirrored } => {
                 assert_eq!(brief.primary_tag(), Some("test"));
@@ -703,6 +736,7 @@ mod tests {
             .sessions_for(ToolKind::Codex, None, 100, 0)
             .await
             .unwrap();
+        let briefs = Arc::new(InMemoryBriefStore::new());
         let responses = (0..6)
             .map(|_| MockResponse::text(r#"{"summary": "s", "tags": []}"#))
             .collect();
@@ -713,7 +747,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        let out = s.summarize_many(store.clone(), sessions.clone()).await;
+        let out = s
+            .summarize_many(store.clone(), briefs.clone(), sessions.clone())
+            .await;
         let ids: Vec<&str> = out.iter().map(|o| o.session_id.as_str()).collect();
         let expected: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
         assert_eq!(ids, expected);

@@ -2,8 +2,7 @@
 
 use serde::Deserialize;
 
-use aikit_session_capture::TagAssignment;
-
+use crate::brief::TagAssignment;
 use crate::tags::{ModelTag, TagList};
 
 /// The one system message. Nothing else is injected (ADR 0022).
@@ -111,7 +110,7 @@ pub fn parse_reply(text: &str) -> Result<ModelReply, ReplyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aikit_session_capture::TagSource;
+    use crate::brief::TagSource;
 
     #[test]
     fn user_message_names_allowed_and_assigned_tags() {

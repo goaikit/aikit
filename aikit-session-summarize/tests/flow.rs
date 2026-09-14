@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use aikit_agent::llm::mock::{MockGateway, MockResponse};
 use aikit_session_capture::{
-    scan_adapter, EventStore, InMemoryCursorStore, InMemoryEventStore, TagSource, ToolKind,
+    scan_adapter, EventStore, InMemoryCursorStore, InMemoryEventStore, ToolKind,
 };
 use aikit_session_summarize::{
-    adapters_for, select_sessions, LocationSpec, ModelConfig, Outcome, Selection, SummarizeOptions,
-    Summarizer, TagList,
+    adapters_for, select_sessions, BriefStore, InMemoryBriefStore, LocationSpec, ModelConfig,
+    Outcome, Selection, SummarizeOptions, Summarizer, TagList, TagSource,
 };
 
 fn fixtures() -> PathBuf {
@@ -72,6 +72,7 @@ async fn all_sessions(store: &InMemoryEventStore) -> Vec<aikit_session_capture::
 #[tokio::test]
 async fn fixtures_scan_list_and_summarize_end_to_end() {
     let (store, _dir) = scanned().await;
+    let briefs = Arc::new(InMemoryBriefStore::new());
 
     let listed = all_sessions(&store).await;
     let mut ids: Vec<(ToolKind, &str)> = listed
@@ -107,7 +108,9 @@ async fn fixtures_scan_list_and_summarize_end_to_end() {
             ..Default::default()
         },
     ));
-    let outcomes = dry.summarize_many(store.clone(), selected.clone()).await;
+    let outcomes = dry
+        .summarize_many(store.clone(), briefs.clone(), selected.clone())
+        .await;
     for o in &outcomes {
         match &o.outcome {
             Outcome::DryRun { user_message, .. } => {
@@ -122,7 +125,7 @@ async fn fixtures_scan_list_and_summarize_end_to_end() {
             other => panic!("expected DryRun for {}: {other:?}", o.session_id),
         }
     }
-    assert!(store
+    assert!(briefs
         .brief_for(ToolKind::Codex, "cx-001")
         .await
         .unwrap()
@@ -153,7 +156,9 @@ async fn fixtures_scan_list_and_summarize_end_to_end() {
             ..Default::default()
         },
     ));
-    let outcomes = real.summarize_many(store.clone(), selected.clone()).await;
+    let outcomes = real
+        .summarize_many(store.clone(), briefs.clone(), selected.clone())
+        .await;
     assert_eq!(outcomes.len(), 2);
     for o in &outcomes {
         match &o.outcome {
@@ -166,7 +171,7 @@ async fn fixtures_scan_list_and_summarize_end_to_end() {
                 assert!(!brief.areas.is_empty(), "areas from the fixture's reads");
                 assert_eq!(brief.model, "mock");
                 assert!(mirrored.is_none());
-                let stored = store.brief_for(o.tool, &o.session_id).await.unwrap();
+                let stored = briefs.brief_for(o.tool, &o.session_id).await.unwrap();
                 assert_eq!(stored.as_ref(), Some(brief));
             }
             other => panic!("expected Generated for {}: {other:?}", o.session_id),
@@ -174,7 +179,9 @@ async fn fixtures_scan_list_and_summarize_end_to_end() {
     }
 
     // Unchanged sessions are a no-op: the queue is empty and never touched.
-    let again = real.summarize_many(store.clone(), selected.clone()).await;
+    let again = real
+        .summarize_many(store.clone(), briefs.clone(), selected.clone())
+        .await;
     assert!(again
         .iter()
         .all(|o| matches!(o.outcome, Outcome::Unchanged { .. })));
@@ -189,17 +196,19 @@ async fn fixtures_scan_list_and_summarize_end_to_end() {
             ..Default::default()
         },
     ));
-    let f = forced.summarize_one(store.as_ref(), &selected[0]).await;
+    let f = forced
+        .summarize_one(store.as_ref(), briefs.as_ref(), &selected[0])
+        .await;
     assert!(matches!(f.outcome, Outcome::Failed { .. }));
     // The stored brief survives a failed regeneration.
-    assert!(store
+    assert!(briefs
         .brief_for(selected[0].tool, &selected[0].session_id)
         .await
         .unwrap()
         .is_some());
 
     // Briefs list newest first per tool.
-    let codex = store.briefs_for(ToolKind::Codex, 10, 0).await.unwrap();
+    let codex = briefs.briefs_for(ToolKind::Codex, 10, 0).await.unwrap();
     assert_eq!(codex.len(), 1);
     assert_eq!(codex[0].session_id, "cx-001");
 }

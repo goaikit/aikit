@@ -5,7 +5,9 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
-use aikit_session_capture::{ActionKind, AreaTouch, ToolEvent};
+use aikit_session_capture::{ActionKind, ToolEvent};
+
+use crate::brief::AreaTouch;
 use serde::Deserialize;
 
 /// Idle gaps longer than this are not attributed to any area: the user

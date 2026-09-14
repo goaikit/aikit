@@ -68,11 +68,13 @@ exact user message sent, which embeds the tag list and the mechanical tags.
 A brief whose stored hash matches is not regenerated without `--force`. Two
 briefs with the same hash were produced from the same bytes.
 
-**Briefs live in the capture store, additively.** `SessionBrief` is a new
-record beside `SessionSummary` in `aikit-session-capture`, persisted through
-three new `EventStore` methods with default implementations, so an existing
-store keeps compiling. The SQLite table is created by the existing
-`IF NOT EXISTS` migration. The record follows [ADR 0020](0020-eval-artifacts-are-an-additive-only-contract.md):
+**Briefs are the summarizer's record, stored beside the events.**
+`SessionBrief` and the `BriefStore` trait live in `aikit-session-summarize`,
+not in the capture crate: capture stays about parsed events and knows nothing
+about briefs. A host that persists briefs implements `BriefStore` beside
+`EventStore`; the production SQLite store implements both on one connection,
+and the table is created by the existing `IF NOT EXISTS` migration. The
+record follows [ADR 0020](0020-eval-artifacts-are-an-additive-only-contract.md):
 fields are added with `#[serde(default)]`, never renamed or removed. The
 primary tag is mirrored into the backend's own tag slot where a
 `HistoryMutator` exists, so the tool's UI shows it; the brief remains the

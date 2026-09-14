@@ -14,6 +14,7 @@
 //! Modules:
 //! - [`locate`]: which adapters and roots to scan, from `--tool` / `--path`.
 //! - [`select`]: which captured sessions to act on (`--session`, `--since`, `--all`).
+//! - [`brief`]: the `SessionBrief` record and the `BriefStore` trait a host implements.
 //! - [`areas`]: deterministic area grouping with time attribution.
 //! - [`tags`]: the tag list, the mechanical rules, model-tag validation.
 //! - [`digest`]: the bounded model input built from events.
@@ -21,6 +22,7 @@
 //! - [`engine`]: the batch summarizer with bounded concurrency.
 
 pub mod areas;
+pub mod brief;
 pub mod digest;
 pub mod engine;
 pub mod locate;
@@ -29,6 +31,9 @@ pub mod select;
 pub mod tags;
 
 pub use areas::{group_areas, AreaMapping, AreaRule};
+pub use brief::{
+    AreaTouch, BriefStore, InMemoryBriefStore, SessionBrief, TagAssignment, TagSource,
+};
 pub use digest::{build_digest, Digest, DigestOptions, PromptsInput};
 pub use engine::{
     ModelConfig, Outcome, PromptSource, SessionOutcome, SummarizeOptions, Summarizer, TagMirror,

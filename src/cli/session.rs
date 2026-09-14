@@ -25,8 +25,8 @@ use aikit_session_capture::{Registry, ToolKind};
 #[cfg(feature = "agent-adapters")]
 use aikit_session_summarize::{
     adapters_for, parse_location, parse_since, parse_tool_kind, select_sessions, AreaMapping,
-    LocationSpec, ModelConfig, Outcome, PromptSource, Selection, SummarizeOptions, Summarizer,
-    TagList, TagMirror,
+    BriefStore, LocationSpec, ModelConfig, Outcome, PromptSource, Selection, SummarizeOptions,
+    Summarizer, TagList, TagMirror,
 };
 #[cfg(feature = "agent-adapters")]
 use aikit_session_sync::{
@@ -346,6 +346,7 @@ struct Scan {
     adapters: Vec<Box<dyn Adapter>>,
     event_store: Arc<dyn EventStore>,
     cursor_store: Arc<dyn CursorStore>,
+    brief_store: Arc<dyn BriefStore>,
 }
 
 #[cfg(feature = "agent-adapters")]
@@ -363,12 +364,15 @@ impl Scan {
         let db_path = capture_db(db);
         let conn = super::serve::storage::schema::open(&db_path)
             .map_err(|e| anyhow::anyhow!("opening capture store {}: {e}", db_path.display()))?;
+        // One SQLite store serves both traits: events and briefs.
+        let sqlite = Arc::new(super::serve::storage::SqliteEventStore::new(conn.clone()));
         Ok(Self {
             tools,
             locations,
             adapters,
-            event_store: Arc::new(super::serve::storage::SqliteEventStore::new(conn.clone())),
+            event_store: sqlite.clone(),
             cursor_store: Arc::new(super::serve::storage::SqliteCursorStore::new(conn)),
+            brief_store: sqlite,
         })
     }
 
@@ -601,7 +605,11 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
             .with_tag_mirror(Arc::new(HistoryTagMirror)),
     );
     let outcomes = summarizer
-        .summarize_many(Arc::clone(&scan.event_store), selected)
+        .summarize_many(
+            Arc::clone(&scan.event_store),
+            Arc::clone(&scan.brief_store),
+            selected,
+        )
         .await;
 
     let mut failed = 0;
@@ -674,13 +682,13 @@ fn print_brief(
     session_id: &str,
     tool: ToolKind,
     status: &str,
-    brief: &aikit_session_capture::SessionBrief,
+    brief: &aikit_session_summarize::SessionBrief,
 ) {
     let tags: Vec<String> = brief
         .tags
         .iter()
         .map(|t| match t.source {
-            aikit_session_capture::TagSource::Mechanical => format!("{}*", t.name),
+            aikit_session_summarize::TagSource::Mechanical => format!("{}*", t.name),
             _ => t.name.clone(),
         })
         .collect();

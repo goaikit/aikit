@@ -15,8 +15,9 @@ use serde_json::Value;
 
 use aikit_session_capture::{
     ActionKind, ActionStatus, CacheObservation, CaptureSource, EventBatch, EventStore, FileTouch,
-    SessionBrief, SessionSummary, StoreError, TokenEvent, ToolEvent, ToolKind,
+    SessionSummary, StoreError, TokenEvent, ToolEvent, ToolKind,
 };
+use aikit_session_summarize::{BriefStore, SessionBrief};
 
 /// Map a rusqlite error into the crate-agnostic [`StoreError::Backend`] variant.
 /// (Can't impl `From<rusqlite::Error>` due to the orphan rule — `StoreError`
@@ -404,7 +405,13 @@ impl EventStore for SqliteEventStore {
             .map_err(sqlite_err)?;
         Ok(result)
     }
+}
 
+// ── session briefs (BriefStore, ADR 0022) ─────────────────────────────────────
+
+/// The same connection serves briefs: one database, two traits.
+#[async_trait]
+impl BriefStore for SqliteEventStore {
     async fn put_brief(&self, brief: &SessionBrief) -> Result<(), StoreError> {
         let conn = self.conn.clone();
         let brief = brief.clone();
@@ -486,8 +493,6 @@ impl EventStore for SqliteEventStore {
         .map_err(sqlite_err)
     }
 }
-
-// ── session briefs ────────────────────────────────────────────────────────────
 
 const BRIEF_SELECT: &str = "SELECT tool, session_id, summary, areas, tags, model, \
      digest_hash, generated_at_ms, extra FROM capture_session_briefs";
@@ -718,7 +723,7 @@ mod tests {
 
     #[tokio::test]
     async fn briefs_round_trip_replace_and_page() {
-        use aikit_session_capture::{AreaTouch, SessionBrief, TagAssignment, TagSource};
+        use aikit_session_summarize::{AreaTouch, SessionBrief, TagAssignment, TagSource};
         let store =
             SqliteEventStore::new(crate::cli::serve::storage::schema::open_in_memory().unwrap());
         let brief = |id: &str, at: i64| SessionBrief {
