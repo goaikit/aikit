@@ -28,6 +28,10 @@ pub struct AgentConfig {
     pub session_agents: HashMap<String, AgentPersona>,
     /// Optional host tool provider injected by the embedder.
     pub host_tool_provider: Option<Arc<dyn HostToolProvider>>,
+    /// Emit one `HarnessSnapshot` event at run start carrying the system
+    /// prompt, tool definitions, model, skills and hooks in effect (ADR
+    /// 0022). Off by default; set from `RunOptions::capture_harness`.
+    pub capture_harness: bool,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -133,6 +137,7 @@ impl AgentConfig {
             session_persona: None,
             session_agents: HashMap::new(),
             host_tool_provider: None,
+            capture_harness: false,
         })
     }
 }

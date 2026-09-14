@@ -22,9 +22,10 @@ pub mod usage;
 
 pub use types::{
     AgentAvailabilityReason, AgentEvent, AgentEventPayload, AgentEventStream, AgentStatus,
-    KnobSupport, MessageKind, MessagePhase, MessageRole, OutputMode, ProgressSink, QuotaCategory,
-    QuotaExceededInfo, RunError, RunOptions, RunResult, SandboxPolicy, SkillIsolation,
-    StreamMessage, TerminalOutcome, TokenUsage, UsageSource,
+    HookAction, HookPhase, KnobSupport, MessageKind, MessagePhase, MessageRole, OutputMode,
+    ProgressSink, QuotaCategory, QuotaExceededInfo, RunError, RunOptions, RunResult, SandboxPolicy,
+    SkillIsolation, StreamMessage, TerminalOutcome, TokenUsage, ToolDefinitionSnapshot,
+    UsageSource,
 };
 
 pub use argv::{is_runnable, runnable_agents};
@@ -545,10 +546,14 @@ where
                                     call_id,
                                     output,
                                     is_error,
+                                    duration_ms,
+                                    started_at_ms,
                                 } => AgentEventPayload::ToolResult {
                                     call_id,
                                     output,
                                     is_error,
+                                    duration_ms,
+                                    started_at_ms,
                                 },
                                 backend::Decoded::Terminal {
                                     outcome,
@@ -1294,6 +1299,8 @@ mod tests {
                 AgentEventPayload::Result { .. } => "result",
                 AgentEventPayload::SessionStarted { .. } => "session_started",
                 AgentEventPayload::Terminal { .. } => "terminal",
+                AgentEventPayload::HarnessSnapshot { .. } => "harness_snapshot",
+                AgentEventPayload::Hook { .. } => "hook",
             };
             payloads.push(kind.to_string());
         });

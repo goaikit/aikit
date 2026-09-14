@@ -564,6 +564,8 @@ fn map_item(item: &Value, raw_line_seq: u64) -> Vec<Decoded> {
                             .to_string(),
                         output: json!(output),
                         is_error: item.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0) != 0,
+                        duration_ms: None,
+                        started_at_ms: None,
                     });
                 }
             }
@@ -627,10 +629,14 @@ fn decoded_to_payload(frame: Decoded) -> AgentEventPayload {
             call_id,
             output,
             is_error,
+            duration_ms,
+            started_at_ms,
         } => AgentEventPayload::ToolResult {
             call_id,
             output,
             is_error,
+            duration_ms,
+            started_at_ms,
         },
         Decoded::Terminal {
             outcome,

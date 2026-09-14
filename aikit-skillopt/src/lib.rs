@@ -631,6 +631,7 @@ mod tests {
             pass_threshold: 0.5,
             isolation: aikit_evals::IsolationMode::Inherit,
             retain_workspace_in: None,
+            capture_harness: false,
         };
 
         let result = runner.run_case_trials(&case, &opts, &[], 3, None).await;

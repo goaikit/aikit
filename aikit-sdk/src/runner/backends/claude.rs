@@ -168,6 +168,8 @@ pub(crate) fn map_message(
                         call_id: t.tool_use_id,
                         output: t.content.unwrap_or(serde_json::Value::Null),
                         is_error: t.is_error.unwrap_or(false),
+                        duration_ms: None,
+                        started_at_ms: None,
                     }),
                     ContentBlock::ServerToolUse(s) => out.push(Decoded::ToolUse {
                         call_id: s.id,
@@ -178,6 +180,8 @@ pub(crate) fn map_message(
                         call_id: s.tool_use_id,
                         output: serde_json::Value::Object(s.content),
                         is_error: false,
+                        duration_ms: None,
+                        started_at_ms: None,
                     }),
                 }
             }
@@ -191,6 +195,8 @@ pub(crate) fn map_message(
                             call_id: t.tool_use_id,
                             output: t.content.unwrap_or(serde_json::Value::Null),
                             is_error: t.is_error.unwrap_or(false),
+                            duration_ms: None,
+                            started_at_ms: None,
                         });
                     }
                 }
@@ -620,6 +626,8 @@ mod sdk_tests {
                 call_id,
                 output,
                 is_error,
+                duration_ms: None,
+                started_at_ms: None,
             } => {
                 assert_eq!(call_id, "tu_1");
                 assert_eq!(output, "file.txt");

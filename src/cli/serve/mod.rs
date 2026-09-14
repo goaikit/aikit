@@ -844,6 +844,8 @@ mod tests {
             call_id: "tu_1".into(),
             output: serde_json::json!("file.txt\n"),
             is_error: false,
+            duration_ms: None,
+            started_at_ms: None,
         };
         let (tag, data) = tag_and_inner(&res_ev);
         assert_eq!(tag, "tool_result");
@@ -1015,6 +1017,8 @@ mod tests {
             call_id: "c1".into(),
             output: serde_json::Value::Null,
             is_error: false,
+            duration_ms: None,
+            started_at_ms: None,
         };
         assert_eq!(payload_kind_name(&res_ev), "tool_result");
     }

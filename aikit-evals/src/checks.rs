@@ -479,18 +479,37 @@ fn count_matching(trace_jsonl: &str, predicate: impl Fn(&TracePayload) -> bool) 
 /// off raw stdout. Blanking only that one field is the narrower change: every
 /// modelled payload line still matches byte-identically, and the `Unknown`
 /// event itself (with its `payload_type`) stays visible in the haystack.
+///
+/// The same reasoning blanks what the harness told the agent (ADR 0022): a
+/// `harness_snapshot`'s system prompt lists every skill in the catalogue and
+/// its tool schemas name every tool, and a `hook` payload names the tool a
+/// blocked call asked for. A pattern check must read what the agent did.
 fn pattern_haystack(trace_jsonl: &str) -> String {
     trace_jsonl
         .lines()
         .map(|line| match serde_json::from_str::<TraceEvent>(line) {
-            Ok(mut event) => {
-                if let TracePayload::Unknown { raw, .. } = &mut event.payload {
+            Ok(mut event) => match &mut event.payload {
+                TracePayload::Unknown { raw, .. } => {
                     raw.clear();
                     serde_json::to_string(&event).unwrap_or_default()
-                } else {
-                    line.to_string()
                 }
-            }
+                TracePayload::HarnessSnapshot {
+                    system_prompt,
+                    tools,
+                    skills,
+                    ..
+                } => {
+                    *system_prompt = None;
+                    tools.clear();
+                    skills.clear();
+                    serde_json::to_string(&event).unwrap_or_default()
+                }
+                TracePayload::Hook { payload, .. } => {
+                    *payload = None;
+                    serde_json::to_string(&event).unwrap_or_default()
+                }
+                _ => line.to_string(),
+            },
             Err(_) => line.to_string(),
         })
         .collect::<Vec<_>>()
@@ -1585,5 +1604,57 @@ limit = 2
         let results = run_checks(&[check], "", "", Path::new("/tmp"));
         assert!(results[0].is_observable(), "{:?}", results[0]);
         assert!(results[0].passed);
+    }
+}
+
+#[cfg(test)]
+mod harness_haystack_tests {
+    //! ADR 0022: pattern checks read what the agent did, not what the
+    //! harness told it.
+    use super::*;
+    use crate::trace::{trace_to_jsonl, TraceEvent, TracePayload, TraceToolDefinition};
+
+    #[test]
+    fn pattern_checks_do_not_read_the_snapshot_prompt_tools_skills_or_hook_payloads() {
+        let events = vec![
+            TraceEvent {
+                seq: 0,
+                payload: TracePayload::HarnessSnapshot {
+                    backend: "aikit".to_string(),
+                    model: Some("m".to_string()),
+                    system_prompt: Some("Use the `secret-skill` skill".to_string()),
+                    tools: vec![TraceToolDefinition {
+                        name: "secret_tool".to_string(),
+                        description: None,
+                        input_schema: None,
+                    }],
+                    skills: vec!["secret-skill".to_string()],
+                    hooks: vec!["tool_dispatch".to_string()],
+                },
+            },
+            TraceEvent {
+                seq: 1,
+                payload: TracePayload::Hook {
+                    phase: "before_tool".to_string(),
+                    hook_name: "tool_dispatch".to_string(),
+                    action: "blocked".to_string(),
+                    payload: Some(serde_json::json!({"tool_name": "secret_tool"})),
+                },
+            },
+        ];
+        let jsonl = trace_to_jsonl(&events);
+        assert!(
+            jsonl.contains("secret"),
+            "the trace itself keeps everything"
+        );
+
+        let hay = pattern_haystack(&jsonl);
+        assert!(!hay.contains("secret-skill"), "{hay}");
+        assert!(!hay.contains("secret_tool"), "{hay}");
+        assert!(
+            hay.contains("harness_snapshot") && hay.contains(r#""model":"m""#),
+            "{hay}"
+        );
+        assert!(hay.contains(r#""hook_name":"tool_dispatch""#), "{hay}");
     }
 }

@@ -118,6 +118,8 @@ pub(crate) fn decode(
                                     call_id,
                                     output: serde_json::json!(out),
                                     is_error: item_is_error(item),
+                                    duration_ms: None,
+                                    started_at_ms: None,
                                 });
                             }
                         }
@@ -238,6 +240,8 @@ pub(crate) fn decode(
                         "stderr": stderr.unwrap_or("")
                     }),
                     is_error: stderr.is_some_and(|s| !s.trim().is_empty()),
+                    duration_ms: None,
+                    started_at_ms: None,
                 });
             }
         }

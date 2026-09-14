@@ -271,6 +271,7 @@ mod tests {
             pass_threshold: 1.0,
             isolation: crate::runner::IsolationMode::Inherit,
             retain_workspace_in: None,
+            capture_harness: false,
         }
     }
 
@@ -768,6 +769,7 @@ mod tests {
                 source: SkillSource::Inline("# s\n".to_string()),
             },
             retain_workspace_in: None,
+            capture_harness: false,
         };
         let isolated = score_cases(&runner, &cases, &isolated_opts, &scorer, 1, Some(1)).await;
         assert!(

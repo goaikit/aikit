@@ -479,10 +479,14 @@ fn decoded_to_payload(frame: Decoded) -> AgentEventPayload {
             call_id,
             output,
             is_error,
+            duration_ms,
+            started_at_ms,
         } => AgentEventPayload::ToolResult {
             call_id,
             output,
             is_error,
+            duration_ms,
+            started_at_ms,
         },
         Decoded::Terminal {
             outcome,
@@ -591,6 +595,8 @@ mod tests {
             call_id: "c1".into(),
             output: serde_json::json!("ok"),
             is_error: false,
+            duration_ms: None,
+            started_at_ms: None,
         });
         assert!(matches!(p, AgentEventPayload::ToolResult { .. }));
     }

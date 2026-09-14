@@ -76,6 +76,11 @@ pub struct CaseRunOptions {
     /// (spec 016 D2). `None` = always delete. The caller owns the policy; the
     /// runner owns the mechanism.
     pub retain_workspace_in: Option<PathBuf>,
+    /// Ask the backend for a `harness_snapshot` line at the head of each
+    /// trial's `trace.jsonl` (ADR 0022): the system prompt, tool definitions,
+    /// model, skills and hooks in effect. Off by default; only backends that
+    /// can see their own harness (the in-process `aikit` agent) populate it.
+    pub capture_harness: bool,
 }
 
 /// A per-case scratch workspace handed back to the caller so post-run scoring
@@ -658,7 +663,8 @@ impl AikitEvalRunner {
             .with_stream(true)
             .with_timeout(Duration::from_secs(timeout_secs))
             .with_current_dir(working_dir.clone())
-            .with_emit_token_usage_events(true);
+            .with_emit_token_usage_events(true)
+            .with_capture_harness(opts.capture_harness);
         if let Some(p) = payload.clone() {
             run_opts = run_opts.with_skill_isolation(p);
         }
@@ -1069,6 +1075,7 @@ mod tests {
                 source: SkillSource::Inline("# My Skill\n".to_string()),
             },
             retain_workspace_in: None,
+            capture_harness: false,
         }
     }
 
@@ -1178,6 +1185,7 @@ mod tests {
             pass_threshold: 1.0,
             isolation: IsolationMode::Inherit,
             retain_workspace_in: None,
+            capture_harness: false,
         };
         let runner = StubEvalRunner;
         let (out, res, trace) = runner.run_case(&case, &opts, &[]).await;
@@ -1196,6 +1204,7 @@ mod tests {
             pass_threshold: 1.0,
             isolation: IsolationMode::Inherit,
             retain_workspace_in: None,
+            capture_harness: false,
         };
         assert_eq!(opts.agent_key, "codex");
         assert_eq!(opts.model, Some("gpt-4".to_string()));
@@ -1229,6 +1238,7 @@ mod tests {
             pass_threshold: 1.0,
             isolation: IsolationMode::Inherit,
             retain_workspace_in: None,
+            capture_harness: false,
         };
         let case = EvalCase {
             id: "required-matrix".to_string(),
@@ -1304,6 +1314,7 @@ mod tests {
             pass_threshold: 1.0,
             isolation: IsolationMode::Inherit,
             retain_workspace_in: None,
+            capture_harness: false,
         };
         let case = EvalCase {
             id: "agent-failure".to_string(),
@@ -1360,6 +1371,7 @@ mod tests {
             pass_threshold: 1.0,
             isolation: IsolationMode::Inherit,
             retain_workspace_in: None,
+            capture_harness: false,
         };
         let case = EvalCase {
             id: "agent-failure-trials".to_string(),
@@ -1413,6 +1425,7 @@ mod tests {
             pass_threshold: 1.0,
             isolation: IsolationMode::Inherit,
             retain_workspace_in: None,
+            capture_harness: false,
         };
         let runner = StubEvalRunner;
         let (_out, res, _trace) = runner.run_case(&case, &opts, &[]).await;
@@ -1446,6 +1459,7 @@ mod tests {
             pass_threshold: 1.0,
             isolation: IsolationMode::Inherit,
             retain_workspace_in: None,
+            capture_harness: false,
         };
         let runner = StubEvalRunner;
         let trials_result = runner.run_case_trials(&case, &opts, &[], 2, None).await;
@@ -1954,6 +1968,7 @@ mod tests {
             pass_threshold: 1.0,
             isolation: IsolationMode::Inherit,
             retain_workspace_in: None,
+            capture_harness: false,
         };
         let runner = AikitEvalRunner::new();
         let (_out, result, _trace) = runner.run_case_inner(&simple_case("m1"), &opts, &[]).await;
