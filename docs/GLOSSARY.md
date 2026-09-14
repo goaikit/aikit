@@ -37,9 +37,20 @@ Terms below reflect discussion of **AIKit**, **HTTP exposure for agent operation
 | **One-shot invocation** | A single magic-tool call: validated input → one **Agent run** → **Draft**. The "Magic Button" mode. | Magic tool (the tool ≠ a single call) |
 | **Magic tool session** | A multi-turn conversation that refines a **Draft**, implemented as successive **Agent runs** sharing one `session_id`. The "Copilot" mode. | "Session" unqualified — see flagged ambiguity below |
 
+## Session capture and briefs
+
+| Term | Definition | Aliases to avoid |
+| --- | --- | --- |
+| **Captured session** | One session an adapter has parsed from a tool's on-disk transcript into the event store (spec 010): the row `aikit session list` prints. | Session (bare), transcript, history entry |
+| **Digest** | The bounded, secret-scrubbed text built from a captured session's events that is the only thing a summarizing model sees ([ADR 0022](adr/0022-a-session-brief-is-one-completion-over-a-scrubbed-digest.md)). | Transcript, context, prompt |
+| **Area** | A directory of the repository (or a user-named group of path prefixes) a session touched, with read and modification counts and attributed time. | Module, component, file group |
+| **Mechanical tag** | A tag decided in code from the events before any model call, e.g. `test` when only test files changed. | Rule tag, auto tag |
+| **Session brief** | The persisted result of `aikit session summarize`: summary paragraph, areas, tags, model, digest hash, generated-at time. | Session summary (that is the captured-session row), report, annotation |
+
 ## Flagged ambiguities
 
-- **"Session"** is overloaded. The glossary lists it as an alias to avoid for **Agent run**. The magic-tool feature uses it for the multi-turn case, so the canonical term is **Magic tool session** (a *sequence* of Agent runs sharing a `session_id`), never bare "session". A single Agent run is still an **Agent run**, not a session.
+- **"Session"** is overloaded. The glossary lists it as an alias to avoid for **Agent run**. The magic-tool feature uses it for the multi-turn case, so the canonical term is **Magic tool session** (a *sequence* of Agent runs sharing a `session_id`), never bare "session". A single Agent run is still an **Agent run**, not a session. A session a coding tool left on disk and an adapter parsed is a **Captured session**.
+- **"Summary"** is taken twice in session capture: `SessionSummary` is the captured-session row, and the generated record is a **Session brief**. Say *brief* for the generated one.
 
 ## Relationships
 

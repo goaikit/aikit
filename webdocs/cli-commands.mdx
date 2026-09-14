@@ -19,6 +19,8 @@ AIKit organizes functionality into logical command groups:
 - **`mcp list`** - List supported agents and their project/global config paths
 - **`agent mcp`** - List supported agents or merge one MCP server into agent config files
 - **`serve`** - Start an HTTP server for multi-turn agent sessions ([dedicated page](/serve))
+- **`session list`** - List captured coding-agent sessions on disk (`--live` for live sessions on `aikit serve`)
+- **`session summarize`** - Summarize captured sessions: one paragraph, areas touched, tags from a fixed list
 - **`session sync`** - Sync raw, secret-scrubbed Claude Code / Codex session transcripts to S3-compatible blob storage
 - **`llm`** - Invoke an LLM via OpenAI-compatible API (supports streaming and JSON output)
 - **`check`** / **`agent check`** - Validate installed tools and AI agent CLIs
@@ -66,6 +68,8 @@ aikit <command> --help
 | `mcp list` | List agents + config paths | `aikit mcp list` |
 | `agent mcp` | MCP config merge | `aikit agent mcp list` / `aikit agent mcp add --agent claude ...` |
 | `serve` | Multi-turn HTTP API | `aikit serve --port 8787` |
+| `session list` | List captured sessions on disk | `aikit session list --tool claude_code --since 7d` |
+| `session summarize` | Summarize and tag sessions | `aikit session summarize --since 24h --model gpt-4o` |
 | `session sync` | Sync sessions to blob | `aikit session sync --owner me --bucket b --endpoint https://…` |
 | `llm` | Invoke an LLM | `aikit llm -m gpt-4o -p "Hello"` |
 | `check` | Validate environment | `aikit check` |
@@ -293,6 +297,144 @@ curl -s -X POST http://127.0.0.1:8787/api/v1/messages \
 Any other explicit `Accept` returns `406 Not Acceptable`. See the
 [serve API reference](/serve) for full request/response schemas, SSE event
 names, session lifecycle, and error codes.
+
+### session list
+
+List the coding-agent sessions on disk — **Claude Code**, **Codex** and
+**OpenCode** — as captured sessions: id, tool, start and end time, action
+count, git root and source file. Listing scans the selected locations into the
+capture store first (cursor-resumed and idempotent, the same path `aikit serve`
+uses), then prints what the store holds for the selected tools.
+
+```bash
+# Every tool's default home, newest first
+aikit session list
+
+# One tool, the last week, machine-readable
+aikit session list --tool claude_code --since 7d --format json
+
+# A scratch directory (CI); the tool is named so no other adapter claims the files
+aikit session list --path codex=/tmp/ci-sessions --db /tmp/ci-capture.db
+
+# A bare directory is offered to every adapter; files are claimed by name shape
+aikit session list --path /mnt/backup/sessions
+
+# The previous behaviour: live sessions on a running aikit serve
+aikit session list --live --serve-url http://127.0.0.1:8080
+```
+
+**Options:**
+
+| Flag | Env | Default | Description |
+|------|-----|---------|-------------|
+| `--tool` | — | all compiled tools | Repeatable; `claude_code`, `codex` or `open_code` |
+| `--path` | — | each tool's home | Repeatable; `[<tool>=]<dir>`. Overrides the registry's homes (`CLAUDE_HOME`, `CODEX_HOME`, then `$HOME`). With `--path`, only sessions under a given root are listed |
+| `--since` | — | — | `24h`, `7d`, `2w`, an RFC 3339 time or `YYYY-MM-DD`; filters on the session's last event |
+| `--db` | `AIKIT_CAPTURE_DB` | `<data dir>/aikit/capture.db` | The capture SQLite file (the one `aikit serve` uses) |
+| `--format` | — | `default` | `default` (table) or `json` (an array of captured-session rows) |
+| `--live` | — | off | List live sessions on a running `aikit serve` instead |
+| `--serve-url` | `AIKIT_SERVE_URL` | `http://127.0.0.1:8080` | With `--live` only |
+
+Requires a build with the `agent-adapters` feature (`--live` does not).
+
+### session summarize
+
+Write a **brief** for each selected captured session: one short summary
+paragraph, the **areas** of the repository touched, and **tags** from a fixed
+list. The model never sees a transcript. It sees a bounded, secret-scrubbed
+**digest** built from the captured events — prompts, files touched in order
+with their action kinds, commands run, the areas table, the final assistant
+message — and answers with one completion, no tools, no agent loop
+([ADR 0022](https://github.com/goaikit/aikit/blob/main/docs/adr/0022-a-session-brief-is-one-completion-over-a-scrubbed-digest.md)).
+
+```bash
+# Preview: print every digest as it would be sent; no model call, nothing stored
+aikit session summarize --since 24h --dry-run
+
+# Summarize the last week with the built-in tag list
+export OPENAI_API_KEY=...
+aikit session summarize --since 7d --model gpt-4o
+
+# Two sessions by id (a unique prefix of 8+ characters is enough)
+aikit session summarize --session 550e8400 --session 7c9e6679-7425-40de-944b-e07fc1f90ae7 --model gpt-4o
+
+# Your own tags, your own areas, a local OpenAI-compatible endpoint
+aikit session summarize --all --model qwen2.5 --base-url http://localhost:11434/v1 \
+  --tags-file session-tags.toml --areas-file areas.toml --format json
+
+# Regenerate an unchanged session, and keep the tool's own tag slot untouched
+aikit session summarize --session 550e8400 --model gpt-4o --force --no-mirror
+```
+
+**Selection** (exactly one of): `--session <id>` (repeatable), `--since <when>`,
+`--all`. `--since` also narrows `--all` and `--session`. Locations are the same
+`--tool` / `--path` / `--db` flags as `session list`.
+
+**Options:**
+
+| Flag | Env | Default | Description |
+|------|-----|---------|-------------|
+| `--session` | — | — | Repeatable; a session id or a unique prefix of at least 8 characters |
+| `--all` | — | off | Every captured session in the selected locations |
+| `--since` | — | — | `24h`, `7d`, an RFC 3339 time or `YYYY-MM-DD` |
+| `--tool`, `--path`, `--db` | | | As for `session list` |
+| `--model`, `-m` | `AIKIT_MODEL` | — | Required unless `--dry-run` |
+| `--base-url` | `AIKIT_LLM_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
+| `--api-key-env` | — | `OPENAI_API_KEY`, then `AIKIT_API_KEY` | Environment variable holding the key |
+| `--max-tokens` | — | `1024` | Completion budget; temperature is always `0` |
+| `--timeout` | — | `120` | Request timeout in seconds |
+| `--tags` | — | built-in list | Comma-separated tag names (no descriptions, no rules) |
+| `--tags-file` | `AIKIT_SESSION_TAGS` | built-in list | TOML `[[tag]]` entries; see below. Not with `--tags` |
+| `--areas-file` | — | directory grouping | TOML `[[area]]` entries: `name` and `prefix`; longest prefix wins |
+| `--area-depth` | — | `2` | Directory components that make an area when no prefix matches (`src/cli/serve/x.rs` → `src/cli`) |
+| `--include-assistant` | — | off | Add the assistant's text blocks to the digest (a richer "why", more tokens) |
+| `--parallel` | — | `4` | Concurrent model calls |
+| `--force` | — | off | Regenerate even when the stored brief has the same digest hash |
+| `--no-mirror` | — | off | Do not write the primary tag into the tool's own tag slot |
+| `--dry-run` | — | off | Print each digest and its mechanical tags; call no model, store nothing |
+| `--format` | — | `default` | `default` (human) or `json` (an array with `status`: `generated`, `unchanged`, `dry_run`, `failed`) |
+
+**Tags.** The built-in list is `feature`, `bugfix`, `refactor`, `test`, `docs`,
+`config`, `research`, `chore`. A tag can be bound to a **rule**, decided in code
+before the model is asked and named in the digest as already assigned:
+`only_tests`, `only_docs`, `only_config`, `read_only`. The model may add tags
+only from the list, each with a one-line justification; a name outside the list
+is rejected, the model is asked once more, and any name still unknown is dropped
+and recorded on the brief as `rejected_tags`. The first tag is the primary tag.
+
+```toml
+# session-tags.toml
+[[tag]]
+name = "test"
+description = "Only test files were modified"
+rule = "only_tests"
+
+[[tag]]
+name = "feature"
+description = "New behaviour was added"
+```
+
+**Areas.** `Read` counts as a read; `Write`, `Edit` and `Delete` count as
+modifications. Time per area is the gap from an event to the next one in the
+session, capped at five minutes, attributed to the earlier event's area.
+
+**Persistence.** Briefs live in the capture database keyed by `(tool,
+session_id)`: summary, areas, tags, model, digest hash and generated-at time.
+The digest hash is the SHA-256 of the exact message sent, so an unchanged
+session is a no-op. `aikit serve` serves stored briefs read-only:
+`GET /api/v1/capture/{backend}/briefs?limit=&offset=` and
+`GET /api/v1/capture/{backend}/sessions/{session_id}/brief`.
+
+**Prompts.** Codex records prompts as events. Claude Code prompts reach the
+digest through the history reader, which resolves the default Claude home
+(`CLAUDE_CONFIG_DIR` or `~/.claude`); a Claude session under an overridden
+`--path` is summarized from its files, commands and final message.
+
+**Exit codes:** `0` every session generated, unchanged or previewed · `1` at
+least one session failed · `2` configuration error before any call (no
+selection, no model, no key, a bad tags file).
+
+Requires a build with the `agent-adapters` feature.
 
 ### session sync
 

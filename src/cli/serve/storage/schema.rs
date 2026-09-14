@@ -1,8 +1,9 @@
 //! Schema + migration for the capture SQLite DB (spec 010 §11.2).
 //!
-//! Three tables live in one DB file. Both event tables enforce the
+//! The capture tables live in one DB file. Both event tables enforce the
 //! `(source_file, source_event_id)` uniqueness invariant — the idempotency
-//! contract that makes `scan --force` safe.
+//! contract that makes `scan --force` safe. `capture_session_briefs` (ADR
+//! 0022) is keyed by `(tool, session_id)` and replaced on write.
 
 use std::sync::Arc;
 
@@ -74,6 +75,22 @@ CREATE TABLE IF NOT EXISTS capture_cursors (
     updated_at_ms INTEGER NOT NULL
 );
 
+-- Session briefs (ADR 0022): one per (tool, session). `areas` and `tags`
+-- are JSON arrays; `extra` is a JSON object holding every field added
+-- after the first version, so the record grows without a column migration.
+CREATE TABLE IF NOT EXISTS capture_session_briefs (
+    tool            TEXT    NOT NULL,
+    session_id      TEXT    NOT NULL,
+    summary         TEXT    NOT NULL,
+    areas           TEXT    NOT NULL DEFAULT '[]',
+    tags            TEXT    NOT NULL DEFAULT '[]',
+    model           TEXT    NOT NULL,
+    digest_hash     TEXT    NOT NULL,
+    generated_at_ms INTEGER NOT NULL,
+    extra           TEXT    NOT NULL DEFAULT '{}',
+    PRIMARY KEY (tool, session_id)
+);
+
 -- Query accelerators for the serve routes + MCP tools.
 CREATE INDEX IF NOT EXISTS idx_tool_events_tool_session
     ON capture_tool_events(tool, session_id);
@@ -83,6 +100,8 @@ CREATE INDEX IF NOT EXISTS idx_token_events_tool_session
     ON capture_token_events(tool, session_id);
 CREATE INDEX IF NOT EXISTS idx_cache_observations_tool_session
     ON capture_cache_observations(tool, session_id);
+CREATE INDEX IF NOT EXISTS idx_session_briefs_generated
+    ON capture_session_briefs(tool, generated_at_ms);
 "#;
 
 /// Open or create the capture DB at `path`, run migrations, and return a

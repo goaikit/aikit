@@ -10,6 +10,7 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 
+use crate::brief::SessionBrief;
 use crate::models::{ActionKind, CacheObservation, TokenEvent, ToolEvent, ToolKind};
 
 /// Argument to [`EventStore::upsert_events`]. Each field may be empty.
@@ -98,6 +99,43 @@ pub trait EventStore: Send + Sync {
     /// Freshness join: most recent `Read`/`Edit`/`Write` of `path` across
     /// every session. Used by MCP `check_file_freshness`.
     async fn last_file_touch(&self, path: &Path) -> Result<Option<FileTouch>, StoreError>;
+
+    // ── session briefs (ADR 0022) ─────────────────────────────────────────
+    //
+    // Additive: every method has a default that reports the store does not
+    // persist briefs, so a host store written before briefs existed keeps
+    // compiling and fails loudly rather than losing writes.
+
+    /// Store or replace the brief for `(brief.tool, brief.session_id)`.
+    async fn put_brief(&self, brief: &SessionBrief) -> Result<(), StoreError> {
+        let _ = brief;
+        Err(briefs_unsupported())
+    }
+
+    /// The brief for one session, if one was stored.
+    async fn brief_for(
+        &self,
+        tool: ToolKind,
+        session_id: &str,
+    ) -> Result<Option<SessionBrief>, StoreError> {
+        let _ = (tool, session_id);
+        Err(briefs_unsupported())
+    }
+
+    /// Briefs for one tool, newest generated first, paginated.
+    async fn briefs_for(
+        &self,
+        tool: ToolKind,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<SessionBrief>, StoreError> {
+        let _ = (tool, limit, offset);
+        Err(briefs_unsupported())
+    }
+}
+
+fn briefs_unsupported() -> StoreError {
+    StoreError::Backend("this event store does not persist session briefs".into())
 }
 
 /// In-memory event store. For tests and the `CliTestHarness` MCP integration
@@ -111,6 +149,7 @@ pub struct InMemoryEventStore {
     // Index: source_event_id → position in tool_events. Enforces idempotency.
     seen: RwLock<HashMap<String, usize>>,
     seen_cache: RwLock<HashMap<String, usize>>,
+    briefs: RwLock<HashMap<(ToolKind, String), SessionBrief>>,
 }
 
 impl InMemoryEventStore {
@@ -305,6 +344,49 @@ impl EventStore for InMemoryEventStore {
             last_modified_at_ms: last_modified,
         }))
     }
+
+    async fn put_brief(&self, brief: &SessionBrief) -> Result<(), StoreError> {
+        self.briefs
+            .write()
+            .unwrap()
+            .insert((brief.tool, brief.session_id.clone()), brief.clone());
+        Ok(())
+    }
+
+    async fn brief_for(
+        &self,
+        tool: ToolKind,
+        session_id: &str,
+    ) -> Result<Option<SessionBrief>, StoreError> {
+        Ok(self
+            .briefs
+            .read()
+            .unwrap()
+            .get(&(tool, session_id.to_string()))
+            .cloned())
+    }
+
+    async fn briefs_for(
+        &self,
+        tool: ToolKind,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<SessionBrief>, StoreError> {
+        let briefs = self.briefs.read().unwrap();
+        let mut rows: Vec<SessionBrief> = briefs
+            .values()
+            .filter(|b| b.tool == tool)
+            .cloned()
+            .collect();
+        rows.sort_by(|a, b| {
+            b.generated_at_ms
+                .cmp(&a.generated_at_ms)
+                .then_with(|| a.session_id.cmp(&b.session_id))
+        });
+        let off = (offset as usize).min(rows.len());
+        let end = (off + limit as usize).min(rows.len());
+        Ok(rows[off..end].to_vec())
+    }
 }
 
 #[cfg(test)]
@@ -382,6 +464,50 @@ mod tests {
             .unwrap();
         let got = store.search_outputs("main", 10).await.unwrap();
         assert_eq!(got.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn briefs_replace_by_key_and_page_newest_first() {
+        use crate::brief::SessionBrief;
+        let store = InMemoryEventStore::new();
+        let brief = |id: &str, at: i64| SessionBrief {
+            tool: ToolKind::ClaudeCode,
+            session_id: id.into(),
+            summary: format!("brief {id}"),
+            areas: vec![],
+            tags: vec![],
+            model: "m".into(),
+            digest_hash: "h".into(),
+            generated_at_ms: at,
+            model_reported: None,
+            rejected_tags: vec![],
+            prompt_source: None,
+        };
+        store.put_brief(&brief("a", 10)).await.unwrap();
+        store.put_brief(&brief("b", 20)).await.unwrap();
+        let mut replaced = brief("a", 30);
+        replaced.summary = "replaced".into();
+        store.put_brief(&replaced).await.unwrap();
+
+        let got = store.brief_for(ToolKind::ClaudeCode, "a").await.unwrap();
+        assert_eq!(got.unwrap().summary, "replaced");
+        assert!(store
+            .brief_for(ToolKind::Codex, "a")
+            .await
+            .unwrap()
+            .is_none());
+
+        let page = store.briefs_for(ToolKind::ClaudeCode, 10, 0).await.unwrap();
+        let ids: Vec<&str> = page.iter().map(|b| b.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"], "newest generated first");
+        assert_eq!(
+            store
+                .briefs_for(ToolKind::ClaudeCode, 1, 1)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
