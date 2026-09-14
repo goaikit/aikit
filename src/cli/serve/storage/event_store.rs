@@ -17,6 +17,7 @@ use aikit_session_capture::{
     ActionKind, ActionStatus, CacheObservation, CaptureSource, EventBatch, EventStore, FileTouch,
     SessionSummary, StoreError, TokenEvent, ToolEvent, ToolKind,
 };
+use aikit_session_summarize::{BriefStore, SessionBrief};
 
 /// Map a rusqlite error into the crate-agnostic [`StoreError::Backend`] variant.
 /// (Can't impl `From<rusqlite::Error>` due to the orphan rule — `StoreError`
@@ -231,6 +232,8 @@ impl EventStore for SqliteEventStore {
                    WHERE tool = ?1 AND session_id = ?2
                    ORDER BY started_at_ms ASC LIMIT ?3 OFFSET ?4"#,
                 )?;
+                // Column order matches `search_outputs` below: `tool` sits at
+                // index 3, so `kind` is 4 and `metadata` 13.
                 let iter =
                     stmt.query_map(params![tool.as_str(), &session_id, limit, offset], |row| {
                         let metadata_str: String = row.get(13)?;
@@ -242,15 +245,15 @@ impl EventStore for SqliteEventStore {
                             source_file: PathBuf::from(row.get::<_, String>(1)?),
                             session_id: row.get(2)?,
                             tool,
-                            kind: parse_action_kind(&row.get::<_, String>(3)?),
-                            target: row.get::<_, Option<String>>(4)?.filter(|s| !s.is_empty()),
-                            input: row.get::<_, Option<String>>(5)?.filter(|s| !s.is_empty()),
-                            output: row.get::<_, Option<String>>(6)?.filter(|s| !s.is_empty()),
-                            status: parse_action_status(&row.get::<_, String>(7)?),
+                            kind: parse_action_kind(&row.get::<_, String>(4)?),
+                            target: row.get::<_, Option<String>>(5)?.filter(|s| !s.is_empty()),
+                            input: row.get::<_, Option<String>>(6)?.filter(|s| !s.is_empty()),
+                            output: row.get::<_, Option<String>>(7)?.filter(|s| !s.is_empty()),
+                            status: parse_action_status(&row.get::<_, String>(8)?),
                             error_message: row
-                                .get::<_, Option<String>>(8)?
+                                .get::<_, Option<String>>(9)?
                                 .filter(|s| !s.is_empty()),
-                            started_at_ms: row.get(9)?,
+                            started_at_ms: row.get(10)?,
                             duration_ms: duration_ms.map(|d| d as u64),
                             git_root: row
                                 .get::<_, Option<String>>(12)?
@@ -402,6 +405,126 @@ impl EventStore for SqliteEventStore {
             .map_err(sqlite_err)?;
         Ok(result)
     }
+}
+
+// ── session briefs (BriefStore, ADR 0022) ─────────────────────────────────────
+
+/// The same connection serves briefs: one database, two traits.
+#[async_trait]
+impl BriefStore for SqliteEventStore {
+    async fn put_brief(&self, brief: &SessionBrief) -> Result<(), StoreError> {
+        let conn = self.conn.clone();
+        let brief = brief.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), rusqlite::Error> {
+            let conn = conn.lock().unwrap();
+            let areas = serde_json::to_string(&brief.areas).unwrap_or_else(|_| "[]".into());
+            let tags = serde_json::to_string(&brief.tags).unwrap_or_else(|_| "[]".into());
+            // Every field added after the first version rides in `extra`.
+            let extra = serde_json::json!({
+                "model_reported": brief.model_reported,
+                "rejected_tags": brief.rejected_tags,
+                "prompt_source": brief.prompt_source,
+            });
+            conn.execute(
+                r#"INSERT OR REPLACE INTO capture_session_briefs (
+                    tool, session_id, summary, areas, tags, model,
+                    digest_hash, generated_at_ms, extra
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"#,
+                params![
+                    brief.tool.as_str(),
+                    &brief.session_id,
+                    &brief.summary,
+                    areas,
+                    tags,
+                    &brief.model,
+                    &brief.digest_hash,
+                    brief.generated_at_ms,
+                    extra.to_string(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| StoreError::Backend(format!("join error: {e}")))?
+        .map_err(sqlite_err)
+    }
+
+    async fn brief_for(
+        &self,
+        tool: ToolKind,
+        session_id: &str,
+    ) -> Result<Option<SessionBrief>, StoreError> {
+        let conn = self.conn.clone();
+        let session_id = session_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<SessionBrief>, rusqlite::Error> {
+            let conn = conn.lock().unwrap();
+            let mut stmt = conn.prepare(&format!(
+                "{BRIEF_SELECT} WHERE tool = ?1 AND session_id = ?2"
+            ))?;
+            let mut rows = stmt.query_map(params![tool.as_str(), &session_id], brief_from_row)?;
+            match rows.next() {
+                Some(row) => Ok(Some(row?)),
+                None => Ok(None),
+            }
+        })
+        .await
+        .map_err(|e| StoreError::Backend(format!("join error: {e}")))?
+        .map_err(sqlite_err)
+    }
+
+    async fn briefs_for(
+        &self,
+        tool: ToolKind,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<SessionBrief>, StoreError> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<SessionBrief>, rusqlite::Error> {
+            let conn = conn.lock().unwrap();
+            let mut stmt = conn.prepare(&format!(
+                "{BRIEF_SELECT} WHERE tool = ?1 \
+                 ORDER BY generated_at_ms DESC, session_id ASC LIMIT ?2 OFFSET ?3"
+            ))?;
+            let iter = stmt.query_map(params![tool.as_str(), limit, offset], brief_from_row)?;
+            iter.collect()
+        })
+        .await
+        .map_err(|e| StoreError::Backend(format!("join error: {e}")))?
+        .map_err(sqlite_err)
+    }
+}
+
+const BRIEF_SELECT: &str = "SELECT tool, session_id, summary, areas, tags, model, \
+     digest_hash, generated_at_ms, extra FROM capture_session_briefs";
+
+fn brief_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionBrief> {
+    let tool_str: String = row.get(0)?;
+    let areas: String = row.get(3)?;
+    let tags: String = row.get(4)?;
+    let extra: String = row.get(8)?;
+    let extra: Value = serde_json::from_str(&extra).unwrap_or(Value::Null);
+    Ok(SessionBrief {
+        tool: parse_tool_kind(&tool_str),
+        session_id: row.get(1)?,
+        summary: row.get(2)?,
+        areas: serde_json::from_str(&areas).unwrap_or_default(),
+        tags: serde_json::from_str(&tags).unwrap_or_default(),
+        model: row.get(5)?,
+        digest_hash: row.get(6)?,
+        generated_at_ms: row.get(7)?,
+        model_reported: extra
+            .get("model_reported")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        rejected_tags: extra
+            .get("rejected_tags")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
+        prompt_source: extra
+            .get("prompt_source")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    })
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -559,6 +682,109 @@ mod tests {
         let n2 = store.upsert_events(batch).await.unwrap();
         assert_eq!(n1, 1);
         assert_eq!(n2, 0, "second upsert of same batch must dedupe to zero");
+    }
+
+    #[tokio::test]
+    async fn actions_for_session_round_trips_every_column() {
+        // Regression: the row mapping once skipped the `tool` column, so a
+        // NULL `output` failed the read and `kind` came back as the tool name.
+        let store =
+            SqliteEventStore::new(crate::cli::serve::storage::schema::open_in_memory().unwrap());
+        let mut ev = sample_tool_event("1", "s1");
+        ev.kind = ActionKind::Edit;
+        ev.output = None;
+        ev.status = ActionStatus::Failure;
+        ev.error_message = Some("boom".into());
+        ev.metadata = serde_json::json!({"k": "v"});
+        store
+            .upsert_events(EventBatch {
+                tool_events: vec![ev.clone()],
+                token_events: vec![],
+                cache_observations: vec![],
+            })
+            .await
+            .unwrap();
+        let got = store
+            .actions_for_session(ToolKind::ClaudeCode, "s1", 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        let back = &got[0];
+        assert_eq!(back.kind, ActionKind::Edit);
+        assert_eq!(back.target.as_deref(), Some("/tmp/file.go"));
+        assert_eq!(back.output, None);
+        assert_eq!(back.status, ActionStatus::Failure);
+        assert_eq!(back.error_message.as_deref(), Some("boom"));
+        assert_eq!(back.started_at_ms, Some(1000));
+        assert_eq!(back.duration_ms, Some(5));
+        assert_eq!(back.git_root, Some(PathBuf::from("/tmp")));
+        assert_eq!(back.metadata, serde_json::json!({"k": "v"}));
+    }
+
+    #[tokio::test]
+    async fn briefs_round_trip_replace_and_page() {
+        use aikit_session_summarize::{AreaTouch, SessionBrief, TagAssignment, TagSource};
+        let store =
+            SqliteEventStore::new(crate::cli::serve::storage::schema::open_in_memory().unwrap());
+        let brief = |id: &str, at: i64| SessionBrief {
+            tool: ToolKind::Codex,
+            session_id: id.into(),
+            summary: format!("summary of {id}"),
+            areas: vec![AreaTouch {
+                area: "src".into(),
+                reads: 1,
+                modifications: 2,
+                time_ms: 3,
+                files: vec!["src/a.rs".into()],
+            }],
+            tags: vec![TagAssignment {
+                name: "feature".into(),
+                source: TagSource::Model,
+                justification: "why".into(),
+            }],
+            model: "m".into(),
+            digest_hash: "hash".into(),
+            generated_at_ms: at,
+            model_reported: Some("m-2".into()),
+            rejected_tags: vec!["bogus".into()],
+            prompt_source: Some("events".into()),
+        };
+        assert!(store
+            .brief_for(ToolKind::Codex, "a")
+            .await
+            .unwrap()
+            .is_none());
+        store.put_brief(&brief("a", 10)).await.unwrap();
+        store.put_brief(&brief("b", 20)).await.unwrap();
+        let got = store
+            .brief_for(ToolKind::Codex, "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, brief("a", 10), "every field survives the round trip");
+
+        let mut replaced = brief("a", 30);
+        replaced.summary = "replaced".into();
+        store.put_brief(&replaced).await.unwrap();
+        let got = store
+            .brief_for(ToolKind::Codex, "a")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.summary, "replaced");
+
+        let page = store.briefs_for(ToolKind::Codex, 10, 0).await.unwrap();
+        let ids: Vec<&str> = page.iter().map(|b| b.session_id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"], "newest generated first");
+        assert!(store
+            .briefs_for(ToolKind::ClaudeCode, 10, 0)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            store.briefs_for(ToolKind::Codex, 1, 1).await.unwrap().len(),
+            1
+        );
     }
 
     #[tokio::test]

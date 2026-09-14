@@ -513,12 +513,14 @@ fn build_capture_state() -> anyhow::Result<capture::CaptureState> {
 
     let db_path = capture_db_path();
     let conn = storage::schema::open(&db_path)?;
-    let event_store: std::sync::Arc<dyn aikit_session_capture::EventStore> =
-        std::sync::Arc::new(storage::SqliteEventStore::new(conn.clone()));
+    // One SQLite store serves both traits: events and briefs.
+    let sqlite = std::sync::Arc::new(storage::SqliteEventStore::new(conn.clone()));
+    let event_store: std::sync::Arc<dyn aikit_session_capture::EventStore> = sqlite.clone();
+    let brief_store: std::sync::Arc<dyn aikit_session_summarize::BriefStore> = sqlite;
     let cursor_store: std::sync::Arc<dyn aikit_session_capture::CursorStore> =
         std::sync::Arc::new(storage::SqliteCursorStore::new(conn));
 
-    let state = capture::CaptureState::new(reg, event_store, cursor_store);
+    let state = capture::CaptureState::new(reg, event_store, cursor_store, brief_store);
 
     // Spawn the background WatchDriver if the `watcher` feature is enabled.
     // The driver drains into the same parse_and_store_file pipeline the

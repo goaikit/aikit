@@ -1,0 +1,34 @@
+[package]
+name = "aikit-session-summarize"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Session briefs for captured AI coding-tool sessions: a scrubbed digest, one model completion, areas touched and tags from a fixed list. ADR 0022."
+repository = "https://github.com/goaikit/aikit"
+keywords = ["ai", "agents", "sessions", "summary", "tags"]
+categories = ["development-tools"]
+
+[features]
+default = ["claudecode", "codex"]
+claudecode = ["aikit-session-capture/claudecode"]
+codex = ["aikit-session-capture/codex"]
+opencode = ["aikit-session-capture/opencode"]
+
+[dependencies]
+aikit-agent = { path = "../aikit-agent", version = "0.1.0" }
+aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", default-features = false }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "macros", "time"] }
+toml = "1.1"
+tracing = "0.1"
+
+[dev-dependencies]
+aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", default-features = false, features = ["claudecode", "codex"] }
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

@@ -1,12 +1,17 @@
 //! `aikit serve` capture routes — the HTTP surface for passive session
 //! capture (spec 010 §14).
 //!
-//! Five routes under `/api/v1/capture`:
+//! Seven routes under `/api/v1/capture`:
 //! - `GET  /capture`                          — list detected adapters
 //! - `GET  /capture/{backend}/sessions`       — list parsed sessions
 //! - `GET  /capture/{backend}/sessions/{id}/actions` — action stream
+//! - `GET  /capture/{backend}/sessions/{id}/brief`   — the stored session brief
+//! - `GET  /capture/{backend}/briefs`         — stored briefs, newest first
 //! - `POST /capture/scan`                     — trigger async scan job
 //! - `GET  /capture/scan/{job_id}`            — scan job status
+//!
+//! Briefs are read-only here: `aikit session summarize` generates them
+//! (ADR 0022).
 //!
 //! All routes are registered only when the `agent-adapters` feature is on
 //! (compile-time gate). A runtime `409 passive_capture_unsupported` is
@@ -26,9 +31,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use aikit_sdk::runner::Backend;
-use aikit_session_capture::{
-    Adapter, CursorStore, EventBatch, EventStore, ParseCursor, ParseWarning, Registry, ToolKind,
-};
+use aikit_session_capture::{Adapter, CursorStore, EventStore, ParseWarning, Registry, ToolKind};
+use aikit_session_summarize::BriefStore;
 
 use super::error_response;
 
@@ -40,6 +44,8 @@ pub struct CaptureState {
     pub registry: Arc<Registry>,
     pub event_store: Arc<dyn EventStore>,
     pub cursor_store: Arc<dyn CursorStore>,
+    /// Stored session briefs, read-only here (ADR 0022).
+    pub brief_store: Arc<dyn BriefStore>,
     pub scan_jobs: Arc<ScanJobRegistry>,
     /// Last parse timestamp per adapter kind, for the `GET /capture` summary.
     last_parse: Arc<Mutex<HashMap<ToolKind, i64>>>,
@@ -50,11 +56,13 @@ impl CaptureState {
         registry: Registry,
         event_store: Arc<dyn EventStore>,
         cursor_store: Arc<dyn CursorStore>,
+        brief_store: Arc<dyn BriefStore>,
     ) -> Self {
         Self {
             registry: Arc::new(registry),
             event_store,
             cursor_store,
+            brief_store,
             scan_jobs: Arc::new(ScanJobRegistry::default()),
             last_parse: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -120,6 +128,11 @@ pub fn build_router(state: CaptureState) -> Router {
             "/capture/{backend}/sessions/{session_id}/actions",
             get(list_actions),
         )
+        .route(
+            "/capture/{backend}/sessions/{session_id}/brief",
+            get(get_brief),
+        )
+        .route("/capture/{backend}/briefs", get(list_briefs))
         .route("/capture/scan", post(start_scan))
         .route("/capture/scan/{job_id}", get(scan_status));
 
@@ -339,6 +352,60 @@ async fn list_actions(
     }
 }
 
+// ── GET /capture/{backend}/sessions/{id}/brief ────────────────────────────────
+
+async fn get_brief(
+    State(cs): State<CaptureState>,
+    AxumPath((backend_key, session_id)): AxumPath<(String, String)>,
+) -> Response {
+    let (tool, _) = match resolve_backend(&cs, &backend_key) {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    match cs.brief_store.brief_for(tool, &session_id).await {
+        Ok(Some(brief)) => json_ok(StatusCode::OK, &brief),
+        Ok(None) => error_response(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            &format!("no brief for session {session_id}"),
+        ),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            &e.to_string(),
+        ),
+    }
+}
+
+// ── GET /capture/{backend}/briefs ─────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct BriefsQuery {
+    #[serde(default = "default_limit")]
+    limit: u32,
+    #[serde(default)]
+    offset: u32,
+}
+
+async fn list_briefs(
+    State(cs): State<CaptureState>,
+    AxumPath(backend_key): AxumPath<String>,
+    Query(q): Query<BriefsQuery>,
+) -> Response {
+    let (tool, _) = match resolve_backend(&cs, &backend_key) {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    match cs.brief_store.briefs_for(tool, q.limit, q.offset).await {
+        Ok(briefs) => json_ok(StatusCode::OK, &briefs),
+        Err(e) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store_error",
+            &e.to_string(),
+        ),
+    }
+}
+
 // ── POST /capture/scan ────────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -483,83 +550,10 @@ pub enum ScanJobState {
 
 // ── Shared scan pipeline ──────────────────────────────────────────────────────
 
-/// Outcome of parsing one file. Aggregated into the ScanJob totals.
-#[derive(Default)]
-pub struct ScanFileOutcome {
-    files_scanned: u64,
-    files_skipped: u64,
-    events_upserted: u64,
-    deduplicated_count: u64,
-    warnings: Vec<ParseWarning>,
-}
-
-/// The shared pipeline both `POST /capture/scan` and the watch driver
-/// (Phase 4.5) use. Loads the cursor, calls the adapter, upserts events,
-/// saves the new cursor. Identical code path = identical idempotency.
-pub async fn parse_and_store_file(
-    adapter: &dyn Adapter,
-    path: &Path,
-    event_store: &dyn EventStore,
-    cursor_store: &dyn CursorStore,
-    force: bool,
-) -> Result<ScanFileOutcome, String> {
-    let cursor = cursor_store.load(path).await;
-    let from_offset = if force {
-        0
-    } else {
-        let stored = cursor.as_ref().map(|c| c.offset).unwrap_or(0);
-        // Fast path for byte-offset adapters: skip if the file hasn't grown
-        // past the stored cursor. SQLite-watermark adapters (OpenCode) always
-        // proceed — their offset isn't a byte position.
-        if stored > 0 {
-            if let Ok(meta) = std::fs::metadata(path) {
-                if meta.len() <= stored {
-                    return Ok(ScanFileOutcome {
-                        files_skipped: 1,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-        stored
-    };
-
-    let result = adapter
-        .parse_session_file(path, from_offset)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let total = (result.tool_events.len()
-        + result.token_events.len()
-        + result.cache_observations.len()) as u64;
-    let batch = EventBatch {
-        tool_events: result.tool_events,
-        token_events: result.token_events,
-        cache_observations: result.cache_observations,
-    };
-    let inserted = event_store
-        .upsert_events(batch)
-        .await
-        .map_err(|e| e.to_string())?;
-    let deduped = total.saturating_sub(inserted);
-
-    cursor_store
-        .save(ParseCursor {
-            source_file: path.to_path_buf(),
-            offset: result.new_offset,
-            adapter_kind: adapter.kind(),
-            updated_at: Utc::now(),
-        })
-        .await;
-
-    Ok(ScanFileOutcome {
-        files_scanned: 1,
-        files_skipped: 0,
-        events_upserted: inserted,
-        deduplicated_count: deduped,
-        warnings: result.warnings,
-    })
-}
+/// The per-file pipeline lives in `aikit_session_capture::ingest` so this
+/// route, the watch driver and the `aikit session` commands share one code
+/// path (spec 010 §14.3). Re-exported under its historical name here.
+pub use aikit_session_capture::ingest::{parse_and_store_file, IngestOutcome as ScanFileOutcome};
 
 /// Run a full scan: walk each adapter's watch paths, parse every session file
 /// found, aggregate results into the job.
@@ -571,43 +565,15 @@ async fn run_scan(cs: CaptureState, job_id: String, force: bool) {
     let mut outcome = ScanFileOutcome::default();
     for adapter in cs.registry.all() {
         cs.touch_last_parse(adapter.kind());
-        for watch_path in adapter.watch_paths() {
-            if !watch_path.is_dir() {
-                continue;
-            }
-            for entry in walkdir::WalkDir::new(&watch_path).into_iter().flatten() {
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let path = entry.path();
-                if !adapter.is_session_file(path) {
-                    continue;
-                }
-                match parse_and_store_file(
-                    adapter,
-                    path,
-                    cs.event_store.as_ref(),
-                    cs.cursor_store.as_ref(),
-                    force,
-                )
-                .await
-                {
-                    Ok(o) => {
-                        outcome.files_scanned += o.files_scanned;
-                        outcome.files_skipped += o.files_skipped;
-                        outcome.events_upserted += o.events_upserted;
-                        outcome.deduplicated_count += o.deduplicated_count;
-                        outcome.warnings.extend(o.warnings);
-                    }
-                    Err(e) => {
-                        outcome.warnings.push(ParseWarning::Other {
-                            message: format!("{}: {e}", path.display()),
-                        });
-                        outcome.files_skipped += 1;
-                    }
-                }
-            }
-        }
+        outcome.absorb(
+            aikit_session_capture::ingest::scan_adapter(
+                adapter,
+                cs.event_store.as_ref(),
+                cs.cursor_store.as_ref(),
+                force,
+            )
+            .await,
+        );
     }
 
     cs.scan_jobs.update(&job_id, |j| {
@@ -790,6 +756,128 @@ mod tests {
             git_root: None,
             metadata: serde_json::Value::Null,
         }
+    }
+
+    #[tokio::test]
+    async fn brief_routes_read_the_store() {
+        use aikit_session_capture::EventBatch;
+        use aikit_session_summarize::{InMemoryBriefStore, SessionBrief};
+        use axum::body::to_bytes;
+
+        struct NoAdapter;
+        #[async_trait]
+        impl Adapter for NoAdapter {
+            fn kind(&self) -> ToolKind {
+                ToolKind::ClaudeCode
+            }
+            fn watch_paths(&self) -> Vec<PathBuf> {
+                vec![]
+            }
+            fn is_session_file(&self, _: &Path) -> bool {
+                false
+            }
+            async fn parse_session_file(
+                &self,
+                _: &Path,
+                _: u64,
+            ) -> Result<aikit_session_capture::ParseResult, aikit_session_capture::AdapterError>
+            {
+                Ok(aikit_session_capture::ParseResult::default())
+            }
+        }
+
+        let mut registry = Registry::new();
+        registry.register(Box::new(NoAdapter));
+        let store = Arc::new(InMemoryEventStore::new());
+        store
+            .upsert_events(EventBatch {
+                tool_events: vec![sample_event("1", "s1")],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let briefs = Arc::new(InMemoryBriefStore::new());
+        briefs
+            .put_brief(&SessionBrief {
+                tool: ToolKind::ClaudeCode,
+                session_id: "s1".into(),
+                summary: "Read a file.".into(),
+                areas: vec![],
+                tags: vec![],
+                model: "m".into(),
+                digest_hash: "h".into(),
+                generated_at_ms: 5,
+                model_reported: None,
+                rejected_tags: vec![],
+                prompt_source: None,
+            })
+            .await
+            .unwrap();
+        let cs = CaptureState::new(
+            registry,
+            store,
+            Arc::new(InMemoryCursorStore::default()),
+            briefs,
+        );
+
+        async fn body_json(resp: Response) -> (StatusCode, serde_json::Value) {
+            let status = resp.status();
+            let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+
+        let (status, body) = body_json(
+            get_brief(
+                State(cs.clone()),
+                AxumPath(("claude".to_string(), "s1".to_string())),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["summary"], "Read a file.");
+        assert_eq!(body["tool"], "claude_code");
+
+        let (status, body) = body_json(
+            get_brief(
+                State(cs.clone()),
+                AxumPath(("claude".to_string(), "missing".to_string())),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+
+        let (status, body) = body_json(
+            list_briefs(
+                State(cs.clone()),
+                AxumPath("claude".to_string()),
+                Query(BriefsQuery {
+                    limit: 10,
+                    offset: 0,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.as_array().map(|a| a.len()), Some(1));
+
+        // An unknown backend key is the same 404 the other routes return.
+        let (status, _) = body_json(
+            list_briefs(
+                State(cs),
+                AxumPath("nope".to_string()),
+                Query(BriefsQuery {
+                    limit: 10,
+                    offset: 0,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

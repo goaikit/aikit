@@ -319,7 +319,7 @@ pub fn build_app() -> Result<AikitApp> {
     builder = builder.register_group(
         &session_path,
         GroupMetadata {
-            summary: "Interactive bidirectional agent sessions (multi-turn REPL)",
+            summary: "Agent sessions: live REPL, captured sessions on disk, sync, briefs",
             hidden: false,
         },
     )?;
@@ -351,13 +351,56 @@ pub fn build_app() -> Result<AikitApp> {
     builder = builder.register(
         path!["session", "list"],
         |_ctx, args: SessionListArgs| async move {
-            tokio::task::spawn_blocking(move || {
-                session::execute_list(session::ListSessionsArgs {
-                    serve_url: args.serve_url,
-                })
+            let code = session::execute_list(session::ListSessionsArgs {
+                live: args.live,
+                serve_url: args.serve_url,
+                tools: args.tool,
+                paths: args.path,
+                since: args.since,
+                db: args.db,
+                format: args.format,
             })
-            .await
-            .map_err(|e| anyhow::anyhow!("task join error: {}", e))?
+            .await?;
+            if code == 0 {
+                Ok(())
+            } else {
+                std::process::exit(code);
+            }
+        },
+    )?;
+
+    builder = builder.register(
+        path!["session", "summarize"],
+        |_ctx, args: SessionSummarizeArgs| async move {
+            let code = session::execute_summarize(session::SummarizeSessionsArgs {
+                sessions: args.session,
+                all: args.all,
+                since: args.since,
+                tools: args.tool,
+                paths: args.path,
+                db: args.db,
+                model: args.model,
+                base_url: args.base_url,
+                api_key_env: args.api_key_env,
+                max_tokens: args.max_tokens,
+                timeout: args.timeout,
+                tags: args.tags,
+                tags_file: args.tags_file,
+                areas_file: args.areas_file,
+                area_depth: args.area_depth,
+                include_assistant: args.include_assistant,
+                parallel: args.parallel,
+                force: args.force,
+                no_mirror: args.no_mirror,
+                dry_run: args.dry_run,
+                format: args.format,
+            })
+            .await?;
+            if code == 0 {
+                Ok(())
+            } else {
+                std::process::exit(code);
+            }
         },
     )?;
 
@@ -1325,20 +1368,53 @@ impl FromArgValueMap for SessionNewArgs {
     }
 }
 
+fn repeated_spec(name: &'static str, help: &'static str) -> ArgSpec {
+    ArgSpec {
+        name,
+        short: None,
+        long: Some(name),
+        kind: ArgKind::Option,
+        value_type: ArgValueType::String,
+        cardinality: Cardinality::Repeated,
+        default: None,
+        conflicts_with: vec![],
+        requires: vec![],
+        help,
+        ..Default::default()
+    }
+}
+
 struct SessionListArgs {
+    live: bool,
     serve_url: Option<String>,
+    tool: Vec<String>,
+    path: Vec<String>,
+    since: Option<String>,
+    db: Option<String>,
+    format: String,
 }
 
 impl IntoCommandSpec for SessionListArgs {
     fn command_spec() -> CommandSpec {
         CommandSpec {
-            summary: "List active live sessions on a running aikit serve instance",
-            syntax: Some("session list"),
+            summary: "List captured coding-agent sessions on disk (--live: live sessions on aikit serve)",
+            syntax: Some("session list [--tool <KIND>]... [--path [<KIND>=]<DIR>]... [--since <WHEN>]"),
             category: Some("agents"),
-            args: vec![opt_spec(
-                "serve-url",
-                "URL of aikit serve (default: AIKIT_SERVE_URL or http://127.0.0.1:8080)",
-            )],
+            args: vec![
+                repeated_spec("tool", "Tool to list; repeatable: claude_code, codex or open_code"),
+                repeated_spec(
+                    "path",
+                    "Session root to scan instead of the tool's home; repeatable: [<tool>=]<dir>",
+                ),
+                opt_spec("since", "Only sessions active since: 24h, 7d, or an RFC 3339 time"),
+                opt_spec("db", "Capture SQLite file (or AIKIT_CAPTURE_DB; default: aikit serve's)"),
+                opt_spec("format", "Output format: default or json"),
+                flag_spec("live", "List live sessions on a running aikit serve instead"),
+                opt_spec(
+                    "serve-url",
+                    "With --live: URL of aikit serve (default: AIKIT_SERVE_URL or http://127.0.0.1:8080)",
+                ),
+            ],
             ..CommandSpec::default()
         }
     }
@@ -1347,7 +1423,142 @@ impl IntoCommandSpec for SessionListArgs {
 impl FromArgValueMap for SessionListArgs {
     fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
         SessionListArgs {
+            live: get_bool_val(map, "live"),
             serve_url: get_opt_val(map, "serve-url"),
+            tool: get_repeated_val(map, "tool"),
+            path: get_repeated_val(map, "path"),
+            since: get_opt_val(map, "since"),
+            db: get_opt_val(map, "db"),
+            format: get_str_default(map, "format", "default"),
+        }
+    }
+}
+
+struct SessionSummarizeArgs {
+    session: Vec<String>,
+    all: bool,
+    since: Option<String>,
+    tool: Vec<String>,
+    path: Vec<String>,
+    db: Option<String>,
+    model: Option<String>,
+    base_url: Option<String>,
+    api_key_env: Option<String>,
+    max_tokens: Option<String>,
+    timeout: Option<String>,
+    tags: Option<String>,
+    tags_file: Option<String>,
+    areas_file: Option<String>,
+    area_depth: Option<String>,
+    include_assistant: bool,
+    parallel: Option<String>,
+    force: bool,
+    no_mirror: bool,
+    dry_run: bool,
+    format: String,
+}
+
+impl IntoCommandSpec for SessionSummarizeArgs {
+    fn command_spec() -> CommandSpec {
+        CommandSpec {
+            summary:
+                "Summarize captured sessions: one paragraph, areas touched, tags from a fixed list",
+            syntax: Some(
+                "session summarize (--session <ID>... | --since <WHEN> | --all) --model <MODEL>",
+            ),
+            category: Some("agents"),
+            args: vec![
+                repeated_spec(
+                    "session",
+                    "Session id (or a unique prefix of 8+ chars); repeatable",
+                ),
+                flag_spec("all", "Every captured session in the selected locations"),
+                opt_spec(
+                    "since",
+                    "Sessions active since: 24h, 7d, or an RFC 3339 time",
+                ),
+                repeated_spec(
+                    "tool",
+                    "Tool to include; repeatable: claude_code, codex or open_code",
+                ),
+                repeated_spec(
+                    "path",
+                    "Session root to scan instead of the tool's home; repeatable: [<tool>=]<dir>",
+                ),
+                opt_spec(
+                    "db",
+                    "Capture SQLite file (or AIKIT_CAPTURE_DB; default: aikit serve's)",
+                ),
+                opt_short_spec(
+                    "model",
+                    'm',
+                    "Model to ask (or AIKIT_MODEL); required unless --dry-run",
+                ),
+                opt_spec("base-url", "OpenAI-compatible base URL (or AIKIT_LLM_URL)"),
+                opt_spec(
+                    "api-key-env",
+                    "Env var holding the API key (default: OPENAI_API_KEY, then AIKIT_API_KEY)",
+                ),
+                opt_spec("max-tokens", "Max completion tokens (default: 1024)"),
+                opt_spec("timeout", "Request timeout in seconds (default: 120)"),
+                opt_spec("tags", "Allowed tags, comma-separated (names only)"),
+                opt_spec(
+                    "tags-file",
+                    "Allowed tags as TOML [[tag]] entries (or AIKIT_SESSION_TAGS)",
+                ),
+                opt_spec(
+                    "areas-file",
+                    "Path-to-area mapping as TOML [[area]] entries",
+                ),
+                opt_spec(
+                    "area-depth",
+                    "Directory depth for default area grouping (default: 2)",
+                ),
+                flag_spec(
+                    "include-assistant",
+                    "Add the assistant's text blocks to the digest",
+                ),
+                opt_spec("parallel", "Concurrent model calls (default: 4)"),
+                flag_spec("force", "Regenerate even when the digest is unchanged"),
+                flag_spec(
+                    "no-mirror",
+                    "Do not mirror the primary tag into the tool's tag slot",
+                ),
+                flag_spec(
+                    "dry-run",
+                    "Print each digest as it would be sent; call no model",
+                ),
+                opt_spec("format", "Output format: default or json"),
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for SessionSummarizeArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        SessionSummarizeArgs {
+            session: get_repeated_val(map, "session"),
+            all: get_bool_val(map, "all"),
+            since: get_opt_val(map, "since"),
+            tool: get_repeated_val(map, "tool"),
+            path: get_repeated_val(map, "path"),
+            db: get_opt_val(map, "db"),
+            model: get_opt_val(map, "model"),
+            base_url: get_opt_val(map, "base-url"),
+            api_key_env: get_opt_val(map, "api-key-env"),
+            max_tokens: get_opt_val(map, "max-tokens"),
+            timeout: get_opt_val(map, "timeout"),
+            tags: get_opt_val(map, "tags"),
+            tags_file: get_opt_val(map, "tags-file"),
+            areas_file: get_opt_val(map, "areas-file"),
+            area_depth: get_opt_val(map, "area-depth"),
+            include_assistant: get_bool_val(map, "include-assistant"),
+            parallel: get_opt_val(map, "parallel"),
+            force: get_bool_val(map, "force"),
+            no_mirror: get_bool_val(map, "no-mirror"),
+            dry_run: get_bool_val(map, "dry-run"),
+            format: get_str_default(map, "format", "default"),
         }
     }
 }

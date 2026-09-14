@@ -19,6 +19,10 @@ built-in `aikit` agent, or anything else in the catalog.
   schema-driven form-fill endpoints on `aikit serve` (`/api/v1/aitools/…`),
   including `agents/draft_definition` to draft an agent definition from plain
   English. See [`aikit-magictool`](aikit-magictool/README.md).
+- **Session briefs (optional)** — `aikit session list` shows the coding-agent
+  sessions on disk and `aikit session summarize` writes a short summary, the
+  areas touched and tags from a fixed list for each one, from a scrubbed
+  digest rather than the transcript.
 - **Session sync (optional)** — `aikit session sync` uploads the transcripts
   Claude Code and Codex already write to disk, secret-scrubbed and
   content-addressed, to S3-compatible blob storage (one-shot or `--watch`).
@@ -285,7 +289,43 @@ versions and all versions are retained. See the
 and environment table. Requires the `agent-adapters` feature (`watcher` for
 `--watch`).
 
-## 5. Packages
+## 5. Session briefs (`aikit session list` / `aikit session summarize`)
+
+List the sessions your coding agents have left on disk (Claude Code, Codex,
+OpenCode) and summarize the ones you pick. A summary is a **brief**: one
+paragraph, the areas of the repository touched (reads and modifications per
+directory, with time attributed from the event timestamps), and tags from a
+list you control. The model never sees a transcript; it sees a bounded,
+secret-scrubbed **digest** built from the captured events (ADR 0022).
+
+```bash
+# Sessions from every tool's default home, newest first
+aikit session list
+
+# A scratch directory (CI), one tool, machine output
+aikit session list --path codex=/tmp/ci-sessions --format json
+
+# See exactly what would be sent, without calling a model
+aikit session summarize --since 24h --dry-run
+
+# Summarize and tag everything from the last week with the built-in tag list
+export OPENAI_API_KEY=...
+aikit session summarize --since 7d --model gpt-4o
+
+# Your own tags; mechanical ones (test, docs, config, research) are decided in code
+aikit session summarize --all --model gpt-4o --tags-file ~/.config/aikit/session-tags.toml
+```
+
+Briefs are stored in the capture database next to the events, keyed by
+session; re-running on an unchanged session is a no-op unless `--force`. The
+primary tag is mirrored into the tool's own tag slot where the tool has one
+(Claude Code today). `aikit serve` exposes stored briefs read-only at
+`GET /api/v1/capture/{backend}/briefs` and `.../sessions/{id}/brief`. See the
+[command reference](webdocs/cli-commands.mdx) for every flag. Requires the
+`agent-adapters` feature. `aikit session list --live` still lists the live
+sessions of a running `aikit serve`.
+
+## 6. Packages
 
 Distribute commands, skills, and agent definitions as `aikit.toml`
 packages. Install them per project for whichever assistant you use.
@@ -328,7 +368,7 @@ A package's `aikit.toml` describes name, version, description, and an
 package can target multiple assistants because the artifacts mapping is
 per-agent.
 
-## 6. MCP server registration (`aikit agent mcp`)
+## 7. MCP server registration (`aikit agent mcp`)
 
 Merge one MCP server entry into whichever agent's config file is
 appropriate (`mcpServers` for Cursor/Claude, VS Code `servers`, OpenCode
@@ -352,7 +392,7 @@ Six catalog keys are supported: `cursor-agent` (alias `cursor`), `claude`,
 `--overwrite` to replace an existing server id. Full reference:
 [webdocs/mcp.mdx](webdocs/mcp.mdx).
 
-## 7. Programmatic use
+## 8. Programmatic use
 
 Both crates expose the same capabilities as the CLI:
 

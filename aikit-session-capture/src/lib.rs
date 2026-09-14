@@ -30,6 +30,7 @@ pub mod adapter;
 pub mod cursor_offset;
 pub mod event_store;
 pub mod homes;
+pub mod ingest;
 pub mod models;
 pub mod registry;
 pub mod scrub;
@@ -53,6 +54,7 @@ pub use event_store::{
     EventBatch, EventStore, FileTouch, InMemoryEventStore, SessionSummary, StoreError,
 };
 pub use homes::{DefaultHomeResolver, HomeOs, HomeResolver, HomeRoot};
+pub use ingest::{parse_and_store_file, scan_adapter, session_files, IngestOutcome};
 pub use models::{
     ActionKind, ActionStatus, CacheObservation, CaptureSource, TokenEvent, ToolEvent, ToolKind,
 };
