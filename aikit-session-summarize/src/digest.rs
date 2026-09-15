@@ -1,5 +1,5 @@
 //! The digest: the bounded, deterministic text a model sees for one
-//! session. Built from the event store, never from a transcript (ADR 0022).
+//! session. Built from the event store, never from a transcript (ADR 0023).
 
 use aikit_session_capture::{ActionKind, ActionStatus, SessionSummary, ToolEvent, ToolKind};
 
@@ -97,6 +97,30 @@ pub fn clip(s: &str, max: usize) -> String {
     out
 }
 
+/// Harness blocks that ride inside a user turn but are not the user's
+/// words: Claude Code's `<system-reminder>` and the desktop app's
+/// `<task-notification>`. Stripped before budgeting so the prompt section
+/// holds what the person typed.
+const NOISE_TAGS: &[&str] = &["system-reminder", "task-notification"];
+
+/// Remove every `<tag>…</tag>` span for the tags in [`NOISE_TAGS`]. An
+/// unterminated span is cut to the end of the text.
+pub fn strip_harness_noise(prompt: &str) -> String {
+    let mut out = prompt.to_string();
+    for tag in NOISE_TAGS {
+        let open = format!("<{tag}>");
+        let close = format!("</{tag}>");
+        while let Some(start) = out.find(&open) {
+            let end = out[start..]
+                .find(&close)
+                .map(|i| start + i + close.len())
+                .unwrap_or(out.len());
+            out.replace_range(start..end, "");
+        }
+    }
+    out.trim().to_string()
+}
+
 fn is_prompt_event(e: &ToolEvent) -> bool {
     e.kind == ActionKind::Other
         && e.metadata.get("kind").and_then(|v| v.as_str()) == Some("user_prompt")
@@ -127,6 +151,11 @@ pub fn build_digest(
             (from_events, src)
         }
     };
+    let raw_prompts: Vec<String> = raw_prompts
+        .iter()
+        .map(|p| strip_harness_noise(p))
+        .filter(|p| !p.is_empty())
+        .collect();
     let mut prompts_out = Vec::new();
     let mut prompt_budget = opts.prompts_chars;
     for p in raw_prompts.iter().take(opts.max_prompts) {
@@ -515,6 +544,39 @@ mod tests {
         let text = d.render(&opts);
         assert!(text.ends_with("[digest truncated]\n"));
         assert!(text.chars().count() <= 200 + "\n[digest truncated]\n".len());
+    }
+
+    #[test]
+    fn harness_noise_is_stripped_from_prompts() {
+        assert_eq!(
+            strip_harness_noise(
+                "<system-reminder>\nYou are in a worktree.\n</system-reminder>\n\n## Goal\nDo the thing."
+            ),
+            "## Goal\nDo the thing."
+        );
+        assert_eq!(
+            strip_harness_noise("<task-notification><task-id>x</task-id></task-notification>"),
+            ""
+        );
+        assert_eq!(
+            strip_harness_noise("plain <system-reminder>cut to end"),
+            "plain"
+        );
+        assert_eq!(strip_harness_noise("  keep me  "), "keep me");
+
+        // A prompt that is only noise disappears from the digest entirely.
+        let opts = DigestOptions::default();
+        let d = build_digest(
+            &session(),
+            &sample_events(),
+            PromptsInput::History(vec![
+                "<task-notification>done</task-notification>".into(),
+                "<system-reminder>ctx</system-reminder> real question".into(),
+            ]),
+            vec![],
+            &opts,
+        );
+        assert_eq!(d.prompts, vec!["real question"]);
     }
 
     #[test]

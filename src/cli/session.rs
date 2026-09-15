@@ -5,7 +5,7 @@
 //! - `list`      — list captured sessions on disk (`--live` lists the live
 //!   sessions of a running `aikit serve` instead)
 //! - `sync`      — upload scrubbed transcripts to S3-compatible storage
-//! - `summarize` — generate session briefs (summary, areas, tags) — ADR 0022
+//! - `summarize` — generate session briefs (summary, areas, tags) — ADR 0023
 
 use std::io::{self, BufRead, Write as IoWrite};
 use std::path::PathBuf;
@@ -503,7 +503,7 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
         Ok(v) => v.max(1),
         Err(code) => return Ok(code),
     };
-    let max_tokens = match parse_num(args.max_tokens.as_deref(), "--max-tokens", 1024u32) {
+    let max_tokens = match parse_num(args.max_tokens.as_deref(), "--max-tokens", 4096u32) {
         Ok(v) => v,
         Err(code) => return Ok(code),
     };

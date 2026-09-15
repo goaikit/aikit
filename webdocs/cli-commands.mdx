@@ -345,7 +345,7 @@ list. The model never sees a transcript. It sees a bounded, secret-scrubbed
 **digest** built from the captured events — prompts, files touched in order
 with their action kinds, commands run, the areas table, the final assistant
 message — and answers with one completion, no tools, no agent loop
-([ADR 0022](https://github.com/goaikit/aikit/blob/main/docs/adr/0022-a-session-brief-is-one-completion-over-a-scrubbed-digest.md)).
+([ADR 0023](https://github.com/goaikit/aikit/blob/main/docs/adr/0023-a-session-brief-is-one-completion-over-a-scrubbed-digest.md)).
 
 ```bash
 # Preview: print every digest as it would be sent; no model call, nothing stored
@@ -381,7 +381,7 @@ aikit session summarize --session 550e8400 --model gpt-4o --force --no-mirror
 | `--model`, `-m` | `AIKIT_MODEL` | — | Required unless `--dry-run` |
 | `--base-url` | `AIKIT_LLM_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
 | `--api-key-env` | — | `OPENAI_API_KEY`, then `AIKIT_API_KEY` | Environment variable holding the key |
-| `--max-tokens` | — | `1024` | Completion budget; temperature is always `0` |
+| `--max-tokens` | — | `4096` | Completion budget; temperature is always `0`. A thinking model spends the budget on reasoning before it answers, and an exhausted budget is reported as `finish_reason=length` |
 | `--timeout` | — | `120` | Request timeout in seconds |
 | `--tags` | — | built-in list | Comma-separated tag names (no descriptions, no rules) |
 | `--tags-file` | `AIKIT_SESSION_TAGS` | built-in list | TOML `[[tag]]` entries; see below. Not with `--tags` |

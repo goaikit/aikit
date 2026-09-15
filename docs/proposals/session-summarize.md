@@ -5,7 +5,7 @@
 (history backend), [ADR 0018](../adr/0018-history-has-a-transcript-vocabulary-distinct-from-the-streaming-vocabulary.md),
 [ADR 0020](../adr/0020-eval-artifacts-are-an-additive-only-contract.md),
 [ADR 0021](../adr/0021-a-judgment-is-one-native-completion-recorded-whole.md),
-[ADR 0022](../adr/0022-a-session-brief-is-one-completion-over-a-scrubbed-digest.md).
+[ADR 0023](../adr/0023-a-session-brief-is-one-completion-over-a-scrubbed-digest.md).
 
 ## Goal
 
@@ -69,7 +69,7 @@ aikit session summarize (--session <id>... | --since <when> | --all)
   characters. Exactly one of `--session`, `--since`, `--all` selects.
 - Model: `--model` (env `AIKIT_MODEL`), `--base-url` (env `AIKIT_LLM_URL`,
   default the gateway's), `--api-key-env` (default order `OPENAI_API_KEY`,
-  `AIKIT_API_KEY`), temperature 0, `--max-tokens` 1024. Exactly the judge's
+  `AIKIT_API_KEY`), temperature 0, `--max-tokens` 4096. Exactly the judge's
   shape (ADR 0021): one `LlmGateway::complete` per session, no agent loop.
 - `--dry-run` builds and prints every digest and its mechanical tags and
   makes no model call. `--format json` prints machine output on stdout;

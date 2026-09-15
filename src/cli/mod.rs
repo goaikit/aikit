@@ -1499,7 +1499,7 @@ impl IntoCommandSpec for SessionSummarizeArgs {
                     "api-key-env",
                     "Env var holding the API key (default: OPENAI_API_KEY, then AIKIT_API_KEY)",
                 ),
-                opt_spec("max-tokens", "Max completion tokens (default: 1024)"),
+                opt_spec("max-tokens", "Max completion tokens (default: 4096; thinking models spend it on reasoning first)"),
                 opt_spec("timeout", "Request timeout in seconds (default: 120)"),
                 opt_spec("tags", "Allowed tags, comma-separated (names only)"),
                 opt_spec(

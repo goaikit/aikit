@@ -1,5 +1,5 @@
 //! `aikit-session-summarize`: session briefs for captured coding-agent
-//! sessions (ADR 0022).
+//! sessions (ADR 0023).
 //!
 //! Given sessions that `aikit-session-capture` has parsed into an
 //! [`EventStore`](aikit_session_capture::EventStore), this crate builds a

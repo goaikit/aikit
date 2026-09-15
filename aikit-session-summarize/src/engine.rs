@@ -1,6 +1,6 @@
 //! The summarizer: one native completion per session over a scrubbed
 //! digest, validated tags, a stored brief, and bounded concurrency over a
-//! batch (ADR 0022).
+//! batch (ADR 0023).
 
 use std::sync::Arc;
 
@@ -37,7 +37,10 @@ impl ModelConfig {
             model: model.into(),
             base_url: base_url.into(),
             api_key: api_key.into(),
-            max_tokens: 1024,
+            // 4096, not 1024: a thinking model spends the budget on reasoning
+            // before it writes the answer, and an exhausted budget arrives
+            // as an empty reply.
+            max_tokens: 4096,
             temperature: 0.0,
         }
     }
@@ -129,6 +132,25 @@ pub struct Summarizer {
 /// SHA-256 hex of the exact user message: the identity of the request.
 pub fn digest_hash(user_message: &str) -> String {
     hex::encode(Sha256::digest(user_message.as_bytes()))
+}
+
+/// An empty reply that stopped for `length` is not a model that had nothing
+/// to say: the budget ran out first. Thinking models spend it on reasoning,
+/// so say what to raise instead of reporting "empty reply".
+fn check_budget(resp: &LlmResponse) -> Result<(), String> {
+    let empty = resp
+        .content
+        .as_deref()
+        .map(|c| c.trim().is_empty())
+        .unwrap_or(true);
+    if empty && resp.finish_reason.as_deref() == Some("length") {
+        return Err(
+            "model hit the token budget before answering (finish_reason=length); \
+             raise --max-tokens, thinking models spend it on reasoning first"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 fn message(role: &str, text: String) -> LlmMessage {
@@ -291,6 +313,7 @@ impl Summarizer {
             message("user", user),
         ];
         let first = self.complete(messages.clone()).await?;
+        check_budget(&first)?;
         let first_text = first.content.clone().unwrap_or_default();
         let mut model_reported = first.model.clone();
 
@@ -309,6 +332,7 @@ impl Summarizer {
                     corrective_message(&rejected, parse_error.as_deref(), &self.options.tags),
                 ));
                 let second = self.complete(messages).await?;
+                check_budget(&second)?;
                 if second.model.is_some() {
                     model_reported = second.model.clone();
                 }
@@ -610,6 +634,21 @@ mod tests {
             .summarize_one(store.as_ref(), briefs.as_ref(), &session)
             .await;
         assert!(matches!(out.outcome, Outcome::Failed { .. }));
+    }
+
+    #[tokio::test]
+    async fn empty_reply_truncated_by_length_names_the_budget() {
+        let (store, briefs, session) = store_with_session().await;
+        let mut truncated = MockResponse::text("");
+        truncated.finish_reason = "length".into();
+        let s = summarizer(vec![truncated], SummarizeOptions::default());
+        let out = s
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await;
+        match out.outcome {
+            Outcome::Failed { error } => assert!(error.contains("--max-tokens"), "{error}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     struct RecordingMirror(std::sync::Mutex<Vec<(ToolKind, String, String)>>);

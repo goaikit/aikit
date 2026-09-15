@@ -407,7 +407,7 @@ impl EventStore for SqliteEventStore {
     }
 }
 
-// ── session briefs (BriefStore, ADR 0022) ─────────────────────────────────────
+// ── session briefs (BriefStore, ADR 0023) ─────────────────────────────────────
 
 /// The same connection serves briefs: one database, two traits.
 #[async_trait]

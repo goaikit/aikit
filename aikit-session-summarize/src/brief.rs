@@ -6,7 +6,7 @@
 //! `BriefStore` beside `EventStore` (the production SQLite store in
 //! `aikit-cli` implements both on one connection).
 //!
-//! The record is an additive-only contract (ADR 0020, ADR 0022): fields are
+//! The record is an additive-only contract (ADR 0020, ADR 0023): fields are
 //! added with `#[serde(default)]`, never renamed or removed.
 
 use std::collections::HashMap;

@@ -194,48 +194,49 @@ pub(crate) fn parse(
                 captured_at_ms: ts_ms.unwrap_or(0),
                 captured_via: CaptureSource::Transcript,
             };
-            if let Some(id) = &msg.id {
-                if !id.is_empty() {
-                    if let Some(&idx) = msg_id_to_idx.get(id) {
-                        // Streaming usage progresses monotonically — keep the
-                        // later record (highest output_tokens). Don't `continue`
-                        // the outer loop; content blocks below are still
-                        // distinct and must be processed.
-                        if ev.output_tokens.unwrap_or(0)
-                            >= res.token_events[idx].output_tokens.unwrap_or(0)
-                        {
-                            res.token_events[idx] = ev;
-                        }
-                    } else {
-                        msg_id_to_idx.insert(id.clone(), res.token_events.len());
-                        res.token_events.push(ev);
+            // The usage envelope never ends the record: the content blocks
+            // below (tool_use, text) still belong to this line and must be
+            // processed. A `continue` here once dropped every tool call of a
+            // real transcript, where each assistant record carries both a
+            // usage envelope and a message id.
+            if let Some(id) = msg.id.clone().filter(|s| !s.is_empty()) {
+                if let Some(&idx) = msg_id_to_idx.get(&id) {
+                    // Streaming usage progresses monotonically — keep the
+                    // later record (highest output_tokens).
+                    if ev.output_tokens.unwrap_or(0)
+                        >= res.token_events[idx].output_tokens.unwrap_or(0)
+                    {
+                        res.token_events[idx] = ev;
                     }
-                    // Also emit a Tier-2 CacheObservation so the cachetrack
-                    // module (future) can attribute invalidations. Spec 010
-                    // data-model.md.
-                    res.cache_observations.push(CacheObservation {
-                        source_event_id: format!("cachetrack:{}", id),
-                        session_id: rec.session_id.clone().unwrap_or_default(),
-                        tool: ToolKind::ClaudeCode,
-                        cache_read_input_tokens: usage.cache_read_input_tokens,
-                        cache_creation_input_tokens: if cache_creation_total > 0 {
-                            Some(cache_creation_total)
-                        } else {
-                            None
-                        },
-                        cache_creation_1h_input_tokens: if cache_creation_1h > 0 {
-                            Some(cache_creation_1h)
-                        } else {
-                            None
-                        },
-                        assistant_blocks_hash: None, // Phase 2 leaves this for the cachetrack module.
-                        tools_changed: Vec::new(),
-                        observed_at_ms: ts_ms.unwrap_or(0),
-                    });
-                    continue;
+                } else {
+                    msg_id_to_idx.insert(id.clone(), res.token_events.len());
+                    res.token_events.push(ev);
                 }
+                // Also emit a Tier-2 CacheObservation so the cachetrack
+                // module (future) can attribute invalidations. Spec 010
+                // data-model.md.
+                res.cache_observations.push(CacheObservation {
+                    source_event_id: format!("cachetrack:{}", id),
+                    session_id: rec.session_id.clone().unwrap_or_default(),
+                    tool: ToolKind::ClaudeCode,
+                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                    cache_creation_input_tokens: if cache_creation_total > 0 {
+                        Some(cache_creation_total)
+                    } else {
+                        None
+                    },
+                    cache_creation_1h_input_tokens: if cache_creation_1h > 0 {
+                        Some(cache_creation_1h)
+                    } else {
+                        None
+                    },
+                    assistant_blocks_hash: None, // Phase 2 leaves this for the cachetrack module.
+                    tools_changed: Vec::new(),
+                    observed_at_ms: ts_ms.unwrap_or(0),
+                });
+            } else {
+                res.token_events.push(ev);
             }
-            res.token_events.push(ev);
         }
 
         // Content blocks: tool_use, tool_result, text.
@@ -775,6 +776,30 @@ mod tests {
     }
 
     // ---- Task 11: invariants -------------------------------------------
+
+    #[test]
+    fn records_with_usage_and_msg_id_still_emit_their_content_blocks() {
+        // Regression: real transcripts put a usage envelope and a message id
+        // on every assistant record. The usage branch once `continue`d past
+        // the content blocks, so no tool call or assistant text was ever
+        // captured from a live session.
+        let bytes = fixture("multi-block-dedup.jsonl");
+        let res = parse(Path::new("/tmp/dedup.jsonl"), &bytes, 0, &scrubber()).unwrap();
+        let tool_calls = res
+            .tool_events
+            .iter()
+            .filter(|e| e.kind != ActionKind::Think && e.kind != ActionKind::Other)
+            .count();
+        assert!(
+            tool_calls >= 3,
+            "expected the fixture's three tool_use blocks, got {tool_calls}: {:?}",
+            res.tool_events.iter().map(|e| e.kind).collect::<Vec<_>>()
+        );
+        assert!(
+            res.tool_events.iter().any(|e| e.kind == ActionKind::Think),
+            "assistant text on an id-bearing record becomes a Think event"
+        );
+    }
 
     #[test]
     fn parse_twice_from_zero_produces_identical_source_event_ids() {
