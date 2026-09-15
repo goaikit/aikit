@@ -314,7 +314,9 @@ mod tests {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             l.local_addr().unwrap().port()
         };
-        let provider = OpenAiCompatProvider::new(1, 1).unwrap();
+        // Generous timeouts: Windows retries a refused connect for about 2 s,
+        // and a request timeout firing first would be a timeout, not a refusal.
+        let provider = OpenAiCompatProvider::new(30, 10).unwrap();
         let err = provider
             .complete(tiny_request(format!("http://127.0.0.1:{port}")))
             .unwrap_err();
