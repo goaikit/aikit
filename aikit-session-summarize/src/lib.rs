@@ -8,7 +8,9 @@
 //! against the fixed list, and stores the resulting
 //! [`SessionBrief`](aikit_session_capture::SessionBrief).
 //!
-//! The crate never spawns a tool and never reads a transcript. It mirrors
+//! The crate never spawns a tool and never reads a transcript. It only
+//! reads the tools' session files and never writes to them: its one write is
+//! the brief, through a host's `BriefStore`. It mirrors
 //! `aikit-session-sync` as a sibling consumer of the capture crate.
 //!
 //! Modules:
@@ -34,9 +36,10 @@ pub use areas::{group_areas, AreaMapping, AreaRule};
 pub use brief::{
     AreaTouch, BriefStore, InMemoryBriefStore, SessionBrief, TagAssignment, TagSource,
 };
-pub use digest::{build_digest, Digest, DigestOptions, PromptsInput};
+pub use digest::{build_digest, Digest, DigestOptions, PromptsInput, RenderReport};
 pub use engine::{
-    ModelConfig, Outcome, PromptSource, SessionOutcome, SummarizeOptions, Summarizer, TagMirror,
+    is_transient, ModelConfig, Outcome, ProgressFn, PromptSource, SessionOutcome, SummarizeOptions,
+    Summarizer,
 };
 pub use locate::{adapters_for, parse_location, parse_tool_kind, LocateError, LocationSpec};
 pub use select::{parse_since, select_sessions, SelectError, Selection};

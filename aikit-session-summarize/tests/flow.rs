@@ -1,9 +1,12 @@
 //! The whole flow on the capture crate's fixtures: locate → scan → select →
-//! summarize through a mock gateway → stored brief → no-op on re-run.
+//! summarize through a mock gateway → stored brief → no-op on re-run, with the
+//! session files left untouched.
 #![cfg(all(feature = "claudecode", feature = "codex"))]
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use aikit_agent::llm::mock::{MockGateway, MockResponse};
 use aikit_session_capture::{
@@ -13,6 +16,26 @@ use aikit_session_summarize::{
     adapters_for, select_sessions, BriefStore, InMemoryBriefStore, LocationSpec, ModelConfig,
     Outcome, Selection, SummarizeOptions, Summarizer, TagList, TagSource,
 };
+
+/// Every file under `root` with its bytes and modification time: what a
+/// read-only run must leave exactly as it found it.
+fn snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, SystemTime)> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            let path = entry.path();
+            let meta = entry.metadata().unwrap();
+            if meta.is_dir() {
+                stack.push(path);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                out.insert(path, (bytes, meta.modified().unwrap()));
+            }
+        }
+    }
+    out
+}
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -71,8 +94,10 @@ async fn all_sessions(store: &InMemoryEventStore) -> Vec<aikit_session_capture::
 
 #[tokio::test]
 async fn fixtures_scan_list_and_summarize_end_to_end() {
-    let (store, _dir) = scanned().await;
+    let (store, dir) = scanned().await;
     let briefs = Arc::new(InMemoryBriefStore::new());
+    // The session roots, as the scan left them.
+    let before = snapshot(dir.path());
 
     let listed = all_sessions(&store).await;
     let mut ids: Vec<(ToolKind, &str)> = listed
@@ -162,7 +187,7 @@ async fn fixtures_scan_list_and_summarize_end_to_end() {
     assert_eq!(outcomes.len(), 2);
     for o in &outcomes {
         match &o.outcome {
-            Outcome::Generated { brief, mirrored } => {
+            Outcome::Generated { brief } => {
                 assert!(brief.summary.starts_with("Looked at main.go"));
                 assert_eq!(brief.tags.len(), 1);
                 assert_eq!(brief.tags[0].name, "research");
@@ -170,7 +195,6 @@ async fn fixtures_scan_list_and_summarize_end_to_end() {
                 assert_eq!(brief.rejected_tags, vec!["bogus"]);
                 assert!(!brief.areas.is_empty(), "areas from the fixture's reads");
                 assert_eq!(brief.model, "mock");
-                assert!(mirrored.is_none());
                 let stored = briefs.brief_for(o.tool, &o.session_id).await.unwrap();
                 assert_eq!(stored.as_ref(), Some(brief));
             }
@@ -206,6 +230,11 @@ async fn fixtures_scan_list_and_summarize_end_to_end() {
         .await
         .unwrap()
         .is_some());
+
+    // Read-only toward the tools: dry run, generation, re-run and a forced
+    // regeneration left every session file byte-for-byte and mtime-for-mtime
+    // as it was.
+    assert_eq!(snapshot(dir.path()), before);
 
     // Briefs list newest first per tool.
     let codex = briefs.briefs_for(ToolKind::Codex, 10, 0).await.unwrap();

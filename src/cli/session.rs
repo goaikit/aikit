@@ -6,6 +6,10 @@
 //!   sessions of a running `aikit serve` instead)
 //! - `sync`      — upload scrubbed transcripts to S3-compatible storage
 //! - `summarize` — generate session briefs (summary, areas, tags) — ADR 0023
+//! - `briefs`    — print stored briefs; no scan, no model, no network
+//!
+//! Read-only toward the coding tools: these commands read their session
+//! files and never write to them.
 
 use std::io::{self, BufRead, Write as IoWrite};
 use std::path::PathBuf;
@@ -26,7 +30,7 @@ use aikit_session_capture::{Registry, ToolKind};
 use aikit_session_summarize::{
     adapters_for, parse_location, parse_since, parse_tool_kind, select_sessions, AreaMapping,
     BriefStore, LocationSpec, ModelConfig, Outcome, PromptSource, Selection, SummarizeOptions,
-    Summarizer, TagList, TagMirror,
+    Summarizer, TagList,
 };
 #[cfg(feature = "agent-adapters")]
 use aikit_session_sync::{
@@ -88,8 +92,27 @@ pub struct SummarizeSessionsArgs {
     pub include_assistant: bool,
     pub parallel: Option<String>,
     pub force: bool,
+    /// Deprecated, no effect: aikit never writes to a tool's session files.
+    /// Accepted so scripts written for 0.1.196 keep working.
     pub no_mirror: bool,
+    /// No per-session progress lines and no tally on stderr.
+    pub quiet: bool,
+    /// Skip the one-call endpoint check before a batch.
+    pub no_preflight: bool,
     pub dry_run: bool,
+    pub format: String,
+}
+
+/// `aikit session briefs`.
+#[derive(Debug, Default)]
+pub struct BriefsArgs {
+    /// Session ids or unique prefixes of 8+ characters; repeatable.
+    pub sessions: Vec<String>,
+    /// Keep briefs generated since this instant (duration or timestamp).
+    pub since: Option<String>,
+    pub tools: Vec<String>,
+    pub db: Option<String>,
+    /// `default` or `json`.
     pub format: String,
 }
 
@@ -445,6 +468,11 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
         Ok(j) => j,
         Err(code) => return Ok(code),
     };
+    if args.no_mirror {
+        eprintln!(
+            "note: --no-mirror is deprecated and has no effect; aikit never writes to tool session files"
+        );
+    }
 
     // Tag list: --tags, --tags-file, AIKIT_SESSION_TAGS, else built-in.
     let tags = match (args.tags.as_deref(), args.tags_file.as_deref()) {
@@ -499,7 +527,7 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
             ..Default::default()
         },
     };
-    let parallel = match parse_num(args.parallel.as_deref(), "--parallel", 4usize) {
+    let parallel = match parse_num(args.parallel.as_deref(), "--parallel", 1usize) {
         Ok(v) => v.max(1),
         Err(code) => return Ok(code),
     };
@@ -507,7 +535,7 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
         Ok(v) => v,
         Err(code) => return Ok(code),
     };
-    let timeout = match parse_num(args.timeout.as_deref(), "--timeout", 120u64) {
+    let timeout = match parse_num(args.timeout.as_deref(), "--timeout", 180u64) {
         Ok(v) => v,
         Err(code) => return Ok(code),
     };
@@ -597,20 +625,48 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
         force: args.force,
         dry_run: args.dry_run,
         parallel,
-        mirror: !args.no_mirror,
+        ..SummarizeOptions::default()
     };
     let summarizer = Arc::new(
-        Summarizer::new(gateway, model, options)
-            .with_prompt_source(Arc::new(HistoryPrompts))
-            .with_tag_mirror(Arc::new(HistoryTagMirror)),
+        Summarizer::new(gateway, model, options).with_prompt_source(Arc::new(HistoryPrompts)),
     );
+    // One tiny call before the batch: a bad key, an unknown model or an
+    // unreachable endpoint fails once here, not once per session.
+    if !args.dry_run && !args.no_preflight {
+        if let Err(e) = summarizer.preflight().await {
+            eprintln!("Error: {e}");
+            eprintln!(
+                "  check --model, --base-url and the API key (--no-preflight skips this check)"
+            );
+            return Ok(2);
+        }
+    }
+    let quiet = args.quiet;
+    let progress: Option<Arc<aikit_session_summarize::ProgressFn>> = if quiet {
+        None
+    } else {
+        let report: Arc<aikit_session_summarize::ProgressFn> = Arc::new(
+            |done: usize,
+             total: usize,
+             o: &aikit_session_summarize::SessionOutcome,
+             took: std::time::Duration| {
+                eprintln!("{}", progress_line(done, total, o, took));
+            },
+        );
+        Some(report)
+    };
+    let started = std::time::Instant::now();
     let outcomes = summarizer
-        .summarize_many(
+        .summarize_many_with_progress(
             Arc::clone(&scan.event_store),
             Arc::clone(&scan.brief_store),
             selected,
+            progress,
         )
         .await;
+    if !quiet {
+        eprintln!("{}", tally_line(&outcomes, started.elapsed()));
+    }
 
     let mut failed = 0;
     if json {
@@ -623,11 +679,8 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
     } else {
         for o in &outcomes {
             match &o.outcome {
-                Outcome::Generated { brief, mirrored } => {
+                Outcome::Generated { brief } => {
                     print_brief(&o.session_id, o.tool, "generated", brief);
-                    if let Some(Err(e)) = mirrored {
-                        eprintln!("  warning: tag not mirrored: {e}");
-                    }
                 }
                 Outcome::Unchanged { brief } => {
                     print_brief(&o.session_id, o.tool, "unchanged", brief);
@@ -636,6 +689,7 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
                     user_message,
                     mechanical,
                     digest_hash,
+                    warnings,
                 } => {
                     println!(
                         "==> {}  {}  dry-run  digest={}  mechanical=[{}]",
@@ -649,6 +703,9 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
                             .join(",")
                     );
                     println!("{user_message}");
+                    for w in warnings {
+                        println!("warning: {w}");
+                    }
                 }
                 Outcome::Failed { error } => {
                     failed += 1;
@@ -658,6 +715,183 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
         }
     }
     Ok(if failed == 0 { 0 } else { 1 })
+}
+
+/// One stderr line per finished session:
+/// `[3/20] a27cfd7d generated 25.1s docs,research`.
+#[cfg(feature = "agent-adapters")]
+fn progress_line(
+    done: usize,
+    total: usize,
+    o: &aikit_session_summarize::SessionOutcome,
+    took: std::time::Duration,
+) -> String {
+    let id: String = o.session_id.chars().take(8).collect();
+    let detail = match &o.outcome {
+        Outcome::Generated { brief } | Outcome::Unchanged { brief } => brief
+            .tags
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        Outcome::DryRun { warnings, .. } if !warnings.is_empty() => {
+            format!("{} warnings", warnings.len())
+        }
+        Outcome::DryRun { .. } => String::new(),
+        Outcome::Failed { error } => error
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(160)
+            .collect(),
+    };
+    format!(
+        "[{done}/{total}] {id} {} {:.1}s {detail}",
+        o.outcome.status(),
+        took.as_secs_f64()
+    )
+    .trim_end()
+    .to_string()
+}
+
+/// The last stderr line of a batch.
+#[cfg(feature = "agent-adapters")]
+fn tally_line(
+    outcomes: &[aikit_session_summarize::SessionOutcome],
+    took: std::time::Duration,
+) -> String {
+    let count = |status: &str| {
+        outcomes
+            .iter()
+            .filter(|o| o.outcome.status() == status)
+            .count()
+    };
+    format!(
+        "done: generated={} unchanged={} dry_run={} failed={} in {:.1}s",
+        count("generated"),
+        count("unchanged"),
+        count("dry_run"),
+        count("failed"),
+        took.as_secs_f64()
+    )
+}
+
+/// `aikit session briefs`: print stored briefs. Reads aikit's own capture
+/// database only: no scan, no model, no network. Returns the exit code.
+#[cfg(feature = "agent-adapters")]
+pub async fn execute_briefs(args: BriefsArgs) -> anyhow::Result<i32> {
+    use aikit_session_summarize::select::MIN_PREFIX;
+    use aikit_session_summarize::SessionBrief;
+
+    let json = match parse_format(&args.format) {
+        Ok(j) => j,
+        Err(code) => return Ok(code),
+    };
+    let tools = match parse_tools(&args.tools) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            return Ok(2);
+        }
+    };
+    let since_ms = match args.since.as_deref().map(parse_since_now) {
+        Some(Err(e)) => {
+            eprintln!("Error: {e}");
+            return Ok(2);
+        }
+        Some(Ok(ms)) => Some(ms),
+        None => None,
+    };
+
+    let db_path = capture_db(args.db.as_deref());
+    let mut briefs: Vec<SessionBrief> = Vec::new();
+    if db_path.exists() {
+        let conn = super::serve::storage::schema::open(&db_path)
+            .map_err(|e| anyhow::anyhow!("opening capture store {}: {e}", db_path.display()))?;
+        let store = super::serve::storage::SqliteEventStore::new(conn);
+        let kinds = tools.unwrap_or_else(aikit_session_summarize::locate::compiled_tools);
+        for kind in kinds {
+            briefs.extend(
+                store
+                    .briefs_for(kind, u32::MAX, 0)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("reading briefs: {e}"))?,
+            );
+        }
+    }
+    if let Some(since) = since_ms {
+        briefs.retain(|b| b.generated_at_ms >= since);
+    }
+    if !args.sessions.is_empty() {
+        let mut chosen: Vec<SessionBrief> = Vec::new();
+        for id in &args.sessions {
+            let id = id.trim();
+            let exact: Vec<&SessionBrief> = briefs.iter().filter(|b| b.session_id == id).collect();
+            let matched = if !exact.is_empty() {
+                exact
+            } else {
+                if id.chars().count() < MIN_PREFIX {
+                    eprintln!(
+                        "Error: session id prefix '{id}' is shorter than {MIN_PREFIX} characters"
+                    );
+                    return Ok(2);
+                }
+                let by_prefix: Vec<&SessionBrief> = briefs
+                    .iter()
+                    .filter(|b| b.session_id.starts_with(id))
+                    .collect();
+                let mut ids: Vec<&str> = by_prefix.iter().map(|b| b.session_id.as_str()).collect();
+                ids.sort_unstable();
+                ids.dedup();
+                if ids.len() > 1 {
+                    eprintln!(
+                        "Error: '{id}' matches more than one session: {}",
+                        ids.join(", ")
+                    );
+                    return Ok(2);
+                }
+                by_prefix
+            };
+            if matched.is_empty() {
+                eprintln!("Error: no stored brief matches '{id}'");
+                return Ok(2);
+            }
+            for b in matched {
+                if !chosen
+                    .iter()
+                    .any(|c| c.tool == b.tool && c.session_id == b.session_id)
+                {
+                    chosen.push(b.clone());
+                }
+            }
+        }
+        briefs = chosen;
+    }
+    briefs.sort_by(|a, b| {
+        b.generated_at_ms
+            .cmp(&a.generated_at_ms)
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
+
+    if json {
+        println!("{}", serde_json::to_string(&briefs)?);
+        return Ok(0);
+    }
+    if briefs.is_empty() {
+        println!("No stored briefs.");
+        return Ok(0);
+    }
+    for b in &briefs {
+        print_brief(&b.session_id, b.tool, "stored", b);
+    }
+    Ok(0)
+}
+
+#[cfg(not(feature = "agent-adapters"))]
+pub async fn execute_briefs(_args: BriefsArgs) -> anyhow::Result<i32> {
+    eprintln!("Error: session briefs requires the agent-adapters feature");
+    Ok(2)
 }
 
 #[cfg(not(feature = "agent-adapters"))]
@@ -716,6 +950,9 @@ fn print_brief(
     if !brief.rejected_tags.is_empty() {
         println!("    rejected: {}", brief.rejected_tags.join(", "));
     }
+    for w in &brief.warnings {
+        println!("    warning: {w}");
+    }
 }
 
 #[cfg(feature = "agent-adapters")]
@@ -725,14 +962,9 @@ fn outcome_json(o: &aikit_session_summarize::SessionOutcome) -> serde_json::Valu
         "session_id": o.session_id,
     });
     match &o.outcome {
-        Outcome::Generated { brief, mirrored } => {
+        Outcome::Generated { brief } => {
             v["status"] = "generated".into();
             v["brief"] = serde_json::to_value(brief).unwrap_or_default();
-            v["mirrored"] = match mirrored {
-                Some(Ok(b)) => serde_json::json!(b),
-                Some(Err(e)) => serde_json::json!({"error": e}),
-                None => serde_json::Value::Null,
-            };
         }
         Outcome::Unchanged { brief } => {
             v["status"] = "unchanged".into();
@@ -742,11 +974,13 @@ fn outcome_json(o: &aikit_session_summarize::SessionOutcome) -> serde_json::Valu
             user_message,
             mechanical,
             digest_hash,
+            warnings,
         } => {
             v["status"] = "dry_run".into();
             v["user_message"] = user_message.clone().into();
             v["mechanical_tags"] = serde_json::to_value(mechanical).unwrap_or_default();
             v["digest_hash"] = digest_hash.clone().into();
+            v["warnings"] = serde_json::to_value(warnings).unwrap_or_default();
         }
         Outcome::Failed { error } => {
             v["status"] = "failed".into();
@@ -756,7 +990,7 @@ fn outcome_json(o: &aikit_session_summarize::SessionOutcome) -> serde_json::Valu
     v
 }
 
-// ── history integration: prompts in, primary tag out ──────────────────────────
+// ── history integration: prompts in, read-only ──────────────────────────────────
 
 #[cfg(feature = "agent-adapters")]
 fn backend_for(tool: ToolKind) -> Option<aikit_sdk::runner::Backend> {
@@ -770,24 +1004,46 @@ fn backend_for(tool: ToolKind) -> Option<aikit_sdk::runner::Backend> {
 }
 
 /// User prompts through the history reader, for Backends that have one.
-/// Text returned here is scrubbed by the summarizer before it reaches a
-/// digest.
+/// Reads only. Text returned here is scrubbed by the summarizer before it
+/// reaches a digest.
 #[cfg(feature = "agent-adapters")]
 struct HistoryPrompts;
 
 #[cfg(feature = "agent-adapters")]
 impl PromptSource for HistoryPrompts {
-    fn user_prompts(&self, tool: ToolKind, session_id: &str) -> Option<Vec<String>> {
-        use aikit_sdk::history::{HistoryBlock, HistoryContent, MessagesQuery};
+    fn user_prompts(
+        &self,
+        tool: ToolKind,
+        session_id: &str,
+    ) -> Result<Option<Vec<String>>, String> {
+        use aikit_sdk::history::{HistoryBlock, HistoryContent, HistoryError, MessagesQuery};
         use aikit_sdk::MessageRole;
-        let backend = backend_for(tool)?;
+        let Some(backend) = backend_for(tool) else {
+            return Ok(None);
+        };
         if !backend.capabilities().history_store {
-            return None;
+            return Ok(None);
         }
-        let reader = backend.history_reader()?;
+        let Some(reader) = backend.history_reader() else {
+            return Ok(None);
+        };
         let mut q = MessagesQuery::default();
         q.limit = Some(500);
-        let messages = reader.messages(session_id, &q, None).ok()?;
+        let messages = match reader.messages(session_id, &q, None) {
+            Ok(m) => m,
+            Err(HistoryError::NotFound { .. }) => {
+                return Err(
+                    "the history reader found no such session in the default Claude home; \
+                     sessions under --path get no prompts"
+                        .into(),
+                )
+            }
+            Err(e) => {
+                return Err(format!(
+                    "the history reader could not read this session: {e}"
+                ))
+            }
+        };
         let prompts: Vec<String> = messages
             .into_iter()
             .filter(|m| matches!(m.role, MessageRole::User))
@@ -807,31 +1063,7 @@ impl PromptSource for HistoryPrompts {
             })
             .filter(|t| !t.trim().is_empty())
             .collect();
-        Some(prompts)
-    }
-}
-
-/// Mirrors the primary tag into the Backend's tag slot when it has a
-/// `HistoryMutator` (Claude today).
-#[cfg(feature = "agent-adapters")]
-struct HistoryTagMirror;
-
-#[cfg(feature = "agent-adapters")]
-impl TagMirror for HistoryTagMirror {
-    fn mirror(&self, tool: ToolKind, session_id: &str, tag: &str) -> Result<bool, String> {
-        let Some(backend) = backend_for(tool) else {
-            return Ok(false);
-        };
-        if !backend.capabilities().history_mutations {
-            return Ok(false);
-        }
-        let Some(mutator) = backend.history_mutator() else {
-            return Ok(false);
-        };
-        mutator
-            .tag(session_id, Some(tag), None)
-            .map(|()| true)
-            .map_err(|e| e.to_string())
+        Ok(Some(prompts))
     }
 }
 

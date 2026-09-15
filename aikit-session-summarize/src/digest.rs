@@ -273,17 +273,50 @@ fn fmt_duration(ms: u64) -> String {
     }
 }
 
+/// Area lines kept in the digest; the rest are counted in a marker line.
+pub const MAX_AREA_LINES: usize = 40;
+
+/// What [`Digest::render_with_report`] kept of each trimmable section, so a
+/// caller can say what was left out. `*_total` is what the digest held;
+/// `*_shown` is what was rendered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderReport {
+    pub files_shown: usize,
+    pub files_total: usize,
+    pub commands_shown: usize,
+    pub commands_total: usize,
+    pub notes_shown: usize,
+    pub notes_total: usize,
+    pub areas_shown: usize,
+    pub areas_total: usize,
+}
+
+fn more_marker(n: usize) -> String {
+    format!("… and {n} more\n")
+}
+
+fn chars(s: &str) -> usize {
+    s.chars().count()
+}
+
 impl Digest {
-    /// The text sent as the body of the user message. Deterministic for the
-    /// same inputs; capped at `max_total_chars`.
+    /// The text sent as the body of the user message. See
+    /// [`Digest::render_with_report`].
     pub fn render(&self, opts: &DigestOptions) -> String {
-        let mut out = String::new();
-        out.push_str(&format!(
-            "# Session {} ({})\n",
-            self.session_id,
-            self.tool.as_str()
-        ));
-        out.push_str(&format!(
+        self.render_with_report(opts).0
+    }
+
+    /// Render within `max_total_chars` without losing how the session ended.
+    ///
+    /// The header, prompts, areas table and final assistant message are
+    /// protected: they are budgeted first and always rendered. Files,
+    /// commands and assistant notes share what is left, taking one whole
+    /// line each in turn, so no section starves the others and no line is
+    /// cut. What does not fit is counted in an `… and N more` line.
+    /// Deterministic for the same inputs.
+    pub fn render_with_report(&self, opts: &DigestOptions) -> (String, RenderReport) {
+        let mut header = format!("# Session {} ({})\n", self.session_id, self.tool.as_str());
+        header.push_str(&format!(
             "Started: {}  Ended: {}  Duration: {}  Actions: {}\n",
             fmt_ms(self.started_at_ms),
             fmt_ms(self.ended_at_ms),
@@ -291,52 +324,25 @@ impl Digest {
             self.action_count
         ));
         if let Some(root) = &self.git_root {
-            out.push_str(&format!("Git root: {root}\n"));
+            header.push_str(&format!("Git root: {root}\n"));
         }
 
-        out.push_str(&format!("\n## Prompts ({})\n", self.prompts.len()));
+        let mut prompts = format!("\n## Prompts ({})\n", self.prompts.len());
         if self.prompts.is_empty() {
-            out.push_str("(none recorded)\n");
+            prompts.push_str("(none recorded)\n");
         }
         for (i, p) in self.prompts.iter().enumerate() {
-            out.push_str(&format!("{}. {}\n", i + 1, p.replace('\n', " ")));
+            prompts.push_str(&format!("{}. {}\n", i + 1, p.replace('\n', " ")));
         }
 
-        out.push_str(&format!(
-            "\n## Files touched, in order ({})\n",
-            self.files.len() + self.files_omitted
-        ));
-        if self.files.is_empty() {
-            out.push_str("(none)\n");
-        }
-        for f in &self.files {
-            out.push_str(&format!("{:<6} {}\n", f.kind.as_str(), f.path));
-        }
-        if self.files_omitted > 0 {
-            out.push_str(&format!("… and {} more\n", self.files_omitted));
-        }
-
-        out.push_str(&format!(
-            "\n## Commands ({})\n",
-            self.commands.len() + self.commands_omitted
-        ));
-        if self.commands.is_empty() {
-            out.push_str("(none)\n");
-        }
-        for c in &self.commands {
-            let mark = if c.failed { "  (failed)" } else { "" };
-            out.push_str(&format!("$ {}{mark}\n", c.command.replace('\n', " ")));
-        }
-        if self.commands_omitted > 0 {
-            out.push_str(&format!("… and {} more\n", self.commands_omitted));
-        }
-
-        out.push_str("\n## Areas (reads / modifications / time)\n");
+        let areas_total = self.areas.len();
+        let areas_shown = areas_total.min(MAX_AREA_LINES);
+        let mut areas = String::from("\n## Areas (reads / modifications / time)\n");
         if self.areas.is_empty() {
-            out.push_str("(no files touched)\n");
+            areas.push_str("(no files touched)\n");
         }
-        for a in &self.areas {
-            out.push_str(&format!(
+        for a in &self.areas[..areas_shown] {
+            areas.push_str(&format!(
                 "{}  {} / {} / {}\n",
                 a.area,
                 a.reads,
@@ -344,29 +350,121 @@ impl Digest {
                 fmt_duration(a.time_ms)
             ));
         }
-
-        out.push_str("\n## Final assistant message\n");
-        match &self.final_message {
-            Some(m) => out.push_str(&format!("{m}\n")),
-            None => out.push_str("(none recorded)\n"),
+        if areas_total > areas_shown {
+            areas.push_str(&more_marker(areas_total - areas_shown));
         }
 
-        if !self.assistant_notes.is_empty() {
-            out.push_str(&format!(
-                "\n## Assistant notes ({})\n",
-                self.assistant_notes.len()
-            ));
-            for n in &self.assistant_notes {
-                out.push_str(&format!("- {}\n", n.replace('\n', " ")));
+        let mut final_msg = String::from("\n## Final assistant message\n");
+        match &self.final_message {
+            Some(m) => final_msg.push_str(&format!("{m}\n")),
+            None => final_msg.push_str("(none recorded)\n"),
+        }
+
+        let files_total = self.files.len() + self.files_omitted;
+        let commands_total = self.commands.len() + self.commands_omitted;
+        let file_lines: Vec<String> = self
+            .files
+            .iter()
+            .map(|f| format!("{:<6} {}\n", f.kind.as_str(), f.path))
+            .collect();
+        let command_lines: Vec<String> = self
+            .commands
+            .iter()
+            .map(|c| {
+                let mark = if c.failed { "  (failed)" } else { "" };
+                format!("$ {}{mark}\n", c.command.replace('\n', " "))
+            })
+            .collect();
+        let note_lines: Vec<String> = self
+            .assistant_notes
+            .iter()
+            .map(|n| format!("- {}\n", n.replace('\n', " ")))
+            .collect();
+        let files_heading = format!("\n## Files touched, in order ({files_total})\n");
+        let commands_heading = format!("\n## Commands ({commands_total})\n");
+        let notes_heading = (!note_lines.is_empty())
+            .then(|| format!("\n## Assistant notes ({})\n", note_lines.len()));
+
+        let none = "(none)\n";
+        let fixed = chars(&header)
+            + chars(&prompts)
+            + chars(&areas)
+            + chars(&final_msg)
+            + chars(&files_heading)
+            + chars(&commands_heading)
+            + notes_heading.as_deref().map(chars).unwrap_or(0)
+            + 2 * chars(none);
+        // Room for the three marker lines the trimmable sections may need.
+        let reserve = 3 * chars(&more_marker(usize::MAX));
+        let mut remaining = opts.max_total_chars.saturating_sub(fixed + reserve);
+
+        let sections: [&[String]; 3] = [&file_lines, &command_lines, &note_lines];
+        let mut taken = [0usize; 3];
+        let mut open = [true; 3];
+        while open.iter().any(|o| *o) {
+            for s in 0..sections.len() {
+                if !open[s] {
+                    continue;
+                }
+                match sections[s].get(taken[s]) {
+                    Some(line) if chars(line) <= remaining => {
+                        remaining -= chars(line);
+                        taken[s] += 1;
+                    }
+                    _ => open[s] = false,
+                }
             }
         }
 
-        if out.chars().count() > opts.max_total_chars {
-            let mut cut: String = out.chars().take(opts.max_total_chars).collect();
-            cut.push_str("\n[digest truncated]\n");
-            return cut;
+        let mut out = header;
+        out.push_str(&prompts);
+
+        out.push_str(&files_heading);
+        if files_total == 0 {
+            out.push_str(none);
         }
-        out
+        for line in &file_lines[..taken[0]] {
+            out.push_str(line);
+        }
+        if files_total > taken[0] {
+            out.push_str(&more_marker(files_total - taken[0]));
+        }
+
+        out.push_str(&commands_heading);
+        if commands_total == 0 {
+            out.push_str(none);
+        }
+        for line in &command_lines[..taken[1]] {
+            out.push_str(line);
+        }
+        if commands_total > taken[1] {
+            out.push_str(&more_marker(commands_total - taken[1]));
+        }
+
+        out.push_str(&areas);
+        out.push_str(&final_msg);
+
+        if let Some(heading) = &notes_heading {
+            out.push_str(heading);
+            for line in &note_lines[..taken[2]] {
+                out.push_str(line);
+            }
+            if note_lines.len() > taken[2] {
+                out.push_str(&more_marker(note_lines.len() - taken[2]));
+            }
+        }
+
+        let report = RenderReport {
+            files_shown: taken[0],
+            files_total,
+            commands_shown: taken[1],
+            commands_total,
+            notes_shown: taken[2],
+            notes_total: note_lines.len(),
+            areas_shown,
+            areas_total,
+        };
+        (out, report)
     }
 }
 
@@ -541,9 +639,74 @@ mod tests {
         assert_eq!(d.commands.len(), 1);
         assert_eq!(d.commands_omitted, 1);
         assert_eq!(d.commands[0].command, "carg…");
-        let text = d.render(&opts);
-        assert!(text.ends_with("[digest truncated]\n"));
-        assert!(text.chars().count() <= 200 + "\n[digest truncated]\n".len());
+        let (text, report) = d.render_with_report(&opts);
+        // A 200-character budget is smaller than the protected sections, so
+        // the trimmable ones give way entirely and the end of the story stays.
+        assert!(text.contains("## Areas"));
+        assert!(text.contains("## Final assistant message\nFixed by awaiting the join."));
+        assert!(!text.contains("[digest truncated]"));
+        assert_eq!((report.files_shown, report.files_total), (0, 2));
+        assert_eq!((report.commands_shown, report.commands_total), (0, 2));
+        assert!(text.contains("## Commands (2)\n… and 2 more\n"));
+    }
+
+    #[test]
+    fn a_huge_session_keeps_protected_sections_and_whole_lines() {
+        let mut events = vec![prompt_ev("p0", "refactor the storage layer", 1)];
+        for i in 0..10_000i64 {
+            let e = if i % 3 == 0 {
+                ev(
+                    &format!("c{i}"),
+                    ActionKind::Bash,
+                    &format!("cargo test --package storage -- case_{i} --test-threads=1"),
+                    None,
+                    10 + i,
+                )
+            } else {
+                ev(
+                    &format!("f{i}"),
+                    ActionKind::Edit,
+                    &format!("/repo/src/module_{}/file_{i}.rs", i % 50),
+                    None,
+                    10 + i,
+                )
+            };
+            events.push(e);
+        }
+        events.push(ev(
+            "end",
+            ActionKind::Think,
+            "done",
+            Some("All storage tests pass now."),
+            20_000,
+        ));
+        let opts = DigestOptions::default();
+        let areas = crate::areas::group_areas(
+            &events,
+            Some(std::path::Path::new("/repo")),
+            &crate::areas::AreaMapping::default(),
+        );
+        let d = build_digest(&session(), &events, PromptsInput::Events, areas, &opts);
+        let (text, report) = d.render_with_report(&opts);
+
+        assert!(text.contains("## Prompts (1)\n1. refactor the storage layer"));
+        assert!(text.contains("## Areas (reads / modifications / time)"));
+        assert!(text.contains("## Final assistant message\nAll storage tests pass now."));
+        assert!(
+            chars(&text) <= opts.max_total_chars,
+            "{} chars",
+            chars(&text)
+        );
+        assert_eq!(report.commands_total, 3_334);
+        assert!(report.commands_shown > 0 && report.commands_shown <= opts.max_commands);
+        assert!(report.files_shown > 0);
+        assert_eq!(
+            (report.areas_shown, report.areas_total),
+            (MAX_AREA_LINES, 50)
+        );
+        for line in text.lines().filter(|l| l.starts_with("$ ")) {
+            assert!(line.ends_with("--test-threads=1"), "cut line: {line}");
+        }
     }
 
     #[test]

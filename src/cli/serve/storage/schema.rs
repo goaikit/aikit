@@ -112,6 +112,10 @@ pub fn open(path: &std::path::Path) -> Result<Arc<std::sync::Mutex<Connection>>,
         let _ = std::fs::create_dir_all(parent);
     }
     let conn = Connection::open(path)?;
+    // `aikit serve` and the `aikit session` commands can share this file. A
+    // writer waits up to 5 s for another's lock instead of failing at once
+    // with "database is locked".
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
     conn.execute_batch(MIGRATION_SQL)?;
     Ok(Arc::new(std::sync::Mutex::new(conn)))

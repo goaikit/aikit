@@ -424,6 +424,7 @@ impl BriefStore for SqliteEventStore {
                 "model_reported": brief.model_reported,
                 "rejected_tags": brief.rejected_tags,
                 "prompt_source": brief.prompt_source,
+                "warnings": brief.warnings,
             });
             conn.execute(
                 r#"INSERT OR REPLACE INTO capture_session_briefs (
@@ -524,6 +525,10 @@ fn brief_from_row(row: &rusqlite::Row) -> rusqlite::Result<SessionBrief> {
             .get("prompt_source")
             .and_then(|v| v.as_str())
             .map(str::to_string),
+        warnings: extra
+            .get("warnings")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -721,6 +726,55 @@ mod tests {
         assert_eq!(back.metadata, serde_json::json!({"k": "v"}));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_connection_waits_for_a_held_write_lock() {
+        use aikit_session_summarize::SessionBrief;
+        // Two connections on one file, as `aikit serve` and the CLI have.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capture.db");
+        let holder_conn = crate::cli::serve::storage::schema::open(&path).unwrap();
+        let store = SqliteEventStore::new(crate::cli::serve::storage::schema::open(&path).unwrap());
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let conn = holder_conn.lock().unwrap();
+            conn.execute_batch(
+                "BEGIN IMMEDIATE; INSERT INTO capture_cursors \
+                 (source_file, offset, adapter_kind, updated_at_ms) VALUES ('x', 1, 'codex', 1);",
+            )
+            .unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            conn.execute_batch("COMMIT;").unwrap();
+        });
+        locked_rx.recv().unwrap();
+
+        // Without a busy timeout this write fails at once with SQLITE_BUSY.
+        store
+            .put_brief(&SessionBrief {
+                tool: ToolKind::Codex,
+                session_id: "s".into(),
+                summary: "waited for the lock".into(),
+                areas: vec![],
+                tags: vec![],
+                model: "m".into(),
+                digest_hash: "h".into(),
+                generated_at_ms: 1,
+                model_reported: None,
+                rejected_tags: vec![],
+                prompt_source: None,
+                warnings: vec![],
+            })
+            .await
+            .expect("the second writer waits for the first to commit");
+        holder.join().unwrap();
+        assert!(store
+            .brief_for(ToolKind::Codex, "s")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
     #[tokio::test]
     async fn briefs_round_trip_replace_and_page() {
         use aikit_session_summarize::{AreaTouch, SessionBrief, TagAssignment, TagSource};
@@ -748,6 +802,7 @@ mod tests {
             model_reported: Some("m-2".into()),
             rejected_tags: vec!["bogus".into()],
             prompt_source: Some("events".into()),
+            warnings: vec!["digest: showed 40 of 190 commands".into()],
         };
         assert!(store
             .brief_for(ToolKind::Codex, "a")

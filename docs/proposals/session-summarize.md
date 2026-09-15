@@ -11,8 +11,8 @@
 
 List the coding-agent sessions on disk, pick some or all, and get for each a
 short summary of what was worked on, the areas of the codebase touched, and
-tags from a fixed list. The result is persisted so re-running is cheap and the
-primary tag shows up where the tool itself keeps tags.
+tags from a fixed list. The result is persisted in aikit's own database so re-running is cheap; the
+tools' session files are only ever read.
 
 ## Vocabulary
 
@@ -30,7 +30,7 @@ primary tag shows up where the tool itself keeps tags.
 | --- | --- | --- |
 | `aikit-session-capture` (existing) | The `ingest` module (`parse_and_store_file`, `scan_adapter`) moved out of `aikit serve` so the CLI, serve and the summarizer share one idempotent scan path. Nothing about briefs. | The crate stays about parsed events; it neither stores nor produces briefs. |
 | `aikit-session-summarize` (new) | `SessionBrief`, `AreaTouch`, `TagAssignment` and the `BriefStore` trait (`put_brief`, `brief_for`, `briefs_for`) with an `InMemoryBriefStore` for tests; locations, digest builder, area grouping, tag list + mechanical rules + validation, prompt rendering and reply parsing, the batch engine with bounded concurrency. Depends on `aikit-session-capture` and `aikit-agent` (for `LlmGateway`, `OpenAiCompatProvider`, `MockGateway`). | Mirrors `aikit-session-sync`: a sibling consumer of capture with its own responsibility, and the owner of its own record. It never spawns a tool and never reads a transcript. |
-| `aikit-cli` (root) | `aikit session list` / `aikit session summarize`; the SQLite `capture_session_briefs` table, with `SqliteEventStore` implementing `BriefStore` beside `EventStore` on one connection; the history-reader prompt source and history-mutator tag mirror (the only place `aikit-sdk` is wired in); two read-only serve routes. | The root already owns the SQLite store and the serve surface. |
+| `aikit-cli` (root) | `aikit session list` / `aikit session summarize`; the SQLite `capture_session_briefs` table, with `SqliteEventStore` implementing `BriefStore` beside `EventStore` on one connection; the history-reader prompt source (the only place `aikit-sdk` is wired in); two read-only serve routes. | The root already owns the SQLite store and the serve surface. |
 
 ## CLI
 
@@ -48,7 +48,7 @@ aikit session summarize (--session <id>... | --since <when> | --all)
                    [--tool <kind>]... [--path [<kind>=]<dir>]... [--db <file>]
                    [--model <m>] [--base-url <url>] [--api-key-env <VAR>]
                    [--tags <a,b,c> | --tags-file <toml>] [--areas-file <toml>] [--area-depth N]
-                   [--include-assistant] [--parallel N] [--force] [--no-mirror]
+                   [--include-assistant] [--parallel N] [--force]
                    [--dry-run] [--format default|json]
 ```
 
@@ -171,13 +171,12 @@ KEY (tool, session_id))`, created by the existing `IF NOT EXISTS` migration.
 migration. The struct follows ADR 0020: fields are only ever added, with
 `#[serde(default)]`.
 
-## Persistence and mirroring
+## Persistence
 
-`BriefStore::put_brief` replaces the row for (tool, session id). After a successful
-write, when the tool's Backend has a `HistoryMutator` (Claude today) the
-primary tag is written to the backend's tag slot via
-`Backend::history_mutator().tag(...)`; a failure there is a warning, never a
-failed session. `--no-mirror` skips it.
+`BriefStore::put_brief` replaces the row for (tool, session id). Nothing is
+written back to the tools' own session files. An earlier revision mirrored the
+primary tag into Claude Code's tag slot; it was removed before launch, see the
+amendment in ADR 0023.
 
 ## Serve
 

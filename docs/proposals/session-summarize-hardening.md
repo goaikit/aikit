@@ -1,6 +1,6 @@
 # Proposal: launch plan for `aikit session summarize`
 
-**Status**: proposed. Supersedes the earlier hardening draft on this branch.
+**Status**: the ten launch items are implemented on this branch; see *Implementation notes* at the end.
 **Builds on**: [session-summarize.md](session-summarize.md), [ADR 0023](../adr/0023-a-session-brief-is-one-completion-over-a-scrubbed-digest.md), [ADR 0020](../adr/0020-eval-artifacts-are-an-additive-only-contract.md).
 
 ## Goal
@@ -110,3 +110,21 @@ In order of user value:
 
 Generating briefs from `aikit serve`, cost estimates on briefs (ADR 0020),
 and Cursor or Gemini adapters.
+
+## Implementation notes
+
+All ten launch items landed on this branch, with these deviations from the
+text above:
+
+- **`Retry-After` is not read.** The gateway error type (`LlmError`) carries
+  the status and body but not the response headers. Retries use exponential
+  backoff with jitter instead; honouring the header needs an additive change
+  to the gateway error first.
+- **`--no-mirror` is kept as an accepted no-op**, not deleted, so scripts
+  written for 0.1.196 do not fail on an unknown flag.
+- **`aikit session briefs --since` filters on when a brief was generated**,
+  not on session activity, because a brief does not carry session times.
+- **The release note lives in the command reference** ("Upgrading from
+  0.1.196"), because GitHub release notes are generated from commit subjects.
+- **Added `--quiet` and `--no-preflight`**, the escape hatches for the new
+  progress output and the preflight call.

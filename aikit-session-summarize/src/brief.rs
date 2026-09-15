@@ -86,11 +86,15 @@ pub struct SessionBrief {
     /// digest carried no prompts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_source: Option<String>,
+    /// What was degraded while producing this brief: prompts that could not
+    /// be read, digest sections that did not show everything, replies or
+    /// requests that were retried. Empty when nothing was.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl SessionBrief {
-    /// The first tag, which the summarizer mirrors into the backend's tag
-    /// slot when one exists.
+    /// The first tag: mechanical tags come first, then the model's.
     pub fn primary_tag(&self) -> Option<&str> {
         self.tags.first().map(|t| t.name.as_str())
     }
@@ -197,6 +201,7 @@ mod tests {
             model_reported: None,
             rejected_tags: vec![],
             prompt_source: None,
+            warnings: vec![],
         };
         store.put_brief(&brief("a", 10)).await.unwrap();
         store.put_brief(&brief("b", 20)).await.unwrap();
@@ -248,6 +253,7 @@ mod tests {
             model_reported: None,
             rejected_tags: vec![],
             prompt_source: Some("events".into()),
+            warnings: vec![],
         };
         let json = serde_json::to_string(&brief).unwrap();
         let back: SessionBrief = serde_json::from_str(&json).unwrap();
@@ -261,6 +267,7 @@ mod tests {
         let back: SessionBrief = serde_json::from_str(old).unwrap();
         assert_eq!(back.model_reported, None);
         assert!(back.rejected_tags.is_empty());
+        assert!(back.warnings.is_empty());
         assert_eq!(back.primary_tag(), None);
     }
 }

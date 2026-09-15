@@ -319,7 +319,7 @@ pub fn build_app() -> Result<AikitApp> {
     builder = builder.register_group(
         &session_path,
         GroupMetadata {
-            summary: "Agent sessions: live REPL, captured sessions on disk, sync, briefs",
+            summary: "Agent sessions: live REPL, captured sessions on disk, sync, briefs (read-only toward tool files)",
             hidden: false,
         },
     )?;
@@ -392,6 +392,8 @@ pub fn build_app() -> Result<AikitApp> {
                 parallel: args.parallel,
                 force: args.force,
                 no_mirror: args.no_mirror,
+                quiet: args.quiet,
+                no_preflight: args.no_preflight,
                 dry_run: args.dry_run,
                 format: args.format,
             })
@@ -420,6 +422,25 @@ pub fn build_app() -> Result<AikitApp> {
                 format: args.format,
                 log_level: args.log_level,
                 log_format: args.log_format,
+            })
+            .await?;
+            if code == 0 {
+                Ok(())
+            } else {
+                std::process::exit(code);
+            }
+        },
+    )?;
+
+    builder = builder.register(
+        path!["session", "briefs"],
+        |_ctx, args: SessionBriefsArgs| async move {
+            let code = session::execute_briefs(session::BriefsArgs {
+                sessions: args.session,
+                since: args.since,
+                tools: args.tool,
+                db: args.db,
+                format: args.format,
             })
             .await?;
             if code == 0 {
@@ -1454,6 +1475,8 @@ struct SessionSummarizeArgs {
     parallel: Option<String>,
     force: bool,
     no_mirror: bool,
+    quiet: bool,
+    no_preflight: bool,
     dry_run: bool,
     format: String,
 }
@@ -1500,7 +1523,7 @@ impl IntoCommandSpec for SessionSummarizeArgs {
                     "Env var holding the API key (default: OPENAI_API_KEY, then AIKIT_API_KEY)",
                 ),
                 opt_spec("max-tokens", "Max completion tokens (default: 4096; thinking models spend it on reasoning first)"),
-                opt_spec("timeout", "Request timeout in seconds (default: 120)"),
+                opt_spec("timeout", "Request timeout in seconds (default: 180)"),
                 opt_spec("tags", "Allowed tags, comma-separated (names only)"),
                 opt_spec(
                     "tags-file",
@@ -1518,11 +1541,19 @@ impl IntoCommandSpec for SessionSummarizeArgs {
                     "include-assistant",
                     "Add the assistant's text blocks to the digest",
                 ),
-                opt_spec("parallel", "Concurrent model calls (default: 4)"),
+                opt_spec(
+                    "parallel",
+                    "Concurrent model calls (default: 1; raise for endpoints that serve requests in parallel)",
+                ),
                 flag_spec("force", "Regenerate even when the digest is unchanged"),
                 flag_spec(
                     "no-mirror",
-                    "Do not mirror the primary tag into the tool's tag slot",
+                    "Deprecated, no effect: aikit never writes to tool session files",
+                ),
+                flag_spec("quiet", "No per-session progress lines or tally on stderr"),
+                flag_spec(
+                    "no-preflight",
+                    "Skip the one-call endpoint check before the batch",
                 ),
                 flag_spec(
                     "dry-run",
@@ -1557,7 +1588,59 @@ impl FromArgValueMap for SessionSummarizeArgs {
             parallel: get_opt_val(map, "parallel"),
             force: get_bool_val(map, "force"),
             no_mirror: get_bool_val(map, "no-mirror"),
+            quiet: get_bool_val(map, "quiet"),
+            no_preflight: get_bool_val(map, "no-preflight"),
             dry_run: get_bool_val(map, "dry-run"),
+            format: get_str_default(map, "format", "default"),
+        }
+    }
+}
+
+struct SessionBriefsArgs {
+    session: Vec<String>,
+    since: Option<String>,
+    tool: Vec<String>,
+    db: Option<String>,
+    format: String,
+}
+
+impl IntoCommandSpec for SessionBriefsArgs {
+    fn command_spec() -> CommandSpec {
+        CommandSpec {
+            summary: "Print stored session briefs (no scan, no model, no network)",
+            syntax: Some("session briefs [--session <ID>]... [--since <WHEN>] [--tool <KIND>]..."),
+            category: Some("agents"),
+            args: vec![
+                repeated_spec(
+                    "session",
+                    "Session id (or a unique prefix of 8+ chars); repeatable",
+                ),
+                opt_spec(
+                    "since",
+                    "Briefs generated since: 24h, 7d, or an RFC 3339 time",
+                ),
+                repeated_spec(
+                    "tool",
+                    "Tool to include; repeatable: claude_code, codex or open_code",
+                ),
+                opt_spec(
+                    "db",
+                    "Capture SQLite file (or AIKIT_CAPTURE_DB; default: aikit serve's)",
+                ),
+                opt_spec("format", "Output format: default or json"),
+            ],
+            ..CommandSpec::default()
+        }
+    }
+}
+
+impl FromArgValueMap for SessionBriefsArgs {
+    fn from_arg_value_map(map: &HashMap<String, ArgValue>) -> Self {
+        SessionBriefsArgs {
+            session: get_repeated_val(map, "session"),
+            since: get_opt_val(map, "since"),
+            tool: get_repeated_val(map, "tool"),
+            db: get_opt_val(map, "db"),
             format: get_str_default(map, "format", "default"),
         }
     }

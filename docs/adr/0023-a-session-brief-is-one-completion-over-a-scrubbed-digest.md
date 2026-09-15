@@ -76,9 +76,8 @@ about briefs. A host that persists briefs implements `BriefStore` beside
 and the table is created by the existing `IF NOT EXISTS` migration. The
 record follows [ADR 0020](0020-eval-artifacts-are-an-additive-only-contract.md):
 fields are added with `#[serde(default)]`, never renamed or removed. The
-primary tag is mirrored into the backend's own tag slot where a
-`HistoryMutator` exists, so the tool's UI shows it; the brief remains the
-record of truth.
+brief is the only record: nothing is written back to a tool's own session
+files (see the amendment below).
 
 ## Consequences
 
@@ -101,3 +100,18 @@ record of truth.
 - Generation stays in the CLI. `aikit serve` exposes briefs read-only; a
   server-side job that generates them needs model configuration on the
   server and is a separate decision.
+
+## Amendment (2026-09-15): read-only toward the tools
+
+The first implementation, released in 0.1.196, also mirrored a brief's first
+tag into the tool's own tag slot where a `HistoryMutator` existed, appending a
+tag line to the Claude Code session file by default. That made aikit write to a
+file another program owns, possibly while that program was using it, and a
+single slot meant replacing a tag the user had set by hand. Nothing needed it:
+the brief and all its tags are already in aikit's database and served
+read-only.
+
+Mirroring is removed. The summarizer only reads the tools' session files; its
+one write is the brief, into aikit's own database. `--no-mirror` stays accepted
+as a no-op so scripts written for 0.1.196 keep working. The history backend's
+`PATCH` route (spec 008) is a separate, explicit user action and is unchanged.

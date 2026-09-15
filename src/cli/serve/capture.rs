@@ -810,6 +810,7 @@ mod tests {
                 model_reported: None,
                 rejected_tags: vec![],
                 prompt_source: None,
+                warnings: vec![],
             })
             .await
             .unwrap();
