@@ -102,6 +102,22 @@ fn convert_tool_calls(calls: &[OpenAiToolCall]) -> Vec<ToolCall> {
         .collect()
 }
 
+/// A transport error as [`LlmError::RequestFailed`]. A timeout after the
+/// connection was made is marked with [`TIMED_OUT_PREFIX`]; a connect timeout
+/// is not, because that request never reached the server.
+fn request_failed(e: reqwest::Error, context: Option<&str>) -> LlmError {
+    let detail = match context {
+        Some(c) => format!("{c}: {e}"),
+        None => e.to_string(),
+    };
+    let message = if e.is_timeout() && !e.is_connect() {
+        format!("{}{detail}", crate::llm::types::TIMED_OUT_PREFIX)
+    } else {
+        detail
+    };
+    LlmError::RequestFailed { message }
+}
+
 async fn send_complete(
     client: &reqwest::Client,
     base_url: &str,
@@ -126,9 +142,7 @@ async fn send_complete(
         .json(&body)
         .send()
         .await
-        .map_err(|e| LlmError::RequestFailed {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| request_failed(e, None))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -140,9 +154,10 @@ async fn send_complete(
         });
     }
 
-    let resp: OpenAiResponse = response.json().await.map_err(|e| LlmError::RequestFailed {
-        message: format!("failed to parse response: {}", e),
-    })?;
+    let resp: OpenAiResponse = response
+        .json()
+        .await
+        .map_err(|e| request_failed(e, Some("failed to parse response")))?;
 
     let first = resp.choices.into_iter().next();
     let content = first
@@ -198,9 +213,7 @@ async fn send_stream(
         .json(&body)
         .send()
         .await
-        .map_err(|e| LlmError::RequestFailed {
-            message: e.to_string(),
-        })?;
+        .map_err(|e| request_failed(e, None))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -212,9 +225,10 @@ async fn send_stream(
         });
     }
 
-    let text = response.text().await.map_err(|e| LlmError::RequestFailed {
-        message: format!("failed to read stream body: {}", e),
-    })?;
+    let text = response
+        .text()
+        .await
+        .map_err(|e| request_failed(e, Some("failed to read stream body")))?;
 
     parse_sse_body(&text)
 }
@@ -262,6 +276,51 @@ impl std::fmt::Debug for OpenAiCompatProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tiny_request(base_url: String) -> LlmRequest {
+        LlmRequest {
+            model: "m".into(),
+            base_url,
+            api_key: "k".into(),
+            messages: vec![],
+            tools: vec![],
+            tool_choice: None,
+            temperature: None,
+            top_p: None,
+            max_tokens: Some(1),
+            stream: false,
+        }
+    }
+
+    #[test]
+    fn a_server_that_never_answers_is_a_marked_timeout() {
+        // Accept and hold connections without ever answering.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming().flatten() {
+                held.push(stream);
+            }
+        });
+        let provider = OpenAiCompatProvider::new(1, 1).unwrap();
+        let err = provider.complete(tiny_request(url)).unwrap_err();
+        assert!(err.is_timeout(), "{err}");
+    }
+
+    #[test]
+    fn a_refused_connection_is_not_a_timeout() {
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let provider = OpenAiCompatProvider::new(1, 1).unwrap();
+        let err = provider
+            .complete(tiny_request(format!("http://127.0.0.1:{port}")))
+            .unwrap_err();
+        assert!(matches!(err, LlmError::RequestFailed { .. }), "{err}");
+        assert!(!err.is_timeout(), "{err}");
+    }
 
     #[test]
     fn test_resolve_api_key_missing() {
