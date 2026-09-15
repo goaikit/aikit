@@ -116,9 +116,36 @@ pub fn open(path: &std::path::Path) -> Result<Arc<std::sync::Mutex<Connection>>,
     // writer waits up to 5 s for another's lock instead of failing at once
     // with "database is locked".
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
-    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
-    conn.execute_batch(MIGRATION_SQL)?;
+    init_with_retry(&conn)?;
     Ok(Arc::new(std::sync::Mutex::new(conn)))
+}
+
+/// WAL mode, then the migration. Switching a new file to WAL needs an
+/// exclusive lock, and SQLite can report that lock as busy without waiting on
+/// the busy timeout, so two processes creating the same file at once would
+/// fail with "database is locked". Retry that for up to 5 s.
+fn init_with_retry(conn: &Connection) -> Result<(), rusqlite::Error> {
+    use rusqlite::ErrorCode;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let attempt = (|| {
+            let mode: String = conn.query_row("PRAGMA journal_mode", [], |r| r.get(0))?;
+            if !mode.eq_ignore_ascii_case("wal") {
+                conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0))?;
+            }
+            conn.execute_batch("PRAGMA synchronous = NORMAL;")?;
+            conn.execute_batch(MIGRATION_SQL)
+        })();
+        match attempt {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(e.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            other => return other,
+        }
+    }
 }
 
 /// Open an in-memory DB. For tests.
@@ -127,4 +154,38 @@ pub fn open_in_memory() -> Result<Arc<std::sync::Mutex<Connection>>, rusqlite::E
     let conn = Connection::open_in_memory()?;
     conn.execute_batch(MIGRATION_SQL)?;
     Ok(Arc::new(std::sync::Mutex::new(conn)))
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::*;
+
+    #[test]
+    fn processes_creating_the_same_new_file_at_once_all_open_it() {
+        for _round in 0..10 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = Arc::new(dir.path().join("capture.db"));
+            let barrier = Arc::new(std::sync::Barrier::new(8));
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    let path = Arc::clone(&path);
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        open(&path).map(|_| ()).map_err(|e| e.to_string())
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().unwrap().expect("every opener succeeds");
+            }
+            let conn = open(&path).unwrap();
+            let mode: String = conn
+                .lock()
+                .unwrap()
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mode, "wal");
+        }
+    }
 }
