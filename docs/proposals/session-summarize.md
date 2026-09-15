@@ -5,7 +5,7 @@
 (history backend), [ADR 0018](../adr/0018-history-has-a-transcript-vocabulary-distinct-from-the-streaming-vocabulary.md),
 [ADR 0020](../adr/0020-eval-artifacts-are-an-additive-only-contract.md),
 [ADR 0021](../adr/0021-a-judgment-is-one-native-completion-recorded-whole.md),
-[ADR 0022](../adr/0022-a-session-brief-is-one-completion-over-a-scrubbed-digest.md).
+[ADR 0023](../adr/0023-a-session-brief-is-one-completion-over-a-scrubbed-digest.md).
 
 ## Goal
 

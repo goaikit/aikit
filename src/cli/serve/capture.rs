@@ -11,7 +11,7 @@
 //! - `GET  /capture/scan/{job_id}`            — scan job status
 //!
 //! Briefs are read-only here: `aikit session summarize` generates them
-//! (ADR 0022).
+//! (ADR 0023).
 //!
 //! All routes are registered only when the `agent-adapters` feature is on
 //! (compile-time gate). A runtime `409 passive_capture_unsupported` is
@@ -44,7 +44,7 @@ pub struct CaptureState {
     pub registry: Arc<Registry>,
     pub event_store: Arc<dyn EventStore>,
     pub cursor_store: Arc<dyn CursorStore>,
-    /// Stored session briefs, read-only here (ADR 0022).
+    /// Stored session briefs, read-only here (ADR 0023).
     pub brief_store: Arc<dyn BriefStore>,
     pub scan_jobs: Arc<ScanJobRegistry>,
     /// Last parse timestamp per adapter kind, for the `GET /capture` summary.

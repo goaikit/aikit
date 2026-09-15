@@ -42,7 +42,7 @@ Terms below reflect discussion of **AIKit**, **HTTP exposure for agent operation
 | Term | Definition | Aliases to avoid |
 | --- | --- | --- |
 | **Captured session** | One session an adapter has parsed from a tool's on-disk transcript into the event store (spec 010): the row `aikit session list` prints. | Session (bare), transcript, history entry |
-| **Digest** | The bounded, secret-scrubbed text built from a captured session's events that is the only thing a summarizing model sees ([ADR 0022](adr/0022-a-session-brief-is-one-completion-over-a-scrubbed-digest.md)). | Transcript, context, prompt |
+| **Digest** | The bounded, secret-scrubbed text built from a captured session's events that is the only thing a summarizing model sees ([ADR 0023](adr/0023-a-session-brief-is-one-completion-over-a-scrubbed-digest.md)). | Transcript, context, prompt |
 | **Area** | A directory of the repository (or a user-named group of path prefixes) a session touched, with read and modification counts and attributed time. | Module, component, file group |
 | **Mechanical tag** | A tag decided in code from the events before any model call, e.g. `test` when only test files changed. | Rule tag, auto tag |
 | **Session brief** | The persisted result of `aikit session summarize`: summary paragraph, areas, tags, model, digest hash, generated-at time. | Session summary (that is the captured-session row), report, annotation |

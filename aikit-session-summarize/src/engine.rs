@@ -1,6 +1,6 @@
 //! The summarizer: one native completion per session over a scrubbed
 //! digest, validated tags, a stored brief, and bounded concurrency over a
-//! batch (ADR 0022).
+//! batch (ADR 0023).
 
 use std::sync::Arc;
 

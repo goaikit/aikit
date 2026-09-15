@@ -5,7 +5,7 @@
 //! - `list`      — list captured sessions on disk (`--live` lists the live
 //!   sessions of a running `aikit serve` instead)
 //! - `sync`      — upload scrubbed transcripts to S3-compatible storage
-//! - `summarize` — generate session briefs (summary, areas, tags) — ADR 0022
+//! - `summarize` — generate session briefs (summary, areas, tags) — ADR 0023
 
 use std::io::{self, BufRead, Write as IoWrite};
 use std::path::PathBuf;

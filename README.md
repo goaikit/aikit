@@ -296,7 +296,7 @@ OpenCode) and summarize the ones you pick. A summary is a **brief**: one
 paragraph, the areas of the repository touched (reads and modifications per
 directory, with time attributed from the event timestamps), and tags from a
 list you control. The model never sees a transcript; it sees a bounded,
-secret-scrubbed **digest** built from the captured events (ADR 0022).
+secret-scrubbed **digest** built from the captured events (ADR 0023).
 
 ```bash
 # Sessions from every tool's default home, newest first

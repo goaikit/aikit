@@ -1,5 +1,5 @@
 //! The digest: the bounded, deterministic text a model sees for one
-//! session. Built from the event store, never from a transcript (ADR 0022).
+//! session. Built from the event store, never from a transcript (ADR 0023).
 
 use aikit_session_capture::{ActionKind, ActionStatus, SessionSummary, ToolEvent, ToolKind};
 

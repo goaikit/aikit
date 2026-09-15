@@ -5,7 +5,7 @@ use serde::Deserialize;
 use crate::brief::TagAssignment;
 use crate::tags::{ModelTag, TagList};
 
-/// The one system message. Nothing else is injected (ADR 0022).
+/// The one system message. Nothing else is injected (ADR 0023).
 pub const SYSTEM_PROMPT: &str = "You summarize coding-agent sessions from a digest of what happened: \
 the user's prompts, the files touched, the commands run and the assistant's final message. \
 Write one short paragraph, in plain prose, saying what was worked on and how it ended. \

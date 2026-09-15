@@ -75,7 +75,7 @@ CREATE TABLE IF NOT EXISTS capture_cursors (
     updated_at_ms INTEGER NOT NULL
 );
 
--- Session briefs (ADR 0022): one per (tool, session). `areas` and `tags`
+-- Session briefs (ADR 0023): one per (tool, session). `areas` and `tags`
 -- are JSON arrays; `extra` is a JSON object holding every field added
 -- after the first version, so the record grows without a column migration.
 CREATE TABLE IF NOT EXISTS capture_session_briefs (
