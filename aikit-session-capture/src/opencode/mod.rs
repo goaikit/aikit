@@ -12,6 +12,12 @@
 //!   - Desktop variant (per-OS): `~/AppData/Roaming/ai.opencode.desktop/`
 //!     (Windows), `~/Library/Application Support/ai.opencode.desktop/`
 //!     (macOS), `~/.config/ai.opencode.desktop/` (Linux)
+//!
+//! Read-only: the adapter never creates or changes a file in OpenCode's
+//! directories. While OpenCode runs, its `-wal` and `-shm` files exist and the
+//! database is read in place like any SQLite reader. When OpenCode is not
+//! running, SQLite would create those files for a read-only open, so the
+//! database is copied into aikit's cache and the copy is read instead.
 
 mod db;
 mod mirror;
@@ -32,6 +38,9 @@ pub struct OpenCodeAdapter {
     scrubber: SecretScrubber,
     homes: Vec<crate::homes::HomeRoot>,
     override_roots: Option<Vec<PathBuf>>,
+    /// Where idle databases are copied before reading; `None` uses the
+    /// cache chain of spec 010 §19.3.
+    snapshot_root: Option<PathBuf>,
 }
 
 impl OpenCodeAdapter {
@@ -40,6 +49,7 @@ impl OpenCodeAdapter {
             scrubber: SecretScrubber::default(),
             homes: crate::homes::DefaultHomeResolver.homes(),
             override_roots: None,
+            snapshot_root: None,
         }
     }
 
@@ -48,11 +58,19 @@ impl OpenCodeAdapter {
             scrubber,
             homes,
             override_roots: None,
+            snapshot_root: None,
         }
     }
 
     pub fn with_override_roots(mut self, roots: Vec<PathBuf>) -> Self {
         self.override_roots = Some(roots);
+        self
+    }
+
+    /// Copy idle databases into `root` instead of the user cache directory
+    /// before reading them. See [`OpenCodeAdapter`]'s read-only note.
+    pub fn with_snapshot_root(mut self, root: PathBuf) -> Self {
+        self.snapshot_root = Some(root);
         self
     }
 }
@@ -120,9 +138,16 @@ impl Adapter for OpenCodeAdapter {
         path: &Path,
         from_offset: u64,
     ) -> Result<ParseResult, AdapterError> {
-        // Stage a mirror for foreign-mount sources (spec §19.3). Native
-        // sources short-circuit and open directly.
-        let db_path = mirror::stage_mirror_if_foreign(path)?;
+        // Read-only toward OpenCode's directory. Foreign-mount sources are
+        // staged as a mirror (spec §19.3). A native WAL database whose
+        // sidecars are missing (OpenCode is not running) is read from a
+        // snapshot, because a read-only SQLite open would create `-wal` and
+        // `-shm` next to it. Anything else opens in place.
+        let db_path = if mirror::is_foreign_mount_path(path) {
+            mirror::stage_mirror_if_foreign(path)?
+        } else {
+            mirror::read_only_source(path, self.snapshot_root.as_deref())?
+        };
         // Open inside spawn_blocking — rusqlite is sync.
         let scrubber = self.scrubber.clone();
         let path_owned = path.to_path_buf();

@@ -154,3 +154,52 @@ async fn no_new_rows_returns_empty_result_with_advanced_watermark() {
     // Watermark is the actual latest in the DB (1300), not the requested offset.
     assert_eq!(res.new_offset, 1300);
 }
+
+/// Every file directly under `dir` with its bytes and modification time.
+fn dir_snapshot(
+    dir: &std::path::Path,
+) -> std::collections::BTreeMap<String, (Vec<u8>, std::time::SystemTime)> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let e = e.unwrap();
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                (
+                    std::fs::read(e.path()).unwrap(),
+                    e.metadata().unwrap().modified().unwrap(),
+                ),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn an_idle_wal_database_is_parsed_without_creating_files_beside_it() {
+    let home = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let db_path = opencode_fixture::open_fixture_file(home.path()).unwrap();
+    {
+        // OpenCode keeps its database in WAL mode; closing the last
+        // connection removes `-wal` and `-shm`, as when OpenCode exits.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+    }
+    let before = dir_snapshot(home.path());
+    assert_eq!(before.keys().collect::<Vec<_>>(), vec!["opencode.db"]);
+
+    let adapter = OpenCodeAdapter::default()
+        .with_override_roots(vec![home.path().to_path_buf()])
+        .with_snapshot_root(cache.path().to_path_buf());
+    let first = adapter.parse_session_file(&db_path, 0).await.unwrap();
+    assert!(!first.tool_events.is_empty());
+    let second = adapter.parse_session_file(&db_path, 0).await.unwrap();
+    assert_eq!(first.tool_events.len(), second.tool_events.len());
+    // Events still name the real source file, not the snapshot.
+    assert!(first.tool_events.iter().all(|e| e.source_file == db_path));
+
+    assert_eq!(dir_snapshot(home.path()), before);
+}

@@ -200,3 +200,193 @@ fn short_hash(s: &str) -> String {
     }
     format!("{:016x}", hash)
 }
+
+// ---------------------------------------------------------------------------
+// Idle snapshots: read-only toward OpenCode's own directory.
+// ---------------------------------------------------------------------------
+
+/// Whether `db` is a SQLite file in WAL mode: header bytes 18 and 19 (file
+/// format write and read versions) are 2 in WAL mode and 1 otherwise.
+pub(crate) fn is_wal_mode(db: &Path) -> bool {
+    use std::io::Read;
+    let mut header = [0u8; 20];
+    match std::fs::File::open(db).and_then(|mut f| f.read_exact(&mut header)) {
+        Ok(()) => &header[..16] == b"SQLite format 3\0" && (header[18] == 2 || header[19] == 2),
+        Err(_) => false,
+    }
+}
+
+fn sibling(db: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}{suffix}", db.to_string_lossy()))
+}
+
+/// Whether opening `db` read-only in place would create files next to it.
+///
+/// SQLite creates `-wal` and `-shm` beside a WAL-mode database when they are
+/// missing, even for a read-only connection, and leaves them after closing.
+/// OpenCode removes them when it closes cleanly, so an idle OpenCode database
+/// is exactly this case. While OpenCode runs, both already exist and a
+/// read-only open adds nothing.
+pub(crate) fn in_place_open_creates_files(db: &Path) -> bool {
+    is_wal_mode(db) && !(sibling(db, "-wal").exists() && sibling(db, "-shm").exists())
+}
+
+/// `(size, modified)` of a file, `None` when it cannot be read.
+fn stamp(p: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let m = std::fs::metadata(p).ok()?;
+    Some((m.len(), m.modified().ok()?))
+}
+
+/// The path to open for `src_db` without writing anything next to it.
+///
+/// Returns `src_db` itself when an in-place read-only open creates no files
+/// (a rollback-journal database, or a WAL database whose `-wal` and `-shm`
+/// already exist). Otherwise copies the database into a snapshot directory
+/// under `cache_root` (or the §19.3 cache chain when `None`) and returns the
+/// copy; an unchanged source reuses the previous copy. Without a writable
+/// cache this fails rather than fall back to an open that would write.
+pub(crate) fn read_only_source(
+    src_db: &Path,
+    cache_root: Option<&Path>,
+) -> Result<PathBuf, AdapterError> {
+    if !in_place_open_creates_files(src_db) {
+        return Ok(src_db.to_path_buf());
+    }
+    let fail = |reason: String| {
+        AdapterError::Other(anyhow::anyhow!(
+            "read-only snapshot of {} failed: {reason}",
+            src_db.display()
+        ))
+    };
+    let root = match cache_root {
+        Some(r) => r.to_path_buf(),
+        None => pick_mirror_root()
+            .map_err(|e| fail(format!("no writable cache directory ({e:?})")))?,
+    };
+    let hash = short_hash(&src_db.to_string_lossy());
+    let dir = root
+        .join("aikit-session-capture")
+        .join("opencode-snapshot")
+        .join(&hash[..8]);
+    std::fs::create_dir_all(&dir).map_err(|e| fail(format!("mkdir {}: {e}", dir.display())))?;
+    let dst_db = dir.join("opencode.db");
+
+    // Three tries: a copy taken while OpenCode starts writing is discarded.
+    for _ in 0..3 {
+        if !in_place_open_creates_files(src_db) {
+            // OpenCode started meanwhile; its sidecars exist now.
+            return Ok(src_db.to_path_buf());
+        }
+        let fresh = files_match(src_db, &dst_db);
+        if !fresh {
+            let before = stamp(src_db);
+            let tmp = dir.join(format!("opencode.db.tmp-{}", std::process::id()));
+            std::fs::copy(src_db, &tmp)
+                .map_err(|e| fail(format!("copy to {}: {e}", tmp.display())))?;
+            if stamp(src_db) != before || sibling(src_db, "-wal").exists() {
+                let _ = std::fs::remove_file(&tmp);
+                continue;
+            }
+            std::fs::rename(&tmp, &dst_db)
+                .map_err(|e| fail(format!("rename to {}: {e}", dst_db.display())))?;
+        }
+        // The copy is fully checkpointed: sidecars left by an earlier open of
+        // an older copy would not describe it. They live in aikit's cache.
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(sibling(&dst_db, suffix));
+        }
+        return Ok(dst_db);
+    }
+    Err(fail(
+        "the database kept changing while it was copied; the next scan retries".into(),
+    ))
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn wal_db(dir: &Path) -> PathBuf {
+        let path = dir.join("opencode.db");
+        let c = Connection::open(&path).unwrap();
+        c.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0))
+            .unwrap();
+        c.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (7);")
+            .unwrap();
+        drop(c);
+        path
+    }
+
+    #[test]
+    fn detects_wal_mode_from_the_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wal = wal_db(tmp.path());
+        assert!(is_wal_mode(&wal));
+        let rollback = tmp.path().join("rollback.db");
+        Connection::open(&rollback)
+            .unwrap()
+            .execute_batch("CREATE TABLE t(x);")
+            .unwrap();
+        assert!(!is_wal_mode(&rollback));
+        assert!(!is_wal_mode(&tmp.path().join("missing.db")));
+    }
+
+    #[test]
+    fn an_idle_wal_database_is_read_from_a_snapshot_and_left_untouched() {
+        let src = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = wal_db(src.path());
+        let before = (listing(src.path()), std::fs::read(&db).unwrap(), stamp(&db));
+        assert_eq!(before.0, vec!["opencode.db".to_string()]);
+
+        let open = read_only_source(&db, Some(cache.path())).unwrap();
+        assert_ne!(open, db);
+        assert!(open.starts_with(cache.path()));
+        let conn = crate::opencode::db::open_read_only(&open).unwrap();
+        let n: i64 = conn.query_row("SELECT x FROM t", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 7);
+        drop(conn);
+
+        // Again, with the snapshot and its sidecars already in the cache.
+        let again = read_only_source(&db, Some(cache.path())).unwrap();
+        assert_eq!(again, open);
+        drop(crate::opencode::db::open_read_only(&again).unwrap());
+
+        let after = (listing(src.path()), std::fs::read(&db).unwrap(), stamp(&db));
+        assert_eq!(after, before, "the source directory must not change");
+    }
+
+    #[test]
+    fn a_live_or_rollback_database_is_opened_in_place() {
+        let src = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = wal_db(src.path());
+        // A writer holding the database open keeps both sidecars present.
+        let writer = Connection::open(&db).unwrap();
+        writer.execute_batch("INSERT INTO t VALUES (8);").unwrap();
+        assert!(sibling(&db, "-wal").exists() && sibling(&db, "-shm").exists());
+        assert_eq!(read_only_source(&db, Some(cache.path())).unwrap(), db);
+        drop(writer);
+
+        let rollback = src.path().join("rollback.db");
+        Connection::open(&rollback)
+            .unwrap()
+            .execute_batch("CREATE TABLE t(x);")
+            .unwrap();
+        assert_eq!(
+            read_only_source(&rollback, Some(cache.path())).unwrap(),
+            rollback
+        );
+        assert!(listing(cache.path()).is_empty(), "no snapshot was needed");
+    }
+}
