@@ -20,6 +20,20 @@ pub enum LlmError {
     StreamProtocol { line: u64, detail: String },
 }
 
+/// Start of a [`LlmError::RequestFailed`] message when the request was sent
+/// and no answer arrived within the client timeout. Unlike a refused
+/// connection, the server may still be working on that request.
+pub const TIMED_OUT_PREFIX: &str = "request timed out: ";
+
+impl LlmError {
+    /// The request was sent and the client timeout expired before an answer.
+    /// Resending it can queue a second copy behind the first on a server that
+    /// is still working, so callers should not retry it blindly.
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, LlmError::RequestFailed { message } if message.starts_with(TIMED_OUT_PREFIX))
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LlmMessage {
     pub role: String,

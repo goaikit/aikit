@@ -22,7 +22,7 @@ built-in `aikit` agent, or anything else in the catalog.
 - **Session briefs (optional)** — `aikit session list` shows the coding-agent
   sessions on disk and `aikit session summarize` writes a short summary, the
   areas touched and tags from a fixed list for each one, from a scrubbed
-  digest rather than the transcript.
+  digest rather than the transcript. Read-only toward the tools' files.
 - **Session sync (optional)** — `aikit session sync` uploads the transcripts
   Claude Code and Codex already write to disk, secret-scrubbed and
   content-addressed, to S3-compatible blob storage (one-shot or `--watch`).
@@ -289,7 +289,7 @@ versions and all versions are retained. See the
 and environment table. Requires the `agent-adapters` feature (`watcher` for
 `--watch`).
 
-## 5. Session briefs (`aikit session list` / `aikit session summarize`)
+## 5. Session briefs (`aikit session list` / `summarize` / `briefs`)
 
 List the sessions your coding agents have left on disk (Claude Code, Codex,
 OpenCode) and summarize the ones you pick. A summary is a **brief**: one
@@ -297,6 +297,11 @@ paragraph, the areas of the repository touched (reads and modifications per
 directory, with time attributed from the event timestamps), and tags from a
 list you control. The model never sees a transcript; it sees a bounded,
 secret-scrubbed **digest** built from the captured events (ADR 0023).
+
+**Read-only.** aikit reads the tools' session files and never writes to them
+or creates files next to them. An idle OpenCode database is read from a copy in
+aikit's cache, because SQLite would otherwise create `-wal` and `-shm` files
+beside it. Briefs are stored only in aikit's own capture database.
 
 ```bash
 # Sessions from every tool's default home, newest first
@@ -312,17 +317,31 @@ aikit session summarize --since 24h --dry-run
 export OPENAI_API_KEY=...
 aikit session summarize --since 7d --model gpt-4o
 
-# Your own tags; mechanical ones (test, docs, config, research) are decided in code
-aikit session summarize --all --model gpt-4o --tags-file ~/.config/aikit/session-tags.toml
+# A self-hosted OpenAI-compatible gateway (LiteLLM, Ollama, vLLM)
+aikit session summarize --since 1d --model qwen3 --base-url http://localhost:4000/v1
+
+# Read stored briefs later: no model, no network
+aikit session briefs --since 7d
 ```
 
-Briefs are stored in the capture database next to the events, keyed by
-session; re-running on an unchanged session is a no-op unless `--force`. The
-primary tag is mirrored into the tool's own tag slot where the tool has one
-(Claude Code today). `aikit serve` exposes stored briefs read-only at
-`GET /api/v1/capture/{backend}/briefs` and `.../sessions/{id}/brief`. See the
-[command reference](webdocs/cli-commands.mdx) for every flag. Requires the
-`agent-adapters` feature. `aikit session list --live` still lists the live
+Re-running on an unchanged session is a no-op unless `--force`, and makes no
+model call. Before the first session that needs the model, one small call
+checks the endpoint, model and key, so a bad key fails once. HTTP 429, 5xx and
+failed connections are retried three times with backoff. A timeout is not
+retried, because the server may still be working on the request; raise
+`--timeout` for slow models. Calls run one at a time by default; raise `--parallel` for endpoints
+that serve requests in parallel. Each finished session prints a progress line
+on stderr, and a brief lists `warnings` when something was left out.
+`aikit serve` exposes stored briefs read-only at
+`GET /api/v1/capture/{backend}/briefs` and `.../sessions/{id}/brief`.
+
+**Known limits.** A session edited mostly through shell commands (`sed -i`,
+`cat >`) has a thin areas table. Very long sessions are described by the start
+of each section. Claude Code prompts are read only from the default Claude
+home. Thinking models need the default `--max-tokens 4096` or more.
+
+See the [command reference](webdocs/cli-commands.mdx) for every flag. Requires
+the `agent-adapters` feature. `aikit session list --live` still lists the live
 sessions of a running `aikit serve`.
 
 ## 6. Packages

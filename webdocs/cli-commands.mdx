@@ -21,6 +21,7 @@ AIKit organizes functionality into logical command groups:
 - **`serve`** - Start an HTTP server for multi-turn agent sessions ([dedicated page](/serve))
 - **`session list`** - List captured coding-agent sessions on disk (`--live` for live sessions on `aikit serve`)
 - **`session summarize`** - Summarize captured sessions: one paragraph, areas touched, tags from a fixed list
+- **`session briefs`** - Print stored session briefs; no model, no network
 - **`session sync`** - Sync raw, secret-scrubbed Claude Code / Codex session transcripts to S3-compatible blob storage
 - **`llm`** - Invoke an LLM via OpenAI-compatible API (supports streaming and JSON output)
 - **`check`** / **`agent check`** - Validate installed tools and AI agent CLIs
@@ -70,6 +71,7 @@ aikit <command> --help
 | `serve` | Multi-turn HTTP API | `aikit serve --port 8787` |
 | `session list` | List captured sessions on disk | `aikit session list --tool claude_code --since 7d` |
 | `session summarize` | Summarize and tag sessions | `aikit session summarize --since 24h --model gpt-4o` |
+| `session briefs` | Read stored briefs | `aikit session briefs --since 7d` |
 | `session sync` | Sync sessions to blob | `aikit session sync --owner me --bucket b --endpoint https://…` |
 | `llm` | Invoke an LLM | `aikit llm -m gpt-4o -p "Hello"` |
 | `check` | Validate environment | `aikit check` |
@@ -342,10 +344,17 @@ Requires a build with the `agent-adapters` feature (`--live` does not).
 Write a **brief** for each selected captured session: one short summary
 paragraph, the **areas** of the repository touched, and **tags** from a fixed
 list. The model never sees a transcript. It sees a bounded, secret-scrubbed
-**digest** built from the captured events — prompts, files touched in order
+**digest** built from the captured events: prompts, files touched in order
 with their action kinds, commands run, the areas table, the final assistant
-message — and answers with one completion, no tools, no agent loop
+message. It answers with one completion, no tools, no agent loop
 ([ADR 0023](https://github.com/goaikit/aikit/blob/main/docs/adr/0023-a-session-brief-is-one-completion-over-a-scrubbed-digest.md)).
+
+**Read-only.** `summarize` reads the tools' session files and never writes to
+them or creates files next to them. Its one write is the brief, into aikit's
+own capture database. OpenCode keeps sessions in SQLite: while OpenCode runs,
+its database is read in place like any SQLite reader; when it is idle, aikit
+reads a copy in its cache, because opening the file would create `-wal` and
+`-shm` beside it.
 
 ```bash
 # Preview: print every digest as it would be sent; no model call, nothing stored
@@ -358,15 +367,18 @@ aikit session summarize --since 7d --model gpt-4o
 # Two sessions by id (a unique prefix of 8+ characters is enough)
 aikit session summarize --session 550e8400 --session 7c9e6679-7425-40de-944b-e07fc1f90ae7 --model gpt-4o
 
-# Your own tags, your own areas, a local OpenAI-compatible endpoint
-aikit session summarize --all --model qwen2.5 --base-url http://localhost:11434/v1 \
+# A self-hosted gateway, your own tags and areas, machine output
+aikit session summarize --all --model qwen3 --base-url http://localhost:4000/v1 \
   --tags-file session-tags.toml --areas-file areas.toml --format json
 
-# Regenerate an unchanged session, and keep the tool's own tag slot untouched
-aikit session summarize --session 550e8400 --model gpt-4o --force --no-mirror
+# A cloud endpoint that serves requests in parallel
+aikit session summarize --since 30d --model gpt-4o --parallel 4
+
+# Regenerate an unchanged session
+aikit session summarize --session 550e8400 --model gpt-4o --force
 ```
 
-**Selection** (exactly one of): `--session <id>` (repeatable), `--since <when>`,
+**Selection** (at least one of): `--session <id>` (repeatable), `--since <when>`,
 `--all`. `--since` also narrows `--all` and `--session`. Locations are the same
 `--tool` / `--path` / `--db` flags as `session list`.
 
@@ -381,18 +393,54 @@ aikit session summarize --session 550e8400 --model gpt-4o --force --no-mirror
 | `--model`, `-m` | `AIKIT_MODEL` | — | Required unless `--dry-run` |
 | `--base-url` | `AIKIT_LLM_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint |
 | `--api-key-env` | — | `OPENAI_API_KEY`, then `AIKIT_API_KEY` | Environment variable holding the key |
-| `--max-tokens` | — | `4096` | Completion budget; temperature is always `0`. A thinking model spends the budget on reasoning before it answers, and an exhausted budget is reported as `finish_reason=length` |
-| `--timeout` | — | `120` | Request timeout in seconds |
+| `--max-tokens` | — | `4096` | Completion budget; temperature is always `0`. A thinking model spends the budget on reasoning before it answers |
+| `--timeout` | — | `180` | Per request, in seconds |
+| `--parallel` | — | `1` | Concurrent model calls. Many self-hosted gateways serve one request at a time and queue the rest, so raise this only for endpoints that serve requests in parallel |
 | `--tags` | — | built-in list | Comma-separated tag names (no descriptions, no rules) |
 | `--tags-file` | `AIKIT_SESSION_TAGS` | built-in list | TOML `[[tag]]` entries; see below. Not with `--tags` |
 | `--areas-file` | — | directory grouping | TOML `[[area]]` entries: `name` and `prefix`; longest prefix wins |
 | `--area-depth` | — | `2` | Directory components that make an area when no prefix matches (`src/cli/serve/x.rs` → `src/cli`) |
 | `--include-assistant` | — | off | Add the assistant's text blocks to the digest (a richer "why", more tokens) |
-| `--parallel` | — | `4` | Concurrent model calls |
 | `--force` | — | off | Regenerate even when the stored brief has the same digest hash |
-| `--no-mirror` | — | off | Do not write the primary tag into the tool's own tag slot |
-| `--dry-run` | — | off | Print each digest and its mechanical tags; call no model, store nothing |
+| `--dry-run` | — | off | Print each digest, its mechanical tags and warnings; call no model, store nothing |
+| `--quiet` | — | off | No progress lines and no tally on stderr |
+| `--no-preflight` | — | off | Skip the endpoint check before the first model call |
+| `--no-mirror` | — | — | Deprecated, no effect. Accepted so scripts written for 0.1.196 keep working |
 | `--format` | — | `default` | `default` (human) or `json` (an array with `status`: `generated`, `unchanged`, `dry_run`, `failed`) |
+
+**Reliability.**
+
+- **Preflight.** Right before the first session that needs the model, one
+  small completion checks the endpoint, model and key, once per batch. A
+  rejected key, an unknown model or an unreachable endpoint exits `2` with one
+  error, and no session reaches the model. A rerun where every session is
+  unchanged makes no call at all, so it works while the endpoint is down.
+- **Retries.** HTTP 429, any 5xx and failed connections are retried up to three
+  times per call, waiting about 1 s, 2 s, then 4 s, with jitter. The
+  `Retry-After` header is not read. 401, 403, 404 and other client errors are
+  not retried.
+- **Timeouts.** A request that gets no answer within `--timeout` fails without
+  a retry: the server may still be working on it, and a server that handles one
+  request at a time would queue the resend behind it. Raise `--timeout` for slow
+  models.
+- **Crashes.** An internal error while summarizing one session fails that
+  session, which is counted in the tally and makes the exit code `1`.
+- **Replies.** A reply that is not the JSON object, or that names tags outside
+  the list, is asked about once more.
+- **Budget.** An empty reply that stopped at the token budget fails with a
+  message naming `--max-tokens`.
+- **Progress.** Each finished session prints a line on stderr, then a tally:
+
+  ```text
+  [3/20] a27cfd7d generated 25.1s docs,research
+  done: generated=19 unchanged=0 dry_run=0 failed=1 in 512.4s
+  ```
+
+- **Warnings.** A brief's `warnings` say what was degraded: prompts that could
+  not be read, digest sections that did not show everything, replies or
+  requests that were retried. `--dry-run` prints the same warnings.
+- **Interrupting.** Each brief is stored as soon as its session finishes, so
+  stopping a batch keeps every brief already written, and a rerun skips them.
 
 **Tags.** The built-in list is `feature`, `bugfix`, `refactor`, `test`, `docs`,
 `config`, `research`, `chore`. A tag can be bound to a **rule**, decided in code
@@ -418,21 +466,76 @@ description = "New behaviour was added"
 modifications. Time per area is the gap from an event to the next one in the
 session, capped at five minutes, attributed to the earlier event's area.
 
+**Digest size.** The digest is capped at about 12,000 characters. The header,
+prompts, areas table and final assistant message are always kept. Files,
+commands and assistant notes share the remaining room one whole line at a time,
+and what does not fit is counted as `… and N more`.
+
 **Persistence.** Briefs live in the capture database keyed by `(tool,
-session_id)`: summary, areas, tags, model, digest hash and generated-at time.
-The digest hash is the SHA-256 of the exact message sent, so an unchanged
-session is a no-op. `aikit serve` serves stored briefs read-only:
-`GET /api/v1/capture/{backend}/briefs?limit=&offset=` and
+session_id)`: summary, areas, tags, warnings, model, digest hash and
+generated-at time. The digest hash is the SHA-256 of the exact message sent, so
+an unchanged session is a no-op. Read briefs with `aikit session briefs`, or
+from `aikit serve` at `GET /api/v1/capture/{backend}/briefs?limit=&offset=` and
 `GET /api/v1/capture/{backend}/sessions/{session_id}/brief`.
 
 **Prompts.** Codex records prompts as events. Claude Code prompts reach the
 digest through the history reader, which resolves the default Claude home
-(`CLAUDE_CONFIG_DIR` or `~/.claude`); a Claude session under an overridden
-`--path` is summarized from its files, commands and final message.
+(`CLAUDE_CONFIG_DIR` or `~/.claude`). A Claude session under an overridden
+`--path` is summarized from its files, commands and final message, and its
+brief carries a warning saying so.
+
+**Known limits.**
+
+- Sessions edited mostly through shell commands (`sed -i`, `cat >`, scripts)
+  have a thin areas table, because those edits are recorded as commands rather
+  than file touches.
+- Very long sessions are described by the start of each section: the first 12
+  prompts, 120 file touches and 40 commands.
+- Speed is the gateway's. A thinking model served one request at a time takes
+  about 25 seconds per brief.
+
+**Upgrading from 0.1.196.** Version 0.1.196 appended a tag line
+(`{"type":"tag",...}`) to the Claude Code session file after each Claude brief,
+unless `--no-mirror` was passed. Later versions never write to tool session
+files, and `--no-mirror` is accepted and ignored. Lines already appended are
+ordinary Claude Code tag entries and can stay; to remove one, delete that
+trailing `"type":"tag"` line from the session's `.jsonl` file while Claude Code
+is not running.
 
 **Exit codes:** `0` every session generated, unchanged or previewed · `1` at
-least one session failed · `2` configuration error before any call (no
-selection, no model, no key, a bad tags file).
+least one session failed · `2` configuration error before any session (no
+selection, no model, no key, a bad tags file, a failed preflight).
+
+Requires a build with the `agent-adapters` feature.
+
+### session briefs
+
+Print the briefs already stored in the capture database. Reads aikit's own
+database only: no scan, no model, no network.
+
+```bash
+# Every stored brief, newest first
+aikit session briefs
+
+# Briefs generated in the last week for Claude Code sessions
+aikit session briefs --since 7d --tool claude_code
+
+# One session, machine output
+aikit session briefs --session 550e8400 --format json
+```
+
+**Options:**
+
+| Flag | Env | Default | Description |
+|------|-----|---------|-------------|
+| `--session` | — | all | Repeatable; a session id or a unique prefix of at least 8 characters |
+| `--since` | — | — | Briefs generated since `24h`, `7d`, an RFC 3339 time or `YYYY-MM-DD`. Filters on when the brief was generated, not on session activity |
+| `--tool` | — | all compiled tools | Repeatable; `claude_code`, `codex` or `open_code` |
+| `--db` | `AIKIT_CAPTURE_DB` | `<data dir>/aikit/capture.db` | The capture SQLite file |
+| `--format` | — | `default` | `default` (human) or `json` (an array of briefs) |
+
+**Exit codes:** `0` success, including when nothing is stored · `2` bad flags,
+or a `--session` that matches no stored brief or more than one.
 
 Requires a build with the `agent-adapters` feature.
 
