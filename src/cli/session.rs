@@ -625,31 +625,31 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
         force: args.force,
         dry_run: args.dry_run,
         parallel,
+        // Checked once, right before the first session that needs the model:
+        // a bad key fails once, and a rerun with nothing to regenerate makes
+        // no call at all.
+        preflight: !args.no_preflight,
         ..SummarizeOptions::default()
     };
     let summarizer = Arc::new(
         Summarizer::new(gateway, model, options).with_prompt_source(Arc::new(HistoryPrompts)),
     );
-    // One tiny call before the batch: a bad key, an unknown model or an
-    // unreachable endpoint fails once here, not once per session.
-    if !args.dry_run && !args.no_preflight {
-        if let Err(e) = summarizer.preflight().await {
-            eprintln!("Error: {e}");
-            eprintln!(
-                "  check --model, --base-url and the API key (--no-preflight skips this check)"
-            );
-            return Ok(2);
-        }
-    }
     let quiet = args.quiet;
     let progress: Option<Arc<aikit_session_summarize::ProgressFn>> = if quiet {
         None
     } else {
+        let batch = Arc::clone(&summarizer);
         let report: Arc<aikit_session_summarize::ProgressFn> = Arc::new(
-            |done: usize,
-             total: usize,
-             o: &aikit_session_summarize::SessionOutcome,
-             took: std::time::Duration| {
+            move |done: usize,
+                  total: usize,
+                  o: &aikit_session_summarize::SessionOutcome,
+                  took: std::time::Duration| {
+                // A failed preflight is reported once, after the batch.
+                if let Outcome::Failed { error } = &o.outcome {
+                    if batch.preflight_error() == Some(error.as_str()) {
+                        return;
+                    }
+                }
                 eprintln!("{}", progress_line(done, total, o, took));
             },
         );
@@ -664,6 +664,11 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
             progress,
         )
         .await;
+    if let Some(e) = summarizer.preflight_error() {
+        eprintln!("Error: {e}");
+        eprintln!("  check --model, --base-url and the API key (--no-preflight skips this check)");
+        return Ok(2);
+    }
     if !quiet {
         eprintln!("{}", tally_line(&outcomes, started.elapsed()));
     }

@@ -65,11 +65,18 @@ pub struct SummarizeOptions {
     /// flight only move the wait into the request timeout.
     pub parallel: usize,
     /// Retries of a transient transport failure (HTTP 429, any 5xx, a
-    /// timeout or connection error) per model call. Client errors such as
-    /// 401, 403 and 404 are never retried.
+    /// connection that failed before an answer) per model call. Client
+    /// errors such as 401, 403 and 404 are never retried, and neither is a
+    /// timeout: the server may still be working on that request.
     pub transport_retries: u32,
     /// First retry delay; doubles per retry, with up to 25% jitter added.
     pub backoff_base: Duration,
+    /// Check endpoint, model and key with one tiny completion before the
+    /// first model call of the batch, once. A failure fails every session
+    /// that needed a call with the same error, without further calls, and is
+    /// reported by [`Summarizer::preflight_error`]. Sessions that need no call
+    /// (unchanged, dry run) never trigger it.
+    pub preflight: bool,
 }
 
 impl Default for SummarizeOptions {
@@ -83,6 +90,7 @@ impl Default for SummarizeOptions {
             parallel: 1,
             transport_retries: 3,
             backoff_base: Duration::from_secs(1),
+            preflight: false,
         }
     }
 }
@@ -151,6 +159,7 @@ pub struct Summarizer {
     options: SummarizeOptions,
     prompts: Option<Arc<dyn PromptSource>>,
     scrubber: SecretScrubber,
+    preflight_once: tokio::sync::OnceCell<Result<(), String>>,
 }
 
 /// SHA-256 hex of the exact user message: the identity of the request.
@@ -158,15 +167,33 @@ pub fn digest_hash(user_message: &str) -> String {
     hex::encode(Sha256::digest(user_message.as_bytes()))
 }
 
-/// Whether a gateway error is worth retrying: the request never got an
-/// answer (timeout, connection), or the server said to try later (429) or
-/// failed (5xx). The same classification as the SDK's conversation pipeline
-/// uses for the evals judge.
+/// Whether a gateway error is worth retrying: the server said to try later
+/// (429) or failed (5xx), or the request failed without an answer (refused or
+/// reset connection, unreadable body).
+///
+/// A timeout is not retried: the request reached the server, which may still
+/// be working on it, and a server that handles one request at a time would
+/// queue the resend behind it.
 pub fn is_transient(err: &LlmError) -> bool {
     match err {
         LlmError::ErrorResponse { status, .. } => *status == 429 || (500..=599).contains(status),
-        LlmError::RequestFailed { .. } => true,
+        LlmError::RequestFailed { .. } => !err.is_timeout(),
         _ => false,
+    }
+}
+
+/// A panicked or cancelled session task as a readable error.
+fn join_error_message(err: tokio::task::JoinError) -> String {
+    if err.is_panic() {
+        let payload = err.into_panic();
+        let text = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_string());
+        format!("internal error: summarizing this session panicked: {text}")
+    } else {
+        "internal error: the session task was cancelled".to_string()
     }
 }
 
@@ -246,6 +273,7 @@ impl Summarizer {
             options,
             prompts: None,
             scrubber: SecretScrubber::default(),
+            preflight_once: tokio::sync::OnceCell::new(),
         }
     }
 
@@ -261,6 +289,16 @@ impl Summarizer {
 
     pub fn options(&self) -> &SummarizeOptions {
         &self.options
+    }
+
+    /// The error of the batch preflight, when [`SummarizeOptions::preflight`]
+    /// ran it and it failed. Sessions that needed a model call failed with
+    /// exactly this text.
+    pub fn preflight_error(&self) -> Option<&str> {
+        match self.preflight_once.get() {
+            Some(Err(e)) => Some(e.as_str()),
+            _ => None,
+        }
     }
 
     fn request(&self, messages: Vec<LlmMessage>, max_tokens: u32) -> LlmRequest {
@@ -313,6 +351,12 @@ impl Summarizer {
                         "transient model error, retrying: {err}"
                     );
                     tokio::time::sleep(backoff_delay(self.options.backoff_base, retries)).await;
+                }
+                Err(err) if err.is_timeout() => {
+                    return Err(format!(
+                        "{err} (not retried: the server may still be working on it; \
+                         raise --timeout for slow models)"
+                    ))
                 }
                 Err(err) if retries > 0 => {
                     return Err(format!(
@@ -406,7 +450,7 @@ impl Summarizer {
             areas.clone(),
             &self.options.digest,
         );
-        if digest.prompts.is_empty() {
+        if digest.prompts.is_empty() && !warnings.iter().any(|w| w.starts_with("prompts:")) {
             warnings.push(
                 "prompts: none were available; the brief rests on files, commands and the final message"
                     .into(),
@@ -440,6 +484,13 @@ impl Summarizer {
                     return Ok(Outcome::Unchanged { brief: existing });
                 }
             }
+        }
+
+        if self.options.preflight {
+            self.preflight_once
+                .get_or_init(|| self.preflight())
+                .await
+                .clone()?;
         }
 
         let max_tokens = self.model.max_tokens;
@@ -555,9 +606,22 @@ impl Summarizer {
             set.spawn(async move {
                 let _permit = sem.acquire_owned().await.expect("semaphore open");
                 let started = Instant::now();
-                let outcome = me
-                    .summarize_one(events.as_ref(), briefs.as_ref(), &session)
-                    .await;
+                let (tool, session_id) = (session.tool, session.session_id.clone());
+                // Its own task, so a panic fails this session, not the batch.
+                let run = tokio::spawn(async move {
+                    me.summarize_one(events.as_ref(), briefs.as_ref(), &session)
+                        .await
+                });
+                let outcome = match run.await {
+                    Ok(outcome) => outcome,
+                    Err(e) => SessionOutcome {
+                        tool,
+                        session_id,
+                        outcome: Outcome::Failed {
+                            error: join_error_message(e),
+                        },
+                    },
+                };
                 (i, outcome, started.elapsed())
             });
         }
@@ -585,6 +649,7 @@ mod tests {
     use super::*;
     use crate::brief::{InMemoryBriefStore, TagSource};
     use aikit_agent::llm::mock::{MockGateway, MockResponse};
+    use aikit_agent::llm::types::TIMED_OUT_PREFIX;
     use aikit_session_capture::{
         ActionKind, ActionStatus, EventBatch, InMemoryEventStore, ToolEvent,
     };
@@ -839,7 +904,10 @@ mod tests {
         assert!(!is_transient(&status(401)));
         assert!(!is_transient(&status(404)));
         assert!(is_transient(&LlmError::RequestFailed {
-            message: "operation timed out".into()
+            message: "connection refused".into()
+        }));
+        assert!(!is_transient(&LlmError::RequestFailed {
+            message: format!("{TIMED_OUT_PREFIX}error sending request"),
         }));
         assert!(!is_transient(&LlmError::NoApiKey {
             checked: String::new()
@@ -1131,5 +1199,235 @@ mod tests {
         assert_eq!(o.parallel, 1);
         assert_eq!(o.transport_retries, 3);
         assert_eq!(o.backoff_base, Duration::from_secs(1));
+        assert!(!o.preflight, "the library leaves preflight to its caller");
+    }
+
+    #[tokio::test]
+    async fn a_timeout_is_not_retried() {
+        let (store, briefs, session) = store_with_session().await;
+        let s = summarizer(
+            vec![
+                MockResponse::error(LlmError::RequestFailed {
+                    message: format!("{TIMED_OUT_PREFIX}error sending request"),
+                }),
+                MockResponse::text(GOOD),
+            ],
+            fast(),
+        );
+        match s
+            .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+            .await
+            .outcome
+        {
+            Outcome::Failed { error } => {
+                assert!(error.contains("not retried"), "{error}");
+                assert!(error.contains("--timeout"), "{error}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    /// `n` captured Codex sessions, one edit each, none with a prompt.
+    async fn many_sessions(n: i64) -> (Arc<InMemoryEventStore>, Vec<SessionSummary>) {
+        let store = Arc::new(InMemoryEventStore::new());
+        let events = (0..n)
+            .map(|i| {
+                let mut e = ev(
+                    &format!("e{i}"),
+                    ActionKind::Edit,
+                    "/repo/src/x.rs",
+                    None,
+                    i,
+                );
+                e.session_id = format!("session-{i}");
+                e
+            })
+            .collect();
+        store
+            .upsert_events(EventBatch {
+                tool_events: events,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let sessions = store
+            .sessions_for(ToolKind::Codex, None, 100, 0)
+            .await
+            .unwrap();
+        (store, sessions)
+    }
+
+    #[tokio::test]
+    async fn preflight_runs_once_before_the_first_call_and_its_failure_is_shared() {
+        let (store, sessions) = many_sessions(2).await;
+        let briefs = Arc::new(InMemoryBriefStore::new());
+        // Were preflight run per session, the second session would pass it on
+        // the first GOOD and generate a brief with the second.
+        let s = summarizer(
+            vec![
+                status_error(401),
+                MockResponse::text(GOOD),
+                MockResponse::text(GOOD),
+            ],
+            SummarizeOptions {
+                preflight: true,
+                parallel: 2,
+                ..fast()
+            },
+        );
+        let out = s.summarize_many(store, briefs, sessions).await;
+        let errors: Vec<&str> = out
+            .iter()
+            .map(|o| match &o.outcome {
+                Outcome::Failed { error } => error.as_str(),
+                other => panic!("expected Failed, got {other:?}"),
+            })
+            .collect();
+        let shared = s.preflight_error().expect("preflight failed");
+        assert!(shared.contains("preflight") && shared.contains("401"), "{shared}");
+        assert!(errors.iter().all(|e| *e == shared), "{errors:?}");
+    }
+
+    #[tokio::test]
+    async fn preflight_is_skipped_when_no_session_needs_a_call() {
+        let (store, briefs, session) = store_with_session().await;
+        let first = summarizer(vec![MockResponse::text(GOOD)], fast());
+        assert_eq!(
+            first
+                .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+                .await
+                .outcome
+                .status(),
+            "generated"
+        );
+
+        // Unchanged: a rejecting gateway is never reached.
+        let rerun = summarizer(
+            vec![status_error(401)],
+            SummarizeOptions {
+                preflight: true,
+                ..fast()
+            },
+        );
+        assert_eq!(
+            rerun
+                .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+                .await
+                .outcome
+                .status(),
+            "unchanged"
+        );
+        assert!(rerun.preflight_error().is_none());
+
+        // Forced: preflight answers, then the brief is generated.
+        let forced = summarizer(
+            vec![MockResponse::text("OK"), MockResponse::text(GOOD)],
+            SummarizeOptions {
+                preflight: true,
+                force: true,
+                ..fast()
+            },
+        );
+        assert_eq!(
+            forced
+                .summarize_one(store.as_ref(), briefs.as_ref(), &session)
+                .await
+                .outcome
+                .status(),
+            "generated"
+        );
+    }
+
+    struct PanickingPrompts;
+    impl PromptSource for PanickingPrompts {
+        fn user_prompts(&self, _tool: ToolKind, id: &str) -> Result<Option<Vec<String>>, String> {
+            if id == "session-1" {
+                panic!("prompt source exploded");
+            }
+            Ok(None)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_panicking_session_fails_alone_and_is_reported() {
+        let (store, sessions) = many_sessions(3).await;
+        let briefs = Arc::new(InMemoryBriefStore::new());
+        let s = Arc::new(
+            Summarizer::new(
+                Arc::new(MockGateway::new(vec![MockResponse::text(GOOD); 3])),
+                ModelConfig::new("m", "http://mock", "k"),
+                fast(),
+            )
+            .with_prompt_source(Arc::new(PanickingPrompts)),
+        );
+        let seen: Seen = Default::default();
+        let sink = Arc::clone(&seen);
+        let progress: Arc<ProgressFn> = Arc::new(
+            move |done: usize, total: usize, o: &SessionOutcome, _took: Duration| {
+                sink.lock().unwrap().push((done, total, o.outcome.status()));
+            },
+        );
+        let out = s
+            .summarize_many_with_progress(store, briefs, sessions, Some(progress))
+            .await;
+        assert_eq!(out.len(), 3);
+        for o in &out {
+            match (&o.session_id[..], &o.outcome) {
+                ("session-1", Outcome::Failed { error }) => {
+                    assert!(error.contains("panicked"), "{error}");
+                    assert!(error.contains("prompt source exploded"), "{error}");
+                }
+                ("session-1", other) => panic!("expected Failed, got {other:?}"),
+                (_, other) => assert_eq!(other.status(), "generated"),
+            }
+        }
+        assert_eq!(seen.lock().unwrap().len(), 3, "every session is reported");
+    }
+
+    #[tokio::test]
+    async fn missing_prompts_are_warned_about_once() {
+        let (store, sessions) = many_sessions(1).await;
+        let briefs = InMemoryBriefStore::new();
+        let s = Summarizer::new(
+            Arc::new(MockGateway::new(vec![])),
+            ModelConfig::new("m", "http://mock", "k"),
+            SummarizeOptions {
+                dry_run: true,
+                ..fast()
+            },
+        )
+        .with_prompt_source(Arc::new(BrokenPrompts));
+        match s
+            .summarize_one(store.as_ref(), &briefs, &sessions[0])
+            .await
+            .outcome
+        {
+            Outcome::DryRun { warnings, .. } => assert_eq!(
+                warnings,
+                vec!["prompts: the history reader found no such session".to_string()]
+            ),
+            other => panic!("expected DryRun, got {other:?}"),
+        }
+
+        // Without a failing source, the plain warning still appears.
+        let plain = Summarizer::new(
+            Arc::new(MockGateway::new(vec![])),
+            ModelConfig::new("m", "http://mock", "k"),
+            SummarizeOptions {
+                dry_run: true,
+                ..fast()
+            },
+        );
+        match plain
+            .summarize_one(store.as_ref(), &briefs, &sessions[0])
+            .await
+            .outcome
+        {
+            Outcome::DryRun { warnings, .. } => {
+                assert_eq!(warnings.len(), 1);
+                assert!(warnings[0].starts_with("prompts: none were available"));
+            }
+            other => panic!("expected DryRun, got {other:?}"),
+        }
     }
 }

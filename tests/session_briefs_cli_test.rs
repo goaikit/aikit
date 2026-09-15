@@ -246,8 +246,9 @@ async fn generates_reads_back_and_never_touches_session_files() {
         .with_status(200)
         .with_header("content-type", "application/json")
         .with_body(completion_body())
-        // Preflight + one brief on the first run; preflight on each rerun.
-        .expect_at_least(2)
+        // Preflight and one brief on the first run. The rerun has nothing to
+        // regenerate, so it makes no call, not even the preflight.
+        .expect(2)
         .create_async()
         .await;
     let url = server.url();
@@ -354,4 +355,36 @@ async fn a_rejected_key_fails_once_at_preflight() {
     };
     assert_eq!(execute_summarize(skip).await.unwrap(), 1);
     rejected.assert_async().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_model_that_never_answers_is_called_once_not_retried() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    std::env::set_var(KEY_ENV, "test-key");
+    let (_dir, _root, path, db) = scratch();
+
+    // Accepts connections and never answers, like a busy one-at-a-time
+    // backend that is still working on an earlier request.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&accepted);
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for stream in listener.incoming().flatten() {
+            count.fetch_add(1, Ordering::SeqCst);
+            held.push(stream);
+        }
+    });
+
+    let args = SummarizeSessionsArgs {
+        timeout: Some("1".into()),
+        ..summarize_args(&path, &db, &url)
+    };
+    // The preflight times out: exit 2, one request, no resend.
+    assert_eq!(execute_summarize(args).await.unwrap(), 2);
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    assert!(stored_briefs(&db).is_empty());
 }
