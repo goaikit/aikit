@@ -112,6 +112,9 @@ the brief and all its tags are already in aikit's database and served
 read-only.
 
 Mirroring is removed. The summarizer only reads the tools' session files; its
-one write is the brief, into aikit's own database. `--no-mirror` stays accepted
+one write is the brief, into aikit's own database. Reading creates no file in a
+tool's directories either: an idle OpenCode database, whose `-wal` and `-shm`
+SQLite would create on a read-only open, is read from a copy in aikit's
+cache. `--no-mirror` stays accepted
 as a no-op so scripts written for 0.1.196 keep working. The history backend's
 `PATCH` route (spec 008) is a separate, explicit user action and is unchanged.

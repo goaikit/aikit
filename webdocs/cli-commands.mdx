@@ -350,7 +350,11 @@ message. It answers with one completion, no tools, no agent loop
 ([ADR 0023](https://github.com/goaikit/aikit/blob/main/docs/adr/0023-a-session-brief-is-one-completion-over-a-scrubbed-digest.md)).
 
 **Read-only.** `summarize` reads the tools' session files and never writes to
-them. Its one write is the brief, into aikit's own capture database.
+them or creates files next to them. Its one write is the brief, into aikit's
+own capture database. OpenCode keeps sessions in SQLite: while OpenCode runs,
+its database is read in place like any SQLite reader; when it is idle, aikit
+reads a copy in its cache, because opening the file would create `-wal` and
+`-shm` beside it.
 
 ```bash
 # Preview: print every digest as it would be sent; no model call, nothing stored
@@ -400,19 +404,27 @@ aikit session summarize --session 550e8400 --model gpt-4o --force
 | `--force` | — | off | Regenerate even when the stored brief has the same digest hash |
 | `--dry-run` | — | off | Print each digest, its mechanical tags and warnings; call no model, store nothing |
 | `--quiet` | — | off | No progress lines and no tally on stderr |
-| `--no-preflight` | — | off | Skip the endpoint check before the batch |
+| `--no-preflight` | — | off | Skip the endpoint check before the first model call |
 | `--no-mirror` | — | — | Deprecated, no effect. Accepted so scripts written for 0.1.196 keep working |
 | `--format` | — | `default` | `default` (human) or `json` (an array with `status`: `generated`, `unchanged`, `dry_run`, `failed`) |
 
 **Reliability.**
 
-- **Preflight.** Before a batch that calls a model, one small completion checks
-  the endpoint, model and key. A rejected key, an unknown model or an
-  unreachable endpoint exits `2` before any session is attempted.
-- **Retries.** HTTP 429, any 5xx, timeouts and connection errors are retried up
-  to three times per call, waiting about 1 s, 2 s, then 4 s, with jitter. The
+- **Preflight.** Right before the first session that needs the model, one
+  small completion checks the endpoint, model and key, once per batch. A
+  rejected key, an unknown model or an unreachable endpoint exits `2` with one
+  error, and no session reaches the model. A rerun where every session is
+  unchanged makes no call at all, so it works while the endpoint is down.
+- **Retries.** HTTP 429, any 5xx and failed connections are retried up to three
+  times per call, waiting about 1 s, 2 s, then 4 s, with jitter. The
   `Retry-After` header is not read. 401, 403, 404 and other client errors are
   not retried.
+- **Timeouts.** A request that gets no answer within `--timeout` fails without
+  a retry: the server may still be working on it, and a server that handles one
+  request at a time would queue the resend behind it. Raise `--timeout` for slow
+  models.
+- **Crashes.** An internal error while summarizing one session fails that
+  session, which is counted in the tally and makes the exit code `1`.
 - **Replies.** A reply that is not the JSON object, or that names tags outside
   the list, is asked about once more.
 - **Budget.** An empty reply that stopped at the token budget fails with a

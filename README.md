@@ -298,8 +298,10 @@ directory, with time attributed from the event timestamps), and tags from a
 list you control. The model never sees a transcript; it sees a bounded,
 secret-scrubbed **digest** built from the captured events (ADR 0023).
 
-**Read-only.** aikit reads the tools' session files and never writes to them.
-Briefs are stored only in aikit's own capture database.
+**Read-only.** aikit reads the tools' session files and never writes to them
+or creates files next to them. An idle OpenCode database is read from a copy in
+aikit's cache, because SQLite would otherwise create `-wal` and `-shm` files
+beside it. Briefs are stored only in aikit's own capture database.
 
 ```bash
 # Sessions from every tool's default home, newest first
@@ -322,10 +324,12 @@ aikit session summarize --since 1d --model qwen3 --base-url http://localhost:400
 aikit session briefs --since 7d
 ```
 
-Re-running on an unchanged session is a no-op unless `--force`. Before a
-batch, one small call checks the endpoint, model and key, so a bad key fails
-once. Transient errors (HTTP 429, 5xx, timeouts) are retried three times with
-backoff. Calls run one at a time by default; raise `--parallel` for endpoints
+Re-running on an unchanged session is a no-op unless `--force`, and makes no
+model call. Before the first session that needs the model, one small call
+checks the endpoint, model and key, so a bad key fails once. HTTP 429, 5xx and
+failed connections are retried three times with backoff. A timeout is not
+retried, because the server may still be working on the request; raise
+`--timeout` for slow models. Calls run one at a time by default; raise `--parallel` for endpoints
 that serve requests in parallel. Each finished session prints a progress line
 on stderr, and a brief lists `warnings` when something was left out.
 `aikit serve` exposes stored briefs read-only at

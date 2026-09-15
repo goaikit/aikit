@@ -128,3 +128,29 @@ text above:
   0.1.196"), because GitHub release notes are generated from commit subjects.
 - **Added `--quiet` and `--no-preflight`**, the escape hatches for the new
   progress output and the preflight call.
+
+### Follow-up fixes from the pre-launch audit
+
+An end-to-end audit of this branch found six gaps, fixed here:
+
+- **OpenCode sidecar files.** Scanning an idle OpenCode database left
+  `opencode.db-wal` and `opencode.db-shm` in OpenCode's directory: SQLite
+  creates them for a read-only open of a WAL database. The adapter now reads an
+  idle WAL database from a copy in aikit's cache, verified unchanged during the
+  copy, and reads a live one in place. Tests assert the directory is unchanged.
+- **Opening a new capture database concurrently.** Two processes creating the
+  file at once could fail with "database is locked", because switching to WAL
+  is not covered by the busy timeout. The switch and the migration now retry for
+  up to 5 s.
+- **A panicking session.** It was dropped from the results and the batch could
+  exit 0. Each session now runs in its own task; a panic becomes a failed
+  outcome.
+- **Timeouts.** They were retried, which on a one-at-a-time backend queues a
+  resend behind the request still running. The gateway marks a timeout after
+  the connection was made (`LlmError::is_timeout`, additive), and the
+  summarizer does not retry it.
+- **Preflight on reruns.** It ran before every batch, so a rerun with nothing
+  to regenerate failed while the endpoint was down. It now runs once, right
+  before the first model call.
+- **Duplicate warnings.** A session without prompts got two prompt warnings;
+  it now gets one.
