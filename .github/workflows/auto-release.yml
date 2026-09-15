@@ -20,6 +20,11 @@ on:
 permissions:
   contents: write
 
+# Serialize runs so two pushes cannot race on the tag or the bump branch.
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
 jobs:
   auto-release:
     name: Auto Release
@@ -124,79 +129,106 @@ jobs:
 
           echo "skip=false" >> "$GITHUB_OUTPUT"
 
-      - name: Get current and last released versions
+      # main is protected, so this workflow never pushes to it. A push whose Cargo.toml
+      # version is not tagged yet (a merged bump PR) is a release commit and gets tagged;
+      # any other push opens or refreshes the bump PR for the next version.
+      # See docs/releasing.md.
+      - name: Classify pushed commit
         if: steps.check-label.outputs.skip != 'true'
-        id: versions
+        id: version
         run: |
-          # Current version in Cargo.toml
-          CURRENT=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          git fetch --tags --force
 
-          # Last released version (from latest tag)
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
-          LAST_VERSION="${LAST_TAG#v}"
-          echo "last=$LAST_VERSION" >> $GITHUB_OUTPUT
-
-          echo "Current Cargo.toml version: $CURRENT"
-          echo "Last released tag: $LAST_TAG ($LAST_VERSION)"
-
-      - name: Determine release version
-        if: steps.check-label.outputs.skip != 'true'
-        id: release
-        run: |
-          CURRENT="${{ steps.versions.outputs.current }}"
-          LAST="${{ steps.versions.outputs.last }}"
-
-          # Always create a release (auto-bump patch version if needed)
-          IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
-          NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
-          echo "version=$NEW_VERSION" >> $GITHUB_OUTPUT
-          echo "needs_bump=true" >> $GITHUB_OUTPUT
-          echo "Auto-bumping patch version: $CURRENT -> $NEW_VERSION"
-
-      - name: Update Cargo.toml version
-        if: steps.check-label.outputs.skip != 'true' && steps.release.outputs.needs_bump == 'true'
-        run: |
-          VERSION="${{ steps.release.outputs.version }}"
-          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
-
-          echo "Updated Cargo.toml to version $VERSION:"
-          grep '^version = ' Cargo.toml
-
-      - name: Commit version bump
-        if: steps.check-label.outputs.skip != 'true' && steps.release.outputs.needs_bump == 'true'
-        run: |
-          VERSION="${{ steps.release.outputs.version }}"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          git add Cargo.toml
-          git commit -m "chore: auto-bump version to $VERSION for release [skip ci]"
-          git push origin HEAD:refs/heads/main
-
-      - name: Create and push tag
-        if: steps.check-label.outputs.skip != 'true'
-        run: |
-          VERSION="${{ steps.release.outputs.version }}"
+          VERSION=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
           TAG="v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-          # Check if tag already exists
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping"
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+            echo "$TAG is already tagged; this push is not a release commit"
+          else
+            echo "is_release=true" >> "$GITHUB_OUTPUT"
+            echo "$TAG is not tagged yet; tagging $GITHUB_SHA"
+          fi
+
+      - name: Tag release commit
+        if: steps.check-label.outputs.skip != 'true' && steps.version.outputs.is_release == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$TAG"
+          echo "::notice::Tagged $GITHUB_SHA as $TAG - Release runs via workflow_run"
+
+      # PRs and pushes made with GITHUB_TOKEN do not trigger CI, so the bump PR would never
+      # get its required checks. The GitHub App token does.
+      - name: Generate GitHub App token
+        if: steps.check-label.outputs.skip != 'true' && steps.version.outputs.is_release == 'false'
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: goaikit
+          repositories: aikit
+
+      - name: Open or update version bump PR
+        if: steps.check-label.outputs.skip != 'true' && steps.version.outputs.is_release == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: release/next-version
+        run: |
+          set -euo pipefail
+          git fetch origin main --force
+
+          # Bump from main's tip, not the pushed commit, so the PR never conflicts with main.
+          MAIN_VERSION=$(git show origin/main:Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)
+          if ! git rev-parse -q --verify "refs/tags/v$MAIN_VERSION" >/dev/null; then
+            echo "::notice::main is at untagged version $MAIN_VERSION; its release is still pending, so no bump PR"
             exit 0
           fi
 
-          git tag "$TAG"
-          git push origin "$TAG"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$MAIN_VERSION"
+          if ! [[ "$MAJOR.$MINOR.$PATCH" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Cannot auto-bump non-semver version '$MAIN_VERSION'; bump Cargo.toml by hand"
+            exit 1
+          fi
+          NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
+          TITLE="chore(release): bump version to $NEXT"
 
-          echo "::notice::Created and pushed tag $TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH" origin/main
+          sed -i "0,/^version = \".*\"$/s//version = \"$NEXT\"/" Cargo.toml
+          git commit -am "$TITLE"
 
-      - name: Release workflow notice
-        if: steps.check-label.outputs.skip != 'true'
-        run: |
-          VERSION="${{ steps.release.outputs.version }}"
-          echo "::notice::Tag v$VERSION created - Release workflow will be triggered via workflow_run event"
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch -q "$REMOTE" "refs/heads/$BRANCH" 2>/dev/null && git diff --quiet FETCH_HEAD HEAD; then
+            echo "$BRANCH already matches main + bump to $NEXT; not re-pushing"
+          else
+            git push --force "$REMOTE" "HEAD:refs/heads/$BRANCH"
+          fi
+
+          BODY=$(cat <<EOF
+          Bumps \`Cargo.toml\` to \`$NEXT\`, opened by the Auto Release workflow.
+
+          Merging this PR is what cuts the release: Auto Release tags the merge commit \`v$NEXT\`, and Release builds and publishes it from that tag.
+
+          This branch is rebuilt from \`main\` on every push, so it stays mergeable. Do not add a CI or release skip marker to the merge commit message, or the release will not be tagged.
+          EOF
+          )
+
+          PR=$(gh pr list --head "$BRANCH" --base main --state open --json number --jq '.[0].number // empty')
+          if [ -n "$PR" ]; then
+            gh pr edit "$PR" --title "$TITLE" --body "$BODY"
+            echo "::notice::Updated bump PR #$PR to $NEXT"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$TITLE" --body "$BODY"
+            echo "::notice::Opened bump PR for $NEXT"
+          fi
 
       - name: Skip notice
         if: steps.check-label.outputs.skip == 'true'

@@ -1,16 +1,32 @@
 name: Release
 
+# Publishes the GitHub release, binaries, and Homebrew/Scoop manifests for one version tag.
+# See docs/releasing.md for the end-to-end flow.
+#
+# Invariants:
+# - A release is built from the commit its tag points at, never from a branch head.
+# - An already-published release is never deleted or replaced; the run fails instead.
+# - A failed Auto Release run never produces a release.
+
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g., 0.1.1); required for manual runs'
+        description: 'Version to release (e.g., 0.1.1); tag v<version> must already exist'
         required: true
         type: string
   workflow_run:
     workflows: ["Auto Release"]
+    branches: [main]
     types:
       - completed
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_sha || inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -20,57 +36,92 @@ jobs:
   verify-version:
     name: Verify Version
     runs-on: ubuntu-latest
+    # Auto Release fails when it cannot tag or open its bump PR; that must never publish.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
     outputs:
-      version: ${{ steps.detect-version.outputs.version }}
-      tag: ${{ steps.detect-version.outputs.tag }}
+      release: ${{ steps.resolve.outputs.release }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit: ${{ steps.resolve.outputs.commit }}
     steps:
-      - name: Checkout code for tag detection
+      - name: Checkout code
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.ref }}
           fetch-depth: 0
 
-      - name: Detect version
-        id: detect-version
-        uses: ./.github/actions/detect-version
-        with:
-          version: ${{ inputs.version }}
-
-      - name: Require valid release tag
+      - name: Resolve release tag
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          TAG="${{ steps.detect-version.outputs.tag }}"
-          if [ -z "$TAG" ]; then
-            echo "::error::detect-version produced an empty tag (do not fall back to branch name)"
+          set -euo pipefail
+          git fetch --tags --force
+
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            VERSION="${INPUT_VERSION#v}"
+            if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Invalid version input: '$INPUT_VERSION' (expected e.g. 0.1.197)"
+              exit 1
+            fi
+            TAG="v$VERSION"
+            if ! COMMIT=$(git rev-parse -q --verify "refs/tags/$TAG^{commit}"); then
+              echo "::error::Tag $TAG does not exist. Push the tag first (see docs/releasing.md)."
+              exit 1
+            fi
+          else
+            # Auto Release tags the pushed commit only when its Cargo.toml version is new.
+            # Any other successful run (it opened a bump PR, or was skipped) releases nothing.
+            VERSION=$(git show "$HEAD_SHA:Cargo.toml" | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)
+            TAG="v$VERSION"
+            COMMIT=$(git rev-parse -q --verify "refs/tags/$TAG^{commit}" || true)
+            if [ -z "$VERSION" ] || [ "$COMMIT" != "$HEAD_SHA" ]; then
+              echo "::notice::$HEAD_SHA is not tagged $TAG, so Auto Release did not cut a release from it. Nothing to publish."
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          CARGO_VERSION=$(git show "$COMMIT:Cargo.toml" | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)
+          if [[ "$VERSION" == *"-"* ]]; then
+            echo "Skipping Cargo.toml version check for pre-release tag: $VERSION"
+          elif [ "$VERSION" != "$CARGO_VERSION" ]; then
+            echo "::error::Version mismatch: tag $TAG points at $COMMIT whose Cargo.toml says '$CARGO_VERSION'"
             exit 1
           fi
-          if [ "$TAG" = "main" ] || [ "$TAG" = "master" ]; then
-            echo "::error::Refusing branch-shaped release tag: $TAG"
-            exit 1
-          fi
 
-      - name: Read version from Cargo.toml
-        id: cargo-version
+          echo "Releasing $TAG from $COMMIT"
+          {
+            echo "release=true"
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "commit=$COMMIT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to replace a published release
+        if: steps.resolve.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.resolve.outputs.tag }}
         run: |
-          CARGO_VERSION=$(grep '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "cargo-version=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Verify versions match
-        run: |
-          TAG_VER="${{ steps.detect-version.outputs.version }}"
-          CARGO_VER="${{ steps.cargo-version.outputs.cargo-version }}"
-
-          if [[ "$TAG_VER" == *"-"* ]]; then
-            echo "Skipping version verification for pre-release tag: $TAG_VER"
-          elif [ "$TAG_VER" != "$CARGO_VER" ]; then
-            echo "Version mismatch"
-            echo "Tag version: $TAG_VER"
-            echo "Cargo.toml version: $CARGO_VER"
+          set -euo pipefail
+          # Fail before spending time on builds. Drafts are invisible to a read-only token;
+          # create-release re-checks with write access right before publishing.
+          if IS_DRAFT=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>gh-err.txt); then
+            if [ "$IS_DRAFT" != "true" ]; then
+              echo "::error::Release $TAG is already published. Refusing to rebuild or replace it: its assets and the Homebrew/Scoop manifests pinned to them must not change under the same version. Release a new version instead."
+              exit 1
+            fi
+          elif ! grep -qi 'not found' gh-err.txt; then
+            cat gh-err.txt >&2
             exit 1
           fi
 
   build:
     name: Build ${{ matrix.os }} binary
     needs: verify-version
+    if: needs.verify-version.outputs.release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -101,7 +152,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
+          ref: ${{ needs.verify-version.outputs.commit }}
 
       - name: Build Rust binary
         uses: ./.github/actions/build-rust-binary
@@ -111,7 +162,7 @@ jobs:
           binary_name: ${{ matrix.binary-name }}
           archive_format: ${{ matrix.archive-format }}
           use_cross: ${{ matrix.use-cross }}
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
+          ref: ${{ needs.verify-version.outputs.commit }}
 
   collect-artifacts:
     name: Collect Release Artifacts
@@ -177,7 +228,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
+          ref: ${{ needs.verify-version.outputs.commit }}
 
       - name: Download collected artifacts
         uses: actions/download-artifact@v8
@@ -205,15 +256,32 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Delete existing release if present
-        continue-on-error: true
-        run: |
-          TAG="${{ needs.verify-version.outputs.tag }}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release delete "$TAG" --yes
-          fi
+      - name: Refuse to replace a published release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.verify-version.outputs.tag }}
+          COMMIT: ${{ needs.verify-version.outputs.commit }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force
+          TAG_COMMIT=$(git rev-parse "refs/tags/$TAG^{commit}")
+          if [ "$TAG_COMMIT" != "$COMMIT" ]; then
+            echo "::error::Tag $TAG moved from $COMMIT to $TAG_COMMIT during this run; refusing to publish binaries built from $COMMIT."
+            exit 1
+          fi
+
+          if IS_DRAFT=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>gh-err.txt); then
+            if [ "$IS_DRAFT" = "true" ]; then
+              echo "Deleting leftover draft release $TAG from an earlier failed run"
+              gh release delete "$TAG" --yes
+            else
+              echo "::error::Release $TAG is already published. Refusing to delete or replace it: its assets and the Homebrew/Scoop manifests pinned to them must not change under the same version. Release a new version instead."
+              exit 1
+            fi
+          elif ! grep -qi 'not found' gh-err.txt; then
+            cat gh-err.txt >&2
+            exit 1
+          fi
 
       - name: Generate release notes
         run: |
@@ -277,7 +345,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && format('v{0}', inputs.version) || github.ref }}
+          ref: ${{ needs.verify-version.outputs.commit }}
 
       - name: Generate GitHub App Token
         id: app-token
