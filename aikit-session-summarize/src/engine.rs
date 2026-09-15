@@ -1284,7 +1284,10 @@ mod tests {
             })
             .collect();
         let shared = s.preflight_error().expect("preflight failed");
-        assert!(shared.contains("preflight") && shared.contains("401"), "{shared}");
+        assert!(
+            shared.contains("preflight") && shared.contains("401"),
+            "{shared}"
+        );
         assert!(errors.iter().all(|e| *e == shared), "{errors:?}");
     }
 

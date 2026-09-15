@@ -260,8 +260,9 @@ pub(crate) fn read_only_source(
     };
     let root = match cache_root {
         Some(r) => r.to_path_buf(),
-        None => pick_mirror_root()
-            .map_err(|e| fail(format!("no writable cache directory ({e:?})")))?,
+        None => {
+            pick_mirror_root().map_err(|e| fail(format!("no writable cache directory ({e:?})")))?
+        }
     };
     let hash = short_hash(&src_db.to_string_lossy());
     let dir = root
