@@ -45,7 +45,7 @@ walkdir = "2"
 toml = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-dirs = "6.0"
+dirs = "7.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 zip = "2.3"
 # Archive integrity hashing (SEC-7): SHA-256 of fetched package archives.
