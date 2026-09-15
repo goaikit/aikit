@@ -503,7 +503,7 @@ pub async fn execute_summarize(args: SummarizeSessionsArgs) -> anyhow::Result<i3
         Ok(v) => v.max(1),
         Err(code) => return Ok(code),
     };
-    let max_tokens = match parse_num(args.max_tokens.as_deref(), "--max-tokens", 1024u32) {
+    let max_tokens = match parse_num(args.max_tokens.as_deref(), "--max-tokens", 4096u32) {
         Ok(v) => v,
         Err(code) => return Ok(code),
     };

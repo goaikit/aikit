@@ -69,7 +69,7 @@ aikit session summarize (--session <id>... | --since <when> | --all)
   characters. Exactly one of `--session`, `--since`, `--all` selects.
 - Model: `--model` (env `AIKIT_MODEL`), `--base-url` (env `AIKIT_LLM_URL`,
   default the gateway's), `--api-key-env` (default order `OPENAI_API_KEY`,
-  `AIKIT_API_KEY`), temperature 0, `--max-tokens` 1024. Exactly the judge's
+  `AIKIT_API_KEY`), temperature 0, `--max-tokens` 4096. Exactly the judge's
   shape (ADR 0021): one `LlmGateway::complete` per session, no agent loop.
 - `--dry-run` builds and prints every digest and its mechanical tags and
   makes no model call. `--format json` prints machine output on stdout;
