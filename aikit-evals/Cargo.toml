@@ -26,5 +26,5 @@ chrono = "0.4"
 
 [dev-dependencies]
 mockito = "1.2"
-jsonschema = "0.46"
+jsonschema = "0.56"
 insta = "1.41"
