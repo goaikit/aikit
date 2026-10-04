@@ -21,7 +21,7 @@ A Backend's native, per-agent message format — e.g. Claude's `stream-json` fra
 _Avoid_: Schema, format, protocol (the canonical side is the protocol; the per-agent side is the Dialect)
 
 **Control**:
-The outbound, interactive axis of a bidirectional Backend: answering approval/permission requests, sending interrupts, driving turn/session lifecycle. Shaped for by the Transport's writer half but not implemented in the initial refactor — the current Backends are one-shot and read-only.
+The outbound, interactive axis of a bidirectional Backend: answering approval/permission requests, sending interrupts, and driving turn/session lifecycle. A control operation may be accepted for delivery before the agent acknowledges it; acceptance and completion are distinct outcomes.
 _Avoid_: Command channel, RPC (RPC is one possible Transport, not the concept)
 
 **Canonical agent-event vocabulary**:
@@ -31,3 +31,19 @@ _Avoid_: Normalized output, common format
 **Backend capability**:
 A declared property of a Backend that callers gate behaviour on — e.g. whether it speaks a bidirectional transport, emits structured tool calls, emits reasoning, or is interruptible. Lets a caller subscribe to (or require) richer behaviour only from Backends that actually provide it, instead of assuming the lowest common denominator.
 _Avoid_: Feature flag, trait (it describes a Backend, it is not the Rust trait)
+
+**Host session**:
+A conversation owned by one workspace host and driven by one session backend. A client views or controls the session; the client's connection does not own its lifetime. Native agent session identity and public host session identity are separate.
+_Avoid_: Connection, process, chat window
+
+**Session backend**:
+A coding agent reachable through a host session. Its capabilities describe operations available in that session, which can differ from those available through a standalone run.
+_Avoid_: Model, LLM provider
+
+**Command receipt**:
+The host's recorded disposition of a client action. Durable acceptance, dispatch to the backend, failure, and an uncertain outcome are different dispositions. Repeating the same command identity does not request another execution.
+_Avoid_: Turn result, completion
+
+**Pending request**:
+An agent's permission request or question awaiting an authorized response before its deadline. A request belongs to one host session and is resolved once; an expired or cancelled request cannot authorize later work.
+_Avoid_: Command, notification

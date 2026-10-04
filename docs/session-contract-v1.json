@@ -1,0 +1,815 @@
+{
+  "command": {
+    "$defs": {
+      "RequestResponse": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "option_id": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "allow",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "deny",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "answers": true,
+              "type": {
+                "const": "answers",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "answers"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "send_turn",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "type": {
+            "const": "interrupt",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "steer",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "type": {
+            "const": "follow_up",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "text"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "type": {
+            "const": "set_model",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "model"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "type": {
+            "const": "context_usage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "request_id": {
+            "type": "string"
+          },
+          "response": {
+            "$ref": "#/$defs/RequestResponse"
+          },
+          "type": {
+            "const": "respond",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "request_id",
+          "response"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "type": {
+            "const": "close",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      }
+    ],
+    "properties": {
+      "command_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id"
+    ],
+    "title": "SessionCommand",
+    "type": "object"
+  },
+  "create_session": {
+    "$defs": {
+      "PermissionPolicy": {
+        "enum": [
+          "ask",
+          "deny",
+          "allow"
+        ],
+        "type": "string"
+      },
+      "SessionBackend": {
+        "description": "Session backends include native protocols that are not one-shot CLI runners.",
+        "enum": [
+          "claude",
+          "codex",
+          "pi",
+          "cursor",
+          "gemini",
+          "opencode",
+          "aikit",
+          "grok",
+          "antigravity"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "backend": {
+        "$ref": "#/$defs/SessionBackend"
+      },
+      "command_id": {
+        "type": "string"
+      },
+      "cwd": {
+        "type": "string"
+      },
+      "model": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "permission_policy": {
+        "$ref": "#/$defs/PermissionPolicy",
+        "default": "ask"
+      },
+      "prompt": {
+        "type": "string"
+      },
+      "resume": {
+        "default": null,
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "command_id",
+      "backend",
+      "cwd",
+      "prompt"
+    ],
+    "title": "CreateSession",
+    "type": "object"
+  },
+  "event": {
+    "$defs": {
+      "CommandFailure": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "retry": {
+            "description": "Advice, never automatic authorization to repeat native side effects.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "retry"
+        ],
+        "type": "object"
+      },
+      "CommandReceipt": {
+        "properties": {
+          "command_id": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "failure": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CommandFailure"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result": true,
+          "session_id": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/$defs/CommandStatus"
+          }
+        },
+        "required": [
+          "command_id",
+          "session_id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "CommandStatus": {
+        "description": "Accepted is durable acceptance; dispatched is local transport acceptance.\nNeither implies that a turn completed or that an uncertain action is safe to retry.",
+        "enum": [
+          "accepted",
+          "dispatched",
+          "failed",
+          "outcome_unknown"
+        ],
+        "type": "string"
+      },
+      "PendingRequest": {
+        "properties": {
+          "expires_at_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "payload": true,
+          "request_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "kind",
+          "payload",
+          "expires_at_ms"
+        ],
+        "type": "object"
+      },
+      "SessionStatus": {
+        "enum": [
+          "opening",
+          "running",
+          "idle",
+          "closing",
+          "closed",
+          "failed",
+          "interrupted"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "description": "Client input accepted by the host, separate from native agent output.",
+        "properties": {
+          "payload": {
+            "properties": {
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "type": "object"
+          },
+          "type": {
+            "const": "input",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "payload": true,
+          "type": {
+            "const": "agent",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/SessionStatus"
+          },
+          "type": {
+            "const": "state",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/CommandReceipt"
+          },
+          "type": {
+            "const": "command",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "payload": {
+            "$ref": "#/$defs/PendingRequest"
+          },
+          "type": {
+            "const": "request",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "payload": {
+            "properties": {
+              "reason": {
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "request_id",
+              "reason"
+            ],
+            "type": "object"
+          },
+          "type": {
+            "const": "request_resolved",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "payload": {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "type": "object"
+          },
+          "type": {
+            "const": "error",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "payload": {
+            "properties": {
+              "protocol": {
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "protocol",
+              "value"
+            ],
+            "type": "object"
+          },
+          "type": {
+            "const": "native",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "payload"
+        ],
+        "type": "object"
+      }
+    ],
+    "properties": {
+      "host_id": {
+        "type": "string"
+      },
+      "sequence": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "timestamp_ms": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "turn_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "version": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "version",
+      "host_id",
+      "session_id",
+      "sequence",
+      "timestamp_ms"
+    ],
+    "title": "SessionEvent",
+    "type": "object"
+  },
+  "protocol_version": 1,
+  "receipt": {
+    "$defs": {
+      "CommandFailure": {
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "retry": {
+            "description": "Advice, never automatic authorization to repeat native side effects.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "retry"
+        ],
+        "type": "object"
+      },
+      "CommandStatus": {
+        "description": "Accepted is durable acceptance; dispatched is local transport acceptance.\nNeither implies that a turn completed or that an uncertain action is safe to retry.",
+        "enum": [
+          "accepted",
+          "dispatched",
+          "failed",
+          "outcome_unknown"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "command_id": {
+        "type": "string"
+      },
+      "error": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "failure": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/CommandFailure"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "result": true,
+      "session_id": {
+        "type": "string"
+      },
+      "status": {
+        "$ref": "#/$defs/CommandStatus"
+      }
+    },
+    "required": [
+      "command_id",
+      "session_id",
+      "status"
+    ],
+    "title": "CommandReceipt",
+    "type": "object"
+  },
+  "response": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "option_id": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "const": "allow",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "deny",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "answers": true,
+          "type": {
+            "const": "answers",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "answers"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "RequestResponse"
+  },
+  "session": {
+    "$defs": {
+      "SessionBackend": {
+        "description": "Session backends include native protocols that are not one-shot CLI runners.",
+        "enum": [
+          "claude",
+          "codex",
+          "pi",
+          "cursor",
+          "gemini",
+          "opencode",
+          "aikit",
+          "grok",
+          "antigravity"
+        ],
+        "type": "string"
+      },
+      "SessionCapabilities": {
+        "properties": {
+          "context_usage": {
+            "type": "boolean"
+          },
+          "follow_up": {
+            "type": "boolean"
+          },
+          "interrupt": {
+            "type": "boolean"
+          },
+          "permissions": {
+            "type": "boolean"
+          },
+          "questions": {
+            "type": "boolean"
+          },
+          "resume": {
+            "type": "boolean"
+          },
+          "send_turn": {
+            "type": "boolean"
+          },
+          "set_model": {
+            "type": "boolean"
+          },
+          "steer": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "send_turn",
+          "interrupt",
+          "resume",
+          "permissions",
+          "questions",
+          "steer",
+          "follow_up",
+          "set_model",
+          "context_usage"
+        ],
+        "type": "object"
+      },
+      "SessionStatus": {
+        "enum": [
+          "opening",
+          "running",
+          "idle",
+          "closing",
+          "closed",
+          "failed",
+          "interrupted"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {
+      "active_turn_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "backend": {
+        "$ref": "#/$defs/SessionBackend"
+      },
+      "capabilities": {
+        "$ref": "#/$defs/SessionCapabilities"
+      },
+      "cwd": {
+        "type": "string"
+      },
+      "host_id": {
+        "type": "string"
+      },
+      "last_sequence": {
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "native_session_id": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "status": {
+        "$ref": "#/$defs/SessionStatus"
+      }
+    },
+    "required": [
+      "host_id",
+      "session_id",
+      "backend",
+      "cwd",
+      "status",
+      "capabilities",
+      "last_sequence"
+    ],
+    "title": "SessionInfo",
+    "type": "object"
+  }
+}

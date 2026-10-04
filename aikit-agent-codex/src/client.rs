@@ -261,13 +261,19 @@ impl CodexClient {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(id, tx);
 
-        self.write_raw(&json!({ "method": method, "id": id, "params": params }))
-            .await?;
-
+        let operation = async {
+            self.write_raw(&json!({ "method": method, "id": id, "params": params }))
+                .await?;
+            rx.await.map_err(|_| CodexError::Closed {
+                method: method.into(),
+            })?
+        };
+        let result = timeout(deadline, operation).await;
+        self.pending.lock().unwrap().remove(&id);
         let method_owned = method.to_string();
-        match timeout(deadline, rx).await {
-            Ok(Ok(Ok(v))) => Ok(v),
-            Ok(Ok(Err(e))) => match e {
+        match result {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => match e {
                 CodexError::ServerError {
                     code,
                     message,
@@ -281,10 +287,10 @@ impl CodexClient {
                 }),
                 other => Err(other),
             },
-            Ok(Err(_)) => Err(CodexError::Closed {
-                method: method_owned,
-            }),
             Err(_) => {
+                if let Some(child) = self.child.lock().await.as_mut() {
+                    let _ = child.start_kill();
+                }
                 self.pending.lock().unwrap().remove(&id);
                 Err(CodexError::RequestTimeout {
                     method: method_owned,
@@ -303,11 +309,26 @@ impl CodexClient {
     async fn write_raw(&self, value: &Value) -> Result<()> {
         let mut bytes = serde_json::to_vec(value)?;
         bytes.push(b'\n');
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(&bytes)
-            .await
-            .map_err(|e| CodexError::Send(e.to_string()))?;
+        let result = timeout(self.default_request_timeout, async {
+            let mut stdin = self.stdin.lock().await;
+            stdin
+                .write_all(&bytes)
+                .await
+                .map_err(|e| CodexError::Send(e.to_string()))
+        })
+        .await;
+        match result {
+            Ok(result) => result?,
+            Err(_) => {
+                if let Some(child) = self.child.lock().await.as_mut() {
+                    let _ = child.start_kill();
+                }
+                return Err(CodexError::RequestTimeout {
+                    method: "write".into(),
+                    timeout_secs: self.default_request_timeout.as_secs(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -315,10 +336,7 @@ impl CodexClient {
     ///
     /// Force-kills after a 5-second grace period. Safe to call multiple times.
     pub async fn shutdown(&self) -> Result<()> {
-        // Drop the stdin guard so the server sees EOF.
-        {
-            let _guard = self.stdin.lock().await;
-        }
+        // Do not wait for the writer lock: a wedged write must not block teardown.
         if let Some(mut child) = self.child.lock().await.take() {
             let _ = timeout(Duration::from_secs(5), child.wait()).await;
             let _ = child.kill().await;

@@ -19,6 +19,7 @@
 //! Bidirectional sessions (`/api/v1/live-sessions`) are handled by
 //! [`live_session`] and one-shot runs by [`run_session`].
 
+mod gateway;
 mod history;
 mod live_session;
 mod run_session;
@@ -654,7 +655,8 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
         auth_cache: Arc::new(Mutex::new(None)),
     };
 
-    let domain_router = build_router(state.clone());
+    let gateway_host = gateway::Host::open(config.max_sessions)?;
+    let domain_router = build_router(state.clone()).merge(gateway::router(gateway_host.clone()));
 
     // Spec 008: history (transcript) routes, stateless — always registered
     // regardless of any capture/adapter feature; capability gating happens
@@ -676,6 +678,7 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
         domain_router.merge(capture::build_router(capture_state))
     };
 
+    let readiness_host = gateway_host.clone();
     let mut builder = ApiServerBuilder::new()
         .version(ApiVersion {
             name: ApiVersionName::new_unchecked("v1"),
@@ -684,42 +687,76 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
             deprecation: None,
         })
         .default_version(DefaultVersion::Pinned(ApiVersionName::new_unchecked("v1")))
-        .readiness_check(Arc::new(|| {
-            Box::pin(async {
+        .readiness_check(Arc::new(move || {
+            let host = readiness_host.clone();
+            Box::pin(async move {
                 ReadinessReport {
-                    ready: true,
+                    ready: host.ready(),
                     checks: BTreeMap::new(),
                 }
             })
         }));
 
-    if let Some(ref key) = config.api_key {
-        let key = key.clone();
-        let bearer_layer = BoxCloneLayer::new(axum::middleware::from_fn(
-            move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
-                let key = key.clone();
-                async move {
-                    let authorized = req
-                        .headers()
-                        .get(axum::http::header::AUTHORIZATION)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|h| h.strip_prefix("Bearer "))
-                        .map(|t| t == key.as_str())
-                        .unwrap_or(false);
-                    if authorized {
-                        next.run(req).await
-                    } else {
-                        error_response(
-                            StatusCode::UNAUTHORIZED,
-                            "unauthorized",
-                            "Invalid or missing API key",
-                        )
+    let gateway_access = gateway::auth::Access::load()?;
+    let owner_key = config.api_key.clone();
+    let bearer_layer = BoxCloneLayer::new(axum::middleware::from_fn(
+        move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+            let access = gateway_access.clone();
+            let key = owner_key.clone();
+            async move {
+                let origin = if access.origin_allowed(req.headers(), req.uri().path()) {
+                    req.headers().get("origin").cloned()
+                } else {
+                    None
+                };
+                let preflight = req.method() == axum::http::Method::OPTIONS && origin.is_some();
+                let mut response = if preflight {
+                    StatusCode::NO_CONTENT.into_response()
+                } else if access.authorized(
+                    key.as_deref(),
+                    req.headers(),
+                    req.method(),
+                    req.uri().path(),
+                ) {
+                    match access.command_authorized(key.as_deref(), req).await {
+                        Ok(req) => next.run(req).await,
+                        Err(status) => error_response(
+                            status,
+                            "command_rejected",
+                            "Invalid command body size or response scope",
+                        ),
                     }
+                } else {
+                    error_response(
+                        StatusCode::UNAUTHORIZED,
+                        "unauthorized",
+                        "Invalid credentials, scope, or origin",
+                    )
+                };
+                response
+                    .headers_mut()
+                    .insert("cache-control", HeaderValue::from_static("no-store"));
+                if let Some(origin) = origin {
+                    response
+                        .headers_mut()
+                        .insert("access-control-allow-origin", origin);
+                    response
+                        .headers_mut()
+                        .insert("vary", HeaderValue::from_static("Origin"));
+                    response.headers_mut().insert(
+                        "access-control-allow-methods",
+                        HeaderValue::from_static("GET, POST, OPTIONS"),
+                    );
+                    response.headers_mut().insert(
+                        "access-control-allow-headers",
+                        HeaderValue::from_static("Authorization, Content-Type, Last-Event-ID"),
+                    );
                 }
-            },
-        ));
-        builder = builder.auth(bearer_layer);
-    }
+                response
+            }
+        },
+    ));
+    builder = builder.auth(bearer_layer);
 
     let server = builder.build();
 
@@ -738,8 +775,10 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
 
     let token = server.shutdown_token();
     let runs_ref = Arc::clone(&state.runs);
+    let drain_host = gateway_host.clone();
     tokio::spawn(async move {
         token.cancelled().await;
+        drain_host.drain();
         let mut runs = runs_ref.lock().unwrap();
         for r in runs.values_mut() {
             if let Some(handle) = r.abort_handle.take() {
@@ -748,10 +787,12 @@ pub async fn execute_with_run_fn(args: ServeArgs, run_fn: RunFn) -> anyhow::Resu
         }
     });
 
-    server
+    let result = server
         .serve(&addr.to_string())
         .await
-        .map_err(|e| anyhow::anyhow!("server error: {}", e))
+        .map_err(|e| anyhow::anyhow!("server error: {}", e));
+    gateway_host.finish_shutdown().await;
+    result
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────

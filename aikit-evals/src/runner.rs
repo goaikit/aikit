@@ -1031,6 +1031,7 @@ pub async fn run_eval_case(
 mod tests {
     use super::*;
     use crate::artifacts::CaseStatus;
+    #[cfg(unix)]
     use std::path::Path;
 
     #[cfg(unix)]

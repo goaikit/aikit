@@ -42,7 +42,7 @@ tokio-stream = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 # HTTP client for GitHub API
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "blocking"] }
 
 
 # ZIP archive handling
@@ -75,7 +75,8 @@ aikit-session-capture = { path = "aikit-session-capture", version = "0.1.0", opt
 aikit-session-sync = { path = "aikit-session-sync", version = "0.1.0", optional = true }
 aikit-session-summarize = { path = "aikit-session-summarize", version = "0.1.0", optional = true, default-features = false }
 # SQLite for the production EventStore/CursorStore (capture serve surface).
-rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+rusqlite = { version = "0.39", features = ["bundled"] }
+fs2 = "0.4"
 # async trait for the EventStore/CursorStore impls.
 async-trait = { version = "0.1", optional = true }
 
@@ -122,6 +123,9 @@ dialoguer = "0.12"  # Interactive prompts
 # path needs perl/nasm and breaks, so we keep the system path there.
 [target.x86_64-unknown-linux-musl.dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
 
 [dev-dependencies]
 # Testing utilities
@@ -194,7 +198,6 @@ agent-adapters = [
     "dep:aikit-session-capture",
     "dep:aikit-session-sync",
     "dep:aikit-session-summarize",
-    "dep:rusqlite",
     "dep:async-trait",
     "aikit-sdk/agent-adapters",
 ]

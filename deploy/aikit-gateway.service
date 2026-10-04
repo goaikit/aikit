@@ -1,0 +1,24 @@
+[Unit]
+Description=AIKit agent gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aikit
+Group=aikit
+WorkingDirectory=/srv/workspaces
+EnvironmentFile=/etc/aikit/gateway.env
+Environment=AIKIT_GATEWAY_DATA=/var/lib/aikit/host
+Environment='AIKIT_GATEWAY_WORKSPACES=["/srv/workspaces"]'
+StateDirectory=aikit
+UMask=0077
+ExecStart=/usr/local/bin/aikit serve --host 127.0.0.1 --port 8787
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+TimeoutStopSec=20
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
