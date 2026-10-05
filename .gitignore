@@ -93,3 +93,4 @@ AGENTS.md
 tmp/
 .codex
 .claude
+.aikit/host/

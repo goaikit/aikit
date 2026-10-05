@@ -34,6 +34,10 @@ pub use crate::runner::approval::{PermissionCallback, ToolApprovalRequest, ToolD
 /// Options for opening a Codex session.
 #[derive(Clone)]
 pub struct CodexSessionOptions {
+    pub model: Option<String>,
+    pub resume: Option<String>,
+    /// Native request handler; invoked away from the event/control loop.
+    pub on_request: Option<Arc<dyn Fn(String, Value) -> Value + Send + Sync>>,
     /// Working directory for the thread (and the spawned `codex` process).
     pub cwd: PathBuf,
     /// Approval policy: `never` (auto), `on-request`, `on-failure`, `untrusted`.
@@ -48,6 +52,9 @@ pub struct CodexSessionOptions {
 impl Default for CodexSessionOptions {
     fn default() -> Self {
         Self {
+            model: None,
+            resume: None,
+            on_request: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             // Default to non-interactive auto-approval (matches how aikit runs
             // codex via `--yolo` today); approvals never block the stream.
@@ -108,11 +115,13 @@ pub enum CodexSessionError {
     Connect(String),
     /// The control channel is closed (the session ended).
     Closed,
+    Busy,
 }
 
 impl std::fmt::Display for CodexSessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            CodexSessionError::Busy => write!(f, "session command capacity exceeded"),
             CodexSessionError::Runtime(e) => write!(f, "codex session runtime error: {e}"),
             CodexSessionError::Connect(e) => write!(f, "codex session connect error: {e}"),
             CodexSessionError::Closed => write!(f, "codex session control channel closed"),
@@ -133,12 +142,15 @@ enum ControlCmd {
 
 /// A sync handle to drive a live Codex session.
 pub struct CodexControlHandle {
-    tx: tokio::sync::mpsc::UnboundedSender<ControlCmd>,
+    tx: tokio::sync::mpsc::Sender<ControlCmd>,
 }
 
 impl CodexControlHandle {
     fn send(&self, cmd: ControlCmd) -> Result<(), CodexSessionError> {
-        self.tx.send(cmd).map_err(|_| CodexSessionError::Closed)
+        self.tx.try_send(cmd).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => CodexSessionError::Busy,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => CodexSessionError::Closed,
+        })
     }
 
     /// Interrupt the in-flight turn.
@@ -210,8 +222,8 @@ pub fn open_codex_session(
     options: CodexSessionOptions,
 ) -> Result<CodexSession, CodexSessionError> {
     let prompt = prompt.into();
-    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
-    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel::<ControlCmd>();
+    let (event_tx, event_rx) = mpsc::sync_channel::<AgentEvent>(256);
+    let (control_tx, control_rx) = tokio::sync::mpsc::channel::<ControlCmd>(32);
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
 
     let join = thread::Builder::new()
@@ -253,8 +265,8 @@ pub fn open_codex_session(
 async fn run_session(
     prompt: String,
     options: CodexSessionOptions,
-    event_tx: mpsc::Sender<AgentEvent>,
-    mut control_rx: tokio::sync::mpsc::UnboundedReceiver<ControlCmd>,
+    event_tx: mpsc::SyncSender<AgentEvent>,
+    mut control_rx: tokio::sync::mpsc::Receiver<ControlCmd>,
     ready_tx: mpsc::Sender<Result<(), String>>,
 ) {
     let spawn_opts = SpawnOptions {
@@ -277,11 +289,22 @@ async fn run_session(
         return;
     }
 
-    let thread_id: ThreadId = match client
-        .thread_start_simple(&options.cwd, &options.approval_policy, &options.sandbox)
-        .await
-    {
-        Ok(id) => id,
+    let mut params = json!({"cwd": options.cwd, "approvalPolicy": options.approval_policy, "sandbox": options.sandbox, "model": options.model});
+    let method = if let Some(id) = &options.resume {
+        params["threadId"] = json!(id);
+        "thread/resume"
+    } else {
+        "thread/start"
+    };
+    let thread_id: ThreadId = match client.request(method, params).await {
+        Ok(value) => match value.pointer("/thread/id").and_then(Value::as_str) {
+            Some(id) => ThreadId(id.into()),
+            None => {
+                let _ = ready_tx.send(Err("missing thread id".into()));
+                let _ = client.shutdown().await;
+                return;
+            }
+        },
         Err(e) => {
             let _ = ready_tx.send(Err(format!("thread/start failed: {e}")));
             return;
@@ -299,9 +322,20 @@ async fn run_session(
     let _ = ready_tx.send(Ok(()));
 
     let mut seq: u64 = 0;
+    let _ = event_tx.send(AgentEvent {
+        agent_key: "codex".into(),
+        seq,
+        stream: AgentEventStream::Stdout,
+        payload: AgentEventPayload::SessionStarted {
+            session_id: thread_id.0.clone(),
+        },
+    });
+    seq += 1;
+    let (reply_tx, mut reply_rx) = tokio::sync::mpsc::channel(32);
     let mut closed = false;
     loop {
         tokio::select! {
+            Some((id, result)) = reply_rx.recv() => { let _ = client.reply_server_request(id, result).await; }
             msg = events.recv() => {
                 match msg {
                     Some(ServerMessage::Notification(n)) => {
@@ -355,9 +389,11 @@ async fn run_session(
                                         agent_key: "codex".to_string(),
                                         seq,
                                         stream: AgentEventStream::Stdout,
-                                        payload: AgentEventPayload::AikitStepFinish {
-                                            iteration: 0,
-                                            finish_reason: "turn_completed".into(),
+                                        payload: AgentEventPayload::Terminal {
+                                            outcome: if n.params.pointer("/turn/status").and_then(Value::as_str) == Some("failed") { crate::runner::types::TerminalOutcome::Error } else { crate::runner::types::TerminalOutcome::Success },
+                                            reason: n.params.pointer("/turn/status").and_then(Value::as_str).map(str::to_owned),
+                                            message: n.params.pointer("/turn/error/message").and_then(Value::as_str).map(str::to_owned),
+                                            cost_usd: None,
                                         },
                                     })
                                     .is_err()
@@ -385,27 +421,24 @@ async fn run_session(
                         }
                     }
                     // Server→client request (e.g. an approval prompt). Route to
-                    // the permission callback when one is set; auto-approve otherwise.
+                    // the permission callback when one is set; deny otherwise.
                     Some(ServerMessage::ServerRequest(req)) => {
-                        let outcome = if let Some(cb) = &options.on_tool_permission {
-                            let request = ToolApprovalRequest {
-                                tool_name: req.method.clone(),
-                                input: req.params.clone(),
-                                tool_use_id: None,
+                        let native = options.on_request.clone();
+                        let permission = options.on_tool_permission.clone();
+                        let reply = reply_tx.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let outcome = if let Some(cb) = native { cb(req.method, req.params) } else {
+                                let allowed = permission.is_some_and(|cb| matches!(cb(ToolApprovalRequest { tool_name:req.method.clone(), input:req.params.clone(), tool_use_id:None }), ToolDecision::Allow | ToolDecision::AllowWith {..}));
+                                match req.method.as_str() {
+                                    "item/commandExecution/requestApproval" | "item/fileChange/requestApproval" => json!({"decision": if allowed {"accept"} else {"decline"}}),
+                                    "item/permissions/requestApproval" => json!({"permissions":{},"scope":"turn"}),
+                                    "item/tool/requestUserInput" => json!({"answers":{}}),
+                                    "mcpServer/elicitation/request" => json!({"action":"decline"}),
+                                    _ => json!({"decision":"denied"})
+                                }
                             };
-                            match cb(request) {
-                                ToolDecision::Allow => json!({ "outcome": "approved" }),
-                                ToolDecision::AllowWith { input } => {
-                                    json!({ "outcome": "approved", "input": input })
-                                }
-                                ToolDecision::Deny { message } => {
-                                    json!({ "outcome": "rejected", "reason": message })
-                                }
-                            }
-                        } else {
-                            json!({ "outcome": "approved" })
-                        };
-                        let _ = client.reply_server_request(req.id, outcome).await;
+                            let _ = reply.blocking_send((req.id,outcome));
+                        });
                     }
                     None => break, // app-server closed the stream
                 }
@@ -416,11 +449,22 @@ async fn run_session(
             cmd = control_rx.recv() => {
                 match cmd {
                     Some(ControlCmd::Interrupt) => {
-                        let _ = client.turn_interrupt(&thread_id, &turn_id).await;
+                        if let Err(e) = client.turn_interrupt(&thread_id, &turn_id).await {
+                            let _ = event_tx.send(AgentEvent { agent_key: "codex".into(), seq,
+                                stream: AgentEventStream::Stderr,
+                                payload: AgentEventPayload::RawLine(format!("interrupt error: {e}")) });
+                            seq += 1;
+                        }
                     }
                     Some(ControlCmd::Steer(text)) => {
-                        if let Ok(id) = client.turn_steer(&thread_id, &text).await {
-                            turn_id = id;
+                        match client.turn_steer(&thread_id, &text).await {
+                            Ok(id) => turn_id = id,
+                            Err(e) => {
+                                let _ = event_tx.send(AgentEvent { agent_key: "codex".into(), seq,
+                                    stream: AgentEventStream::Stderr,
+                                    payload: AgentEventPayload::RawLine(format!("steer error: {e}")) });
+                                seq += 1;
+                            }
                         }
                     }
                     Some(ControlCmd::SendTurn(text)) => {
@@ -654,6 +698,54 @@ fn decoded_to_payload(frame: Decoded) -> AgentEventPayload {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn native_request_deadline_covers_stalled_write_and_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join(if cfg!(windows) {
+            "codex-peer.exe"
+        } else {
+            "codex-peer"
+        });
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/acp_peer.rs");
+        assert!(std::process::Command::new("rustc")
+            .arg("--edition=2021")
+            .arg(fixture)
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .unwrap()
+            .success());
+        for blocked_write in [false, true] {
+            let (client, mut events) =
+                aikit_agent_codex::CodexClient::spawn_with(aikit_agent_codex::SpawnOptions {
+                    codex_bin: exe.to_string_lossy().into_owned(),
+                    extra_args: if blocked_write {
+                        vec!["no-read".into()]
+                    } else {
+                        vec![]
+                    },
+                    default_request_timeout: std::time::Duration::from_millis(100),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+            let start = std::time::Instant::now();
+            let input = serde_json::json!({"text":if blocked_write {"x".repeat(512*1024)}else{"small".into()}});
+            assert!(client.request("silent", input).await.is_err());
+            assert!(start.elapsed() < std::time::Duration::from_secs(3));
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_secs(3), events.recv())
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            client.shutdown().await.unwrap();
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -784,7 +876,7 @@ mod tests {
 
     #[test]
     fn send_turn_queues_correctly() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ControlCmd>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ControlCmd>(32);
         let handle = CodexControlHandle { tx };
         handle.send_turn("follow-up prompt").unwrap();
         let cmd = rx.blocking_recv().unwrap();
@@ -800,7 +892,7 @@ mod tests {
 
     #[test]
     fn control_handle_send_after_close_errors() {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ControlCmd>();
+        let (tx, rx) = tokio::sync::mpsc::channel::<ControlCmd>(32);
         let h = CodexControlHandle { tx };
         drop(rx);
         assert!(matches!(h.interrupt(), Err(CodexSessionError::Closed)));

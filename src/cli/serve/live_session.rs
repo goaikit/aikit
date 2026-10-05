@@ -242,9 +242,13 @@ pub(super) async fn create_live_session_handler(
             }
         }
         "codex" => {
-            let opts = CodexSessionOptions::default()
-                .with_approval_policy(body.approval_policy.clone())
-                .with_sandbox(body.sandbox.clone());
+            let opts = CodexSessionOptions {
+                model: body.model.clone(),
+                resume: body.resume.clone(),
+                ..CodexSessionOptions::default()
+            }
+            .with_approval_policy(body.approval_policy.clone())
+            .with_sandbox(body.sandbox.clone());
             match open_codex_session(&body.prompt, opts) {
                 Ok(s) => {
                     let (ctrl, evts) = s.into_parts();
@@ -269,6 +273,7 @@ pub(super) async fn create_live_session_handler(
         "pi" => {
             let opts = PiSessionOptions {
                 model: body.model.clone(),
+                session_id: body.resume.clone(),
                 ..PiSessionOptions::default()
             };
             match open_pi_session(&body.prompt, opts) {
@@ -381,12 +386,10 @@ pub(super) async fn live_session_control_handler(
 
     match body.action.as_str() {
         "interrupt" => {
-            let _ = record.control.interrupt();
-            ok_action("interrupt")
+            match record.control.interrupt() { Ok(()) => ok_action("interrupt"), Err(e) => control_error_response(e, "session_error") }
         }
         "disconnect" => {
-            let _ = record.control.disconnect();
-            ok_action("disconnect")
+            match record.control.disconnect() { Ok(()) => ok_action("disconnect"), Err(e) => control_error_response(e, "session_error") }
         }
         "set_model" => match record.control.set_model(body.model.clone()) {
             Ok(_) => ok_action("set_model"),
@@ -401,8 +404,7 @@ pub(super) async fn live_session_control_handler(
                     "send_turn requires a non-empty 'text' field",
                 );
             }
-            let _ = record.control.send_turn(text);
-            ok_action("send_turn")
+            match record.control.send_turn(text) { Ok(()) => ok_action("send_turn"), Err(e) => control_error_response(e, "session_error") }
         }
         "get_context_usage" => match record.control.get_context_usage() {
             Ok(usage) => (

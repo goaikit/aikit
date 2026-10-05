@@ -114,6 +114,9 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Build MinIO test image
+        uses: ./.github/actions/prepare-minio
+
       - name: Run tests
         # --workspace matters: without it only the root crate's tests run.
         run: cargo test --workspace --all-features -- --test-threads=1
@@ -132,6 +135,9 @@ jobs:
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
+
+      - name: Build MinIO test image
+        uses: ./.github/actions/prepare-minio
 
       - name: Run all tests
         # --workspace matters: without it only the root crate's tests run.
@@ -164,6 +170,10 @@ jobs:
     - name: Run tests
       run: cargo test --workspace --lib --release -- --test-threads=1
 
+    - name: Build MinIO test image
+      if: runner.os == 'Linux'
+      uses: ./.github/actions/prepare-minio
+
     - name: Run integration tests
       run: cargo test --workspace --test '*' -- --test-threads=1
 
@@ -190,6 +200,9 @@ jobs:
 
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
+
+      - name: Build MinIO test image
+        uses: ./.github/actions/prepare-minio
 
       - name: Coverage gate (fail under 95% lines)
         run: cargo llvm-cov -p aikit-session-sync --fail-under-lines 95 -- --test-threads=1

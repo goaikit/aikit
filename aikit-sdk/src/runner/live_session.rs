@@ -42,6 +42,12 @@ impl std::error::Error for ControlError {}
 /// Object-safe: methods take owned `String` (not `impl Into<String>`) so the
 /// trait can be used as `Box<dyn LiveSession>` / `Arc<dyn LiveSession>`.
 pub trait LiveSession: Send {
+    fn steer(&self, _text: String) -> Result<(), ControlError> {
+        Err(ControlError::Unsupported("steer"))
+    }
+    fn follow_up(&self, _text: String) -> Result<(), ControlError> {
+        Err(ControlError::Unsupported("follow_up"))
+    }
     /// Send a follow-up user turn on the same session.
     fn send_turn(&self, text: String) -> Result<(), ControlError>;
 
@@ -88,6 +94,10 @@ impl LiveSession for super::claude_session::ControlHandle {
 
 #[cfg(feature = "codex-app-server")]
 impl LiveSession for super::codex_session::CodexControlHandle {
+    fn steer(&self, text: String) -> Result<(), ControlError> {
+        self.steer(text)
+            .map_err(|e| ControlError::Backend(e.to_string()))
+    }
     fn send_turn(&self, text: String) -> Result<(), ControlError> {
         self.send_turn(text)
             .map_err(|e| ControlError::Backend(e.to_string()))
@@ -104,6 +114,14 @@ impl LiveSession for super::codex_session::CodexControlHandle {
 }
 
 impl LiveSession for super::pi_session::PiControlHandle {
+    fn steer(&self, text: String) -> Result<(), ControlError> {
+        self.steer(text)
+            .map_err(|e| ControlError::Backend(e.to_string()))
+    }
+    fn follow_up(&self, text: String) -> Result<(), ControlError> {
+        self.follow_up(text)
+            .map_err(|e| ControlError::Backend(e.to_string()))
+    }
     fn send_turn(&self, text: String) -> Result<(), ControlError> {
         super::pi_session::PiControlHandle::send_turn(self, text)
             .map_err(|e| ControlError::Backend(e.to_string()))

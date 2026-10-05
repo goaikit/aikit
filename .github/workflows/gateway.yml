@@ -1,0 +1,33 @@
+name: Agent gateway conformance
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  gateway:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.93.1'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: Swatinem/rust-cache@v2
+      - name: Gateway and SDK regression tests
+        run: |
+          cargo test -p aikit-cli --lib gateway -- --test-threads=1
+          cargo test -p aikit-sdk --lib --features claude-control,codex-app-server runner:: -- --test-threads=1
+          cargo test -p aikit-agent-codex --lib
+      - name: Build host and exercise actual HTTP client and crash recovery
+        run: |
+          cargo build -p aikit-cli --bin aikit
+          AIKIT_HTTP_TEST_BIN=target/debug/aikit node --test examples/gateway-client.test.mjs examples/gateway-server.test.mjs
+      - name: Verify generated contract
+        run: |
+          cargo run -p aikit-sdk --example session_schema --no-default-features > /tmp/session-contract.json
+          diff -u docs/session-contract-v1.json /tmp/session-contract.json

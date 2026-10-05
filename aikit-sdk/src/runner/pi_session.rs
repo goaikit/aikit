@@ -83,6 +83,8 @@ pub enum PiSessionError {
     Backend(String),
     /// The control channel is closed (the session has ended).
     Closed,
+    /// The bounded bridge queue has no remaining capacity.
+    Busy,
 }
 
 impl std::fmt::Display for PiSessionError {
@@ -91,6 +93,7 @@ impl std::fmt::Display for PiSessionError {
             PiSessionError::Runtime(e) => write!(f, "pi session runtime error: {e}"),
             PiSessionError::Connect(e) => write!(f, "pi session connect error: {e}"),
             PiSessionError::Backend(e) => write!(f, "pi session error: {e}"),
+            PiSessionError::Busy => write!(f, "pi session command capacity exceeded"),
             PiSessionError::Closed => write!(f, "pi session control channel closed"),
         }
     }
@@ -145,14 +148,15 @@ enum Msg {
 /// A sync handle to drive a live Pi session. Methods queue a command and return
 /// once it is on the channel (fire-and-forget); Pi acts on each asynchronously.
 pub struct PiControlHandle {
-    tx: mpsc::Sender<Msg>,
+    tx: mpsc::SyncSender<Msg>,
 }
 
 impl PiControlHandle {
     fn cmd(&self, cmd: ControlCmd) -> Result<(), PiSessionError> {
-        self.tx
-            .send(Msg::Cmd(cmd))
-            .map_err(|_| PiSessionError::Closed)
+        self.tx.try_send(Msg::Cmd(cmd)).map_err(|e| match e {
+            mpsc::TrySendError::Full(_) => PiSessionError::Busy,
+            mpsc::TrySendError::Disconnected(_) => PiSessionError::Closed,
+        })
     }
 
     /// Send a follow-up user prompt on the same session (multi-turn). If Pi is
@@ -322,8 +326,8 @@ pub fn open_pi_session(
     let stderr = child.stderr.take().expect("stderr was piped");
     let child = Arc::new(Mutex::new(child));
 
-    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
-    let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
+    let (event_tx, event_rx) = mpsc::sync_channel::<AgentEvent>(256);
+    let (msg_tx, msg_rx) = mpsc::sync_channel::<Msg>(256);
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
     // A clone of the merged-channel sender the bridge hands to the reader
     // threads; the original stays here and is moved into the control handle on
@@ -364,14 +368,15 @@ pub fn open_pi_session(
 fn run_session(
     prompt: String,
     child: Arc<Mutex<Child>>,
-    mut stdin: ChildStdin,
+    stdin: ChildStdin,
     stdout: ChildStdout,
     stderr: ChildStderr,
-    event_tx: mpsc::Sender<AgentEvent>,
-    reader_tx: mpsc::Sender<Msg>,
+    event_tx: mpsc::SyncSender<AgentEvent>,
+    reader_tx: mpsc::SyncSender<Msg>,
     msg_rx: mpsc::Receiver<Msg>,
     ready_tx: mpsc::Sender<Result<(), String>>,
 ) {
+    let mut stdin = DeadlineWriter::new(stdin, child.clone());
     let stdout_tx = reader_tx.clone();
     let stderr_tx = reader_tx;
     let stdout_hdl = spawn_stdout_reader(stdout, stdout_tx);
@@ -402,8 +407,8 @@ fn run_session(
 /// indefinitely (the session ends on `Disconnect`, stdout EOF, or a closed
 /// channel).
 fn drive(
-    stdin: &mut ChildStdin,
-    event_tx: &mpsc::Sender<AgentEvent>,
+    stdin: &mut DeadlineWriter,
+    event_tx: &mpsc::SyncSender<AgentEvent>,
     msg_rx: mpsc::Receiver<Msg>,
     ready_tx: mpsc::Sender<Result<(), String>>,
     ready_deadline: Instant,
@@ -522,10 +527,10 @@ fn drive(
 /// session end.
 fn teardown(
     child: Arc<Mutex<Child>>,
-    stdin: ChildStdin,
+    stdin: DeadlineWriter,
     stdout_hdl: JoinHandle<()>,
     stderr_hdl: JoinHandle<()>,
-    event_tx: mpsc::Sender<AgentEvent>,
+    event_tx: mpsc::SyncSender<AgentEvent>,
 ) {
     drop(stdin);
     kill_process_group(&child);
@@ -613,7 +618,7 @@ fn route_stats_response(
 /// stripping an optional trailing `\r`, per the RPC framing spec). Each parsed
 /// line is a [`Msg::Frame`]; a non-JSON line is surfaced as stderr. On EOF or
 /// read error the thread emits [`Msg::StdoutEof`] and exits.
-fn spawn_stdout_reader(reader: ChildStdout, tx: mpsc::Sender<Msg>) -> JoinHandle<()> {
+fn spawn_stdout_reader(reader: ChildStdout, tx: mpsc::SyncSender<Msg>) -> JoinHandle<()> {
     thread::Builder::new()
         .name("aikit-pi-session-stdout".into())
         .spawn(move || {
@@ -657,7 +662,7 @@ fn spawn_stdout_reader(reader: ChildStdout, tx: mpsc::Sender<Msg>) -> JoinHandle
 
 /// Read Pi's stderr line by line and forward each as a [`Msg::Stderr`]. A
 /// stderr EOF is silent: only stdout EOF ends the session.
-fn spawn_stderr_reader(reader: ChildStderr, tx: mpsc::Sender<Msg>) -> JoinHandle<()> {
+fn spawn_stderr_reader(reader: ChildStderr, tx: mpsc::SyncSender<Msg>) -> JoinHandle<()> {
     thread::Builder::new()
         .name("aikit-pi-session-stderr".into())
         .spawn(move || {
@@ -718,7 +723,7 @@ fn decoded_to_payload(frame: Decoded) -> AgentEventPayload {
 }
 
 fn send_event(
-    event_tx: &mpsc::Sender<AgentEvent>,
+    event_tx: &mpsc::SyncSender<AgentEvent>,
     seq: &mut u64,
     stream: AgentEventStream,
     payload: AgentEventPayload,
@@ -737,7 +742,7 @@ fn send_event(
 /// then a token-usage event when the frame carries usage, then a step-finish
 /// event when Pi reports the run settled. Returns `false` if the caller has
 /// gone away (the event channel closed) so the bridge can stop.
-fn emit_frame(event_tx: &mpsc::Sender<AgentEvent>, seq: &mut u64, value: &Value) -> bool {
+fn emit_frame(event_tx: &mpsc::SyncSender<AgentEvent>, seq: &mut u64, value: &Value) -> bool {
     let stream = AgentEventStream::Stdout;
     for frame in pi::decode(value, stream, *seq) {
         if !send_event(event_tx, seq, stream, decoded_to_payload(frame)) {
@@ -774,7 +779,7 @@ fn emit_frame(event_tx: &mpsc::Sender<AgentEvent>, seq: &mut u64, value: &Value)
     true
 }
 
-fn emit_stderr(event_tx: &mpsc::Sender<AgentEvent>, seq: &mut u64, line: String) -> bool {
+fn emit_stderr(event_tx: &mpsc::SyncSender<AgentEvent>, seq: &mut u64, line: String) -> bool {
     if line.is_empty() {
         return true;
     }
@@ -790,9 +795,9 @@ fn emit_stderr(event_tx: &mpsc::Sender<AgentEvent>, seq: &mut u64, line: String)
 /// the stdout reader will deliver EOF and end the session, so it is not logged.
 /// Any other write error is surfaced as a stderr event for diagnostics.
 fn write_cmd(
-    stdin: &mut ChildStdin,
+    stdin: &mut DeadlineWriter,
     bytes: String,
-    event_tx: &mpsc::Sender<AgentEvent>,
+    event_tx: &mpsc::SyncSender<AgentEvent>,
     seq: &mut u64,
 ) {
     if let Err(e) = stdin
@@ -832,6 +837,54 @@ fn prompt_response_outcome(value: &Value) -> Option<Result<(), String>> {
     }
 }
 
+/// A single bounded writer thread. Timeout kills the process, unblocking the pipe.
+struct DeadlineWriter {
+    tx: mpsc::SyncSender<(Vec<u8>, mpsc::SyncSender<io::Result<usize>>)>,
+    child: Arc<Mutex<Child>>,
+}
+impl DeadlineWriter {
+    fn new(mut stdin: ChildStdin, child: Arc<Mutex<Child>>) -> Self {
+        let (tx, rx) = mpsc::sync_channel::<(Vec<u8>, mpsc::SyncSender<io::Result<usize>>)>(1);
+        thread::spawn(move || {
+            while let Ok((bytes, reply)) = rx.recv() {
+                let result = stdin
+                    .write_all(&bytes)
+                    .and_then(|_| stdin.flush())
+                    .map(|_| bytes.len());
+                let failed = result.is_err();
+                let _ = reply.try_send(result);
+                if failed {
+                    break;
+                }
+            }
+        });
+        Self { tx, child }
+    }
+}
+impl Write for DeadlineWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.tx
+            .try_send((bytes.to_vec(), tx))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "writer unavailable"))?;
+        match rx.recv_timeout(READINESS_TIMEOUT) {
+            Ok(result) => result,
+            Err(_) => {
+                kill_process_group(&self.child);
+                let mut child = self.child.lock().unwrap();
+                let _ = child.kill();
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "native write deadline exceeded",
+                ))
+            }
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -849,7 +902,7 @@ mod tests {
 
     #[test]
     fn send_turn_interrupt_steer_follow_up_queue_correctly() {
-        let (tx, rx) = mpsc::channel::<Msg>();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(256);
         let h = PiControlHandle { tx };
         h.send_turn("hello again").unwrap();
         h.interrupt().unwrap();
@@ -876,7 +929,7 @@ mod tests {
 
     #[test]
     fn control_handle_send_after_close_errors() {
-        let (tx, rx) = mpsc::channel::<Msg>();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(256);
         let h = PiControlHandle { tx };
         drop(rx);
         assert!(matches!(
@@ -888,7 +941,7 @@ mod tests {
 
     #[test]
     fn dropping_control_handle_queues_disconnect() {
-        let (tx, rx) = mpsc::channel::<Msg>();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(256);
         let h = PiControlHandle { tx };
         drop(h);
         match rx.recv().unwrap() {
@@ -968,7 +1021,7 @@ mod tests {
 
     #[test]
     fn set_model_queues_command_and_validates_provider() {
-        let (tx, rx) = mpsc::channel::<Msg>();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(256);
         let h = PiControlHandle { tx };
         // `provider/id` is queued for the bridge.
         h.set_model(Some("anthropic/claude-sonnet-4".into()))
@@ -978,7 +1031,7 @@ mod tests {
             other => panic!("expected SetModel, got {other:?}"),
         }
         // A bare id is rejected without sending — Pi requires the provider.
-        let (tx2, rx2) = mpsc::channel::<Msg>();
+        let (tx2, rx2) = mpsc::sync_channel::<Msg>(256);
         let h2 = PiControlHandle { tx: tx2 };
         match h2.set_model(Some("claude-sonnet-4".into())) {
             Err(PiSessionError::Backend(msg)) => assert!(msg.contains("provider"), "got: {msg}"),
@@ -995,7 +1048,7 @@ mod tests {
 
     #[test]
     fn get_context_usage_routes_reply_through_the_channel() {
-        let (tx, rx) = mpsc::channel::<Msg>();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(256);
         let h = PiControlHandle { tx };
         // The handle blocks on the reply; this test plays the bridge half.
         let join = thread::spawn(move || h.get_context_usage());
@@ -1095,7 +1148,7 @@ mod tests {
 
     #[test]
     fn emit_frame_surfaces_decoded_usage_and_step_finish() {
-        let (tx, rx) = mpsc::channel::<AgentEvent>();
+        let (tx, rx) = mpsc::sync_channel::<AgentEvent>(256);
         let mut seq = 0u64;
 
         // A streaming text delta → one StreamMessage.
@@ -1133,7 +1186,7 @@ mod tests {
 
     #[test]
     fn emit_frame_stops_when_the_caller_drops() {
-        let (tx, rx) = mpsc::channel::<AgentEvent>();
+        let (tx, rx) = mpsc::sync_channel::<AgentEvent>(256);
         drop(rx);
         let mut seq = 0u64;
         assert!(!emit_frame(

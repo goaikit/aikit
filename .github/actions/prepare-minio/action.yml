@@ -1,0 +1,7 @@
+name: Prepare MinIO integration-test image
+description: Build the pinned upstream MinIO source without relying on removed release images.
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: docker build --tag aikit-test-minio:8c2c92f7 aikit-session-sync/tests/minio

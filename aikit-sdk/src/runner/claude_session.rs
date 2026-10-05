@@ -119,11 +119,13 @@ pub enum ClaudeSessionError {
     Connect(String),
     /// The control channel is closed (the session ended).
     Closed,
+    Busy,
 }
 
 impl std::fmt::Display for ClaudeSessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ClaudeSessionError::Busy => write!(f, "session command capacity exceeded"),
             ClaudeSessionError::Runtime(e) => write!(f, "session runtime error: {e}"),
             ClaudeSessionError::Connect(e) => write!(f, "session connect error: {e}"),
             ClaudeSessionError::Closed => write!(f, "session control channel closed"),
@@ -149,12 +151,15 @@ enum ControlCmd {
 /// async bridge; methods return once the command is queued (fire-and-forget),
 /// not once the CLI has acted on it.
 pub struct ControlHandle {
-    tx: tokio::sync::mpsc::UnboundedSender<ControlCmd>,
+    tx: tokio::sync::mpsc::Sender<ControlCmd>,
 }
 
 impl ControlHandle {
     fn send(&self, cmd: ControlCmd) -> Result<(), ClaudeSessionError> {
-        self.tx.send(cmd).map_err(|_| ClaudeSessionError::Closed)
+        self.tx.try_send(cmd).map_err(|error| match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => ClaudeSessionError::Busy,
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => ClaudeSessionError::Closed,
+        })
     }
 
     /// Interrupt the current turn.
@@ -185,10 +190,23 @@ impl ControlHandle {
     /// Blocks until the CLI responds (or the session closes). Returns the raw
     /// JSON payload from the control-protocol response.
     pub fn get_context_usage(&self) -> Result<serde_json::Value, ClaudeSessionError> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
         self.send(ControlCmd::GetContextUsage(tx))?;
-        rx.blocking_recv()
-            .unwrap_or(Err(ClaudeSessionError::Closed))
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match rx.try_recv() {
+                Ok(value) => return value,
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(ClaudeSessionError::Closed)
+                }
+                Err(_) if std::time::Instant::now() >= deadline => {
+                    return Err(ClaudeSessionError::Connect(
+                        "context usage deadline exceeded".into(),
+                    ))
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
     }
 
     /// Disconnect the session.
@@ -247,8 +265,8 @@ pub fn open_claude_session(
     options: ClaudeSessionOptions,
 ) -> Result<ClaudeSession, ClaudeSessionError> {
     let prompt = prompt.into();
-    let (event_tx, event_rx) = mpsc::channel::<AgentEvent>();
-    let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel::<ControlCmd>();
+    let (event_tx, event_rx) = mpsc::sync_channel::<AgentEvent>(256);
+    let (control_tx, control_rx) = tokio::sync::mpsc::channel::<ControlCmd>(32);
     // Readiness handshake: the bridge reports Ok once connected + first turn
     // sent, or Err(msg) if setup failed.
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
@@ -343,7 +361,12 @@ fn wrap_permission_callback(cb: PermissionCallback) -> CanUseToolCallback {
                 input,
                 tool_use_id: ctx.tool_use_id,
             };
-            match cb(req) {
+            let decision = tokio::task::spawn_blocking(move || cb(req))
+                .await
+                .unwrap_or_else(|_| ToolDecision::Deny {
+                    message: "Permission callback failed".into(),
+                });
+            match decision {
                 ToolDecision::Allow => PermissionResult::Allow {
                     updated_input: None,
                     updated_permissions: None,
@@ -364,15 +387,15 @@ fn wrap_permission_callback(cb: PermissionCallback) -> CanUseToolCallback {
 async fn run_session(
     prompt: String,
     options: ClaudeSessionOptions,
-    event_tx: mpsc::Sender<AgentEvent>,
-    mut control_rx: tokio::sync::mpsc::UnboundedReceiver<ControlCmd>,
+    event_tx: mpsc::SyncSender<AgentEvent>,
+    mut control_rx: tokio::sync::mpsc::Receiver<ControlCmd>,
     ready_tx: mpsc::Sender<Result<(), String>>,
 ) {
     let opts = build_options(&options);
     let config = build_query_config(&options);
 
     let mut transport = SubprocessCLITransport::new(opts);
-    if let Err(e) = transport.connect().await {
+    if let Err(e) = native_call(transport.connect()).await {
         let _ = ready_tx.send(Err(format!("connect failed: {e}")));
         return;
     }
@@ -385,12 +408,14 @@ async fn run_session(
         }
     };
     query.start();
-    if let Err(e) = query.initialize().await {
+    if let Err(e) = native_call(query.initialize()).await {
         let _ = ready_tx.send(Err(format!("initialize failed: {e}")));
+        let _ = native_call(query.close()).await;
         return;
     }
-    if let Err(e) = query.write_user_message(&prompt).await {
+    if let Err(e) = native_call(query.write_user_message(&prompt)).await {
         let _ = ready_tx.send(Err(format!("send prompt failed: {e}")));
+        let _ = native_call(query.close()).await;
         return;
     }
     let mut rx = match query.take_receiver() {
@@ -434,25 +459,26 @@ async fn run_session(
             cmd = control_rx.recv() => {
                 match cmd {
                     Some(ControlCmd::Interrupt) => {
-                        let _ = query.interrupt().await;
+                        if let Err(e) = native_call(query.interrupt()).await { let expired=e.contains("deadline exceeded"); emit_error(&event_tx, format!("interrupt error: {e}")); if expired {break;} }
                     }
                     Some(ControlCmd::SetPermissionMode(mode)) => {
-                        let _ = query.set_permission_mode(mode).await;
+                        if let Err(e) = native_call(query.set_permission_mode(mode)).await { let expired=e.contains("deadline exceeded"); emit_error(&event_tx, format!("permission mode error: {e}")); if expired {break;} }
                     }
                     Some(ControlCmd::SetModel(model)) => {
-                        let _ = query.set_model(model.as_deref()).await;
+                        if let Err(e) = native_call(query.set_model(model.as_deref())).await { let expired=e.contains("deadline exceeded"); emit_error(&event_tx, format!("model error: {e}")); if expired {break;} }
                     }
                     Some(ControlCmd::SendTurn(text)) => {
-                        if let Err(e) = query.write_user_message(&text).await {
+                        if let Err(e) = native_call(query.write_user_message(&text)).await {
                             emit_error(&event_tx, format!("send_turn error: {e}"));
+                            break;
                         }
                     }
                     Some(ControlCmd::GetContextUsage(reply_tx)) => {
-                        let result = query
-                            .get_context_usage()
-                            .await
+                        let result = native_call(query.get_context_usage()).await
                             .map_err(|e| ClaudeSessionError::Connect(e.to_string()));
+                        let expired=result.as_ref().err().is_some_and(|e|e.to_string().contains("deadline exceeded"));
                         let _ = reply_tx.send(result);
+                        if expired {break;}
                     }
                     Some(ControlCmd::Disconnect) | None => break,
                 }
@@ -460,7 +486,7 @@ async fn run_session(
         }
     }
 
-    let _ = query.close().await;
+    let _ = native_call(query.close()).await;
 }
 
 fn decoded_to_payload(frame: Decoded) -> AgentEventPayload {
@@ -503,7 +529,7 @@ fn decoded_to_payload(frame: Decoded) -> AgentEventPayload {
 }
 
 fn send_stdout_event(
-    event_tx: &mpsc::Sender<AgentEvent>,
+    event_tx: &mpsc::SyncSender<AgentEvent>,
     seq: &mut u64,
     payload: AgentEventPayload,
 ) -> bool {
@@ -523,7 +549,7 @@ fn send_stdout_event(
 }
 
 fn emit_inbound_value_events(
-    event_tx: &mpsc::Sender<AgentEvent>,
+    event_tx: &mpsc::SyncSender<AgentEvent>,
     value: &serde_json::Value,
     ty: &str,
     seq: &mut u64,
@@ -569,13 +595,22 @@ fn emit_inbound_value_events(
     }
 }
 
-fn emit_error(event_tx: &mpsc::Sender<AgentEvent>, message: String) {
+fn emit_error(event_tx: &mpsc::SyncSender<AgentEvent>, message: String) {
     let _ = event_tx.send(AgentEvent {
         agent_key: "claude".to_string(),
         seq: u64::MAX,
         stream: AgentEventStream::Stderr,
         payload: AgentEventPayload::RawLine(message),
     });
+}
+
+async fn native_call<T, E: std::fmt::Display>(
+    future: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    tokio::time::timeout(std::time::Duration::from_secs(30), future)
+        .await
+        .map_err(|_| "native operation deadline exceeded".to_string())?
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -603,7 +638,7 @@ mod tests {
 
     #[test]
     fn control_handle_send_after_close_errors() {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ControlCmd>();
+        let (tx, rx) = tokio::sync::mpsc::channel::<ControlCmd>(32);
         let h = ControlHandle { tx };
         drop(rx);
         assert!(matches!(h.interrupt(), Err(ClaudeSessionError::Closed)));
@@ -644,7 +679,7 @@ mod tests {
             "session_id": "sess-9",
             "result": "done"
         });
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(256);
         let mut seq = 0;
         let mut closed = false;
 
@@ -839,7 +874,7 @@ mod tests {
 
     #[test]
     fn get_context_usage_queues_command_and_returns_on_reply() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ControlCmd>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ControlCmd>(32);
         let handle = ControlHandle { tx };
 
         let reply_val = serde_json::json!({"inputTokens": 500, "outputTokens": 200});
