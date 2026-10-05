@@ -19,7 +19,7 @@ aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", 
 async-trait = "0.1"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }
-dirs = "6"
+dirs = "7"
 hex = "0.4"
 object_store = { version = "0.14.1", default-features = false, features = ["aws"] }
 percent-encoding = "2"
