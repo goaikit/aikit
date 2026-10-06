@@ -1,16 +1,19 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 const unavailable = "AIKit integration checks unavailable; restore the local handler before retrying.";
 const selected = new Set(config.events);
 
 // No process, timer or other session resource is started by the factory.
 export default function (pi) {
+  let invocation;
   let lastBoundary;
   let continued = false;
   const warn = (ctx, reason) => { try { ctx.ui.notify(reason, "warning"); } catch { /* UI failure cannot cancel a denial. */ } };
   const request = (name, ctx, data = {}) => ({
     ...data,
-    aikit_hook_version: 1,
+    aikit_hook_version: 2,
+    invocation_id: invocation,
     hook_event_name: name,
     session_id: ctx.sessionManager.getSessionId(),
     cwd: ctx.cwd,
@@ -46,6 +49,7 @@ export default function (pi) {
         child.stdin.end(raw);
       });
       const response = JSON.parse(result);
+      if (!input.invocation_id || input.invocation_id !== invocation) throw new Error("invocation changed");
       if (!response || typeof response !== "object" || Array.isArray(response)) throw new Error("response shape");
       if (!decisionPoint) return response;
       if (response.decision === "allow") return response;
@@ -62,6 +66,7 @@ export default function (pi) {
   }
 
   pi.on("session_start", async (event, ctx) => {
+    invocation = randomUUID();
     lastBoundary = undefined;
     continued = false;
     if (selected.has("session_started")) await observe(request(event.type, ctx), ctx);
@@ -118,6 +123,7 @@ export default function (pi) {
   }
   if (selected.has("session_ended")) pi.on("session_shutdown", async (event, ctx) => {
     await observe(request(event.type, ctx), ctx);
+    invocation = undefined;
     lastBoundary = undefined;
     continued = false;
   });

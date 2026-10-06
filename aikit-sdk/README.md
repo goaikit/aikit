@@ -162,12 +162,20 @@ until the cursor stops advancing. Stale/detached handles return typed errors.
 Schema 3 retains older events with an absent installation revision; they cannot
 establish a new binding until a new SessionStart is observed.
 
-This identity is supported by local journal evidence, not a native process nonce.
-If a provider reuses a session ID without an observed start, or delivers an old
-hook after a replacement starts, its current payload may not identify the original
-invocation. This limitation still needs native qualification before control or
-message delivery can be advertised. Binding alone does not provide exclusive
-workspace admission, liveness, a transport or permission to send a message.
+Hook consumers should resolve `session_for_hook(&request)` before binding: it
+checks the invocation scope as well as the native session ID. Pi wire v2 uses a
+fresh extension-issued UUID at every `session_start`; shared journal transactions
+reject old invocations, reused start identifiers and hooks after shutdown. The
+SDK rechecks the scope when committing a callback decision. Pi installations must
+include SessionStarted. Other adapters expose `invocation_id: None` and retain
+their unqualified delayed-hook identity semantics.
+
+Schema 5 preserves historical rows and prevents older readers from ignoring the
+new scope. Upgrade consumers together; update Pi's owned extension through
+plan/apply between sessions and restart it. Wire v1 is rejected. The UUID is not a
+credential, process authentication or liveness attestation. A previously unseen
+delayed start and native event ordering still need qualification. Binding alone
+does not provide exclusive workspace admission, a transport or permission to send.
 
 ### Library-only example
 

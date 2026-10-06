@@ -30,7 +30,7 @@ impl HookHandler for ExampleGate<'_> {
             let mut proposals = 0;
             let reference = self
                 .service
-                .observed_session(&request.installation_id, &request.session_id)
+                .session_for_hook(request)
                 .map_err(|e| aikit_sdk::integration::HandlerError(e.to_string()))?;
             let binding = self
                 .service

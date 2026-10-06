@@ -50,7 +50,7 @@ impl Fixture {
         }
     }
     fn input(&self, event: &str) -> Value {
-        json!({"aikit_hook_version":1,"hook_event_name":event,"session_id":"session","cwd":self.installation.spec.workspace})
+        json!({"aikit_hook_version":2,"invocation_id":"11111111-1111-4111-8111-111111111111","hook_event_name":event,"session_id":"session","cwd":self.installation.spec.workspace})
     }
     async fn run(&self, input: Value, decision: Decision) -> crate::integration::HookResponse {
         self.service
@@ -67,6 +67,168 @@ impl HookHandler for Fixed {
     fn decide<'a>(&'a self, _: &'a HookRequest) -> DecisionFuture<'a> {
         Box::pin(async { Ok(self.0.clone()) })
     }
+}
+
+#[tokio::test]
+async fn pi_reused_session_ids_reject_delayed_hooks_without_polluting_the_new_binding() {
+    let f = Fixture::new();
+    // No start evidence: do not let a tool or input manufacture a binding.
+    assert_eq!(f.run(f.input("input"), Decision::Allow).await.exit_code, 2);
+    assert_eq!(
+        f.run(f.input("session_start"), Decision::Allow)
+            .await
+            .exit_code,
+        0
+    );
+    let old = f
+        .service
+        .observed_session(&f.installation.id, "session")
+        .unwrap();
+    let old_binding = f.service.bind_existing(&old).unwrap();
+    let mut start = f.input("session_start");
+    start["invocation_id"] = json!("22222222-2222-4222-8222-222222222222");
+    assert_eq!(f.run(start.clone(), Decision::Allow).await.exit_code, 0);
+    let new = f
+        .service
+        .observed_session(&f.installation.id, "session")
+        .unwrap();
+    assert_ne!(old.invocation_id, new.invocation_id);
+    let binding = f.service.bind_existing(&new).unwrap();
+    assert_eq!(old_binding.status().unwrap(), SessionStatus::Stale);
+    let mut forged = new.clone();
+    forged.invocation_id = old.invocation_id.clone();
+    assert!(matches!(
+        f.service.bind_existing(&forged),
+        Err(IntegrationError::StaleSession)
+    ));
+    for event in ["input", "session_shutdown", "session_start"] {
+        assert_eq!(f.run(f.input(event), Decision::Allow).await.exit_code, 2);
+    }
+    let delayed = decode(&f.installation, f.input("input").to_string().as_bytes()).unwrap();
+    assert!(matches!(
+        f.service.session_for_hook(&delayed),
+        Err(IntegrationError::StaleSession)
+    ));
+    assert_eq!(binding.status().unwrap(), SessionStatus::Observed);
+    assert_eq!(binding.events(0, 100).unwrap().records.len(), 1);
+    start["hook_event_name"] = json!("input");
+    assert_eq!(f.run(start.clone(), Decision::Allow).await.exit_code, 0);
+    start["hook_event_name"] = json!("session_shutdown");
+    assert_eq!(f.run(start.clone(), Decision::Allow).await.exit_code, 0);
+    assert_eq!(binding.status().unwrap(), SessionStatus::Ended);
+    start["hook_event_name"] = json!("input");
+    assert_eq!(f.run(start, Decision::Allow).await.exit_code, 2);
+    let reopened = IntegrationService::open(f._dir.path().join("state")).unwrap();
+    assert_eq!(reopened.binding(binding.id()).unwrap().reference(), &new);
+    assert_eq!(
+        reopened.binding(binding.id()).unwrap().status().unwrap(),
+        SessionStatus::Ended
+    );
+}
+
+struct RestartDuringDecision<'a>(&'a Fixture);
+impl HookHandler for RestartDuringDecision<'_> {
+    fn decide<'a>(&'a self, _: &'a HookRequest) -> DecisionFuture<'a> {
+        Box::pin(async move {
+            let mut start = self.0.input("session_start");
+            start["invocation_id"] = json!("33333333-3333-4333-8333-333333333333");
+            assert_eq!(self.0.run(start, Decision::Allow).await.exit_code, 0);
+            Ok(Decision::Allow)
+        })
+    }
+}
+
+#[tokio::test]
+async fn pi_replacement_during_policy_cannot_commit_or_deliver_an_old_allow() {
+    let f = Fixture::new();
+    f.run(f.input("session_start"), Decision::Allow).await;
+    let response = f
+        .service
+        .handle_hook(
+            &f.installation.id,
+            f.input("input").to_string().as_bytes(),
+            &RestartDuringDecision(&f),
+        )
+        .await;
+    assert_eq!(response.exit_code, 2);
+    assert!(response.stdout.is_empty());
+    let records = f
+        .service
+        .events(&f.installation.id, 0, 100)
+        .unwrap()
+        .records;
+    assert_eq!(records.len(), 3);
+    assert!(records.iter().all(|r| r.decision.is_none()));
+}
+
+#[test]
+fn pi_installation_requires_the_start_event_used_to_establish_invocation_scope() {
+    let f = Fixture::new();
+    let mut spec = f.installation.spec;
+    spec.events.retain(|e| *e != HookEvent::SessionStarted);
+    assert!(matches!(
+        f.service.plan_install(spec),
+        Err(IntegrationError::Invalid(_))
+    ));
+}
+
+#[tokio::test]
+async fn pi_schema_four_upgrade_preserves_history_without_inventing_invocation_evidence() {
+    let f = Fixture::new();
+    f.run(f.input("session_start"), Decision::Allow).await;
+    let reference = f
+        .service
+        .observed_session(&f.installation.id, "session")
+        .unwrap();
+    let id = f.service.bind_existing(&reference).unwrap().id().to_owned();
+    f.service
+        .connection()
+        .unwrap()
+        .execute_batch(
+            "UPDATE hook_invocations SET body=json_remove(body,'$.invocation_id');
+         UPDATE session_bindings SET reference=json_remove(reference,'$.invocation_id');
+         PRAGMA user_version=4;",
+        )
+        .unwrap();
+    let upgraded = IntegrationService::open(f._dir.path().join("state")).unwrap();
+    let legacy = upgraded.binding(&id).unwrap();
+    assert!(legacy.reference().invocation_id.is_none());
+    assert_eq!(legacy.events(0, 100).unwrap().records.len(), 1);
+    let mut old_wire = f.input("input");
+    old_wire["aikit_hook_version"] = json!(1);
+    assert_eq!(
+        upgraded
+            .handle_hook(
+                &f.installation.id,
+                old_wire.to_string().as_bytes(),
+                &Fixed(Decision::Allow)
+            )
+            .await
+            .exit_code,
+        2
+    );
+    let mut fresh = f.input("session_start");
+    fresh["invocation_id"] = json!("44444444-4444-4444-8444-444444444444");
+    assert_eq!(
+        upgraded
+            .handle_hook(
+                &f.installation.id,
+                fresh.to_string().as_bytes(),
+                &Fixed(Decision::Allow)
+            )
+            .await
+            .exit_code,
+        0
+    );
+    assert_eq!(legacy.status().unwrap(), SessionStatus::Stale);
+    assert_eq!(
+        upgraded
+            .events(&f.installation.id, 0, 100)
+            .unwrap()
+            .records
+            .len(),
+        2
+    );
 }
 
 #[test]
@@ -210,7 +372,8 @@ async fn pi_decisions_tool_outcomes_failure_and_replay_preserve_shared_contracts
 async fn pi_refuses_foreign_scope_wire_versions_ambiguous_results_and_changed_extension() {
     let f = Fixture::new();
     for (field, value) in [
-        ("aikit_hook_version", json!(2)),
+        ("aikit_hook_version", json!(1)),
+        ("invocation_id", json!("not-a-uuid")),
         ("cwd", json!(f._dir.path())),
         ("session_id", json!("")),
         ("hook_event_name", json!("agent_settled")),
@@ -227,11 +390,17 @@ async fn pi_refuses_foreign_scope_wire_versions_ambiguous_results_and_changed_ex
     let mut completed = f.input("agent_settled");
     completed["outcome"] = json!("completed");
     assert_eq!(f.run(completed, Decision::Allow).await.exit_code, 2);
+    assert_eq!(
+        f.run(f.input("session_start"), Decision::Allow)
+            .await
+            .exit_code,
+        0
+    );
     std::fs::write(&f.installation.config_path, "changed").unwrap();
     assert_eq!(f.run(f.input("input"), Decision::Allow).await.exit_code, 2);
     let page = f.service.events(&f.installation.id, 0, 100).unwrap();
-    assert_eq!(page.records.len(), 1);
-    assert!(page.records[0].decision.is_none());
+    assert_eq!(page.records.len(), 2);
+    assert!(page.records[1].decision.is_none());
 }
 
 #[test]

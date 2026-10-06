@@ -118,6 +118,8 @@ function Run-Native([string]$Label, [string]$Scenario, [string]$WriteFile = 'pro
         $rows = @($journal.records | Where-Object { $_.request.session_id -eq $starts[0].session })
         Assert-That (@($rows | Where-Object { $_.request.event -eq 'session_started' }).Count -eq 1) "$Label missing SDK start."
         Assert-That (@($rows | Where-Object { $_.request.event -eq 'session_ended' }).Count -eq 1) "$Label missing SDK end."
+        $invocations = @($rows | ForEach-Object { $_.request.invocation_id } | Select-Object -Unique)
+        Assert-That ($invocations.Count -eq 1 -and $invocations[0] -match '^[0-9a-f-]{36}$') "$Label missing a consistent bridge invocation scope."
     }
     return @{ events = $events; rows = $rows; stream = @($stream -split "`n" | Where-Object { $_.Trim() } | ConvertFrom-Json) }
 }

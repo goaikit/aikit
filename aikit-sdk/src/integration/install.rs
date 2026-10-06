@@ -219,17 +219,17 @@ impl IntegrationService {
             state: fs::canonicalize(state)?,
         };
         let connection = service.connection()?;
-        // Version 4 adds generated-source receipts and deletion plans. An older
-        // reader must not interpret a pending deletion as an empty-file write.
+        // Version 5 enforces adapter invocation scopes in hook/binding JSON.
+        // Older readers must not ignore those scopes and accept stale callbacks.
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 4 {
+        if version > 5 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if version < 4 {
+        if version < 5 {
             let _lock = service.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 4 {
+            if version > 5 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {
@@ -243,11 +243,11 @@ impl IntegrationService {
             INSERT INTO installation_revisions SELECT id,lower(hex(randomblob(16))) FROM installations;
             CREATE TABLE session_bindings(id TEXT PRIMARY KEY, reference TEXT NOT NULL, detached INTEGER NOT NULL DEFAULT 0);
             CREATE UNIQUE INDEX active_session_binding ON session_bindings(reference) WHERE detached=0;
-            PRAGMA user_version=4; COMMIT;")?;
+            PRAGMA user_version=5; COMMIT;")?;
             } else {
                 // Version 3 already has the binding tables and revision column.
-                // Only persisted JSON plan/receipt semantics changed in v4.
-                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=4; COMMIT;")?;
+                // Persisted JSON semantics changed in v4 and v5. Keep all rows.
+                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=5; COMMIT;")?;
             }
         }
         Ok(service)
@@ -675,6 +675,11 @@ fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
         ));
     }
     spec.events.sort();
+    if spec.agent_key == "pi" && !spec.events.contains(&HookEvent::SessionStarted) {
+        return Err(IntegrationError::Invalid(
+            "Pi invocation-scoped hooks require SessionStarted".into(),
+        ));
+    }
     if spec.agent_key == "cursor" {
         for event in &spec.events {
             super::cursor::event_name(*event)?;

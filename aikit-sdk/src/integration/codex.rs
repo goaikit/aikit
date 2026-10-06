@@ -112,6 +112,7 @@ pub(super) fn decode(
         id: uuid::Uuid::new_v4().to_string(),
         installation_id: installation.id.clone(),
         session_id,
+        invocation_id: None,
         prompt_id,
         agent_id: optional_string(&value, "agent_id", 256)?,
         event,

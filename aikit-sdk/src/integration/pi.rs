@@ -23,7 +23,7 @@ pub(super) fn decode(
         return Err(IntegrationError::Invalid("hook input exceeds 1 MiB".into()));
     }
     let value: Value = serde_json::from_slice(input)?;
-    if value.get("aikit_hook_version").and_then(Value::as_u64) != Some(1) {
+    if value.get("aikit_hook_version").and_then(Value::as_u64) != Some(2) {
         return Err(IntegrationError::Unsupported(
             "Pi bridge wire version".into(),
         ));
@@ -68,6 +68,10 @@ pub(super) fn decode(
         ));
     }
     let session_id = required_string(&value, "session_id", 256)?;
+    let invocation_id = required_string(&value, "invocation_id", 36)?;
+    if uuid::Uuid::parse_str(&invocation_id).is_err() {
+        return Err(IntegrationError::Invalid("invalid Pi invocation ID".into()));
+    }
     let cwd = std::fs::canonicalize(required_string(&value, "cwd", 32768)?)?;
     if !cwd.starts_with(&installation.spec.workspace) {
         return Err(IntegrationError::Invalid(
@@ -123,6 +127,7 @@ pub(super) fn decode(
         id: uuid::Uuid::new_v4().to_string(),
         installation_id: installation.id.clone(),
         session_id,
+        invocation_id: Some(invocation_id),
         // Pi exposes no stable turn/process identity here. Never manufacture one.
         prompt_id: None,
         agent_id: optional_string(&value, "agent_id", 256)?,

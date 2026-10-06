@@ -4,7 +4,7 @@ assert.deepEqual(process.argv.slice(2), ["", "quote\" slash\\ ' $ ; é"]);
 let text = "";
 for await (const chunk of process.stdin) text += chunk;
 const request = JSON.parse(text);
-assert.equal(request.aikit_hook_version, 1);
+assert.equal(request.aikit_hook_version, 2);
 fs.appendFileSync(process.env.AIKIT_PI_TEST_LOG, `${JSON.stringify(request)}\n`);
 const mode = fs.readFileSync(process.env.AIKIT_PI_TEST_MODE, "utf8");
 if (mode === "hang") await new Promise((resolve) => setTimeout(resolve, 10_000));

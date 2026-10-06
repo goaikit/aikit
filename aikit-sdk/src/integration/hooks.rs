@@ -38,6 +38,10 @@ pub struct HookRequest {
     pub id: String,
     pub installation_id: String,
     pub session_id: String,
+    /// Adapter-issued invocation scope when the native bridge can distinguish
+    /// repeated starts of the same session. Absent for unqualified adapters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_id: Option<String>,
     pub prompt_id: Option<String>,
     pub agent_id: Option<String>,
     pub event: HookEvent,
@@ -123,9 +127,13 @@ impl IntegrationService {
         let deadline = started
             + Duration::from_millis(u64::from(installation.spec.timeout_seconds) * 1000 - 250);
         {
-            let connection = self.connection()?;
+            let mut connection = self.connection()?;
             connection.busy_timeout(Duration::from_millis(100))?;
-            connection.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,?3,?4,?5)", params![request.id, installation_id, request.session_id, journal_body, installation_revision])?;
+            let tx =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            super::sessions::validate_invocation(&tx, &request, &installation_revision)?;
+            tx.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,?3,?4,?5)", params![request.id, installation_id, request.session_id, journal_body, installation_revision])?;
+            tx.commit()?;
         }
         let decision = if is_decision(request.event) {
             // A receipt proves what we installed, not what is still configured.
@@ -183,11 +191,15 @@ impl IntegrationService {
             self.require_configured(&installation)?;
         }
         if let Some(decision) = &decision {
-            let connection = self.connection()?;
+            let mut connection = self.connection()?;
             connection.busy_timeout(Duration::from_millis(100))?;
+            let tx =
+                connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            super::sessions::validate_invocation(&tx, &request, &installation_revision)?;
             // Append, never update an already visible cursor: a consumer may have
             // checkpointed the observation while the callback was still running.
-            connection.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,decision,installation_revision) VALUES (?1,?2,?3,?4,?5,?6)", params![format!("{}:decision", request.id), installation_id, request.session_id, journal_body, serde_json::to_string(decision)?, installation_revision])?;
+            tx.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,decision,installation_revision) VALUES (?1,?2,?3,?4,?5,?6)", params![format!("{}:decision", request.id), installation_id, request.session_id, journal_body, serde_json::to_string(decision)?, installation_revision])?;
+            tx.commit()?;
         }
         if matches!(decision, Some(Decision::Allow)) && Instant::now() >= deadline {
             return Err(IntegrationError::Invalid(
@@ -396,6 +408,7 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
         id: uuid::Uuid::new_v4().to_string(),
         installation_id: installation.id.clone(),
         session_id,
+        invocation_id: None,
         prompt_id,
         agent_id,
         event,

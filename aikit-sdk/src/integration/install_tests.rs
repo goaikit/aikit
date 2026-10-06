@@ -12,6 +12,7 @@ fn generated_extension_recovers_after_install_and_delete_without_adopting_extern
     let f = Fixture::new();
     let mut spec = f.spec.clone();
     spec.agent_key = "pi".into();
+    spec.events.push(HookEvent::SessionStarted);
     let plan = f.service.plan_install(spec).unwrap();
     assert!(!plan.config_path.exists());
     assert!(matches!(
@@ -66,7 +67,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 4);
+    assert_eq!(version, 5);
     assert!(matches!(
         reopened.apply_install(&plan.id).unwrap(),
         InstallationStatus::Configured { .. }
@@ -77,7 +78,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
     reopened
         .connection()
         .unwrap()
-        .execute_batch("PRAGMA user_version=5;")
+        .execute_batch("PRAGMA user_version=6;")
         .unwrap();
     assert!(matches!(
         IntegrationService::open(f._dir.path().join("private-state")),

@@ -384,3 +384,36 @@ admission without current start evidence and retry explicitly. Cloud and multiro
 sessions, subagent attribution, effective settings, native deadlines, tool-intent
 normalization, completion/failure observation and existing-session messaging remain
 unqualified or unimplemented.
+
+## Pi invocation scope, 2026-10-06
+
+Wire v2 adds a fresh extension-issued UUID at each session_start. The shared SDK
+stores it on HookRequest and SessionRef, validates it inside journal transactions,
+and rechecks it after policy callbacks. Binding replay and end-state detection
+use the same scope. Reused start IDs, late input/tool/end hooks from an observed
+older invocation, and hooks after its recorded shutdown are rejected. Consumers
+use session_for_hook before admission; observed_session remains the latest-start
+lookup for explicit inspection. No provider decoder belongs in the consumer.
+
+Schema 5 preserves historical journal/binding rows with absent invocation evidence
+and rejects readers that would ignore this field. Upgrade the SDK and consumer
+together. Update Pi's generated extension using the existing plan/apply lifecycle
+between sessions, then restart it; wire v1 fails closed. SessionStarted is now a
+required event for Pi installations. Historical bindings remain readable without
+inventing an invocation ID.
+
+The focused SDK suite passes 65 tests on Windows, including schema-4 migration,
+repeated native session IDs, stale notifications, replacement during an awaited
+callback, new binding replay, restart persistence, and Node process bridge scope
+rotation. Library/example Clippy passes. The six-scenario native harness was rerun
+with Pi 1.0.4 and Node 24.19.0 in Windows print mode: baseline/allowed/denied/failed
+writes, repeated blocked completion followed by Allow, and provider failure all
+passed with one consistent nonempty invocation ID per run. These native scenarios
+use the real Pi loop/tools and the deterministic qualification provider.
+
+The UUID is an extension invocation scope, not a credential or authenticated OS
+process identity. A previously unseen delayed SessionStart can still become the
+latest observed start; no causal ordering beyond the journal is claimed. Native
+concurrency/resume/extension reload, competing handlers and interactive mode need
+qualification. NativeSessionIdentity is implemented but remains Unknown. No
+message transport or successful-completion evidence is added by this change.
