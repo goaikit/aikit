@@ -14,6 +14,7 @@ mod command;
 mod cursor;
 mod hooks;
 mod install;
+mod pi;
 mod sessions;
 mod tool_effects;
 pub use capabilities::{

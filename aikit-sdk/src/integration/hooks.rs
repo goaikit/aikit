@@ -196,6 +196,8 @@ impl IntegrationService {
         }
         let stdout = if installation.spec.agent_key == "cursor" {
             super::cursor::encode(request.event, decision.as_ref())?
+        } else if installation.spec.agent_key == "pi" {
+            super::pi::encode(decision.as_ref())?
         } else {
             encode(request.event, decision.as_ref())?
         }
@@ -302,6 +304,9 @@ fn journal_copy(request: &HookRequest) -> HookRequest {
 }
 
 fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, IntegrationError> {
+    if installation.spec.agent_key == "pi" {
+        return super::pi::decode(installation, input);
+    }
     if installation.spec.agent_key == "codex" {
         return super::codex::decode(installation, input);
     }

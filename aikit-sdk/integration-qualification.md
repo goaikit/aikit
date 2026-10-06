@@ -170,6 +170,56 @@ or Codex does not implement their external adapters or qualify native behavior.
 Protocol references: [Claude hooks](https://code.claude.com/docs/en/hooks) and
 [Claude environment variables](https://code.claude.com/docs/en/env-vars).
 
+## Pi extension adapter, 2026-10-06
+
+The adapter was written against Pi upstream
+`428a12bc775145afa342530a9eaa652efb3e4422`. The inspected extension types, runner,
+agent session and session manager were compared with that exact revision.
+See the [extension API](https://github.com/earendil-works/pi/blob/428a12bc775145afa342530a9eaa652efb3e4422/packages/coding-agent/src/core/extensions/types.ts)
+and [runtime dispatch](https://github.com/earendil-works/pi/blob/428a12bc775145afa342530a9eaa652efb3e4422/packages/coding-agent/src/core/extensions/runner.ts).
+This is source evidence, not an installed Pi qualification result. No Pi executable
+was found by the current host command lookup.
+
+One owned generated project extension shares the existing plan/apply/remove journal
+and session bindings. Schema 4 marks the new receipt/deletion semantics, so older
+SDK readers reject this state. Tests cover planned operations without worktree
+mutation, whole-file ownership, refusal to adopt unowned source, drift, unrelated
+extensions, interrupted install/deletion, edited-file recovery refusal and v3 JSON
+plan migration. Native project trust/loading remains outside the ownership check.
+All 58 focused SDK integration tests pass on Windows; SDK library/example Clippy
+also passes. The v3 upgrade regression caught and corrected an attempt to repeat
+the older binding-table migration. Existing schema 1/2 migration tests remain green.
+
+The generated JavaScript was executed by Node against a callback harness and a
+real child handler. It tested literal empty/quoted/Unicode argv, UTF-8 inputs,
+prompt/tool denial, three repeated completion denials, preservation of preceding
+boundary entries, missing/foreign/duplicate settlement evidence, and exit-error,
+malformed/empty/oversized response and timeout behavior. The initial failure was
+in the fixture's argv indexing, corrected before the test passed. This harness
+does not load Pi's runtime or prove its extension behavior.
+
+Required native evidence: installed release compatibility, trusted extension
+loading/reload/removal, parallel/nested tools and mutable tool inputs, final-answer
+capture, repeated denial, actual settlement/failure correlation, outage recovery,
+subagent/session identity and process/deadline behavior. Tool-effect attribution
+and existing-session messaging are not supplied by this initial bridge.
+
+Required enhancements before enforced completion can be claimed:
+
+- Pi's boundary dispatcher permits later handlers to replace the continuation
+  decision or entries, and catches handler exceptions. An application needs an
+  enforceable final decision contract or qualified exclusive-policy control.
+- Pi can refuse continuation when final context is not runnable or the user
+  aborts. Distinguish these outcomes from accepted application completion.
+- agent_settled has no outcome/decision/invocation identifier. The bridge's
+  prior-boundary correlation is local evidence only; accepted completion needs
+  an authoritative outcome tied to the specific validated proposal.
+- File removal does not unload a running extension. Effective installation and
+  invocation identity must be established independently of the owned file hash.
+
+Unknown requirements remain Unknown in capabilities. No native readiness claim is
+made from the generated bridge, mechanical fixtures or source inspection.
+
 ## Codex adapter, 2026-10-06
 
 The initial adapter uses the existing installer, journal, observation bindings,

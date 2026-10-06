@@ -43,7 +43,7 @@ from each external hook invocation. User-started hooks use the separate
 The additive `integration` feature exposes `IntegrationService`, owned hook
 configuration and one `HookHandler::decide` callback. Construction never launches
 an agent. Claude hooks, a Cursor prompt/tool/session subset, and a Codex
-prompt/tool/Stop/session subset are implemented. Other known catalog keys return
+prompt/tool/Stop/session subset, and a Pi extension bridge are implemented. Other known catalog keys return
 `IntegrationError::Unsupported`.
 Existing-session observation bindings are available;
 native message delivery and contextual control qualification remain pending.
@@ -198,6 +198,41 @@ native agent.
 
 Native qualification and its limits are recorded in
 [`integration-qualification.md`](integration-qualification.md).
+
+### Pi extension hooks
+
+The `pi` key installs one generated `.pi/extensions/aikit-<installation-id>.js`
+file. Its path is scoped to application, provider and workspace. Plans persist
+desired bytes outside the worktree; apply writes the file, and removal deletes
+only an unchanged owned file. Unrelated extensions/settings remain untouched.
+Schema 4 protects generated-source receipts and deletion plans from older readers;
+existing JSON installation plans and receipts migrate without losing ownership.
+Do not downgrade the integration state database.
+
+Pi loads this extension through its own project-trust/resource lifecycle. Reload
+or restart explicitly between sessions after installation/update/removal; removing
+a file does not revoke code already loaded into Pi. Configured status checks file
+ownership, not actual execution or effective settings. The library never starts Pi.
+
+The bridge registers Pi events and invokes the configured native executable with
+literal argv, bounded JSON stdin/stdout and a process timeout, without a shell.
+Use `hook-pi STATE WORKSPACE BLOCKS [deny-tools]` with the library example. Pi uses
+Node internally; this adds no Node runtime requirement to Codelaya's own binary.
+SDK development tests for the bridge require Node on PATH.
+
+All eight current HookEvents have translations: session_start, input, tool_call,
+tool_result (using its isError flag), agent_before_settle, correlated failed
+agent_settled, and session_shutdown. Failure settlement uses the same session's
+latest pre-settlement outcome and never assumes every settlement failed. Completion
+Block appends a custom-message reason and asks for continuation; Allow preserves
+other extensions' decisions. Every repeat runs application policy again. Native
+tool results are never rewritten by observation. Tool-effect attribution is Unknown.
+
+Native version/execution, handler ordering, settlement correlation, subagents and
+deadline guarantees remain unqualified. Later boundary handlers can override a
+continuation and non-runnable context can prevent it. Accepted completion and
+existing-session messaging are still unavailable. See `integration-qualification.md`
+for the exact inspected upstream revision and remaining enhancement requirements.
 
 ### Codex hooks
 

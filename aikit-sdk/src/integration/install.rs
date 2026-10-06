@@ -170,6 +170,9 @@ struct Receipt {
     owned: Vec<OwnedHook>,
     #[serde(default)]
     inserted_version: bool,
+    /// Complete ownership of a generated extension file, not merged JSON.
+    #[serde(default)]
+    source_fingerprint: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Pending {
@@ -179,6 +182,8 @@ struct Pending {
     previous_receipt: Option<String>,
     next_receipt: Option<Receipt>,
     workspace: PathBuf,
+    #[serde(default)]
+    delete: bool,
 }
 
 /// Reusable integration entry point. Construction opens metadata only; it never
@@ -214,15 +219,17 @@ impl IntegrationService {
             state: fs::canonicalize(state)?,
         };
         let connection = service.connection()?;
+        // Version 4 adds generated-source receipts and deletion plans. An older
+        // reader must not interpret a pending deletion as an empty-file write.
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 3 {
+        if version > 4 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if version < 3 {
+        if version < 4 {
             let _lock = service.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 3 {
+            if version > 4 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {
@@ -236,7 +243,11 @@ impl IntegrationService {
             INSERT INTO installation_revisions SELECT id,lower(hex(randomblob(16))) FROM installations;
             CREATE TABLE session_bindings(id TEXT PRIMARY KEY, reference TEXT NOT NULL, detached INTEGER NOT NULL DEFAULT 0);
             CREATE UNIQUE INDEX active_session_binding ON session_bindings(reference) WHERE detached=0;
-            PRAGMA user_version=3; COMMIT;")?;
+            PRAGMA user_version=4; COMMIT;")?;
+            } else {
+                // Version 3 already has the binding tables and revision column.
+                // Only persisted JSON plan/receipt semantics changed in v4.
+                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=4; COMMIT;")?;
             }
         }
         Ok(service)
@@ -271,6 +282,36 @@ impl IntegrationService {
         reject_prepared_config(&connection, &config_path, None)?;
         let previous = receipt_json(&connection, &id)?;
         let before = read_config(&spec.workspace, &config_path)?;
+        if spec.agent_key == "pi" {
+            if let Some(raw) = &previous {
+                check_source(before.as_deref(), &serde_json::from_str(raw)?)?;
+            } else if before.is_some() {
+                return Err(IntegrationError::Conflict(
+                    "unowned Pi extension already exists".into(),
+                ));
+            }
+            let installation = Installation {
+                id,
+                spec,
+                config_path,
+            };
+            let after = super::pi::extension(&installation)?;
+            let receipt = Receipt {
+                installation: installation.clone(),
+                hooks_existed: false,
+                owned: Vec::new(),
+                inserted_version: false,
+                source_fingerprint: Some(fingerprint(Some(&after))),
+            };
+            return self.save_bytes_plan(
+                &connection,
+                before,
+                Some(after),
+                previous,
+                Some(receipt),
+                &installation,
+            );
+        }
         let mut document = document(before.as_deref())?;
         if let Some(raw) = &previous {
             remove_owned(&mut document, &serde_json::from_str(raw)?)?;
@@ -307,6 +348,17 @@ impl IntegrationService {
             &receipt.installation.spec.workspace,
             &receipt.installation.config_path,
         )?;
+        if receipt.source_fingerprint.is_some() {
+            check_source(before.as_deref(), &receipt)?;
+            return self.save_bytes_plan(
+                &connection,
+                before,
+                None,
+                Some(raw),
+                None,
+                &receipt.installation,
+            );
+        }
         let mut document = document(before.as_deref())?;
         remove_owned(&mut document, &receipt)?;
         self.save_plan(
@@ -330,7 +382,29 @@ impl IntegrationService {
     ) -> Result<InstallPlan, IntegrationError> {
         let mut after = serde_json::to_vec_pretty(&document)?;
         after.push(b'\n');
-        if after.len() as u64 > MAX_CONFIG_BYTES {
+        self.save_bytes_plan(
+            connection,
+            before,
+            Some(after),
+            previous_receipt,
+            next_receipt,
+            installation,
+        )
+    }
+
+    fn save_bytes_plan(
+        &self,
+        connection: &Connection,
+        before: Option<Vec<u8>>,
+        after: Option<Vec<u8>>,
+        previous_receipt: Option<String>,
+        next_receipt: Option<Receipt>,
+        installation: &Installation,
+    ) -> Result<InstallPlan, IntegrationError> {
+        if after
+            .as_ref()
+            .is_some_and(|bytes| bytes.len() as u64 > MAX_CONFIG_BYTES)
+        {
             return Err(IntegrationError::Invalid(
                 "resulting config exceeds 1 MiB".into(),
             ));
@@ -342,12 +416,13 @@ impl IntegrationService {
             events: installation.spec.events.clone(),
             removal: next_receipt.is_none(),
             before_fingerprint: fingerprint(before.as_deref()),
-            after_fingerprint: fingerprint(Some(&after)),
+            after_fingerprint: fingerprint(after.as_deref()),
         };
         let pending = Pending {
             preview: preview.clone(),
             before: preview.before_fingerprint.clone(),
-            after,
+            delete: after.is_none(),
+            after: after.unwrap_or_default(),
             previous_receipt,
             next_receipt,
             workspace: installation.spec.workspace.clone(),
@@ -419,7 +494,20 @@ impl IntegrationService {
             [plan_id],
         )?;
         if !already_written {
-            replace_config(&pending.workspace, config, &pending.before, &pending.after)?;
+            if pending.delete {
+                if fingerprint(read_config(&pending.workspace, config)?.as_deref())
+                    != pending.before
+                {
+                    return Err(IntegrationError::Conflict(
+                        "extension changed before removal".into(),
+                    ));
+                }
+                fs::remove_file(config)?;
+                #[cfg(unix)]
+                fs::File::open(config.parent().expect("validated parent"))?.sync_all()?;
+            } else {
+                replace_config(&pending.workspace, config, &pending.before, &pending.after)?;
+            }
         }
         // Fault injection exercises the actual recovery boundary; not public API.
         if interrupt_after_write {
@@ -496,12 +584,16 @@ impl IntegrationService {
             &receipt.installation.spec.workspace,
             &receipt.installation.config_path,
         )?;
-        let check = document(current.as_deref()).and_then(|mut value| {
-            if value.get("disableAllHooks").and_then(Value::as_bool) == Some(true) {
-                return Err(IntegrationError::Conflict("hooks are disabled".into()));
-            }
-            remove_owned(&mut value, &receipt)
-        });
+        let check = if receipt.source_fingerprint.is_some() {
+            check_source(current.as_deref(), &receipt)
+        } else {
+            document(current.as_deref()).and_then(|mut value| {
+                if value.get("disableAllHooks").and_then(Value::as_bool) == Some(true) {
+                    return Err(IntegrationError::Conflict("hooks are disabled".into()));
+                }
+                remove_owned(&mut value, &receipt)
+            })
+        };
         match check {
             Ok(()) => Ok(InstallationStatus::Configured {
                 installation: receipt.installation,
@@ -518,7 +610,10 @@ fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
     if crate::agent(&spec.agent_key).is_none() {
         return Err(IntegrationError::UnknownAgent(spec.agent_key.clone()));
     }
-    if !matches!(spec.agent_key.as_str(), "claude" | "cursor" | "codex") {
+    if !matches!(
+        spec.agent_key.as_str(),
+        "claude" | "cursor" | "codex" | "pi"
+    ) {
         return Err(IntegrationError::Unsupported(format!(
             "owned hooks for {} are not implemented",
             spec.agent_key
@@ -603,6 +698,11 @@ fn config_path(spec: &InstallSpec) -> Result<PathBuf, IntegrationError> {
         "claude" => Ok(spec.workspace.join(".claude").join("settings.local.json")),
         "cursor" => Ok(spec.workspace.join(".cursor").join("hooks.json")),
         "codex" => Ok(spec.workspace.join(".codex").join("hooks.json")),
+        "pi" => Ok(spec
+            .workspace
+            .join(".pi")
+            .join("extensions")
+            .join(format!("aikit-{}.js", installation_id(spec)))),
         _ => Err(IntegrationError::Unsupported(
             "hook configuration layout".into(),
         )),
@@ -733,7 +833,17 @@ fn add_owned(
         hooks_existed,
         owned,
         inserted_version,
+        source_fingerprint: None,
     })
+}
+
+fn check_source(current: Option<&[u8]>, receipt: &Receipt) -> Result<(), IntegrationError> {
+    if receipt.source_fingerprint.as_deref() != Some(fingerprint(current).as_str()) {
+        return Err(IntegrationError::Conflict(
+            "owned extension was removed or edited".into(),
+        ));
+    }
+    Ok(())
 }
 fn remove_owned(document: &mut Value, receipt: &Receipt) -> Result<(), IntegrationError> {
     if receipt.installation.spec.agent_key == "cursor"

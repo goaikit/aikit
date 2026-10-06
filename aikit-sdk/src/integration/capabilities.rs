@@ -210,6 +210,12 @@ fn report(
                 PreToolDecision | CompletionDecision | RepeatedCompletionBlocking | FinalAnswerCapture | HardHookDeadline => (true, Support::Unknown, "Codex decision/final-message translation exists; native execution, trust, effective settings, competing Stop hooks, tool coverage and deadlines are unqualified. PostToolUse is an outcome-unknown observation, not success."),
                 _ => (false, Support::Unsupported, "Codex failed/accepted completion observations, native invocation identity and existing-session messaging are not implemented. Interrupt and SessionEnd do not prove successful or failed completion."),
             }
+        } else if agent_key == "pi" {
+            match capability {
+                HookInstallation | ObservationBinding | DurableReplay | SafeDetach => (true, Support::Supported, "SDK owns one generated Pi extension file, with fingerprint-checked plans/removal, observation bindings and replay. Loading and native project trust are not attested."),
+                PreToolDecision | CompletionDecision | RepeatedCompletionBlocking | FinalAnswerCapture | FailedCompletionObservation | HardHookDeadline => (true, Support::Unknown, "Pi process bridge and lifecycle translation exist. Native execution/version, extension ordering, settled-outcome correlation, subagent attribution and deadline behavior remain unqualified. Later boundary handlers or non-runnable context can defeat continuation."),
+                _ => (false, Support::Unsupported, "Pi accepted-completion observation, native invocation identity and existing-session message delivery/reconciliation are not implemented. A settlement notification alone is not proof that application policy was accepted."),
+            }
         } else if agent_key != "claude" {
             (false, Support::Unsupported, "External hook adapter is not implemented for this catalog key; managed runner capabilities do not substitute.")
         } else {
@@ -381,7 +387,7 @@ mod tests {
     #[test]
     fn missing_external_adapters_do_not_borrow_managed_capabilities() {
         let report = report(
-            "pi",
+            "gemini",
             "windows",
             "x86_64",
             SessionMode::Print,

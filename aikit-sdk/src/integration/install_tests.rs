@@ -6,6 +6,84 @@ struct Fixture {
     spec: InstallSpec,
     config: PathBuf,
 }
+
+#[test]
+fn generated_extension_recovers_after_install_and_delete_without_adopting_external_edits() {
+    let f = Fixture::new();
+    let mut spec = f.spec.clone();
+    spec.agent_key = "pi".into();
+    let plan = f.service.plan_install(spec).unwrap();
+    assert!(!plan.config_path.exists());
+    assert!(matches!(
+        f.service.apply_inner(&plan.id, true),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    assert!(plan.config_path.exists());
+    let source = fs::read(&plan.config_path).unwrap();
+    let reopened = IntegrationService::open(f._dir.path().join("private-state")).unwrap();
+    assert!(matches!(
+        reopened.apply_install(&plan.id).unwrap(),
+        InstallationStatus::Configured { .. }
+    ));
+    let removal = reopened.plan_remove(&plan.installation_id).unwrap();
+    assert!(matches!(
+        reopened.apply_inner(&removal.id, true),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    assert!(!plan.config_path.exists());
+    fs::write(&plan.config_path, "external replacement").unwrap();
+    assert!(matches!(
+        reopened.apply_install(&removal.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(
+        fs::read_to_string(&plan.config_path).unwrap(),
+        "external replacement"
+    );
+    // Restore the exact pre-removal state, then resume the same operation.
+    fs::write(&plan.config_path, source).unwrap();
+    assert!(matches!(
+        reopened.apply_install(&removal.id).unwrap(),
+        InstallationStatus::Absent
+    ));
+    assert!(matches!(
+        reopened.apply_install(&removal.id).unwrap(),
+        InstallationStatus::Absent
+    ));
+    assert!(!plan.config_path.exists());
+}
+
+#[test]
+fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() {
+    let f = Fixture::new();
+    let plan = f.service.plan_install(f.spec.clone()).unwrap();
+    let connection = f.service.connection().unwrap();
+    connection.execute_batch("UPDATE install_plans SET body=json_remove(body,'$.delete','$.next_receipt.source_fingerprint'); PRAGMA user_version=3;").unwrap();
+    drop(connection);
+    let reopened = IntegrationService::open(f._dir.path().join("private-state")).unwrap();
+    let version: u32 = reopened
+        .connection()
+        .unwrap()
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, 4);
+    assert!(matches!(
+        reopened.apply_install(&plan.id).unwrap(),
+        InstallationStatus::Configured { .. }
+    ));
+    let removal = reopened.plan_remove(&plan.installation_id).unwrap();
+    reopened.apply_install(&removal.id).unwrap();
+    assert_eq!(f.read(), json!({}));
+    reopened
+        .connection()
+        .unwrap()
+        .execute_batch("PRAGMA user_version=5;")
+        .unwrap();
+    assert!(matches!(
+        IntegrationService::open(f._dir.path().join("private-state")),
+        Err(IntegrationError::Invalid(_))
+    ));
+}
 impl Fixture {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
@@ -244,7 +322,7 @@ fn malformed_disabled_and_non_object_configs_are_rejected_without_replacement() 
 #[test]
 fn unsupported_provider_unknown_catalog_key_and_expanding_arguments_are_explicit() {
     let f = Fixture::new();
-    for key in ["cursor", "pi"] {
+    for key in ["cursor", "gemini"] {
         let mut spec = f.spec.clone();
         spec.agent_key = key.into();
         assert!(matches!(
