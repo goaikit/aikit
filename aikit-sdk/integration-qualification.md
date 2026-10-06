@@ -202,8 +202,8 @@ does not load Pi's runtime or prove its extension behavior.
 Required broader native evidence: installed release compatibility beyond the
 bounded scenario below, live reload/removal, parallel/nested tools and mutable tool
 inputs, general final-answer capture and settlement/failure correlation, outage recovery,
-subagent/session identity and process/deadline behavior. Tool-effect attribution
-and existing-session messaging are not supplied by this initial bridge.
+subagent/session identity and process/deadline behavior. Full tool attribution
+and existing-session messaging remain unfinished.
 
 Required enhancements before enforced completion can be claimed:
 
@@ -258,6 +258,31 @@ a summary only after all assertions and cleanup succeed. These checks establish
 bounded native execution with deterministic model responses, not semantic model
 quality, accepted application completion or full native enforcement. Capability
 requirements remain Unknown/Unsupported until their broader contracts are met.
+
+### Exact tool-intent prediction
+
+Inspection of the installed Pi 1.0.4 `write.js`, `edit.js`, `edit-diff.js` and
+`path-utils.js` established the `path/content` Write shape and original-content
+batch semantics of `edits[].oldText/newText`. The SDK now translates those fields
+through the existing `tool_effect` service. It accepts the native legacy single
+edit and prepared array/object/JSON-string shapes without changing original bytes.
+
+Shared `ToolEffect::expected_content` moves existing consumer exact replacement
+logic into the SDK and adds disjoint original-content batches. It rejects missing,
+ambiguous and overlapping matches, absent/non-UTF-8 edit baselines, and retains
+Claude's replace-all semantics. It performs no filesystem operation. Consumers
+must compare a successful tool's resulting bytes against this prediction.
+The new public `EditTextBatch` variant requires exhaustive Rust consumers to
+update; old serialized variants remain unchanged. Integration state schema and
+replay privacy are unchanged; original inputs remain omitted from the journal.
+
+These exact predictions do not reproduce Pi's fuzzy matching, Unicode/path
+expansion or line-ending normalization. Path forms requiring those expansions
+remain Unknown. Exact-match errors can prevent admission; differing actual bytes
+cannot establish attribution. Complete Pi attribution is still an open requirement.
+Three added regressions cover SDK adapter selection/replay, native input shapes,
+original-offset Unicode batches, overlap/ambiguity and shared prediction rules.
+All 61 focused SDK integration tests and SDK library/example Clippy pass on Windows.
 
 ## Codex adapter, 2026-10-06
 

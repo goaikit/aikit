@@ -226,7 +226,21 @@ agent_settled, and session_shutdown. Failure settlement uses the same session's
 latest pre-settlement outcome and never assumes every settlement failed. Completion
 Block appends a custom-message reason and asks for continuation; Allow preserves
 other extensions' decisions. Every repeat runs application policy again. Native
-tool results are never rewritten by observation. Tool-effect attribution is Unknown.
+tool results are never rewritten by observation. `tool_effect` translates native
+`write` and `edit` inputs into `ReplaceFile` and `EditTextBatch` intent. Batch
+replacements are matched against the original content. `ToolEffect::path()` and
+`expected_content(before)` let applications predict exact bytes from their own
+immutable baseline without copying provider parsing or replacement logic.
+Compare the observed result before attributing an edit; these methods execute
+no tool, read no file, and establish no authorship by themselves.
+
+Pi's native fuzzy matching, newline/BOM normalization and path expansion are not
+reimplemented. Exact prediction rejects missing/ambiguous/overlapping matches;
+a differing native result must remain unattributed. Expanded paths (`@`, `~`,
+file URLs, special spaces and Windows shell drive forms) return Unknown, as do
+other Pi tools. Support for those semantics remains unfinished.
+`EditTextBatch` is an additional public enum variant: exhaustive consumers must
+handle it when upgrading. Existing serialized variants and fields are unchanged.
 
 An opt-in [native qualification harness](examples/pi-qualification/README.md)
 exercises the installed Pi loop with Pi's deterministic provider. Pi 1.0.4 on

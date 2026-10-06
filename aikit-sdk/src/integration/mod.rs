@@ -30,4 +30,4 @@ pub use install::{
     IntegrationError, IntegrationService,
 };
 pub use sessions::{SessionBinding, SessionRef, SessionStatus};
-pub use tool_effects::ToolEffect;
+pub use tool_effects::{TextReplacement, ToolEffect};

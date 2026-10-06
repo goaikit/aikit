@@ -70,6 +70,35 @@ impl HookHandler for Fixed {
 }
 
 #[test]
+fn pi_tool_intent_uses_the_registered_adapter_and_does_not_expand_native_paths() {
+    use crate::integration::ToolEffect;
+    let f = Fixture::new();
+    let mut tool = f.input("tool_call");
+    tool["tool_name"] = json!("edit");
+    tool["tool_use_id"] = json!("call");
+    tool["tool_input"] = json!({"path":"a", "edits":[{"oldText":"old", "newText":"new"}]});
+    let decoded = decode(&f.installation, tool.to_string().as_bytes()).unwrap();
+    let effect = f.service.tool_effect(&decoded).unwrap();
+    assert!(matches!(effect, ToolEffect::EditTextBatch { .. }));
+    assert_eq!(
+        effect.expected_content(Some(b"old")).unwrap(),
+        Some(b"new".to_vec())
+    );
+    tool["tool_name"] = json!("write");
+    tool["tool_input"] = json!({"path":"@a", "content":"new"});
+    let decoded = decode(&f.installation, tool.to_string().as_bytes()).unwrap();
+    assert_eq!(
+        f.service.tool_effect(&decoded).unwrap(),
+        ToolEffect::Unknown
+    );
+    let mut replay = decoded;
+    if let AgentEventPayload::ToolUse { input, .. } = &mut replay.payload {
+        *input = Value::Null;
+    }
+    assert_eq!(f.service.tool_effect(&replay).unwrap(), ToolEffect::Unknown);
+}
+
+#[test]
 fn pi_owned_extension_plans_preserve_unrelated_files_and_refuse_drift_or_adoption() {
     let f = Fixture::new();
     let path = &f.installation.config_path;
