@@ -1,5 +1,24 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn owner_drop_releases_installation_lock_with_inherited_description() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("integration.lock");
+    let owner = lock(&path).unwrap();
+    // A duplicate shares the open description just like inheritance across
+    // fork. Keeping it open makes the release failure deterministic.
+    let inherited = owner.0.try_clone().unwrap();
+    assert!(matches!(lock(&path), Err(IntegrationError::Conflict(_))));
+    drop(owner);
+    let next_owner = lock(&path).expect("owner drop must explicitly unlock");
+    assert!(matches!(lock(&path), Err(IntegrationError::Conflict(_))));
+    drop(inherited);
+    assert!(matches!(lock(&path), Err(IntegrationError::Conflict(_))));
+    drop(next_owner);
+    assert!(lock(&path).is_ok());
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     service: IntegrationService,

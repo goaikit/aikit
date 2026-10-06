@@ -253,7 +253,7 @@ impl IntegrationService {
         Ok(service)
     }
 
-    fn state_lock(&self) -> Result<fs::File, IntegrationError> {
+    fn state_lock(&self) -> Result<InstallationLock, IntegrationError> {
         lock(&self.state.join("integration.lock"))
     }
     pub(super) fn connection(&self) -> Result<Connection, IntegrationError> {
@@ -952,7 +952,17 @@ fn read_config(workspace: &Path, path: &Path) -> Result<Option<Vec<u8>>, Integra
     }
     Ok(Some(bytes))
 }
-fn lock(path: &Path) -> Result<fs::File, IntegrationError> {
+// Explicitly unlock before closing: a concurrent Unix fork can inherit the
+// open file description until exec, extending a close-only lock's lifetime.
+struct InstallationLock(fs::File);
+
+impl Drop for InstallationLock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+fn lock(path: &Path) -> Result<InstallationLock, IntegrationError> {
     reject_link(path)?;
     let file = fs::OpenOptions::new()
         .read(true)
@@ -963,7 +973,7 @@ fn lock(path: &Path) -> Result<fs::File, IntegrationError> {
     fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
         IntegrationError::Conflict("another integration writer holds the lock".into())
     })?;
-    Ok(file)
+    Ok(InstallationLock(file))
 }
 fn replace_config(
     workspace: &Path,
