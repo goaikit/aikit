@@ -190,11 +190,17 @@ fn report(
         && architecture == "x86_64"
         && mode == SessionMode::Print
         && version_output.as_deref() == Some("2.1.269 (Claude Code)");
+    let cursor_dispatch_failure = agent_key == "cursor"
+        && platform == "windows"
+        && architecture == "x86_64"
+        && mode == SessionMode::Print
+        && version_output.as_deref() == Some("2026.09.02-c22c1a3");
     let assessments = CAPABILITIES.into_iter().map(|capability| {
         use IntegrationCapability::*;
         let (implemented, support, detail) = if agent_key == "cursor" {
             match capability {
                 HookInstallation | ObservationBinding | DurableReplay | SafeDetach => (true, Support::Supported, "SDK owned single-workspace configuration, observation binding, journal and detach contracts only. Cursor prompt/tool and session hooks are implemented; native execution and effective settings need qualification."),
+                PreToolDecision if cursor_dispatch_failure => (true, Support::Unknown, "Recorded Windows print qualification failure: Cursor's generated PowerShell wrapper failed to parse before invoking the SDK. A matched no-hook Write succeeded; installed hooks failed closed with no SDK observation. Native dispatch requires repair and requalification; other workspaces and modes are not inferred."),
                 PreToolDecision | HardHookDeadline => (true, Support::Unknown, "Cursor prompt/tool decisions use native responses and failClosed configuration. Installed-version execution, shell transport and deadlines remain unqualified."),
                 _ => (false, Support::Unsupported, "Cursor completion continuation, final-answer capture, accepted completion, native identity and messaging are not implemented by this adapter. Stop follow-up is not an enforced completion proposal."),
             }
@@ -236,6 +242,60 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cursor_dispatch_failure_is_scoped_without_inventing_an_enforcement_success() {
+        for (platform, arch, mode, version, has_failure) in [
+            (
+                "windows",
+                "x86_64",
+                SessionMode::Print,
+                "2026.09.02-c22c1a3",
+                true,
+            ),
+            (
+                "windows",
+                "x86_64",
+                SessionMode::Interactive,
+                "2026.09.02-c22c1a3",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Print,
+                "2026.09.02-c22c1a3",
+                false,
+            ),
+            (
+                "windows",
+                "aarch64",
+                SessionMode::Print,
+                "2026.09.02-c22c1a3",
+                false,
+            ),
+            (
+                "windows",
+                "x86_64",
+                SessionMode::Print,
+                "another-version",
+                false,
+            ),
+        ] {
+            let report = report("cursor", platform, arch, mode, Ok(version.into()));
+            let error = report
+                .require(&[IntegrationCapability::PreToolDecision])
+                .unwrap_err();
+            assert_eq!(error.unmet[0].support, Support::Unknown);
+            assert!(error.unmet[0].implemented);
+            assert_eq!(
+                error.unmet[0].detail.contains("failed to parse"),
+                has_failure
+            );
+            report
+                .require(&[IntegrationCapability::HookInstallation])
+                .unwrap();
+        }
+    }
     #[test]
     fn exact_native_evidence_never_promotes_completion_messaging_or_unlimited_enforcement() {
         let report = report(

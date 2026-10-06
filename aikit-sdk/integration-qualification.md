@@ -198,6 +198,34 @@ workspace path containing spaces, an apostrophe, dollar sign, semicolon and Unic
 Native execution remains Unknown; diagnose the installed Cursor dispatch boundary
 before promoting this adapter. No setting or capability is relaxed to bypass it.
 
+### Matched native dispatch diagnosis
+
+A subsequent baseline removed the owned hooks in the same workspace and ran the
+same one-Write request with stream-json output. Cursor created `baseline.txt` with
+the requested content and returned `CREATED`. Reinstalling the SDK hooks and
+requesting `gated.txt` produced a rejected tool result and no file. Both processes
+exited 0 without timeout. This distinguishes ordinary tool permission from the
+installed hook failure.
+
+The rejected native result named a generated `ps-script-*.ps1`, line 54, with
+`Missing ')' in method call` around `FromBase64String(''{1}'')`. This expression
+is absent from the SDK's encoded command; the native wrapper failed before the
+SDK executable. No native SDK observation was recorded. The generated temporary
+script was removed by Cursor, so its complete template was not inspected.
+
+Required upstream work: repair Cursor's Windows command-hook wrapper generation
+and verify both stdin transport modes with literal punctuation/Unicode workspace
+paths. Reproduce with an ordinary native hook executable that reads stdin, writes
+valid permission JSON, and exits 0, retaining the enclosing shell error and the
+handler invocation marker. Do not disable `failClosed` or relax workspace checks.
+After repair, repeat prompt admission, tool allow/deny/failure and session replay;
+the independent SDK byte-stream regression is insufficient for native support.
+
+The exact Windows x86_64 print/version report now includes this observed failure
+under PreToolDecision, which remains Unknown. A differing version, platform,
+architecture or mode does not inherit this finding. The focused SDK suite now
+has 46 passing tests, including this scope regression.
+
 Current SDK reports four supported local contracts, two implemented but Unknown
 native requirements, and eight Unsupported requirements for Cursor. Stop is a
 follow-up mechanism; no forced completion gate or accepted completion is inferred.
