@@ -417,3 +417,28 @@ latest observed start; no causal ordering beyond the journal is claimed. Native
 concurrency/resume/extension reload, competing handlers and interactive mode need
 qualification. NativeSessionIdentity is implemented but remains Unknown. No
 message transport or successful-completion evidence is added by this change.
+
+## Pi completion boundary counterexamples, 2026-10-06
+
+The expanded native harness passed eight scenarios on Pi 1.0.4 / Node 24.19.0 /
+Windows x86_64 print mode using SDK fff6aa7. Six retain the earlier behavior;
+two reproduce native contract gaps. A later extension aborted after a recorded
+SDK Allow, but settlement still carried only `type`, matching normal completion.
+No current abort signal was available at either boundary. A second scenario
+returned continue:false after observing the SDK Block and continue:true; Pi
+settled after one model call without an Allow. The probe queries actual SDK
+journal evidence before acting, so the scenario cannot pass with the wrong order.
+
+The two probes explicitly load the installed SDK source once before the competing
+extension. Earlier setup attempts failed their assertions: one placed the probe
+before the SDK; another loaded the SDK twice through Windows path aliases and
+was stopped by invocation guards. Those attempts are not boundary evidence. The
+six ordinary scenarios still use native project auto-discovery. All fixtures and
+raw evidence stay outside the repository.
+
+These findings are exposed only in the matching version/platform/architecture/mode
+capability report. RepeatedCompletionBlocking stays Unknown and
+SuccessfulCompletionObservation stays Unsupported. Other contexts inherit neither
+the experiment nor support. Required native proposal/outcome/gate contracts and
+loader deduplication are documented in `integration-enhancements.md`. Do not add
+an inferred accepted-completion event to bridge this missing native information.

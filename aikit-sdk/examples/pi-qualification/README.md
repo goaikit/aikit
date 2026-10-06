@@ -10,7 +10,8 @@ provider readiness test.
 
 - PowerShell 7, Node compatible with the selected Pi release, and Rust.
 - A separately installed `@earendil-works/pi-coding-agent` package. The recorded
-  run used version **1.0.4**, Node **24.19.0**, Windows x86_64 and SDK **0f9c971**.
+  original run used version **1.0.4**, Node **24.19.0**, Windows x86_64 and SDK **0f9c971**.
+  The expanded boundary-counterexample run used SDK **fff6aa7** on the same runtime.
 - Build the SDK example from the repository root:
 
 ```text
@@ -56,6 +57,21 @@ extension through the SDK even if a scenario fails; evidence remains on disk.
 6. A provider error records CompletionFailed, with no CompletionProposed or Final
    Answer. Native process exit alone is insufficient: this case exits zero in Pi
    1.0.4 print mode.
+7. A competing extension aborts after confirming an SDK Allow through the actual
+   SDK example's journal query. Pi settles with the same `type`-only event as the
+   normal completion case. No abort signal is available at these boundaries and
+   no CompletionFailed is recorded. This proves the missing observation contract.
+8. A later extension sees the SDK Block and `continue:true`, then returns
+   `continue:false`. Pi settles after one model call without an Allow. This proves
+   that continuation requests can be overridden in the qualified context.
+
+The two ordering scenarios disable automatic discovery and explicitly load the
+installed SDK source once, ahead of `boundary-probe.mjs`. The other six scenarios
+still exercise automatic project discovery. Naming the SDK source explicitly
+while leaving discovery enabled loaded it twice via Windows path aliases in the
+initial setup attempt; invocation guards blocked admission, and that attempt was
+not counted as boundary evidence. The probe requires a recorded SDK decision
+before taking action, so the wrong handler order fails the scenario.
 
 Session start/end records are matched against the runtime's session ID for each
 installed scenario. Successful removal is required before `summary.json` is
@@ -69,9 +85,11 @@ BeforeTool Block for that case; an executed tool failure is a different event.
 
 ## Limits
 
-The scenario uses one trusted project bridge and one deterministic provider. It
-does not qualify competing handlers, interactive mode, compaction/resume,
+The harness uses a trusted project bridge and a deterministic provider, plus one
+controlled competing extension for the two counterexamples. It does not qualify
+arbitrary extension combinations, interactive mode, compaction/resume,
 subagents, native process identity, effective managed settings, hook outages,
 hard deadlines, semantic Final Answer quality, or messaging. Settlement does not
 provide an authoritative accepted-proposal identifier. These native requirements
 remain Unknown or Unsupported; see `../../integration-qualification.md`.
+The requested native contracts are in `../../integration-enhancements.md`.

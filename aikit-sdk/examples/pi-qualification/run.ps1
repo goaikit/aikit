@@ -29,12 +29,15 @@ foreach ($directory in @($workspace, $fixtureProfile)) { [void][IO.Directory]::C
     extensions = @('-builtin:mcp', '-builtin:llama.cpp', '-builtin:codemode', '-builtin:tool-search')
 } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $fixtureProfile 'settings.json') -Encoding utf8
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'provider.mjs') -Destination (Join-Path $root 'provider.mjs')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'boundary-probe.mjs') -Destination (Join-Path $root 'boundary-probe.mjs')
 $environmentValues = @{
     PI_CODING_AGENT_DIR = $fixtureProfile; PI_OFFLINE = '1'; PI_TELEMETRY = '0'
     AIKIT_PI_AI_MODULE = $PiAiModulePath
+    AIKIT_PI_SDK_EXECUTABLE = $SdkPath; AIKIT_PI_SDK_STATE = $state
 }
 $sequence = 0
 $installationId = $null
+$installedExtension = $null
 
 function Assert-That([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -91,6 +94,8 @@ function Install-Gate([int]$Blocks, [bool]$DenyTools = $false) {
     }
     $plan = Invoke-Sdk @('plan', $state) ($spec | ConvertTo-Json -Depth 8)
     $script:installationId = $plan.installation_id
+    $script:installedExtension = $plan.config_path
+    $environmentValues['AIKIT_PI_INSTALLATION'] = $installationId
     $result = Invoke-Sdk @('apply', $state, $plan.id)
     Assert-That ($result.status -eq 'configured') 'Installation did not become configured.'
 }
@@ -103,6 +108,12 @@ function Run-Native([string]$Label, [string]$Scenario, [string]$WriteFile = 'pro
         '--no-skills', '--no-prompt-templates', '--no-context-files', '--no-themes', '--no-mcp',
         '--extension', (Join-Path $root 'provider.mjs'), '--provider', 'aikit-fixture',
         '--model', 'deterministic', '--session-dir', (Join-Path $root 'sessions'))
+    if ($Scenario -in @('abort-after-allow', 'override-block')) {
+        # Control ordering without loading the SDK twice through Windows path
+        # aliases. These two scenarios explicitly load the owned installed source;
+        # the other scenarios still qualify native project auto-discovery.
+        $nativeArguments += @('--no-extensions', '--extension', $installedExtension, '--extension', (Join-Path $root 'boundary-probe.mjs'))
+    }
     if ($Scenario -eq 'write') { $nativeArguments += @('--tools', 'write') }
     else { $nativeArguments += '--no-tools' }
     $nativeArguments += 'Run the deterministic qualification fixture.'
@@ -156,11 +167,32 @@ try {
     $failure = Run-Native 'provider-failed' 'failure'
     Assert-That (@($failure.rows | Where-Object { $_.request.event -eq 'completion_failed' }).Count -eq 1) 'Missing failed completion.'
     Assert-That (@($failure.rows | Where-Object { $_.request.event -eq 'completion_proposed' -or $null -ne $_.request.final_answer }).Count -eq 0) 'Failure became completion evidence.'
+
+    Install-Gate 0
+    $aborted = Run-Native 'abort-after-allow' 'abort-after-allow'
+    $probes = @($aborted.events | Where-Object type -eq 'boundary_probe')
+    Assert-That ($probes.Count -eq 1 -and $probes[0].sdk_decision -eq 'allow') 'Probe did not abort after a recorded Allow.'
+    Assert-That ($probes[0].outcome_before_action -eq 'completed') 'Unexpected outcome before abort.'
+    Assert-That (@($aborted.events | Where-Object event -eq 'agent_settled').Count -eq 1) 'Abort did not settle.'
+    $settled = @($aborted.events | Where-Object event -eq 'agent_settled')[0]
+    $normalSettled = @($stop.events | Where-Object event -eq 'agent_settled')[0]
+    Assert-That (($settled.event_keys -join ',') -eq 'type' -and ($normalSettled.event_keys -join ',') -eq 'type') 'Settlement now carries additional fields: re-evaluate completion evidence.'
+    Assert-That ($probes[0].signal_present -eq $false -and $settled.signal_present -eq $false) 'Abort signal availability changed: revisit native settlement qualification.'
+    Assert-That (@($aborted.rows | Where-Object { $_.request.event -eq 'completion_failed' }).Count -eq 0) 'Abort now has a failure signal: revisit the native API qualification.'
+
+    Install-Gate 3
+    $overridden = Run-Native 'stop-block-overridden' 'override-block'
+    $probes = @($overridden.events | Where-Object type -eq 'boundary_probe')
+    Assert-That ($probes.Count -eq 1 -and $probes[0].sdk_decision -eq 'block' -and $probes[0].incoming_continue -eq $true) 'Probe did not observe SDK continuation request.'
+    Assert-That (@($overridden.events | Where-Object type -eq 'fixture_model_call').Count -eq 1) 'Override did not stop continuation after one native turn.'
+    Assert-That (@($overridden.events | Where-Object event -eq 'agent_settled').Count -eq 1) 'Overridden Block did not settle.'
+    Assert-That (@($overridden.rows | Where-Object { $_.decision.decision -eq 'allow' -and $_.request.event -eq 'completion_proposed' }).Count -eq 0) 'Unexpected completion permission.'
     $summary = @{ node = $nodeVersion; pi = $piVersion; platform = [Environment]::OSVersion.ToString()
         sdk_sha256 = (Get-FileHash -LiteralPath $SdkPath -Algorithm SHA256).Hash
         pi_cli_sha256 = (Get-FileHash -LiteralPath $PiCliPath -Algorithm SHA256).Hash
         provider_sha256 = (Get-FileHash -LiteralPath (Join-Path $root 'provider.mjs') -Algorithm SHA256).Hash
-        scenarios_passed = @('write-baseline', 'stop-blocked', 'write-allowed', 'write-failed', 'write-denied', 'provider-failed')
+        boundary_probe_sha256 = (Get-FileHash -LiteralPath (Join-Path $root 'boundary-probe.mjs') -Algorithm SHA256).Hash
+        scenarios_passed = @('write-baseline', 'stop-blocked', 'write-allowed', 'write-failed', 'write-denied', 'provider-failed', 'abort-after-allow', 'stop-block-overridden')
         scope = 'Native print-mode transport and loop with deterministic model; not full provider readiness.' }
 } finally {
     if ($installationId) {

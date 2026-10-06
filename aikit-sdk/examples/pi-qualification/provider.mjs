@@ -31,7 +31,8 @@ export default async function (pi) {
     pi.on(name, (event, ctx) => {
       record({ type: "native_event", event: name,
         session: ctx.sessionManager.getSessionId(), outcome: event.outcome,
-        isError: event.isError, tool: event.toolName });
+        isError: event.isError, tool: event.toolName,
+        event_keys: Object.keys(event).sort(), signal_present: ctx.signal !== undefined });
     });
   }
 }

@@ -195,6 +195,11 @@ fn report(
         && architecture == "x86_64"
         && mode == SessionMode::Print
         && version_output.as_deref() == Some("2026.09.02-c22c1a3");
+    let pi_boundary_gap = agent_key == "pi"
+        && platform == "windows"
+        && architecture == "x86_64"
+        && mode == SessionMode::Print
+        && version_output.as_deref() == Some("1.0.4");
     let assessments = CAPABILITIES.into_iter().map(|capability| {
         use IntegrationCapability::*;
         let (implemented, support, detail) = if agent_key == "cursor" {
@@ -212,6 +217,8 @@ fn report(
             }
         } else if agent_key == "pi" {
             match capability {
+                RepeatedCompletionBlocking if pi_boundary_gap => (true, Support::Unknown, "Recorded Windows Pi 1.0.4 print-mode counterexample: a later extension observed the SDK Block and continue:true, returned continue:false, and Pi settled after one model turn without an Allow. Native continuation decisions are not monotonic; effective extension ordering and enforced blocking remain unqualified."),
+                SuccessfulCompletionObservation if pi_boundary_gap => (false, Support::Unsupported, "Recorded Windows Pi 1.0.4 print-mode counterexample: a later extension aborted after the SDK Allow. Both normal and aborted agent_settled events contained only type, with no outcome/proposal ID and no available abort signal. Allow followed by settlement cannot prove accepted completion. A native correlated final-outcome contract is required."),
                 HookInstallation | ObservationBinding | DurableReplay | SafeDetach => (true, Support::Supported, "SDK owns one generated Pi extension file, with fingerprint-checked plans/removal, observation bindings and replay. Loading and native project trust are not attested."),
                 PreToolDecision | CompletionDecision | RepeatedCompletionBlocking | FinalAnswerCapture | FailedCompletionObservation | HardHookDeadline => (true, Support::Unknown, "Pi process bridge and lifecycle translation exist. Native execution/version, extension ordering, settled-outcome correlation, subagent attribution and deadline behavior remain unqualified. Later boundary handlers or non-runnable context can defeat continuation."),
                 NativeSessionIdentity => (true, Support::Unknown, "Pi wire v2 carries a fresh extension-issued invocation ID at each session_start. Shared bindings and journal writes reject old observed invocations, including callbacks replaced during policy. This is not native process authentication, liveness, or proof against a previously unseen delayed start; broader native qualification remains open."),
@@ -417,5 +424,33 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.unmet.len(), 1);
         assert_eq!(error.unmet[0].support, Support::Unknown);
+    }
+
+    #[test]
+    fn pi_boundary_counterexamples_are_scoped_and_never_promote_completion() {
+        use IntegrationCapability::{RepeatedCompletionBlocking, SuccessfulCompletionObservation};
+        for (platform, architecture, mode, version, matched) in [
+            ("windows", "x86_64", SessionMode::Print, "1.0.4", true),
+            (
+                "windows",
+                "x86_64",
+                SessionMode::Interactive,
+                "1.0.4",
+                false,
+            ),
+            ("linux", "x86_64", SessionMode::Print, "1.0.4", false),
+            ("windows", "aarch64", SessionMode::Print, "1.0.4", false),
+            ("windows", "x86_64", SessionMode::Print, "1.0.5", false),
+        ] {
+            let report = report("pi", platform, architecture, mode, Ok(version.into()));
+            let error = report
+                .require(&[RepeatedCompletionBlocking, SuccessfulCompletionObservation])
+                .unwrap_err();
+            assert_eq!(error.unmet[0].support, Support::Unknown);
+            assert_eq!(error.unmet[1].support, Support::Unsupported);
+            for assessment in error.unmet {
+                assert_eq!(assessment.detail.contains("counterexample"), matched);
+            }
+        }
     }
 }
