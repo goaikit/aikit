@@ -95,6 +95,13 @@ native deadline behavior require qualification for the deployed version and mode
 
 ### Existing-session observation binding
 
+`HookEvent::CompletionFailed` installs Claude's `StopFailure` notification. It
+records a failed turn without calling the policy callback or closing the session
+binding. Error details and the native error-message field are not retained as a
+Final Answer. Consumers can recover their application state from this observation;
+it does not establish successful completion. Existing installations need an
+explicit install update to subscribe to this additional event.
+
 Resolve `observed_session(installation_id, native_session_id)` after a SessionStart
 hook, then call `bind_existing(&reference)`. Repeating the bind returns the same
 active binding ID. `binding(id)` reopens it after application restart. The handle

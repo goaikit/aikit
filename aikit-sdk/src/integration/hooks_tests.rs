@@ -33,6 +33,7 @@ impl Fixture {
                     HookEvent::AfterTool,
                     HookEvent::ToolFailed,
                     HookEvent::CompletionProposed,
+                    HookEvent::CompletionFailed,
                     HookEvent::SessionEnded,
                 ],
                 timeout_seconds,
@@ -292,6 +293,59 @@ async fn session_end_is_observation_not_successful_turn_completion() {
         page.records[0].request.payload,
         AgentEventPayload::Terminal { .. }
     ));
+}
+
+#[tokio::test]
+async fn failed_completion_is_observation_only_and_keeps_the_session_binding_open() {
+    use crate::integration::SessionStatus;
+    let f = Fixture::new(10);
+    let settings: Value = serde_json::from_slice(
+        &std::fs::read(f.workspace.join(".claude/settings.local.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(settings["hooks"]["StopFailure"].is_array());
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let mut input = f.input("StopFailure");
+    input["error"] = json!("rate_limit");
+    input["error_details"] = json!("private diagnostic");
+    input["last_assistant_message"] = json!("API Error: private diagnostic");
+    let response = f
+        .service
+        .handle_hook(&f.id, input.to_string().as_bytes(), &Never)
+        .await;
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(response.stdout, "{}");
+    assert_eq!(binding.status().unwrap(), SessionStatus::Observed);
+    let page = binding.events(0, 10).unwrap();
+    assert_eq!(page.records.len(), 2);
+    let failure = &page.records[1];
+    assert_eq!(failure.request.event, HookEvent::CompletionFailed);
+    assert!(failure.decision.is_none());
+    assert!(failure.request.final_answer.is_none());
+    assert!(!matches!(
+        failure.request.payload,
+        AgentEventPayload::Terminal { .. }
+    ));
+    assert!(!serde_json::to_string(&page)
+        .unwrap()
+        .contains("private diagnostic"));
+    let reopened = IntegrationService::open(f._dir.path().join("state")).unwrap();
+    let replay = reopened
+        .binding(binding.id())
+        .unwrap()
+        .events(page.records[0].cursor, 10)
+        .unwrap();
+    assert_eq!(replay.records.len(), 1);
+    assert_eq!(replay.records[0].cursor, failure.cursor);
+    assert_eq!(replay.records[0].request.event, HookEvent::CompletionFailed);
 }
 
 #[tokio::test]

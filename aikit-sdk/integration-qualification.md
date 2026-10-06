@@ -24,7 +24,7 @@ responses, repeated decisions, timeout/error/panic blocking, malformed requests,
 append-only cursors and omission of tool contents from replay. Existing MCP and
 managed gateway tests establish compatibility within their tested scope.
 
-The current focused integration suite has 30 passing tests on Windows. Binding
+The current focused integration suite has 31 passing tests on Windows. Binding
 tests include reopen/idempotency, filtering interleaved sessions, empty advancing
 pages, end observation, replacement under a reused native ID, unchanged-settings
 reinstallation, detach without hook removal, schema-2 upgrade, and rejecting Allow
@@ -82,6 +82,15 @@ repeated hook invocations establish this scenario's result.
    setting must remain. Keep the disposable state/output for inspection as needed.
 
 ## Limits and required follow-up
+
+- The added CompletionFailed/StopFailure contract is covered by a native-shaped
+  fixture: configuration, notification-only replay, no error text promoted to a
+  Final Answer, and a session binding that remains observed. This fixture does not
+  yet qualify a failure emitted by a live native process. Existing installations
+  must be explicitly updated to include the new event.
+- Workspace formatting checks on Windows report existing CRLF differences and
+  unsupported rustfmt options. Touched integration files are formatted separately;
+  unrelated source formatting is preserved.
 
 - The fixture configures the native continuation limit explicitly. Installation
   does not own that shared setting or attest effective managed/user configuration.

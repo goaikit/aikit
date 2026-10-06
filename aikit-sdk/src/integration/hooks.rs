@@ -345,6 +345,8 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
             payload: None,
         },
     };
+    // StopFailure's similarly named field is an API error, not conversational
+    // output. Neither that text nor arbitrary error details belong in replay.
     let final_answer = if event == HookEvent::CompletionProposed {
         optional_string(&value, "last_assistant_message", 512 * 1024)?
     } else {

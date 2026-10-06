@@ -80,6 +80,8 @@ pub enum HookEvent {
     AfterTool,
     ToolFailed,
     CompletionProposed,
+    /// Native turn failed. Notification only; never an accepted completion.
+    CompletionFailed,
     SessionEnded,
 }
 impl HookEvent {
@@ -91,6 +93,7 @@ impl HookEvent {
             Self::AfterTool => "PostToolUse",
             Self::ToolFailed => "PostToolUseFailure",
             Self::CompletionProposed => "Stop",
+            Self::CompletionFailed => "StopFailure",
             Self::SessionEnded => "SessionEnd",
         }
     }
