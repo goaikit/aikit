@@ -144,17 +144,18 @@ or Codex does not implement their external adapters or qualify native behavior.
   unsupported rustfmt options. Touched integration files are formatted separately;
   unrelated source formatting is preserved.
 
-- The fixture configures the native continuation limit explicitly. Installation
-  does not own that shared setting or attest effective managed/user configuration.
+- The Claude fixture sets an undocumented continuation-limit variable. Its effect
+  was not established by the bounded run. Installation does not own that shared
+  setting or attest effective managed/user configuration.
 - The completion test does not qualify interactive mode, BeforeTool enforcement,
   agent-owned subprocesses, sidecar outage, or native response-loss recovery.
   The separate Write denial scenario above establishes only its bounded path.
 - Application callbacks must cooperate with cancellation. Filesystem and SQLite
   I/O remain subject to operating system latency; a universal hard deadline is not
   established by an async timeout.
-- Cursor now has the initial subset described below. Codex and Pi external adapters
-  return Unsupported. Required native capabilities, versions and platforms still
-  need implementation and live evidence.
+- Cursor, Codex and Pi now have the adapters described below. Unsupported events
+  reject installation; required native capabilities, versions and platforms still
+  need implementation and qualification.
 - The binding is based on installation revision plus observed SessionStart cursor.
   It detects recorded replacement/resume boundaries, but cannot identify an old
   delayed hook if the native payload reuses an ID without an invocation epoch.
@@ -177,8 +178,8 @@ The adapter was written against Pi upstream
 agent session and session manager were compared with that exact revision.
 See the [extension API](https://github.com/earendil-works/pi/blob/428a12bc775145afa342530a9eaa652efb3e4422/packages/coding-agent/src/core/extensions/types.ts)
 and [runtime dispatch](https://github.com/earendil-works/pi/blob/428a12bc775145afa342530a9eaa652efb3e4422/packages/coding-agent/src/core/extensions/runner.ts).
-This is source evidence, not an installed Pi qualification result. No Pi executable
-was found by the current host command lookup.
+This is source evidence. The initial host command lookup found no Pi executable;
+the later isolated npm installation and native result are described below.
 
 One owned generated project extension shares the existing plan/apply/remove journal
 and session bindings. Schema 4 marks the new receipt/deletion semantics, so older
@@ -198,9 +199,9 @@ malformed/empty/oversized response and timeout behavior. The initial failure was
 in the fixture's argv indexing, corrected before the test passed. This harness
 does not load Pi's runtime or prove its extension behavior.
 
-Required native evidence: installed release compatibility, trusted extension
-loading/reload/removal, parallel/nested tools and mutable tool inputs, final-answer
-capture, repeated denial, actual settlement/failure correlation, outage recovery,
+Required broader native evidence: installed release compatibility beyond the
+bounded scenario below, live reload/removal, parallel/nested tools and mutable tool
+inputs, general final-answer capture and settlement/failure correlation, outage recovery,
 subagent/session identity and process/deadline behavior. Tool-effect attribution
 and existing-session messaging are not supplied by this initial bridge.
 
@@ -219,6 +220,44 @@ Required enhancements before enforced completion can be claimed:
 
 Unknown requirements remain Unknown in capabilities. No native readiness claim is
 made from the generated bridge, mechanical fixtures or source inspection.
+
+### Native Pi loop with deterministic provider
+
+The reusable [qualification harness](examples/pi-qualification/README.md) passed
+six scenarios against npm `@earendil-works/pi-coding-agent` **1.0.4**, Node
+**24.19.0**, Windows x86_64 build 26200, print/JSON mode, and SDK **0f9c971**.
+It uses Pi's `fauxProvider` for scripted responses while exercising the actual
+extension loader, agent loop, native Write tool and SDK subprocess/SQLite path.
+The npm package integrity was
+`sha512-+956nfMFHr5lDUVY/2Q4k+YzojzBuCaBXFgj0eSlXVGr7QVliVddKdc1Pz6yVg1dOlJQmb67doOVrlMsIcIdaw==`.
+
+| Scenario | Native and SDK evidence |
+| --- | --- |
+| Write baseline without SDK hooks | Expected file content and one successful tool result. |
+| Three blocked completion proposals, then Allow | Four native model calls, SDK decision sequence Block/Block/Block/Allow, `OK` captured on every proposal. |
+| Write with Allow | Expected file content and one AfterTool observation. |
+| Write to directory | Native failure and one ToolFailed observation. |
+| Write with Block | No target file, one BeforeTool Block, model-facing error result. |
+| Provider error | One CompletionFailed, no CompletionProposed, no Final Answer. |
+
+All six processes exited zero without timeout, including the provider-error case.
+The harness asserts native/SDK events rather than treating exit zero as completion.
+Denied tools do not emit Pi's extension `tool_result`; consumers must use the
+BeforeTool Block instead of waiting for a nonexistent ToolFailed notification.
+An attempted native write that actually fails does emit ToolFailed.
+
+Each installed scenario matched the SDK start/end records to the native session
+ID. The workspace name contained spaces, an apostrophe, dollar sign, semicolon
+and Unicode. A separate profile and explicit project approval isolated trust;
+startup network/telemetry were disabled. SDK plan/apply updated the extension
+between fresh native processes, and SDK removal left it absent. This does not
+test unloading an extension from an existing process.
+
+The harness saves streams, session-scoped journal views, version/binary hashes and
+a summary only after all assertions and cleanup succeed. These checks establish
+bounded native execution with deterministic model responses, not semantic model
+quality, accepted application completion or full native enforcement. Capability
+requirements remain Unknown/Unsupported until their broader contracts are met.
 
 ## Codex adapter, 2026-10-06
 

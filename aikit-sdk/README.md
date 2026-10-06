@@ -228,8 +228,12 @@ Block appends a custom-message reason and asks for continuation; Allow preserves
 other extensions' decisions. Every repeat runs application policy again. Native
 tool results are never rewritten by observation. Tool-effect attribution is Unknown.
 
-Native version/execution, handler ordering, settlement correlation, subagents and
-deadline guarantees remain unqualified. Later boundary handlers can override a
+An opt-in [native qualification harness](examples/pi-qualification/README.md)
+exercises the installed Pi loop with Pi's deterministic provider. Pi 1.0.4 on
+Windows print mode passed repeated completion blocking, native tool allow/deny,
+tool failure and provider failure. This bounded path does not qualify handler
+ordering, general settlement correlation, subagents or deadline guarantees.
+Later boundary handlers can override a
 continuation and non-runnable context can prevent it. Accepted completion and
 existing-session messaging are still unavailable. See `integration-qualification.md`
 for the exact inspected upstream revision and remaining enhancement requirements.
