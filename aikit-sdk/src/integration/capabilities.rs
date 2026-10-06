@@ -202,6 +202,7 @@ fn report(
                 SafeDetach => (true, Support::Supported, "SDK detach revokes the application binding and sends no native command. It preserves hooks/history. Interactive process-identity qualification remains open."),
                 CompletionDecision | FinalAnswerCapture if qualified => (true, Support::Supported, "Bounded Windows Claude Code 2.1.269 print-mode scenario: ten blocked Stops, one Allow, final answer. Fixture disabled the continuation cap. This does not attest effective settings for the caller."),
                 FailedCompletionObservation if qualified => (true, Support::Supported, "Bounded Windows Claude Code 2.1.269 print-mode invalid-model scenario emitted StopFailure with no Final Answer. Application projection may require durable replay."),
+                PreToolDecision if qualified => (true, Support::Unknown, "One native Write denial prevented file creation on this exact context. Edit, shell, MCP, subagent and effective-settings enforcement remain unqualified; the complete pre-tool requirement is not met."),
                 PreToolDecision => (true, Support::Unknown, "Native pre-tool blocking and all edit paths need live qualification for this context; a decoder fixture or allowed Write is insufficient."),
                 RepeatedCompletionBlocking => (true, Support::Unknown, "Effective continuation limits and competing settings are not attested. A bounded scenario with an explicit unlimited setting does not prove unconditional enforcement."),
                 CompletionDecision | FinalAnswerCapture | FailedCompletionObservation => (true, Support::Unknown, "Adapter exists, but this version/platform/mode has no matching native qualification scenario."),
@@ -249,11 +250,13 @@ mod tests {
                 IntegrationCapability::RepeatedCompletionBlocking,
                 IntegrationCapability::SuccessfulCompletionObservation,
                 IntegrationCapability::MessageSubmission,
+                IntegrationCapability::PreToolDecision,
             ])
             .unwrap_err();
-        assert_eq!(error.unmet.len(), 3);
+        assert_eq!(error.unmet.len(), 4);
         assert_eq!(error.unmet[0].support, Support::Unknown);
         assert_eq!(error.unmet[1].support, Support::Unsupported);
+        assert_eq!(error.unmet[3].support, Support::Unknown);
     }
     #[test]
     fn version_mode_platform_and_missing_probe_do_not_inherit_native_qualification() {

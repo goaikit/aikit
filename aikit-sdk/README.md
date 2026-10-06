@@ -73,6 +73,12 @@ The thin executable must honor all three response fields. `HookHandler` receives
 input admission, before-tool and completion proposals; observations are journaled
 without calling a decision handler. Callbacks must cooperate with cancellation.
 Errors, timeouts and panics block. Allow preserves native permission checks.
+Decision requests recheck the owned local hook configuration before calling policy
+and after it returns. Disabled, missing or edited owned hooks block without a
+prepared Allow. Unrelated settings edits are preserved. The observation is saved
+before these checks; notification-only events remain available for recovery.
+This does not attest effective managed/user settings or prevent edits after the
+last check, and cannot enforce a hook the provider never invokes.
 
 `events(installation_id, after, limit)` returns immutable observation and prepared
 decision rows with separate cursors. Neither a saved Allow nor SessionEnd proves
@@ -172,7 +178,7 @@ integration_hooks apply STATE PLAN_ID
 integration_hooks remove-plan STATE INSTALLATION_ID
 integration_hooks status STATE INSTALLATION_ID
 integration_hooks events STATE INSTALLATION_ID
-integration_hooks hook STATE WORKSPACE BLOCKS
+integration_hooks hook STATE WORKSPACE BLOCKS [deny-tools]
 integration_hooks bind STATE INSTALLATION_ID NATIVE_SESSION_ID
 integration_hooks binding-status STATE BINDING_ID
 integration_hooks detach STATE BINDING_ID
@@ -184,7 +190,9 @@ absolute workspace path, and a block count. Register the events needed by the
 scenario, including SessionStarted. The example binds to that observed start and
 blocks the first BLOCKS completion proposals in its session-scoped replay, then
 allows a nonempty final answer. This is a qualification gate, not
-a review policy. An external caller starts the native agent.
+a review policy. Append `deny-tools` to the handler arguments to block every
+BeforeTool request for a native denial check. An external caller starts the
+native agent.
 
 Native qualification and its limits are recorded in
 [`integration-qualification.md`](integration-qualification.md).

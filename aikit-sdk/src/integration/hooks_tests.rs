@@ -608,3 +608,112 @@ async fn reapplying_identical_hook_settings_during_a_callback_cannot_deliver_the
     assert_eq!(journal.records.len(), 1);
     assert!(journal.records[0].decision.is_none());
 }
+
+struct EditConfigDuringDecision {
+    path: PathBuf,
+    document: Value,
+    calls: AtomicUsize,
+}
+impl HookHandler for EditConfigDuringDecision {
+    fn decide<'a>(&'a self, _: &'a HookRequest) -> DecisionFuture<'a> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::fs::write(&self.path, self.document.to_string()).unwrap();
+            Ok(Decision::Allow)
+        })
+    }
+}
+
+#[tokio::test]
+async fn local_hook_drift_blocks_before_policy_without_erasing_observations() {
+    let f = Fixture::new(10);
+    let path = f.service.installed(&f.id).unwrap().config_path;
+    let original: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let mut disabled = original.clone();
+    disabled["disableAllHooks"] = json!(true);
+    let mut changed = original.clone();
+    changed["hooks"]["Stop"][0]["hooks"][0]["timeout"] = json!(99);
+    let handler = EditConfigDuringDecision {
+        path: path.clone(),
+        document: original.clone(),
+        calls: AtomicUsize::new(0),
+    };
+    for document in [disabled, changed, json!({})] {
+        std::fs::write(&path, document.to_string()).unwrap();
+        let response = f
+            .service
+            .handle_hook(&f.id, f.input("Stop").to_string().as_bytes(), &handler)
+            .await;
+        assert_eq!(response.exit_code, 2);
+        assert!(response.stdout.is_empty());
+        assert_eq!(handler.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap(),
+            document
+        );
+    }
+    let page = f.service.events(&f.id, 0, 20).unwrap();
+    assert_eq!(page.records.len(), 3);
+    assert!(page.records.iter().all(|record| record.decision.is_none()));
+    // A delivered failure notification still belongs in recovery history even
+    // when the local hooks have drifted. It invokes no application decision.
+    assert_eq!(
+        f.service
+            .handle_hook(&f.id, f.input("StopFailure").to_string().as_bytes(), &Never)
+            .await
+            .exit_code,
+        0
+    );
+    assert_eq!(
+        f.service.events(&f.id, 3, 20).unwrap().records[0]
+            .request
+            .event,
+        HookEvent::CompletionFailed
+    );
+}
+
+#[tokio::test]
+async fn a_callback_cannot_allow_after_disabling_its_owned_hooks() {
+    let f = Fixture::new(10);
+    let path = f.service.installed(&f.id).unwrap().config_path;
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    document["disableAllHooks"] = json!(true);
+    let handler = EditConfigDuringDecision {
+        path,
+        document,
+        calls: AtomicUsize::new(0),
+    };
+    let response = f
+        .service
+        .handle_hook(&f.id, f.input("Stop").to_string().as_bytes(), &handler)
+        .await;
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(response.exit_code, 2);
+    assert!(response.stdout.is_empty());
+    let page = f.service.events(&f.id, 0, 10).unwrap();
+    assert_eq!(page.records.len(), 1);
+    assert!(page.records[0].decision.is_none());
+}
+
+#[tokio::test]
+async fn unrelated_settings_edits_during_policy_do_not_invalidate_owned_hooks() {
+    let f = Fixture::new(10);
+    let path = f.service.installed(&f.id).unwrap().config_path;
+    let mut document: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    document["env"] = json!({"APPLICATION_FIXTURE":"preserved"});
+    let handler = EditConfigDuringDecision {
+        path,
+        document,
+        calls: AtomicUsize::new(0),
+    };
+    let response = f
+        .service
+        .handle_hook(&f.id, f.input("Stop").to_string().as_bytes(), &handler)
+        .await;
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(response.stdout, "{}");
+    assert_eq!(
+        f.service.events(&f.id, 0, 10).unwrap().records[1].decision,
+        Some(Decision::Allow)
+    );
+}

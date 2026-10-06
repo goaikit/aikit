@@ -13,10 +13,16 @@ use std::{
 struct ExampleGate<'a> {
     service: &'a IntegrationService,
     blocks: usize,
+    deny_tools: bool,
 }
 impl HookHandler for ExampleGate<'_> {
     fn decide<'a>(&'a self, request: &'a HookRequest) -> DecisionFuture<'a> {
         Box::pin(async move {
+            if self.deny_tools && request.event == HookEvent::BeforeTool {
+                return Ok(Decision::Block {
+                    reason: "Example qualification gate denies tool execution. Do not retry or use an alternative tool; report BLOCKED.".into(),
+                });
+            }
             if request.event != HookEvent::CompletionProposed {
                 return Ok(Decision::Allow);
             }
@@ -88,14 +94,15 @@ async fn run(args: &[String]) -> anyhow::Result<i32> {
     }
     let service = IntegrationService::open(&args[1])?;
     if args[0] == "hook" {
-        if args.len() != 4 {
-            anyhow::bail!("hook requires STATE WORKSPACE BLOCKS");
+        if !(args.len() == 4 || (args.len() == 5 && args[4] == "deny-tools")) {
+            anyhow::bail!("hook requires STATE WORKSPACE BLOCKS [deny-tools]");
         }
         let installation =
             service.find_installation("sdk-example", "claude", Path::new(&args[2]))?;
         let gate = ExampleGate {
             service: &service,
             blocks: args[3].parse()?,
+            deny_tools: args.len() == 5,
         };
         let mut input = Vec::new();
         std::io::stdin()

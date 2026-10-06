@@ -1,5 +1,5 @@
 //! Native hook translation and one bounded application decision callback.
-use super::{HookEvent, Installation, IntegrationError, IntegrationService};
+use super::{HookEvent, Installation, InstallationStatus, IntegrationError, IntegrationService};
 use crate::runner::{AgentEventPayload, HookAction, HookPhase};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -128,6 +128,10 @@ impl IntegrationService {
             connection.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,?3,?4,?5)", params![request.id, installation_id, request.session_id, journal_body, installation_revision])?;
         }
         let decision = if is_decision(request.event) {
+            // A receipt proves what we installed, not what is still configured.
+            // Reuse the installer's ownership/drift checks before invoking policy.
+            // Observations remain durable even when policy cannot safely run.
+            self.require_configured(&installation)?;
             let remaining = deadline.saturating_duration_since(Instant::now());
             let result = if remaining.is_zero() {
                 None
@@ -173,6 +177,11 @@ impl IntegrationService {
                 "installation changed during hook validation".into(),
             ));
         }
+        if decision.is_some() {
+            // The application can await arbitrary work. Never return its result
+            // under hooks disabled, edited or removed during that callback.
+            self.require_configured(&installation)?;
+        }
         if let Some(decision) = &decision {
             let connection = self.connection()?;
             connection.busy_timeout(Duration::from_millis(100))?;
@@ -192,6 +201,15 @@ impl IntegrationService {
             exit_code: 0,
             request_id: Some(request.id),
         })
+    }
+
+    fn require_configured(&self, expected: &Installation) -> Result<(), IntegrationError> {
+        match self.installation_status(&expected.id)? {
+            InstallationStatus::Configured { installation } if installation == *expected => Ok(()),
+            _ => Err(IntegrationError::Conflict(
+                "owned hook configuration changed; restore or reconfigure the installation".into(),
+            )),
+        }
     }
 
     /// Durable local append order, not native causal order. Records are retained

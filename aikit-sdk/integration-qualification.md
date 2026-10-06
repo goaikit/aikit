@@ -24,11 +24,17 @@ responses, repeated decisions, timeout/error/panic blocking, malformed requests,
 append-only cursors and omission of tool contents from replay. Existing MCP and
 managed gateway tests establish compatibility within their tested scope.
 
-The current focused integration suite has 36 passing tests on Windows. Binding
+The current focused integration suite has 39 passing tests on Windows. Binding
 tests include reopen/idempotency, filtering interleaved sessions, empty advancing
 pages, end observation, replacement under a reused native ID, unchanged-settings
 reinstallation, detach without hook removal, schema-2 upgrade, and rejecting Allow
 when the installation revision changes during the callback. SDK Clippy also passes.
+Three additional regressions cover disabled/edited/missing owned configuration
+before policy, disabling hooks during policy, and preserving unrelated setting
+changes. Drift blocks with exit 2 and no prepared Allow; observations, including
+delivered failure notifications, remain durable. These are local configuration
+checks, not effective managed/user configuration or protection against a change
+after the last check.
 
 The additional tool-intent fixture covers exact Write/Edit fields, raw content,
 replace-all semantics and malformed inputs. `IntegrationService::tool_effect`
@@ -81,6 +87,30 @@ repeated hook invocations establish this scenario's result.
 6. Use `remove-plan` and `apply` to remove the owned hooks. The existing environment
    setting must remain. Keep the disposable state/output for inspection as needed.
 
+## Native pre-tool denial, 2026-10-06
+
+On Windows x86_64 with Claude Code 2.1.269 in print mode, the built example was
+installed in a new disposable workspace with all eight events and a ten-second
+timeout. Its handler arguments were `hook STATE WORKSPACE 0 deny-tools`.
+The external harness invoked Claude with `--tools Write --allowedTools Write`,
+`--max-turns 4`, JSON output and the installed local settings. The prompt asked
+for one Write creating `blocked.txt`, then `BLOCKED` if denied, without retries.
+
+Observed: one native BeforeTool observation for Write, one matching Block, no
+AfterTool or ToolFailed observations, no `blocked.txt`, and native exit 0 with
+`is_error: false`, two turns and final answer `BLOCKED`. One Stop was allowed;
+SessionEnd followed. All eight journal rows belong to the same native session.
+Normal native Write permission was enabled, so the denial exercised the hook.
+The SDK did not launch the agent; the external qualification harness did.
+
+To reproduce, follow the installation steps above but use the handler arguments
+in this section and add `completion_failed` to the installed events. No
+continuation-cap override is needed. Verify the absent file, native result and
+matching observation/decision together; a recorded Block alone is insufficient.
+This qualifies the bounded Write denial path. Edit, shell, MCP, subagents,
+interactive mode and effective settings remain outside this evidence, so the
+broader PreToolDecision requirement remains Unknown.
+
 ## Limits and required follow-up
 
 The example's fresh version-only probe on this Windows x86_64 host returned
@@ -116,8 +146,9 @@ or Codex does not implement their external adapters or qualify native behavior.
 
 - The fixture configures the native continuation limit explicitly. Installation
   does not own that shared setting or attest effective managed/user configuration.
-- This test does not qualify interactive mode, BeforeTool enforcement under real
-  edits, agent-owned subprocesses, sidecar outage, or native response-loss recovery.
+- The completion test does not qualify interactive mode, BeforeTool enforcement,
+  agent-owned subprocesses, sidecar outage, or native response-loss recovery.
+  The separate Write denial scenario above establishes only its bounded path.
 - Application callbacks must cooperate with cancellation. Filesystem and SQLite
   I/O remain subject to operating system latency; a universal hard deadline is not
   established by an async timeout.
