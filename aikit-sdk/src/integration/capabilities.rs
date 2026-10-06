@@ -192,7 +192,13 @@ fn report(
         && version_output.as_deref() == Some("2.1.269 (Claude Code)");
     let assessments = CAPABILITIES.into_iter().map(|capability| {
         use IntegrationCapability::*;
-        let (implemented, support, detail) = if agent_key != "claude" {
+        let (implemented, support, detail) = if agent_key == "cursor" {
+            match capability {
+                HookInstallation | ObservationBinding | DurableReplay | SafeDetach => (true, Support::Supported, "SDK owned single-workspace configuration, observation binding, journal and detach contracts only. Cursor prompt/tool and session hooks are implemented; native execution and effective settings need qualification."),
+                PreToolDecision | HardHookDeadline => (true, Support::Unknown, "Cursor prompt/tool decisions use native responses and failClosed configuration. Installed-version execution, shell transport and deadlines remain unqualified."),
+                _ => (false, Support::Unsupported, "Cursor completion continuation, final-answer capture, accepted completion, native identity and messaging are not implemented by this adapter. Stop follow-up is not an enforced completion proposal."),
+            }
+        } else if agent_key != "claude" {
             (false, Support::Unsupported, "External hook adapter is not implemented for this catalog key; managed runner capabilities do not substitute.")
         } else {
             match capability {
@@ -308,7 +314,7 @@ mod tests {
     }
     #[test]
     fn missing_external_adapters_do_not_borrow_managed_capabilities() {
-        for agent in ["cursor", "codex", "pi"] {
+        for agent in ["codex", "pi"] {
             let report = report(
                 agent,
                 "windows",

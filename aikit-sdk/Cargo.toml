@@ -11,7 +11,7 @@ categories = ["command-line-utilities"]
 [features]
 default = ["claude-sdk"]
 testing = []
-integration = ["dep:rusqlite", "dep:fs2", "dep:anyhow", "dep:tokio"]
+integration = ["dep:rusqlite", "dep:fs2", "dep:anyhow", "dep:tokio", "dep:base64"]
 # History (transcript) backend (spec 008): the `HistoryReader`/`HistoryMutator`
 # traits + canonical types. No SDK dependency — compiles standalone so the
 # seam is provable without any concrete adapter.
@@ -40,6 +40,7 @@ codex = ["agent-adapters", "aikit-session-capture/codex"]
 opencode = ["agent-adapters", "aikit-session-capture/opencode"]
 
 [dependencies]
+base64 = { version = "0.22", optional = true }
 tracing = "0.1"
 rusqlite = { version = "0.39", features = ["bundled"], optional = true }
 fs2 = { version = "0.4", optional = true }

@@ -42,8 +42,9 @@ from each external hook invocation. User-started hooks use the separate
 
 The additive `integration` feature exposes `IntegrationService`, owned hook
 configuration and one `HookHandler::decide` callback. Construction never launches
-an agent. The current native adapter is Claude; other known catalog keys return
-`IntegrationError::Unsupported`. Existing-session observation bindings are available;
+an agent. Claude hooks and an initial Cursor prompt/tool/session subset are
+implemented. Other known catalog keys return `IntegrationError::Unsupported`.
+Existing-session observation bindings are available;
 native message delivery and contextual control qualification remain pending.
 
 ```rust,no_run
@@ -196,6 +197,31 @@ native agent.
 
 Native qualification and its limits are recorded in
 [`integration-qualification.md`](integration-qualification.md).
+
+### Cursor hooks
+
+Use the same service with catalog key `cursor`. The owned `.cursor/hooks.json`
+installer supports SessionStarted, InputSubmitted, BeforeTool, AfterTool,
+ToolFailed and SessionEnded. It preserves unrelated entries, checks version 1,
+and sets `failClosed` on owned commands. Unsupported completion events reject the
+entire plan before configuration changes. The example uses `hook-cursor` instead
+of `hook`, with the same arguments; `deny-tools` exercises tool denial.
+
+Cursor command strings use POSIX literal quoting on Unix. On Windows the SDK
+encodes a constant PowerShell script that starts the native executable with exact
+arguments and copies byte streams; Windows PowerShell must be available on PATH.
+The additional process is included in the native timeout and does not establish
+a hard deadline. A native-process test covers empty/quoted arguments, punctuation,
+Unicode paths, UTF-8 streams and nonzero exit propagation. Unix execution still
+needs platform qualification.
+
+The decoder requires one workspace root matching the installation and rejects
+foreign cwd/session identity. Conversation/generation IDs identify observations;
+they do not establish native process identity. Tool output is decoded from the
+native JSON string and omitted from replay. Tool effects remain Unknown until
+Cursor edit-intent schemas are qualified. Session notifications never decide
+admission or accepted completion. Stop continuation, final-answer capture and
+messaging remain unimplemented; the full Codelaya requirements cannot pass.
 
 ## Quick start
 

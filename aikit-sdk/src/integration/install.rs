@@ -101,8 +101,8 @@ impl HookEvent {
     }
 }
 
-/// An executable and exact argument vector. No shell serialization. The current
-/// Claude exec-form adapter requires a native executable on Windows, not a shim.
+/// An executable and exact argument vector. Adapters serialize their native
+/// command format; Windows requires a native executable, not a command shim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookCommand {
     pub executable: PathBuf,
@@ -168,6 +168,8 @@ struct Receipt {
     installation: Installation,
     hooks_existed: bool,
     owned: Vec<OwnedHook>,
+    #[serde(default)]
+    inserted_version: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Pending {
@@ -516,7 +518,7 @@ fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
     if crate::agent(&spec.agent_key).is_none() {
         return Err(IntegrationError::UnknownAgent(spec.agent_key.clone()));
     }
-    if spec.agent_key != "claude" {
+    if !matches!(spec.agent_key.as_str(), "claude" | "cursor") {
         return Err(IntegrationError::Unsupported(format!(
             "owned hooks for {} are not implemented",
             spec.agent_key
@@ -552,7 +554,7 @@ fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
             .is_some_and(|v| v.eq_ignore_ascii_case("exe"))
     {
         return Err(IntegrationError::Unsupported(
-            "Windows exec-form hooks require a native .exe".into(),
+            "Windows hooks require a native .exe".into(),
         ));
     }
     if !spec
@@ -578,12 +580,18 @@ fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
         ));
     }
     spec.events.sort();
+    if spec.agent_key == "cursor" {
+        for event in &spec.events {
+            super::cursor::event_name(*event)?;
+        }
+    }
     Ok(())
 }
 
 fn config_path(spec: &InstallSpec) -> Result<PathBuf, IntegrationError> {
     match spec.agent_key.as_str() {
         "claude" => Ok(spec.workspace.join(".claude").join("settings.local.json")),
+        "cursor" => Ok(spec.workspace.join(".cursor").join("hooks.json")),
         _ => Err(IntegrationError::Unsupported(
             "hook configuration layout".into(),
         )),
@@ -653,6 +661,22 @@ fn add_owned(
     installation: Installation,
 ) -> Result<Receipt, IntegrationError> {
     let root = document.as_object_mut().expect("validated object");
+    let inserted_version = if installation.spec.agent_key == "cursor" {
+        match root.get("version") {
+            Some(value) if value.as_u64() == Some(1) => false,
+            Some(_) => {
+                return Err(IntegrationError::Conflict(
+                    "unsupported Cursor config version".into(),
+                ))
+            }
+            None => {
+                root.insert("version".into(), json!(1));
+                true
+            }
+        }
+    } else {
+        false
+    };
     let hooks_existed = root.contains_key("hooks");
     let hooks = root
         .entry("hooks")
@@ -661,14 +685,22 @@ fn add_owned(
         .ok_or_else(|| IntegrationError::Invalid("hooks must be an object".into()))?;
     let mut owned = Vec::new();
     for event in &installation.spec.events {
-        let event = event.claude_name();
+        let event = if installation.spec.agent_key == "cursor" {
+            super::cursor::event_name(*event)?
+        } else {
+            event.claude_name()
+        };
         let event_existed = hooks.contains_key(event);
         let entries = hooks
             .entry(event)
             .or_insert_with(|| json!([]))
             .as_array_mut()
             .ok_or_else(|| IntegrationError::Invalid(format!("{event} hooks must be an array")))?;
-        let entry = json!({"hooks":[{"type":"command","command":installation.spec.handler.executable,"args":installation.spec.handler.arguments,"timeout":installation.spec.timeout_seconds}]});
+        let entry = if installation.spec.agent_key == "cursor" {
+            json!({"command":super::cursor::command(&installation.spec.handler)?,"timeout":installation.spec.timeout_seconds,"failClosed":true})
+        } else {
+            json!({"hooks":[{"type":"command","command":installation.spec.handler.executable,"args":installation.spec.handler.arguments,"timeout":installation.spec.timeout_seconds}]})
+        };
         if entries.iter().any(|existing| existing == &entry) {
             return Err(IntegrationError::Conflict(format!(
                 "unowned identical {event} hook already exists"
@@ -685,9 +717,17 @@ fn add_owned(
         installation,
         hooks_existed,
         owned,
+        inserted_version,
     })
 }
 fn remove_owned(document: &mut Value, receipt: &Receipt) -> Result<(), IntegrationError> {
+    if receipt.installation.spec.agent_key == "cursor"
+        && document.get("version").and_then(Value::as_u64) != Some(1)
+    {
+        return Err(IntegrationError::Conflict(
+            "Cursor config version changed".into(),
+        ));
+    }
     let hooks = document
         .get_mut("hooks")
         .and_then(Value::as_object_mut)
@@ -715,6 +755,10 @@ fn remove_owned(document: &mut Value, receipt: &Receipt) -> Result<(), Integrati
     }
     if hooks.is_empty() && !receipt.hooks_existed {
         document.as_object_mut().expect("object").remove("hooks");
+    }
+    // Preserve the required version if another application's hooks remain.
+    if receipt.inserted_version && document.get("hooks").is_none() {
+        document.as_object_mut().expect("object").remove("version");
     }
     Ok(())
 }

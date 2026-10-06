@@ -194,7 +194,12 @@ impl IntegrationService {
                 "decision expired before delivery".into(),
             ));
         }
-        let stdout = encode(request.event, decision.as_ref())?.to_string();
+        let stdout = if installation.spec.agent_key == "cursor" {
+            super::cursor::encode(request.event, decision.as_ref())?
+        } else {
+            encode(request.event, decision.as_ref())?
+        }
+        .to_string();
         Ok(HookResponse {
             stdout,
             stderr: String::new(),
@@ -297,6 +302,9 @@ fn journal_copy(request: &HookRequest) -> HookRequest {
 }
 
 fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, IntegrationError> {
+    if installation.spec.agent_key == "cursor" {
+        return super::cursor::decode(installation, input);
+    }
     if installation.spec.agent_key != "claude" {
         return Err(IntegrationError::Unsupported("native hook adapter".into()));
     }
@@ -390,12 +398,16 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
     })
 }
 
-fn required_string(value: &Value, key: &str, max: usize) -> Result<String, IntegrationError> {
+pub(super) fn required_string(
+    value: &Value,
+    key: &str,
+    max: usize,
+) -> Result<String, IntegrationError> {
     optional_string(value, key, max)?
         .filter(|v| !v.trim().is_empty())
         .ok_or_else(|| IntegrationError::Invalid(format!("missing {key}")))
 }
-fn optional_string(
+pub(super) fn optional_string(
     value: &Value,
     key: &str,
     max: usize,

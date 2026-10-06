@@ -24,7 +24,7 @@ responses, repeated decisions, timeout/error/panic blocking, malformed requests,
 append-only cursors and omission of tool contents from replay. Existing MCP and
 managed gateway tests establish compatibility within their tested scope.
 
-The current focused integration suite has 39 passing tests on Windows. Binding
+The Claude/shared integration milestone had 39 passing tests on Windows. Binding
 tests include reopen/idempotency, filtering interleaved sessions, empty advancing
 pages, end observation, replacement under a reused native ID, unchanged-settings
 reinstallation, detach without hook removal, schema-2 upgrade, and rejecting Allow
@@ -152,8 +152,9 @@ or Codex does not implement their external adapters or qualify native behavior.
 - Application callbacks must cooperate with cancellation. Filesystem and SQLite
   I/O remain subject to operating system latency; a universal hard deadline is not
   established by an async timeout.
-- Cursor, Codex and Pi external adapters return Unsupported. Their required native
-  capabilities, versions and platforms still need implementation and live evidence.
+- Cursor now has the initial subset described below. Codex and Pi external adapters
+  return Unsupported. Required native capabilities, versions and platforms still
+  need implementation and live evidence.
 - The binding is based on installation revision plus observed SessionStart cursor.
   It detects recorded replacement/resume boundaries, but cannot identify an old
   delayed hook if the native payload reuses an ID without an invocation epoch.
@@ -168,3 +169,40 @@ or Codex does not implement their external adapters or qualify native behavior.
 
 Protocol references: [Claude hooks](https://code.claude.com/docs/en/hooks) and
 [Claude environment variables](https://code.claude.com/docs/en/env-vars).
+
+## Cursor adapter, 2026-10-06
+
+Reuses the existing owned installer, recoverable journal, application callback
+and observation binding. The six supported events are SessionStarted,
+InputSubmitted, BeforeTool, AfterTool, ToolFailed and SessionEnded. Completion
+requests reject installation explicitly; the required final Codelaya workflow
+remains incomplete. The official [Cursor hooks reference](https://cursor.com/docs/hooks)
+and the installed Windows CLI 2026.09.02-c22c1a3 informed this mapping.
+
+Six Cursor tests cover config ownership/version drift, decision encodings,
+bindings and privacy, invalid/foreign/multiroot input, capability limits, and
+command serialization. One of them compiles a tiny native Rust fixture and runs
+the actual Windows PowerShell command: empty and quoted arguments, punctuation,
+Unicode paths, UTF-8 stdin/stdout/stderr, and exit 23 are preserved. This regression
+caught and fixed both inherited-stdin assumptions and PowerShell task-result
+pollution of stdout. Test compilation requires the development Rust compiler.
+This test proves the process bridge, not a live Cursor decision.
+
+All 45 focused integration tests and SDK library/example Clippy passed on Windows.
+Two bounded native Cursor print attempts returned `BLOCKED`, exited 0 and created
+no target file, but neither produced a native SDK observation. A disposable input
+recorder installed for the second attempt was not invoked. The attempts therefore
+do not qualify native hooks or identify whether the cause is native command
+dispatch, configuration loading or ordinary tool permissions. The fixture used a
+workspace path containing spaces, an apostrophe, dollar sign, semicolon and Unicode.
+Native execution remains Unknown; diagnose the installed Cursor dispatch boundary
+before promoting this adapter. No setting or capability is relaxed to bypass it.
+
+Current SDK reports four supported local contracts, two implemented but Unknown
+native requirements, and eight Unsupported requirements for Cursor. Stop is a
+follow-up mechanism; no forced completion gate or accepted completion is inferred.
+SessionStart is asynchronous and can arrive after input; consumers must reject
+admission without current start evidence and retry explicitly. Cloud and multiroot
+sessions, subagent attribution, effective settings, native deadlines, tool-intent
+normalization, completion/failure observation and existing-session messaging remain
+unqualified or unimplemented.
