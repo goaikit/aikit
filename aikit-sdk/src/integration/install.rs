@@ -27,6 +27,9 @@ pub enum IntegrationError {
     Conflict(String),
     NotFound,
     RecoveryRequired(String),
+    StaleSession,
+    Detached,
+    SessionEnded,
 }
 impl std::fmt::Display for IntegrationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -43,6 +46,11 @@ impl std::fmt::Display for IntegrationError {
                 f,
                 "resume prepared installation plan {id} before making another change"
             ),
+            Self::StaleSession => {
+                write!(f, "session observation or installation has been replaced")
+            }
+            Self::Detached => write!(f, "application binding is detached"),
+            Self::SessionEnded => write!(f, "native session end was observed"),
         }
     }
 }
@@ -200,17 +208,29 @@ impl IntegrationService {
         };
         let connection = service.connection()?;
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 2 {
+        if version > 3 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if version < 2 {
+        if version < 3 {
             let _lock = service.state_lock()?;
-            connection.execute_batch("BEGIN IMMEDIATE;
+            // Recheck under the migration lock: another opener may have migrated.
+            let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
+            if version > 3 {
+                return Err(IntegrationError::Invalid("newer integration schema".into()));
+            }
+            if version < 3 {
+                connection.execute_batch("BEGIN IMMEDIATE;
             CREATE TABLE IF NOT EXISTS installations(id TEXT PRIMARY KEY, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS install_plans(id TEXT PRIMARY KEY, installation_id TEXT NOT NULL, phase TEXT NOT NULL, body TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS hook_invocations(sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, installation_id TEXT NOT NULL, session_id TEXT NOT NULL, body TEXT NOT NULL, decision TEXT);
             CREATE INDEX IF NOT EXISTS hooks_by_installation ON hook_invocations(installation_id,sequence);
-            PRAGMA user_version=2; COMMIT;")?;
+            ALTER TABLE hook_invocations ADD COLUMN installation_revision TEXT;
+            CREATE TABLE installation_revisions(installation_id TEXT PRIMARY KEY, revision TEXT NOT NULL);
+            INSERT INTO installation_revisions SELECT id,lower(hex(randomblob(16))) FROM installations;
+            CREATE TABLE session_bindings(id TEXT PRIMARY KEY, reference TEXT NOT NULL, detached INTEGER NOT NULL DEFAULT 0);
+            CREATE UNIQUE INDEX active_session_binding ON session_bindings(reference) WHERE detached=0;
+            PRAGMA user_version=3; COMMIT;")?;
+            }
         }
         Ok(service)
     }
@@ -401,9 +421,14 @@ impl IntegrationService {
         let tx = connection.transaction()?;
         if let Some(receipt) = &pending.next_receipt {
             tx.execute("INSERT INTO installations VALUES (?1,?2) ON CONFLICT(id) DO UPDATE SET body=excluded.body", params![receipt.installation.id, serde_json::to_string(receipt)?])?;
+            tx.execute("INSERT INTO installation_revisions VALUES (?1,?2) ON CONFLICT(installation_id) DO UPDATE SET revision=excluded.revision", params![receipt.installation.id, plan_id])?;
         } else {
             tx.execute(
                 "DELETE FROM installations WHERE id=?1",
+                [&pending.preview.installation_id],
+            )?;
+            tx.execute(
+                "DELETE FROM installation_revisions WHERE installation_id=?1",
                 [&pending.preview.installation_id],
             )?;
         }

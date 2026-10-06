@@ -43,7 +43,8 @@ from each external hook invocation. User-started hooks use the separate
 The additive `integration` feature exposes `IntegrationService`, owned hook
 configuration and one `HookHandler::decide` callback. Construction never launches
 an agent. The current native adapter is Claude; other known catalog keys return
-`IntegrationError::Unsupported`. Session binding and message delivery are pending.
+`IntegrationError::Unsupported`. Existing-session observation bindings are available;
+native message delivery and contextual control qualification remain pending.
 
 ```rust,no_run
 use aikit_sdk::integration::{IntegrationService, InstallSpec};
@@ -85,6 +86,35 @@ a real executable, not a `.cmd`/`.bat` shim. The installer does not own global
 continuation-limit settings or override managed settings. Effective settings and
 native deadline behavior require qualification for the deployed version and mode.
 
+### Existing-session observation binding
+
+Resolve `observed_session(installation_id, native_session_id)` after a SessionStart
+hook, then call `bind_existing(&reference)`. Repeating the bind returns the same
+active binding ID. `binding(id)` reopens it after application restart. The handle
+exposes `reference`, `status`, `events(after, limit)` and idempotent `detach`.
+
+The reference contains the installation revision and the recorded start cursor.
+A later SessionStart for the same native ID invalidates it, including conservative
+invalidation on resume/compaction. Install/update/removal also invalidates existing
+bindings, even when the configuration bytes happen to be identical. Status is
+Observed, Ended, Stale or Detached. Ended observations remain readable; Ended is
+not proof of a successful Turn completion. Reopening never reactivates a detached
+handle. Detach does not remove hooks, delete history or signal a native process.
+Dropping a Rust handle releases its borrow; there is no native resource to stop.
+
+Session pages reuse installation cursors. The limit bounds scanned records: a
+page can be empty while advancing past another session's events. Keep reading
+until the cursor stops advancing. Stale/detached handles return typed errors.
+Schema 3 retains older events with an absent installation revision; they cannot
+establish a new binding until a new SessionStart is observed.
+
+This identity is supported by local journal evidence, not a native process nonce.
+If a provider reuses a session ID without an observed start, or delivers an old
+hook after a replacement starts, its current payload may not identify the original
+invocation. This limitation still needs native qualification before control or
+message delivery can be advertised. Binding alone does not provide exclusive
+workspace admission, liveness, a transport or permission to send a message.
+
 ### Library-only example
 
 Build `cargo build -p aikit-sdk --no-default-features --features integration --example integration_hooks`.
@@ -97,13 +127,17 @@ integration_hooks remove-plan STATE INSTALLATION_ID
 integration_hooks status STATE INSTALLATION_ID
 integration_hooks events STATE INSTALLATION_ID
 integration_hooks hook STATE WORKSPACE BLOCKS
+integration_hooks bind STATE INSTALLATION_ID NATIVE_SESSION_ID
+integration_hooks binding-status STATE BINDING_ID
+integration_hooks detach STATE BINDING_ID
 ```
 
 For this example, set application ID `sdk-example`, agent key `claude`, executable
 to the absolute built example path, and arguments to `hook`, absolute state path,
 absolute workspace path, and a block count. Register the events needed by the
-scenario. The example blocks the first BLOCKS completion proposals per native
-session, then allows a nonempty final answer. This is a qualification gate, not
+scenario, including SessionStarted. The example binds to that observed start and
+blocks the first BLOCKS completion proposals in its session-scoped replay, then
+allows a nonempty final answer. This is a qualification gate, not
 a review policy. An external caller starts the native agent.
 
 Native qualification and its limits are recorded in

@@ -78,6 +78,9 @@ impl HookResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookRecord {
     pub cursor: u64,
+    /// Absent on historical rows written before schema 3. Such rows remain
+    /// readable but cannot establish a binding to the current installation.
+    pub installation_revision: Option<String>,
     pub request: HookRequest,
     pub decision: Option<Decision>,
     /// Tool arguments/results are available to the callback but omitted from
@@ -113,6 +116,7 @@ impl IntegrationService {
     ) -> Result<HookResponse, IntegrationError> {
         let started = Instant::now();
         let installation = self.installed(installation_id)?;
+        let installation_revision = self.installation_revision(installation_id)?;
         let request = decode(&installation, input)?;
         let journal_body = serde_json::to_string(&journal_copy(&request))?;
         // Reserve response/commit time within the configured native process limit.
@@ -121,7 +125,7 @@ impl IntegrationService {
         {
             let connection = self.connection()?;
             connection.busy_timeout(Duration::from_millis(100))?;
-            connection.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body) VALUES (?1,?2,?3,?4)", params![request.id, installation_id, request.session_id, journal_body])?;
+            connection.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,?3,?4,?5)", params![request.id, installation_id, request.session_id, journal_body, installation_revision])?;
         }
         let decision = if is_decision(request.event) {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -162,7 +166,9 @@ impl IntegrationService {
         } else {
             None
         };
-        if self.installed(installation_id)? != installation {
+        if self.installed(installation_id)? != installation
+            || self.installation_revision(installation_id)? != installation_revision
+        {
             return Err(IntegrationError::Conflict(
                 "installation changed during hook validation".into(),
             ));
@@ -172,7 +178,7 @@ impl IntegrationService {
             connection.busy_timeout(Duration::from_millis(100))?;
             // Append, never update an already visible cursor: a consumer may have
             // checkpointed the observation while the callback was still running.
-            connection.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,decision) VALUES (?1,?2,?3,?4,?5)", params![format!("{}:decision", request.id), installation_id, request.session_id, journal_body, serde_json::to_string(decision)?])?;
+            connection.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,decision,installation_revision) VALUES (?1,?2,?3,?4,?5,?6)", params![format!("{}:decision", request.id), installation_id, request.session_id, journal_body, serde_json::to_string(decision)?, installation_revision])?;
         }
         if matches!(decision, Some(Decision::Allow)) && Instant::now() >= deadline {
             return Err(IntegrationError::Invalid(
@@ -219,21 +225,23 @@ impl IntegrationService {
                 "event cursor is ahead of this journal".into(),
             ));
         }
-        let mut query = connection.prepare("SELECT sequence,body,decision FROM hook_invocations WHERE installation_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3")?;
+        let mut query = connection.prepare("SELECT sequence,body,decision,installation_revision FROM hook_invocations WHERE installation_id=?1 AND sequence>?2 ORDER BY sequence LIMIT ?3")?;
         let rows = query.query_map(params![installation_id, after as i64, limit], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
             ))
         })?;
         let records = rows
             .map(|row| {
-                let (cursor, body, decision) = row?;
+                let (cursor, body, decision, installation_revision) = row?;
                 let request: HookRequest = serde_json::from_str(&body)?;
                 Ok(HookRecord {
                     cursor: u64::try_from(cursor)
                         .map_err(|_| IntegrationError::Invalid("negative event cursor".into()))?,
+                    installation_revision,
                     tool_payload_omitted: matches!(
                         request.payload,
                         AgentEventPayload::ToolUse { .. } | AgentEventPayload::ToolResult { .. }

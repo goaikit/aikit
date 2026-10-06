@@ -10,6 +10,7 @@ pub mod gateway_store;
 
 mod hooks;
 mod install;
+mod sessions;
 pub use hooks::{
     Decision, DecisionFuture, HandlerError, HookHandler, HookPage, HookRecord, HookRequest,
     HookResponse,
@@ -18,3 +19,4 @@ pub use install::{
     HookCommand, HookEvent, InstallPlan, InstallSpec, Installation, InstallationStatus,
     IntegrationError, IntegrationService,
 };
+pub use sessions::{SessionBinding, SessionRef, SessionStatus};

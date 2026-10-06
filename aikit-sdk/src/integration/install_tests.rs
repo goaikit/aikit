@@ -299,7 +299,7 @@ fn schema_upgrade_preserves_receipts_and_completed_plans_discard_config_bodies()
     assert!(pending.next_receipt.is_none());
     // Model the previous schema, which has install records but no hook journal.
     connection
-        .execute_batch("DROP TABLE hook_invocations; PRAGMA user_version=1;")
+        .execute_batch("DROP TABLE hook_invocations; DROP TABLE session_bindings; DROP TABLE installation_revisions; PRAGMA user_version=1;")
         .unwrap();
     drop(connection);
     let upgraded = IntegrationService::open(&f.service.state).unwrap();

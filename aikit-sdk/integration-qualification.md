@@ -1,8 +1,9 @@
 # External hook integration qualification
 
-Evidence recorded 2026-10-06. This covers the SDK installation and hook slice;
-existing-session binding, message delivery and application review policy remain
-unimplemented in this slice. No agent is launched by `IntegrationService`.
+Evidence recorded 2026-10-06. This covers the SDK installation, hook and existing
+session observation-binding slice. Message delivery, native process-identity
+qualification and application review policy remain pending. No agent is launched
+by `IntegrationService`.
 
 ## Local mechanical checks
 
@@ -23,6 +24,12 @@ responses, repeated decisions, timeout/error/panic blocking, malformed requests,
 append-only cursors and omission of tool contents from replay. Existing MCP and
 managed gateway tests establish compatibility within their tested scope.
 
+The current focused integration suite has 29 passing tests on Windows. Binding
+tests include reopen/idempotency, filtering interleaved sessions, empty advancing
+pages, end observation, replacement under a reused native ID, unchanged-settings
+reinstallation, detach without hook removal, schema-2 upgrade, and rejecting Allow
+when the installation revision changes during the callback. SDK Clippy also passes.
+
 ## Live scenario
 
 | Property | Observed configuration/result |
@@ -37,7 +44,11 @@ managed gateway tests establish compatibility within their tested scope.
 | Journal | Eleven completion observations, ten Block decisions, one Allow decision |
 | Tool observations | Zero |
 
-The scenario passed twice, including after rebuilding the final hook implementation.
+The initial hook scenario passed twice. A third run used the schema-3 implementation
+and the real `SessionBinding` inside the callback. It produced the same counts and
+result. An external example caller reopened the active binding during the run and
+observed status Observed; after SessionEnd it reported Ended. All 26 records for
+that run carried the current installation revision.
 Count observations separately from decisions, and filter by the native session ID
 when a state directory contains earlier runs. The example's prepared decision
 records alone do not prove native action: the outer native process result and
@@ -75,8 +86,15 @@ repeated hook invocations establish this scenario's result.
   established by an async timeout.
 - Cursor, Codex and Pi external adapters return Unsupported. Their required native
   capabilities, versions and platforms still need implementation and live evidence.
-- Safe existing-session binding/detach and native messaging/reconciliation are
-  pending. Managed gateway transports cannot substitute for user-started topology.
+- The binding is based on installation revision plus observed SessionStart cursor.
+  It detects recorded replacement/resume boundaries, but cannot identify an old
+  delayed hook if the native payload reuses an ID without an invocation epoch.
+  Process liveness, exclusive workspace admission and control capability are not
+  established by a binding. Native messaging/reconciliation remain pending.
+- Detach revokes the persisted application handle and sends no provider command.
+  Mechanical tests preserve installed config/history and continue processing hooks
+  after detach. Live interactive detach/process-identity qualification is pending.
+  Managed gateway transports cannot substitute for user-started topology.
 - Removal does not stop an agent. SessionEnd is an observation, not accepted Turn
   completion. Tool argument/result contents are deliberately absent from replay.
 

@@ -21,14 +21,20 @@ impl HookHandler for ExampleGate<'_> {
             }
             let mut cursor = 0;
             let mut proposals = 0;
+            let reference = self
+                .service
+                .observed_session(&request.installation_id, &request.session_id)
+                .map_err(|e| aikit_sdk::integration::HandlerError(e.to_string()))?;
+            let binding = self
+                .service
+                .bind_existing(&reference)
+                .map_err(|e| aikit_sdk::integration::HandlerError(e.to_string()))?;
             loop {
-                let page = self
-                    .service
-                    .events(&request.installation_id, cursor, 100)
+                let page = binding
+                    .events(cursor, 100)
                     .map_err(|e| aikit_sdk::integration::HandlerError(e.to_string()))?;
                 for record in &page.records {
-                    if record.request.session_id == request.session_id
-                        && record.request.event == HookEvent::CompletionProposed
+                    if record.request.event == HookEvent::CompletionProposed
                         && record.decision.is_none()
                     {
                         proposals += 1;
@@ -77,7 +83,7 @@ async fn main() {
 
 async fn run(args: &[String]) -> anyhow::Result<i32> {
     if args.len() < 2 {
-        anyhow::bail!("usage: integration_hooks <plan|apply|remove-plan|status|events|hook> STATE [ID | WORKSPACE BLOCKS]");
+        anyhow::bail!("usage: integration_hooks <plan|apply|remove-plan|status|events|hook|bind|binding-status|detach> STATE [ID | WORKSPACE BLOCKS | INSTALLATION_ID SESSION_ID]");
     }
     let service = IntegrationService::open(&args[1])?;
     if args[0] == "hook" {
@@ -144,6 +150,32 @@ async fn run(args: &[String]) -> anyhow::Result<i32> {
                 cursor = page.next_cursor;
             }
             json!({"records": records, "next_cursor":cursor})
+        }
+        "bind" => {
+            let reference = service.observed_session(
+                args.get(2)
+                    .ok_or_else(|| anyhow::anyhow!("missing installation ID"))?,
+                args.get(3)
+                    .ok_or_else(|| anyhow::anyhow!("missing native session ID"))?,
+            )?;
+            let binding = service.bind_existing(&reference)?;
+            json!({"id":binding.id(), "reference":binding.reference(), "status":binding.status()?})
+        }
+        "binding-status" => serde_json::to_value(
+            service
+                .binding(
+                    args.get(2)
+                        .ok_or_else(|| anyhow::anyhow!("missing binding ID"))?,
+                )?
+                .status()?,
+        )?,
+        "detach" => {
+            let binding = service.binding(
+                args.get(2)
+                    .ok_or_else(|| anyhow::anyhow!("missing binding ID"))?,
+            )?;
+            binding.detach()?;
+            serde_json::to_value(binding.status()?)?
         }
         _ => anyhow::bail!("unknown operation"),
     };

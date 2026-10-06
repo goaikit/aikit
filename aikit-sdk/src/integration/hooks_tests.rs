@@ -293,3 +293,222 @@ async fn session_end_is_observation_not_successful_turn_completion() {
         AgentEventPayload::Terminal { .. }
     ));
 }
+
+#[tokio::test]
+async fn binding_replay_is_scoped_and_detach_leaves_native_hooks_and_history_intact() {
+    use crate::integration::SessionStatus;
+    let f = Fixture::new(10);
+    assert!(matches!(
+        f.service.observed_session(&f.id, "native-session"),
+        Err(IntegrationError::NotFound)
+    ));
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    assert_eq!(binding.status().unwrap(), SessionStatus::Observed);
+    assert_eq!(
+        f.service.bind_existing(&reference).unwrap().id(),
+        binding.id()
+    );
+    let reopen = IntegrationService::open(f._dir.path().join("state")).unwrap();
+    let reopened = reopen.binding(binding.id()).unwrap();
+    let mut other = f.input("SessionStart");
+    other["session_id"] = json!("another-session");
+    f.service
+        .handle_hook(&f.id, other.to_string().as_bytes(), &Never)
+        .await;
+    let first = reopened.events(0, 1).unwrap();
+    assert_eq!(first.records.len(), 1);
+    let skipped = reopened.events(first.next_cursor, 1).unwrap();
+    assert!(skipped.records.is_empty());
+    assert!(skipped.next_cursor > first.next_cursor);
+    let config = std::fs::read(f.workspace.join(".claude/settings.local.json")).unwrap();
+    reopened.detach().unwrap();
+    reopened.detach().unwrap();
+    assert_eq!(binding.status().unwrap(), SessionStatus::Detached);
+    assert!(matches!(
+        binding.events(0, 10),
+        Err(IntegrationError::Detached)
+    ));
+    assert_eq!(
+        std::fs::read(f.workspace.join(".claude/settings.local.json")).unwrap(),
+        config
+    );
+    // The detached application subscription has no power to disable native hooks.
+    assert_eq!(
+        f.service
+            .handle_hook(
+                &f.id,
+                f.input("Stop").to_string().as_bytes(),
+                &Fixed(Decision::Allow)
+            )
+            .await
+            .exit_code,
+        0
+    );
+    assert_eq!(f.service.events(&f.id, 0, 10).unwrap().records.len(), 4);
+    assert_ne!(
+        f.service.bind_existing(&reference).unwrap().id(),
+        binding.id()
+    );
+}
+
+#[tokio::test]
+async fn ended_sessions_stay_readable_and_resuming_the_same_native_id_invalidates_old_bindings() {
+    use crate::integration::SessionStatus;
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    f.service
+        .handle_hook(&f.id, f.input("SessionEnd").to_string().as_bytes(), &Never)
+        .await;
+    assert_eq!(binding.status().unwrap(), SessionStatus::Ended);
+    assert_eq!(binding.events(0, 10).unwrap().records.len(), 2);
+    assert!(matches!(
+        f.service.bind_existing(&reference),
+        Err(IntegrationError::SessionEnded)
+    ));
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    assert_eq!(binding.status().unwrap(), SessionStatus::Stale);
+    assert!(matches!(
+        binding.events(0, 10),
+        Err(IntegrationError::StaleSession)
+    ));
+    let resumed = f.service.observed_session(&f.id, "native-session").unwrap();
+    assert_ne!(resumed.start_cursor, reference.start_cursor);
+    assert_eq!(
+        f.service
+            .bind_existing(&resumed)
+            .unwrap()
+            .events(0, 10)
+            .unwrap()
+            .records
+            .len(),
+        1
+    );
+    let mut forged = resumed.clone();
+    forged.native_session_id = "unobserved".into();
+    assert!(matches!(
+        f.service.bind_existing(&forged),
+        Err(IntegrationError::StaleSession)
+    ));
+}
+
+#[tokio::test]
+async fn reinstalling_identical_settings_requires_new_start_evidence_and_invalidates_bindings() {
+    use crate::integration::SessionStatus;
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let spec = f.service.installed(&f.id).unwrap().spec;
+    let remove = f.service.plan_remove(&f.id).unwrap();
+    f.service.apply_install(&remove.id).unwrap();
+    let install = f.service.plan_install(spec).unwrap();
+    f.service.apply_install(&install.id).unwrap();
+    assert_eq!(binding.status().unwrap(), SessionStatus::Stale);
+    assert!(matches!(
+        f.service.observed_session(&f.id, "native-session"),
+        Err(IntegrationError::NotFound)
+    ));
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let new = f.service.observed_session(&f.id, "native-session").unwrap();
+    assert_ne!(new.installation_revision, reference.installation_revision);
+}
+
+#[tokio::test]
+async fn migration_keeps_old_events_readable_without_inventing_current_session_identity() {
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let connection = f.service.connection().unwrap();
+    connection.execute_batch("ALTER TABLE hook_invocations DROP COLUMN installation_revision; DROP TABLE session_bindings; DROP TABLE installation_revisions; PRAGMA user_version=2;").unwrap();
+    drop(connection);
+    let upgraded = IntegrationService::open(f._dir.path().join("state")).unwrap();
+    let events = upgraded.events(&f.id, 0, 10).unwrap();
+    assert_eq!(events.records.len(), 1);
+    assert!(events.records[0].installation_revision.is_none());
+    assert!(matches!(
+        upgraded.observed_session(&f.id, "native-session"),
+        Err(IntegrationError::NotFound)
+    ));
+    assert_eq!(
+        upgraded
+            .handle_hook(
+                &f.id,
+                f.input("SessionStart").to_string().as_bytes(),
+                &Never
+            )
+            .await
+            .exit_code,
+        0
+    );
+    let reference = upgraded.observed_session(&f.id, "native-session").unwrap();
+    assert!(upgraded.bind_existing(&reference).is_ok());
+}
+
+struct ReconfigureDuringDecision<'a>(&'a IntegrationService);
+impl HookHandler for ReconfigureDuringDecision<'_> {
+    fn decide<'a>(&'a self, request: &'a HookRequest) -> DecisionFuture<'a> {
+        Box::pin(async move {
+            let spec = self.0.installed(&request.installation_id).unwrap().spec;
+            let plan = self.0.plan_install(spec).unwrap();
+            self.0.apply_install(&plan.id).unwrap();
+            Ok(Decision::Allow)
+        })
+    }
+}
+
+#[tokio::test]
+async fn reapplying_identical_hook_settings_during_a_callback_cannot_deliver_the_old_allow() {
+    let f = Fixture::new(10);
+    let response = f
+        .service
+        .handle_hook(
+            &f.id,
+            f.input("Stop").to_string().as_bytes(),
+            &ReconfigureDuringDecision(&f.service),
+        )
+        .await;
+    assert_eq!(response.exit_code, 2);
+    assert!(response.stdout.is_empty());
+    let journal = f.service.events(&f.id, 0, 10).unwrap();
+    assert_eq!(journal.records.len(), 1);
+    assert!(journal.records[0].decision.is_none());
+}
