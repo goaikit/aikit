@@ -408,13 +408,12 @@ fn read_or_empty_json_object(path: &Path) -> Result<Value, McpDeployError> {
         return Ok(json!({}));
     }
     let raw = fs::read_to_string(path)?;
-    let v: Value = serde_json::from_str(&raw)?;
-    if !v.is_object() {
-        return Err(McpDeployError::InvalidConfig(
+    crate::config_json::parse_object(raw.as_bytes()).map_err(|error| match error {
+        crate::config_json::JsonObjectError::Json(error) => McpDeployError::Json(error),
+        crate::config_json::JsonObjectError::NotObject => McpDeployError::InvalidConfig(
             "config file must contain a JSON object at the root".to_string(),
-        ));
-    }
-    Ok(v)
+        ),
+    })
 }
 
 fn merge_json_bucket(

@@ -3,6 +3,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod config_json;
+
 #[cfg(feature = "integration")]
 pub mod integration;
 

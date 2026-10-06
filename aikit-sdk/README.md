@@ -35,8 +35,79 @@ re-export. Session payloads and command receipts remain the canonical
 
 Opening a persistent store acquires exclusive host ownership and recovers
 interrupted managed sessions and ambiguous commands. Do not open it independently
-from each external hook invocation. This extraction does not implement attachment
-to user-started agents, hook installation or a general integration service.
+from each external hook invocation. User-started hooks use the separate
+`IntegrationService` below, which does not open the managed gateway store.
+
+## User-started agent hooks (integration feature)
+
+The additive `integration` feature exposes `IntegrationService`, owned hook
+configuration and one `HookHandler::decide` callback. Construction never launches
+an agent. The current native adapter is Claude; other known catalog keys return
+`IntegrationError::Unsupported`. Session binding and message delivery are pending.
+
+```rust,no_run
+use aikit_sdk::integration::{IntegrationService, InstallSpec};
+# fn example(spec: InstallSpec) -> Result<(), Box<dyn std::error::Error>> {
+let service = IntegrationService::open("/private/application-state")?;
+let plan = service.plan_install(spec)?; // inspect paths, events and fingerprints
+let status = service.apply_install(&plan.id)?;
+let removal = service.plan_remove(&plan.installation_id)?;
+// Applying the removal is a separate explicit application action:
+// service.apply_install(&removal.id)?;
+# Ok(())
+# }
+```
+
+Keep state outside the reviewed worktree and private to the owner. Unix state
+directories require mode 0700; Windows uses the caller's inherited ACL. Installation
+receipts identify exactly owned entries. Stale plans, changed owned hooks and
+ambiguous recovery refuse mutation. Unrelated hooks/settings survive update/removal.
+Retry the same plan ID after interruption; do not synthesize a replacement plan.
+Pending journals may contain existing configuration values; completed plans discard
+their config bodies. `Configured` means matching config, not qualified enforcement.
+
+`handle_hook(installation_id, input, handler).await` consumes bounded native bytes
+and returns stdout, stderr and an exit code. The provider comes from the receipt.
+The thin executable must honor all three response fields. `HookHandler` receives
+input admission, before-tool and completion proposals; observations are journaled
+without calling a decision handler. Callbacks must cooperate with cancellation.
+Errors, timeouts and panics block. Allow preserves native permission checks.
+
+`events(installation_id, after, limit)` returns immutable observation and prepared
+decision rows with separate cursors. Neither a saved Allow nor SessionEnd proves
+successful Turn completion. Tool arguments/results reach the callback but are
+omitted from replay; persist necessary derived application evidence during the
+callback. Records have `tool_payload_omitted` to make this visible. Final answers
+are retained. The current schema retains events without pruning.
+
+Installation uses Claude exec-form command plus argument vectors. Windows needs
+a real executable, not a `.cmd`/`.bat` shim. The installer does not own global
+continuation-limit settings or override managed settings. Effective settings and
+native deadline behavior require qualification for the deployed version and mode.
+
+### Library-only example
+
+Build `cargo build -p aikit-sdk --no-default-features --features integration --example integration_hooks`.
+The resulting executable offers these operations:
+
+```text
+integration_hooks plan STATE                   # InstallSpec JSON on stdin
+integration_hooks apply STATE PLAN_ID
+integration_hooks remove-plan STATE INSTALLATION_ID
+integration_hooks status STATE INSTALLATION_ID
+integration_hooks events STATE INSTALLATION_ID
+integration_hooks hook STATE WORKSPACE BLOCKS
+```
+
+For this example, set application ID `sdk-example`, agent key `claude`, executable
+to the absolute built example path, and arguments to `hook`, absolute state path,
+absolute workspace path, and a block count. Register the events needed by the
+scenario. The example blocks the first BLOCKS completion proposals per native
+session, then allows a nonempty final answer. This is a qualification gate, not
+a review policy. An external caller starts the native agent.
+
+Native qualification and its limits are recorded in
+[`integration-qualification.md`](integration-qualification.md).
 
 ## Quick start
 
