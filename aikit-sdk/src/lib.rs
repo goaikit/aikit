@@ -3,6 +3,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "integration")]
+pub mod integration;
+
 /// Represents a deploy concept that an agent may or may not support.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeployConcept {

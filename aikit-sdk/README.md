@@ -25,6 +25,19 @@ Or from this workspace:
 aikit-sdk = { path = "../aikit-sdk" }
 ```
 
+## Managed gateway persistence
+
+Enable the additive `integration` feature to reuse
+`aikit_sdk::integration::gateway_store::Store`. This is the existing managed
+gateway SQLite implementation, shared with the CLI through its compatibility
+re-export. Session payloads and command receipts remain the canonical
+`runner::session` types; existing storage/recovery behavior is preserved.
+
+Opening a persistent store acquires exclusive host ownership and recovers
+interrupted managed sessions and ambiguous commands. Do not open it independently
+from each external hook invocation. This extraction does not implement attachment
+to user-started agents, hook installation or a general integration service.
+
 ## Quick start
 
 ```rust
