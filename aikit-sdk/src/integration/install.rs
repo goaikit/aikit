@@ -518,7 +518,7 @@ fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
     if crate::agent(&spec.agent_key).is_none() {
         return Err(IntegrationError::UnknownAgent(spec.agent_key.clone()));
     }
-    if !matches!(spec.agent_key.as_str(), "claude" | "cursor") {
+    if !matches!(spec.agent_key.as_str(), "claude" | "cursor" | "codex") {
         return Err(IntegrationError::Unsupported(format!(
             "owned hooks for {} are not implemented",
             spec.agent_key
@@ -585,6 +585,16 @@ fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
             super::cursor::event_name(*event)?;
         }
     }
+    if spec.agent_key == "codex" {
+        for event in &spec.events {
+            super::codex::event_name(*event)?;
+        }
+        if spec.events.contains(&HookEvent::SessionEnded) && spec.timeout_seconds > 3 {
+            return Err(IntegrationError::Unsupported(
+                "Codex SessionEnd requires a timeout of at most 3 seconds".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -592,6 +602,7 @@ fn config_path(spec: &InstallSpec) -> Result<PathBuf, IntegrationError> {
     match spec.agent_key.as_str() {
         "claude" => Ok(spec.workspace.join(".claude").join("settings.local.json")),
         "cursor" => Ok(spec.workspace.join(".cursor").join("hooks.json")),
+        "codex" => Ok(spec.workspace.join(".codex").join("hooks.json")),
         _ => Err(IntegrationError::Unsupported(
             "hook configuration layout".into(),
         )),
@@ -687,6 +698,8 @@ fn add_owned(
     for event in &installation.spec.events {
         let event = if installation.spec.agent_key == "cursor" {
             super::cursor::event_name(*event)?
+        } else if installation.spec.agent_key == "codex" {
+            super::codex::event_name(*event)?
         } else {
             event.claude_name()
         };
@@ -697,7 +710,9 @@ fn add_owned(
             .as_array_mut()
             .ok_or_else(|| IntegrationError::Invalid(format!("{event} hooks must be an array")))?;
         let entry = if installation.spec.agent_key == "cursor" {
-            json!({"command":super::cursor::command(&installation.spec.handler)?,"timeout":installation.spec.timeout_seconds,"failClosed":true})
+            json!({"command":super::command::command(&installation.spec.handler)?,"timeout":installation.spec.timeout_seconds,"failClosed":true})
+        } else if installation.spec.agent_key == "codex" {
+            json!({"hooks":[{"type":"command","command":super::command::command(&installation.spec.handler)?,"timeout":installation.spec.timeout_seconds}]})
         } else {
             json!({"hooks":[{"type":"command","command":installation.spec.handler.executable,"args":installation.spec.handler.arguments,"timeout":installation.spec.timeout_seconds}]})
         };

@@ -9,6 +9,8 @@
 pub mod gateway_store;
 
 mod capabilities;
+mod codex;
+mod command;
 mod cursor;
 mod hooks;
 mod install;

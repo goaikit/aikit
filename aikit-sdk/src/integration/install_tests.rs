@@ -244,7 +244,7 @@ fn malformed_disabled_and_non_object_configs_are_rejected_without_replacement() 
 #[test]
 fn unsupported_provider_unknown_catalog_key_and_expanding_arguments_are_explicit() {
     let f = Fixture::new();
-    for key in ["cursor", "codex", "pi"] {
+    for key in ["cursor", "pi"] {
         let mut spec = f.spec.clone();
         spec.agent_key = key.into();
         assert!(matches!(

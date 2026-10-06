@@ -266,8 +266,8 @@ impl IntegrationService {
                         .map_err(|_| IntegrationError::Invalid("negative event cursor".into()))?,
                     installation_revision,
                     tool_payload_omitted: matches!(
-                        request.payload,
-                        AgentEventPayload::ToolUse { .. } | AgentEventPayload::ToolResult { .. }
+                        request.event,
+                        HookEvent::BeforeTool | HookEvent::AfterTool | HookEvent::ToolFailed
                     ),
                     request,
                     decision: decision
@@ -302,6 +302,9 @@ fn journal_copy(request: &HookRequest) -> HookRequest {
 }
 
 fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, IntegrationError> {
+    if installation.spec.agent_key == "codex" {
+        return super::codex::decode(installation, input);
+    }
     if installation.spec.agent_key == "cursor" {
         return super::cursor::decode(installation, input);
     }
@@ -420,6 +423,8 @@ pub(super) fn optional_string(
 }
 
 fn encode(event: HookEvent, decision: Option<&Decision>) -> Result<Value, IntegrationError> {
+    // Claude and Codex share these response shapes. Empty Allow leaves native
+    // permissions intact; Block never sets continue:false on a Stop proposal.
     match decision {
         None | Some(Decision::Allow) => Ok(json!({})), // Never bypass native permission checks.
         Some(Decision::Block { reason }) => match event {

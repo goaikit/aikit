@@ -170,6 +170,42 @@ or Codex does not implement their external adapters or qualify native behavior.
 Protocol references: [Claude hooks](https://code.claude.com/docs/en/hooks) and
 [Claude environment variables](https://code.claude.com/docs/en/env-vars).
 
+## Codex adapter, 2026-10-06
+
+The initial adapter uses the existing installer, journal, observation bindings,
+decision encoder and extracted command-string transport. Its six events cover
+session start/end, prompt admission, pre/post tool observations and Stop proposals.
+Distinct tool/turn failure events remain unsupported; no Interrupt substitution
+is made. A requested unsupported event rejects the entire installation plan.
+SessionEnd requires a configured timeout of at most three seconds.
+
+The [official hook reference](https://learn.chatgpt.com/docs/hooks), retrieved on
+2026-10-06, informed the adapter. The installed CLI was previously identified as
+0.160.0; native execution of this adapter has not been qualified. Hook trust is
+an independent native requirement. No SDK operation writes native trust records,
+changes managed policy or bypasses hook review. Configured status cannot establish
+that the native process will invoke a hook.
+
+Five Codex fixtures cover owned configuration/removal and unchanged native config,
+unsupported events, timeout validation, permissions/Stop responses, repeated
+callbacks, nullable final messages, turn/workspace validation, outcome-unknown
+PostToolUse, replay privacy, binding/detach, drift and conservative capabilities.
+All 51 focused SDK integration tests pass on Windows, including the shared
+native executable argv/UTF-8/exit-code bridge regression. These are local fixture
+and process-transport results, not native Codex hook evidence.
+
+PostToolUse can follow a nonzero command exit. Its arbitrary tool_response is not
+a stable success discriminator: replay retains an AfterTool Hook with only
+call_id, tool_name and outcome=unknown. It never emits a fabricated successful
+ToolResult. Raw output is discarded. Tool-intent attribution remains Unknown.
+
+Required native qualification includes project and exact-hook trust, command
+dispatch, prompt/tool denial, repeated Stop continuation, final messages,
+compaction/restart boundaries, competing hooks, subagent identity and deadlines.
+Successful completion, general failed completion and existing-session messaging
+remain unavailable. Codelaya must retain its complete requirements and reject
+installation/admission until the missing contracts are provided and qualified.
+
 ## Cursor adapter, 2026-10-06
 
 Reuses the existing owned installer, recoverable journal, application callback

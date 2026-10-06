@@ -204,6 +204,12 @@ fn report(
                 PreToolDecision | HardHookDeadline => (true, Support::Unknown, "Cursor prompt/tool decisions use native responses and failClosed configuration. Installed-version execution, shell transport and deadlines remain unqualified."),
                 _ => (false, Support::Unsupported, "Cursor completion continuation, final-answer capture, accepted completion, native identity and messaging are not implemented by this adapter. Stop follow-up is not an enforced completion proposal."),
             }
+        } else if agent_key == "codex" {
+            match capability {
+                HookInstallation | ObservationBinding | DurableReplay | SafeDetach => (true, Support::Supported, "SDK owned project hooks, observation binding, journal and detach only. Codex must trust the project and exact hook definitions through its native review flow. SDK does not change trust or managed policy."),
+                PreToolDecision | CompletionDecision | RepeatedCompletionBlocking | FinalAnswerCapture | HardHookDeadline => (true, Support::Unknown, "Codex decision/final-message translation exists; native execution, trust, effective settings, competing Stop hooks, tool coverage and deadlines are unqualified. PostToolUse is an outcome-unknown observation, not success."),
+                _ => (false, Support::Unsupported, "Codex failed/accepted completion observations, native invocation identity and existing-session messaging are not implemented. Interrupt and SessionEnd do not prove successful or failed completion."),
+            }
         } else if agent_key != "claude" {
             (false, Support::Unsupported, "External hook adapter is not implemented for this catalog key; managed runner capabilities do not substitute.")
         } else {
@@ -374,19 +380,17 @@ mod tests {
     }
     #[test]
     fn missing_external_adapters_do_not_borrow_managed_capabilities() {
-        for agent in ["codex", "pi"] {
-            let report = report(
-                agent,
-                "windows",
-                "x86_64",
-                SessionMode::Print,
-                Ok("2.1.269 (Claude Code)".into()),
-            );
-            assert!(report
-                .assessments
-                .iter()
-                .all(|value| !value.implemented && value.support == Support::Unsupported));
-        }
+        let report = report(
+            "pi",
+            "windows",
+            "x86_64",
+            SessionMode::Print,
+            Ok("2.1.269 (Claude Code)".into()),
+        );
+        assert!(report
+            .assessments
+            .iter()
+            .all(|value| !value.implemented && value.support == Support::Unsupported));
     }
     #[test]
     fn absent_and_duplicate_requirements_fail_explicitly() {

@@ -73,7 +73,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let is_hook = matches!(
         args.first().map(String::as_str),
-        Some("hook" | "hook-cursor")
+        Some("hook" | "hook-cursor" | "hook-codex")
     );
     let result = run(&args).await;
     match result {
@@ -96,12 +96,14 @@ async fn run(args: &[String]) -> anyhow::Result<i32> {
         anyhow::bail!("usage: integration_hooks <capabilities|plan|apply|remove-plan|status|events|hook|bind|binding-status|detach> STATE [ID | WORKSPACE BLOCKS | INSTALLATION_ID SESSION_ID | AGENT_KEY MODE]");
     }
     let service = IntegrationService::open(&args[1])?;
-    if matches!(args[0].as_str(), "hook" | "hook-cursor") {
+    if matches!(args[0].as_str(), "hook" | "hook-cursor" | "hook-codex") {
         if !(args.len() == 4 || (args.len() == 5 && args[4] == "deny-tools")) {
             anyhow::bail!("hook requires STATE WORKSPACE BLOCKS [deny-tools]");
         }
         let agent_key = if args[0] == "hook-cursor" {
             "cursor"
+        } else if args[0] == "hook-codex" {
+            "codex"
         } else {
             "claude"
         };

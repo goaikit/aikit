@@ -42,8 +42,9 @@ from each external hook invocation. User-started hooks use the separate
 
 The additive `integration` feature exposes `IntegrationService`, owned hook
 configuration and one `HookHandler::decide` callback. Construction never launches
-an agent. Claude hooks and an initial Cursor prompt/tool/session subset are
-implemented. Other known catalog keys return `IntegrationError::Unsupported`.
+an agent. Claude hooks, a Cursor prompt/tool/session subset, and a Codex
+prompt/tool/Stop/session subset are implemented. Other known catalog keys return
+`IntegrationError::Unsupported`.
 Existing-session observation bindings are available;
 native message delivery and contextual control qualification remain pending.
 
@@ -197,6 +198,34 @@ native agent.
 
 Native qualification and its limits are recorded in
 [`integration-qualification.md`](integration-qualification.md).
+
+### Codex hooks
+
+The `codex` catalog key supports SessionStarted, InputSubmitted, BeforeTool,
+AfterTool, CompletionProposed and SessionEnded in project `.codex/hooks.json`.
+ToolFailed and CompletionFailed reject the whole plan before any configuration
+change. A specification including SessionEnded must use a timeout of 1-3 seconds,
+matching that event's native limit. The example uses `hook-codex` with the same
+STATE/WORKSPACE/BLOCKS arguments as `hook`.
+
+Command transport shares the Cursor literal executable/argv serializer and its
+native-process byte-stream regression. The SDK writes no trust records and never
+bypasses native hook review. The owner must trust the project and current hook
+definitions using Codex's `/hooks` flow. Configured status only checks ownership;
+it does not attest trust, effective settings or actual invocation.
+
+Codex turn_id maps to prompt_id. Nullable Stop messages remain absent when null.
+Allow returns an empty JSON object; pre-tool denial and Stop continuation use
+the existing shared decision encoder. Every repeated Stop invokes policy again.
+PostToolUse becomes an `AgentEventPayload::Hook` observation with AfterTool phase
+and payload `{call_id, tool_name, outcome: "unknown"}`. Its arbitrary output cannot
+prove success or failure, so it never fabricates a successful ToolResult. Raw
+tool output/input is not retained in replay. Tool effect remains Unknown.
+
+The adapter reuses the installer, journal and binding contracts. Native control,
+effective trust, subagent attribution, accepted/failed completion, messaging and
+hard deadlines remain unqualified or unavailable. See `integration-qualification.md`
+before claiming a supported native workflow.
 
 ### Cursor hooks
 
