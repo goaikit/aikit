@@ -81,6 +81,13 @@ omitted from replay; persist necessary derived application evidence during the
 callback. Records have `tool_payload_omitted` to make this visible. Final answers
 are retained. The current schema retains events without pruning.
 
+`tool_effect(&HookRequest)` translates the original BeforeTool payload to
+ReadOnly, ReplaceFile, EditText or Unknown. The Claude adapter normalizes exact
+Write/Edit intent; Bash, MCP and unrecognized tools remain Unknown. This helper
+does not edit files or prove success/attribution. Consumers compare the intent
+with observed file bytes and persist derived evidence before returning Allow.
+Replay omits inputs and therefore cannot reconstruct intent after the fact.
+
 Installation uses Claude exec-form command plus argument vectors. Windows needs
 a real executable, not a `.cmd`/`.bat` shim. The installer does not own global
 continuation-limit settings or override managed settings. Effective settings and

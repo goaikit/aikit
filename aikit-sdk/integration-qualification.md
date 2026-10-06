@@ -24,11 +24,17 @@ responses, repeated decisions, timeout/error/panic blocking, malformed requests,
 append-only cursors and omission of tool contents from replay. Existing MCP and
 managed gateway tests establish compatibility within their tested scope.
 
-The current focused integration suite has 29 passing tests on Windows. Binding
+The current focused integration suite has 30 passing tests on Windows. Binding
 tests include reopen/idempotency, filtering interleaved sessions, empty advancing
 pages, end observation, replacement under a reused native ID, unchanged-settings
 reinstallation, detach without hook removal, schema-2 upgrade, and rejecting Allow
 when the installation revision changes during the callback. SDK Clippy also passes.
+
+The additional tool-intent fixture covers exact Write/Edit fields, raw content,
+replace-all semantics and malformed inputs. `IntegrationService::tool_effect`
+normalizes intent without touching files or claiming a successful edit. Shell,
+MCP and unknown tools remain Unknown. Native tool attribution still requires
+application evidence and live qualification.
 
 ## Live scenario
 

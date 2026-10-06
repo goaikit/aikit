@@ -11,6 +11,7 @@ pub mod gateway_store;
 mod hooks;
 mod install;
 mod sessions;
+mod tool_effects;
 pub use hooks::{
     Decision, DecisionFuture, HandlerError, HookHandler, HookPage, HookRecord, HookRequest,
     HookResponse,
@@ -20,3 +21,4 @@ pub use install::{
     IntegrationError, IntegrationService,
 };
 pub use sessions::{SessionBinding, SessionRef, SessionStatus};
+pub use tool_effects::ToolEffect;
