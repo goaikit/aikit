@@ -2,6 +2,7 @@
 //! Run with --features integration. Usage is described in the SDK README.
 use aikit_sdk::integration::{
     Decision, DecisionFuture, HookEvent, HookHandler, HookRequest, InstallSpec, IntegrationService,
+    SessionMode,
 };
 use serde_json::{json, Value};
 use std::{
@@ -83,7 +84,7 @@ async fn main() {
 
 async fn run(args: &[String]) -> anyhow::Result<i32> {
     if args.len() < 2 {
-        anyhow::bail!("usage: integration_hooks <plan|apply|remove-plan|status|events|hook|bind|binding-status|detach> STATE [ID | WORKSPACE BLOCKS | INSTALLATION_ID SESSION_ID]");
+        anyhow::bail!("usage: integration_hooks <capabilities|plan|apply|remove-plan|status|events|hook|bind|binding-status|detach> STATE [ID | WORKSPACE BLOCKS | INSTALLATION_ID SESSION_ID | AGENT_KEY MODE]");
     }
     let service = IntegrationService::open(&args[1])?;
     if args[0] == "hook" {
@@ -106,6 +107,18 @@ async fn run(args: &[String]) -> anyhow::Result<i32> {
         return Ok(response.exit_code);
     }
     let value: Value = match args[0].as_str() {
+        "capabilities" => {
+            let key = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("missing agent key"))?;
+            let mode = match args.get(3).map(String::as_str) {
+                Some("print") => SessionMode::Print,
+                Some("interactive") => SessionMode::Interactive,
+                Some("unknown") | None => SessionMode::Unknown,
+                _ => anyhow::bail!("mode must be print, interactive or unknown"),
+            };
+            serde_json::to_value(service.capabilities(key, mode)?)?
+        }
         "plan" => {
             let mut input = String::new();
             std::io::stdin()

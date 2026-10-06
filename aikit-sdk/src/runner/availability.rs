@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::io::{Read, Seek};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -63,10 +64,15 @@ pub(super) fn probe_binary_with_timeout(binary: &str) -> Result<bool, AgentAvail
     #[cfg(test)]
     PROBE_CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
+    run_version_probe(binary, Stdio::null())
+}
+
+fn run_version_probe(binary: &str, stdout: Stdio) -> Result<bool, AgentAvailabilityReason> {
     let resolved_binary = crate::command_resolve::resolve_command(binary);
     let mut cmd = Command::new(resolved_binary);
     cmd.arg("--version");
-    cmd.stdout(Stdio::null());
+    cmd.stdin(Stdio::null());
+    cmd.stdout(stdout);
     cmd.stderr(Stdio::null());
 
     let mut child = cmd
@@ -84,8 +90,65 @@ pub(super) fn probe_binary_with_timeout(binary: &str) -> Result<bool, AgentAvail
             let _ = child.wait();
             Err(AgentAvailabilityReason::TimedOut)
         }
-        Err(_) => Err(AgentAvailabilityReason::BinaryNotFound),
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(AgentAvailabilityReason::BinaryNotFound)
+        }
     }
+}
+
+/// A fresh version probe of the selected external Backend. Reuses canonical
+/// candidates, command resolution and the availability timeout. Runs --version
+/// only; does not create a session. Raw output is bounded to 4 KiB.
+pub fn probe_agent_version(agent_key: &str) -> Result<String, AgentAvailabilityReason> {
+    if !is_runnable(agent_key) || agent_key == "aikit" {
+        return Err(AgentAvailabilityReason::NotRunnable);
+    }
+    let mut failure = AgentAvailabilityReason::BinaryNotFound;
+    for binary in get_binary_candidates(agent_key) {
+        match probe_version_binary(binary) {
+            Ok(version) => return Ok(version),
+            Err(reason) => failure = reason,
+        }
+    }
+    Err(failure)
+}
+
+fn probe_version_binary(binary: &str) -> Result<String, AgentAvailabilityReason> {
+    // File capture avoids pipe backpressure and unbounded memory, and cannot
+    // leave a reader thread blocked on inherited stdout after a probe times out.
+    let mut output =
+        tempfile::tempfile().map_err(|_| AgentAvailabilityReason::VersionCheckFailed)?;
+    if !run_version_probe(
+        binary,
+        Stdio::from(
+            output
+                .try_clone()
+                .map_err(|_| AgentAvailabilityReason::VersionCheckFailed)?,
+        ),
+    )? {
+        return Err(AgentAvailabilityReason::VersionCheckFailed);
+    }
+    output
+        .rewind()
+        .map_err(|_| AgentAvailabilityReason::VersionCheckFailed)?;
+    let mut bytes = Vec::new();
+    output
+        .take(4097)
+        .read_to_end(&mut bytes)
+        .map_err(|_| AgentAvailabilityReason::VersionCheckFailed)?;
+    decode_version_output(&bytes)
+}
+
+fn decode_version_output(bytes: &[u8]) -> Result<String, AgentAvailabilityReason> {
+    let value = std::str::from_utf8(bytes)
+        .map_err(|_| AgentAvailabilityReason::VersionCheckFailed)?
+        .trim();
+    if bytes.len() > 4096 || value.is_empty() || value.chars().any(|c| c.is_control()) {
+        return Err(AgentAvailabilityReason::VersionCheckFailed);
+    }
+    Ok(value.to_owned())
 }
 
 /// Checks if an agent is available (installed and responds to --version).
@@ -212,6 +275,30 @@ mod tests {
     /// probe-call counter so they don't race each other under `cargo test`'s
     /// default parallel execution within this binary.
     static CACHE_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    #[test]
+    fn version_evidence_rejects_empty_unbounded_binary_and_control_output() {
+        assert_eq!(
+            decode_version_output(b"2.1.269 (Claude Code)\r\n").unwrap(),
+            "2.1.269 (Claude Code)"
+        );
+        for bytes in [
+            vec![],
+            vec![b'x'; 4097],
+            vec![0xff],
+            b"2.1\0private".to_vec(),
+            b"2.1\nextra".to_vec(),
+        ] {
+            assert_eq!(
+                decode_version_output(&bytes),
+                Err(AgentAvailabilityReason::VersionCheckFailed)
+            );
+        }
+        assert_eq!(
+            probe_agent_version("unknown"),
+            Err(AgentAvailabilityReason::NotRunnable)
+        );
+    }
 
     // --- BUG-5: availability is cached across calls within the TTL ---
 

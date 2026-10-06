@@ -8,10 +8,15 @@
 /// Existing managed-session persistence used by the HTTP gateway and embeddings.
 pub mod gateway_store;
 
+mod capabilities;
 mod hooks;
 mod install;
 mod sessions;
 mod tool_effects;
+pub use capabilities::{
+    CapabilityAssessment, CapabilityReport, CapabilityRequirementsError, IntegrationCapability,
+    SessionMode, Support,
+};
 pub use hooks::{
     Decision, DecisionFuture, HandlerError, HookHandler, HookPage, HookRecord, HookRequest,
     HookResponse,

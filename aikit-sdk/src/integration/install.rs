@@ -30,6 +30,7 @@ pub enum IntegrationError {
     StaleSession,
     Detached,
     SessionEnded,
+    RequirementsUnmet(super::CapabilityRequirementsError),
 }
 impl std::fmt::Display for IntegrationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,6 +52,7 @@ impl std::fmt::Display for IntegrationError {
             }
             Self::Detached => write!(f, "application binding is detached"),
             Self::SessionEnded => write!(f, "native session end was observed"),
+            Self::RequirementsUnmet(error) => error.fmt(f),
         }
     }
 }

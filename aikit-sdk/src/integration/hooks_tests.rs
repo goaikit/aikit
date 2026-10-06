@@ -349,6 +349,48 @@ async fn failed_completion_is_observation_only_and_keeps_the_session_binding_ope
 }
 
 #[tokio::test]
+async fn required_native_contracts_are_checked_before_creating_a_binding() {
+    use crate::integration::{IntegrationCapability, SessionMode};
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let result = f.service.bind_existing_requiring(
+        &reference,
+        SessionMode::Unknown,
+        &[IntegrationCapability::SuccessfulCompletionObservation],
+    );
+    assert!(matches!(
+        result,
+        Err(IntegrationError::RequirementsUnmet(_))
+    ));
+    let count: i64 = f
+        .service
+        .connection()
+        .unwrap()
+        .query_row("SELECT count(*) FROM session_bindings", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let binding = f
+        .service
+        .bind_existing_requiring(
+            &reference,
+            SessionMode::Unknown,
+            &[
+                IntegrationCapability::ObservationBinding,
+                IntegrationCapability::DurableReplay,
+            ],
+        )
+        .unwrap();
+    assert_eq!(binding.reference(), &reference);
+}
+
+#[tokio::test]
 async fn binding_replay_is_scoped_and_detach_leaves_native_hooks_and_history_intact() {
     use crate::integration::SessionStatus;
     let f = Fixture::new(10);

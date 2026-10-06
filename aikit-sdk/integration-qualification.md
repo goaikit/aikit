@@ -24,7 +24,7 @@ responses, repeated decisions, timeout/error/panic blocking, malformed requests,
 append-only cursors and omission of tool contents from replay. Existing MCP and
 managed gateway tests establish compatibility within their tested scope.
 
-The current focused integration suite has 31 passing tests on Windows. Binding
+The current focused integration suite has 36 passing tests on Windows. Binding
 tests include reopen/idempotency, filtering interleaved sessions, empty advancing
 pages, end observation, replacement under a reused native ID, unchanged-settings
 reinstallation, detach without hook removal, schema-2 upgrade, and rejecting Allow
@@ -83,10 +83,32 @@ repeated hook invocations establish this scenario's result.
 
 ## Limits and required follow-up
 
+The example's fresh version-only probe on this Windows x86_64 host returned
+Claude `2.1.269 (Claude Code)`, Cursor `2026.09.02-c22c1a3`, Codex `codex-cli
+0.160.0`, and Pi `binary_not_found`. Claude's print-context report had seven scoped
+Supported contracts, three Unknown guarantees and four Unsupported operations.
+The other external hook adapters remained Unsupported. Detecting installed Cursor
+or Codex does not implement their external adapters or qualify native behavior.
+
+- Contextual reports now distinguish SDK implementation, supported scoped contracts,
+  unsupported operations and unknown native qualification. Tests reject changed
+  version, platform, architecture and mode, missing probes, absent requirements
+  and borrowing managed-runner flags. Requirement-aware binding rejects before
+  persisting a handle. Twelve availability tests cover the reused probe path and
+  cache behavior, including bounded version evidence. The SDK example exposes the
+  report without launching an agent session.
+- A subsequent Windows x86_64 Claude 2.1.269 print-mode invalid-model check through
+  the external-hook consumer emitted CompletionFailed at cursor 4, with no tools,
+  Stop or SessionEnd and no Final Answer. Native exit was 1 and is_error was true
+  despite the result subtype being success. The consumer recovered its application
+  state through journal replay. This bounded scenario is the failure-observation
+  evidence in capability reports, not proof of successful completion.
+
 - The added CompletionFailed/StopFailure contract is covered by a native-shaped
   fixture: configuration, notification-only replay, no error text promoted to a
   Final Answer, and a session binding that remains observed. This fixture does not
-  yet qualify a failure emitted by a live native process. Existing installations
+  itself qualify a failure emitted by a live native process; the separate bounded
+  native scenario above supplies that evidence. Existing installations
   must be explicitly updated to include the new event.
 - Workspace formatting checks on Windows report existing CRLF differences and
   unsupported rustfmt options. Touched integration files are formatted separately;

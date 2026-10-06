@@ -93,7 +93,37 @@ a real executable, not a `.cmd`/`.bat` shim. The installer does not own global
 continuation-limit settings or override managed settings. Effective settings and
 native deadline behavior require qualification for the deployed version and mode.
 
-### Existing-session observation binding
+### Contextual capabilities
+
+`IntegrationService::capabilities(agent_key, SessionMode)` performs a fresh local
+`--version` probe through the existing Backend registry, command resolution and
+availability timeout. It reports host OS/architecture, intended mode, bounded
+version output, probe errors and typed capability assessments. It starts no agent
+session and does not install or alter hooks. Run this blocking operation outside
+an async executor thread; it is an explicit diagnostic, not a per-hook hot path.
+
+Each assessment separates adapter implementation from Supported, Unsupported or
+Unknown and includes its scope. SDK installation/replay/binding/detach contracts
+do not attest native execution. Native evidence currently matches only the recorded
+Windows x86_64 Claude 2.1.269 print-mode scenarios. Other contexts remain Unknown.
+Repeated blocking/effective settings and hard native deadlines remain Unknown even
+in that context. Successful completion, existing-session messaging/reconciliation
+and native process identity remain Unsupported. Missing external adapters report
+Unsupported even if their managed runner supports similar operations.
+
+`CapabilityReport::require` returns structured unmet requirements; Unknown cannot
+pass. `bind_existing_requiring(reference, mode, required)` checks them before
+creating a binding, then applies normal current-reference validation. The original
+observation-only `bind_existing` and `BackendCapabilities` flags retain their
+semantics. Reports describe a probe of this host and an intended mode, not proof
+of a particular running process's version, mode, effective settings or liveness.
+
+```text
+integration_hooks capabilities STATE claude print
+integration_hooks capabilities STATE cursor interactive
+```
+
+### Existing-session failure observations
 
 `HookEvent::CompletionFailed` installs Claude's `StopFailure` notification. It
 records a failed turn without calling the policy callback or closing the session
@@ -101,6 +131,8 @@ binding. Error details and the native error-message field are not retained as a
 Final Answer. Consumers can recover their application state from this observation;
 it does not establish successful completion. Existing installations need an
 explicit install update to subscribe to this additional event.
+
+### Existing-session observation binding
 
 Resolve `observed_session(installation_id, native_session_id)` after a SessionStart
 hook, then call `bind_existing(&reference)`. Repeating the bind returns the same
