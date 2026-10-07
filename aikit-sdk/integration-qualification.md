@@ -371,6 +371,24 @@ handler invocation marker. Do not disable `failClosed` or relax workspace checks
 After repair, repeat prompt admission, tool allow/deny/failure and session replay;
 the independent SDK byte-stream regression is insufficient for native support.
 
+### Repeatable fresh probe, 2026-10-07
+
+`examples/cursor-qualification/run.ps1` now provides a matched, bounded Windows
+probe with an explicitly supplied Cursor installation and current library-only
+SDK example. A fresh workspace at SDK source 972807b reproduced the same native
+line-54 ParserError on Cursor 2026.09.02-c22c1a3 print mode. The no-hook write
+succeeded; the owned-hook run produced no file and zero SDK observations/Blocks.
+Both native processes exited 0 without timeout. The probe exited 1 as required
+and its removal path left an empty hooks configuration.
+
+The example build passed on Windows Rust 1.96 with the local locked dependency
+graph. Its SHA-256 was
+`A956A635D964B5108738BA9D7E61C1A852D2A0A8AA264D667B16A85D0EF21B99`;
+the supplied Cursor entrypoint digest was
+`7C1957BB82B2B31F4BA53D3A9C11404FA263B31F84076E87FCB83539AC8F09A6`.
+This refresh strengthens the recorded failure's reproducibility and does not
+promote capabilities or establish Rust 1.88/native completion qualification.
+
 The exact Windows x86_64 print/version report now includes this observed failure
 under PreToolDecision, which remains Unknown. A differing version, platform,
 architecture or mode does not inherit this finding. The focused SDK suite now

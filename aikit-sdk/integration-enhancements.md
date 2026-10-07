@@ -4,6 +4,28 @@ These are implementation requests backed by local source inspection and bounded
 native evidence. They are not promises of supported behavior. AIKit owns native
 translation and qualification; consumer applications keep their own review rules.
 
+## Cursor: Windows native hook dispatch
+
+The fresh 2026-10-07 probe using SDK source 972807b and Cursor
+2026.09.02-c22c1a3 reproduced the earlier Windows print failure. Without hooks,
+the requested Write created its file. With owned hooks, the native generated
+`ps-script-*.ps1` failed parsing at line 54 around
+`FromBase64String(''{1}'')`, before the SDK executable ran. Both processes exited
+0 without timeout; the gated file was absent and the SDK journal had zero records.
+
+Reproduce using `examples/cursor-qualification/run.ps1` and its README. The
+script retains matched native streams, process results, SDK events and executable
+digests; it fails if no SDK BeforeTool Block exists. It removes only owned
+fixture hooks in `finally`. A failed native wrapper is not an SDK policy denial.
+
+Request a repaired native Windows command-hook wrapper and qualify its literal
+command/argument handling, both stdin modes, UTF-8, punctuation/Unicode paths,
+stderr/exit forwarding and timeout behavior. Then qualify actual prompt admission,
+tool allow/deny/failure and session replay through AIKit. Preserve failClosed and
+workspace scope. The SDK encoded bridge's real-process tests cannot repair a
+provider wrapper that fails before invoking it. Completion and messaging require
+their separate contracts; repairing dispatch alone does not qualify Codelaya.
+
 ## Pi: authoritative completion settlement
 
 Observed on Pi 1.0.4, Windows x86_64 print mode, Node 24.19.0 and SDK fff6aa7:
