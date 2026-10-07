@@ -28,6 +28,42 @@ their separate contracts; repairing dispatch alone does not qualify Codelaya.
 
 ## Pi: authoritative completion settlement
 
+### Linux Pi 0.82.1 compatibility gap, 2026-10-07
+
+Installed Linux x86_64 Pi 0.82.1, exercised under Bun 1.4.2 with the unchanged
+qualification `provider.mjs`, runs four bounded print scenarios: normal, steer,
+followUp and missing delivery mode. All exit 0. The installed extension event
+union includes `agent_settled` but no `agent_before_settle`; the four actual runs
+emit no proposal event and each settles with event keys exactly `type`.
+This runtime cannot inherit the recorded Pi 1.0.4 completion proposal scenarios.
+The existing generated bridge depends on that proposal event. Report the missing
+version-specific native contract before attempting completion qualification;
+do not replace it with agent_end/settled or process exit.
+
+Installed source evidence digests:
+`dist/core/extensions/types.d.ts`:
+`d3fb9d55d312e47df861507aeef41c1183261c3a577588dc2ddb1c97cc909d6e`;
+`dist/core/agent-session.js`:
+`d300f57a70b7ca3f86e8e41b5336b0579268cbcecfedf1d99c176f2add2dd39b`.
+The extension API declares `sendUserMessage` void and the runtime forwards its
+asynchronous rejection to the extension error stream. Native queue probes reuse
+provider SHA-256 `13ab6aca2793570b8eb945bcdc6bb0b34dfeba5757ff35536315263b715420c0`:
+steer/followUp each deliver one fixture message in the second model context;
+missing mode returns undefined, then reports the already-processing error with
+no consumption. No SDK hooks are installed, profile/state are isolated, and no
+external model account is used. This is a candidate queue API, not durable SDK
+messaging or completion enforcement. Native identity, interactive mode, queue
+acknowledgement/reconciliation and restart lifetime remain unqualified.
+
+The local SDK capability report now marks CompletionDecision,
+RepeatedCompletionBlocking, FinalAnswerCapture and FailedCompletionObservation
+Unsupported for exactly Linux/x86_64/print/Pi 0.82.1. The translation code remains
+implemented, but its required proposal event is unavailable in this recorded
+context. Regression cases retain Unknown for other modes, platforms,
+architectures, versions and missing probes; local install/replay/binding/detach
+semantics are unchanged. This change is not yet published or consumed by the
+Codelaya pinned dependency. It does not claim native enforcement or add a fallback.
+
 Observed on Pi 1.0.4, Windows x86_64 print mode, Node 24.19.0 and SDK fff6aa7:
 
 - An extension ran after a recorded SDK Allow and called `ctx.abort()`. The native
