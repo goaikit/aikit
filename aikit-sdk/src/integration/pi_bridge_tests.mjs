@@ -70,4 +70,43 @@ const nextInvocation = rows().at(-1).invocation_id;
 assert.notEqual(nextInvocation, firstInvocation);
 await emit("input");
 assert.equal(rows().at(-1).invocation_id, nextInvocation);
+
+// A real child pauses after recording its input. Replacing the invocation while
+// that child is pending must not let its eventual callback mutate the new state.
+const releaseFile = `${process.env.AIKIT_PI_TEST_MODE}.release`;
+const waitForRow = async (count) => {
+  const deadline = Date.now() + 800;
+  while (rows().length <= count) {
+    assert(Date.now() < deadline, "paused handler did not record its request");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+};
+mode("paused");
+const beforeShutdown = rows().length;
+const oldShutdown = emit("session_shutdown");
+await waitForRow(beforeShutdown);
+mode("allow");
+await emit("session_start");
+const replacement = rows().at(-1).invocation_id;
+fs.writeFileSync(releaseFile, "release");
+await oldShutdown;
+assert.deepEqual(await emit("input"), { action: "continue" });
+assert.equal(rows().at(-1).invocation_id, replacement);
+
+fs.unlinkSync(releaseFile);
+mode("paused");
+const beforeCompletion = rows().length;
+const oldCompletion = emit("agent_before_settle", boundary);
+await waitForRow(beforeCompletion);
+mode("allow");
+await emit("session_start");
+const completionReplacement = rows().at(-1).invocation_id;
+fs.writeFileSync(releaseFile, "release");
+assert.equal((await oldCompletion).continue, true); // Obsolete decision stays closed.
+mode("deny");
+await emit("agent_before_settle", boundary);
+assert.equal(rows().at(-1).invocation_id, completionReplacement);
+assert.equal(rows().at(-1).stop_hook_active, false);
+await emit("agent_before_settle", boundary);
+assert.equal(rows().at(-1).stop_hook_active, true);
 console.log("Pi bridge contract passed");

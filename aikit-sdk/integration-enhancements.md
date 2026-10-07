@@ -28,6 +28,23 @@ their separate contracts; repairing dispatch alone does not qualify Codelaya.
 
 ## Pi: authoritative completion settlement
 
+### Bridge invocation replacement isolation
+
+The local bridge now scopes shutdown cleanup and continuation state to the
+invocation captured before its asynchronous handler request. A shutdown that
+settles after a replacement SessionStart no longer clears the replacement's
+UUID. A stale completion callback still blocks its own decision but cannot set
+the replacement's `stop_hook_active`; failure correlation also checks invocation.
+
+Synchronized real Node child handlers reproduced both prior failures: the new
+invocation's input became handled after old shutdown, and its first completion
+was incorrectly marked as a continuation. The bridge regression now pauses each
+old child after its request is recorded, starts the replacement, releases the
+child and asserts identity plus first/subsequent continuation state. This is
+generated-bridge process evidence, not an installed native Pi lifecycle claim or
+completion/delivery capability promotion. The correction remains local pending
+upstream publication authorization and is not in Codelaya's pinned dependency.
+
 ### Linux Pi 0.82.1 compatibility gap, 2026-10-07
 
 Installed Linux x86_64 Pi 0.82.1, exercised under Bun 1.4.2 with the unchanged

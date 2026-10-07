@@ -94,7 +94,8 @@ export default function (pi) {
   });
   if (selected.has("completion_proposed") || selected.has("completion_failed")) {
     pi.on("agent_before_settle", async (event, ctx) => {
-      lastBoundary = { session: ctx.sessionManager.getSessionId(), outcome: event.outcome };
+      const boundaryInvocation = invocation;
+      lastBoundary = { invocation: boundaryInvocation, session: ctx.sessionManager.getSessionId(), outcome: event.outcome };
       if (event.outcome !== "completed" || !selected.has("completion_proposed")) return;
       let result;
       try {
@@ -106,7 +107,9 @@ export default function (pi) {
         }), true);
       } catch { result = { decision: "block", reason: unavailable }; }
       if (result.decision === "block") {
-        continued = true;
+        // A stale callback still denies its own decision, but cannot contaminate
+        // the continuation state of a replacement invocation.
+        if (invocation === boundaryInvocation) continued = true;
         return { entries: [...(Array.isArray(event.entries) ? event.entries : []), { type: "custom_message", customType: "aikit.integration.block", content: result.reason, display: true }], continue: true };
       }
       // Do not set continue:false: it would cancel another extension's request.
@@ -115,16 +118,19 @@ export default function (pi) {
       const boundary = lastBoundary;
       lastBoundary = undefined;
       continued = false;
-      if (selected.has("completion_failed") && boundary?.session === ctx.sessionManager.getSessionId() && ["error", "aborted"].includes(boundary.outcome)) {
+      if (selected.has("completion_failed") && boundary?.invocation === invocation && boundary?.session === ctx.sessionManager.getSessionId() && ["error", "aborted"].includes(boundary.outcome)) {
         await observe(request(event.type, ctx, { outcome: boundary.outcome }), ctx);
       }
       // Settlement without correlated outcome never fabricates success/failure.
     });
   }
   if (selected.has("session_ended")) pi.on("session_shutdown", async (event, ctx) => {
+    const endingInvocation = invocation;
     await observe(request(event.type, ctx), ctx);
-    invocation = undefined;
-    lastBoundary = undefined;
-    continued = false;
+    if (invocation === endingInvocation) {
+      invocation = undefined;
+      lastBoundary = undefined;
+      continued = false;
+    }
   });
 }
