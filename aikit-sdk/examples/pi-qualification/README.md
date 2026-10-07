@@ -93,3 +93,34 @@ hard deadlines, semantic Final Answer quality, or messaging. Settlement does not
 provide an authoritative accepted-proposal identifier. These native requirements
 remain Unknown or Unsupported; see `../../integration-qualification.md`.
 The requested native contracts are in `../../integration-enhancements.md`.
+
+## Native message queue probe
+
+Run the same bounded harness with `-MessagingOnly`. It reuses the isolated profile,
+real Pi loader/loop, deterministic provider, stream recording and process limits.
+No SDK executable is needed and no integration is installed:
+
+```powershell
+& ./aikit-sdk/examples/pi-qualification/run.ps1 -MessagingOnly `
+  -NodePath '<node executable>' `
+  -PiCliPath '<fixture>/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js' `
+  -PiAiModulePath '<fixture>/node_modules/@earendil-works/pi-ai/dist/index.js' `
+  -OutputDirectory '<new evidence directory outside the repository>'
+```
+
+The provider calls Pi's existing `sendUserMessage` while the first native model
+request is streaming. It records only fixture-message counts in subsequent model
+contexts. Steer and followUp must each produce two model calls, with exactly one
+copy of the Unicode fixture user message in the second context. A missing mode
+must produce one model call, no consumed fixture message and the actual asynchronous
+native error naming an already processing agent and the two queue choices.
+All calls return undefined through the extension API, including that rejected case.
+
+The three scenarios passed twice on Windows, Pi 1.0.4 / Node 24.19.0 on 2026-10-07.
+Provider SHA-256: `13AB6ACA2793570B8EB945BCDC6BB0B34DFEBA5757FF35536315263B715420C0`.
+The summary explicitly sets sdk_messaging=false and durable_acknowledgement=false.
+This is queue feasibility evidence, not an implemented SDK/session attachment,
+native durable acknowledgement, operation reconciliation, crash/restart, shutdown
+queue retention, interactive or remote qualification. Ordinary void return is
+insufficient evidence of consumption. The original eight SDK scenarios were not
+rerun for this messaging-only change; their earlier evidence retains its scope.

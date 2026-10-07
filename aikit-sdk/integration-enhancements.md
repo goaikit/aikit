@@ -82,3 +82,22 @@ and must not be used as an attachment mechanism. Pi's public extension messaging
 functions are a candidate bridge; qualify their queue acknowledgement and lifetime
 before connecting them to the existing session binding. Preserve immutable
 operation IDs/content and never blindly replay an unknown handoff.
+
+### Pi native queue feasibility, 2026-10-07
+
+The existing qualification harness now has a MessagingOnly mode. Two runs on
+Windows Pi 1.0.4 / Node 24.19.0 use the real extension API, native loop and a
+controlled provider. sendUserMessage with steer or followUp delivers one Unicode
+fixture message to the next model context. Without a streaming delivery mode,
+the wrapper still returns undefined, then asynchronously reports the already
+processing error; no fixture message reaches the model. Thus neither void return
+nor absence of a synchronous exception proves acceptance or consumption.
+
+This advances the candidate bridge feasibility, not IntegrationService messaging.
+Before exposing a supported session transport, qualify or request a correlated
+native acknowledgement/error contract: stable operation id and session generation,
+observable enqueue/consume/reject evidence, lookup/reconciliation and explicit
+shutdown/restart queue lifetime. SDK durable records must preserve uncertainty
+across the dispatch boundary and never replay a message merely because a native
+error or acknowledgement was lost. Reuse this existing API where its semantics
+match, without substituting managed gateway process ownership for attachment.
