@@ -422,8 +422,16 @@ fn pi_capabilities_do_not_infer_native_qualification_from_generated_extension() 
             IntegrationCapability::SuccessfulCompletionObservation,
         ])
         .unwrap_err();
-    assert_eq!(unmet.unmet[0].support, Support::Unknown);
-    assert_eq!(unmet.unmet[1].support, Support::Unknown);
+    // The generated bridge cannot establish native qualification. A recorded
+    // version-specific gap may be Unsupported; an unqualified context remains
+    // Unknown. Both must refuse admission, without decoding versions here.
+    assert_eq!(unmet.unmet.len(), 3);
+    for assessment in &unmet.unmet[..2] {
+        assert!(matches!(
+            assessment.support,
+            Support::Unknown | Support::Unsupported
+        ));
+    }
     assert_eq!(unmet.unmet[2].support, Support::Unsupported);
 }
 

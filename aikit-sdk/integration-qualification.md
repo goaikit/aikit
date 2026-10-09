@@ -436,6 +436,30 @@ The installed CLI digest remains the one recorded above. Earlier failed probes
 remain retained. This closes the observed duration-decoding loss for these two
 native tool outcomes, not completion settlement, all edit paths or messaging.
 
+### Linux SDK qualification, 2026-10-09
+
+Public draft source `5ffd32b` plus one Pi test-only correction passes all 73
+focused SDK integration tests and builds the handler example on Linux x86_64
+with Rust 1.88. The corrected Windows suite passes all 71 tests. The Pi test now
+requires refusal for Unknown or Unsupported native completion contracts; installed
+Linux Pi 0.82.1 correctly reports the recorded missing-proposal contract as
+Unsupported. No production capability, version decoder or admission rule changed.
+
+The published library archive excludes its generated Cargo.lock. Qualification
+used the exact generated Windows lockfile, SHA-256
+`4b2b2e5b8b68c144b56cd0d07cd0a0521cfa71dfd9908730b181a2b3012d5654`.
+Initial missing-lock, offline-cache and platform-sensitive-test failures remain
+retained; public dependency downloads filled the cache before the offline rerun.
+
+Rust 1.88 Clippy with warnings denied fails on pre-existing format-string lint:
+17 dependency warnings stop the full command; SDK-only lint reports 100 warnings.
+Restoring the unchanged production decoder reproduces identical SDK diagnostics.
+This is an explicit older-toolchain lint limitation, not a passing Linux lint gate.
+Windows Rust 1.96 Clippy retains its earlier passing scope. The isolated source
+and corrected decoder are preserved; the host checkout HEAD, refs and tracked
+status match before/after. No Linux native agent workflow or macOS behavior is
+qualified by these SDK tests.
+
 ### Repeatable fresh probe, 2026-10-07
 
 `examples/cursor-qualification/run.ps1` now provides a matched, bounded Windows
