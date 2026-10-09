@@ -128,6 +128,67 @@ remove_skill_entry(target, "my-skill")?;
 # Ok::<(), aikit_sdk::SkillEntryError>(())
 ```
 
+## Session-start hooks
+
+For a tool that wants to run a command whenever an agent session starts,
+`session_hooks` registers that command in an agent's per-user settings file,
+describes the machine-wide equivalent for administrators, and formats the
+notice a hook prints. Only agents whose hook format has been verified are
+supported (`session_hook_agents()`); any other key is unsupported.
+
+| Key | Per-user file (under `~`) | Machine-wide file (Linux / macOS / Windows) | Group `matcher` | Entry identified by |
+|-----|---------------------------|---------------------------------------------|-----------------|---------------------|
+| `claude` | `.claude/settings.json` | `/etc/claude-code/managed-settings.json` / `/Library/Application Support/ClaudeCode/managed-settings.json` / `C:\Program Files\ClaudeCode\managed-settings.json` | `""` | the id as a whole word in `command` |
+| `gemini` | `.gemini/settings.json` | `/etc/gemini-cli/settings.json` / `/Library/Application Support/GeminiCli/settings.json` / `C:\ProgramData\gemini-cli\settings.json` | `"*"` | `name` set to the id |
+
+Hooks live under `hooks.SessionStart[]`, each group holding
+`{"matcher": ..., "hooks": [{"type": "command", "command": ...}]}`.
+
+- A `SessionHook` has a stable `id` (ASCII letters, digits, `-`, `_`) that
+  must appear as a whole word in its `command`.
+- `register_session_hook(home, key, &hook)` adds the hook in a new group, or
+  replaces the command of the existing entry with the same id; it returns
+  `HookChange::Added`, `Updated` or `Unchanged` (nothing written).
+- `unregister_session_hook(home, key, id)` removes only that entry, then any
+  group, `SessionStart` array or `hooks` object the removal emptied
+  (`Removed` or `Unchanged`; a missing file is `Unchanged`).
+- `has_session_hook(home, key, id)` checks the per-user file;
+  `admin_hook_present(key, id)` checks the machine-wide one.
+- `admin_hook_file(key)` and `admin_hook_entry(key, &hook)` give the
+  machine-wide file for this platform and the `{"hooks": {...}}` fragment to
+  merge into it. Administrator files are never written.
+- `format_notice(key, text)` returns the one line a hook prints on standard
+  output to show a notice: `{"systemMessage":"<text>"}`.
+- `SessionHookSupport::approval_note` is set when the agent asks the user to
+  review hooks changed outside it (Claude Code: its `/hooks` menu).
+
+Settings files are merged, never clobbered: every other key and hook keeps
+its place, and a file that is not valid JSON or whose `hooks` /
+`SessionStart` has an unexpected type is refused untouched. Writes go to a
+temporary file in the same folder and are renamed into place (pretty-printed,
+two-space indent, trailing newline, existing permissions kept). A symbolic
+link is resolved and its target replaced, so the link stays a link; a
+dangling link is refused.
+
+```rust
+use aikit_sdk::{register_session_hook, session_hook_support, HookChange, SessionHook};
+use std::path::Path;
+
+let home = Path::new("/home/me");
+let hook = SessionHook {
+    id: "mytool-session".into(),
+    command: "mytool on-session-start --hook mytool-session".into(),
+};
+if register_session_hook(home, "claude", &hook)? != HookChange::Unchanged {
+    if let Some(note) = session_hook_support("claude").and_then(|s| s.approval_note) {
+        println!("{note}");
+    }
+}
+// Inside the hook command: print a notice the agent shows the user.
+println!("{}", aikit_sdk::format_notice("claude", "mytool is ready").unwrap());
+# Ok::<(), aikit_sdk::SessionHookError>(())
+```
+
 ## MCP config merge
 
 Merge one MCP server definition into the config file each assistant expects. **Supported keys** (see `mcp_supported_agents()` and `MCP_SUPPORTED_AGENT_KEYS`): `cursor-agent`, `claude`, `gemini`, `copilot`, `opencode`, `codex`. **Aliases** (same as CLI): `cursor` → `cursor-agent`, `vscode` → `copilot`.
