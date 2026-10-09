@@ -371,6 +371,41 @@ handler invocation marker. Do not disable `failClosed` or relax workspace checks
 After repair, repeat prompt admission, tool allow/deny/failure and session replay;
 the independent SDK byte-stream regression is insufficient for native support.
 
+### Windows BOM decoding and path control, 2026-10-09
+
+Cursor 2026.09.02-c22c1a3 in Windows x86_64 print mode was tested with the
+same baseline/owned-hook Write request in an ordinary workspace path. At the
+merged SDK source `1e136544`, the baseline created its file, but the hooked run
+returned validation-unavailable with zero SDK records. Both exited 0 without
+timeout. A metadata-only stdin probe observed a leading UTF-8 BOM in all four
+native hook inputs; strict JSON decoding rejected them before journaling. No
+prompt, tool argument or native identity values were retained by that probe.
+
+The decoder now consumes one leading UTF-8 BOM, after checking the original
+1 MiB byte bound. It preserves BOM characters inside JSON strings. Duplicate
+markers, oversize input and foreign workspace roots remain rejected with exit 2.
+The two regression tests check the application callback's original tool input,
+the durable Block decision and existing journal redaction. All 69 focused SDK
+integration tests and the handler example build pass on Rust 1.88. Library and
+handler example Clippy pass with warnings denied on installed Rust 1.96; this
+host does not have the Rust 1.88 Clippy component.
+
+With the fixed handler, the ordinary-path native baseline write succeeded; the
+hooked Write was denied with one SDK BeforeTool Block among five records and no
+gated file. Both processes exited 0 without timeout. Handler SHA-256:
+`5E6361B66A46FFD032FD19B70572E039BDA7DAD85402C8D0A7835CE57C248642`.
+Cursor entrypoint SHA-256:
+`7C1957BB82B2B31F4BA53D3A9C11404FA263B31F84076E87FCB83539AC8F09A6`.
+
+The original punctuation/Unicode path was rerun with that same handler. Its
+baseline succeeded, but owned hooks again produced zero SDK records and zero
+Blocks, so the probe failed as required. Use the probe's `-OrdinaryWorkspace`
+option to reproduce the control; its default preserves the path stress case.
+The owned hooks were removed in both runs. This qualifies only ordinary-path
+native dispatch and one tool denial. Capability reports remain conservative;
+prompt denial, successful tool outcomes, session replay, completion enforcement
+and messaging still require their own evidence.
+
 ### Repeatable fresh probe, 2026-10-07
 
 `examples/cursor-qualification/run.ps1` now provides a matched, bounded Windows

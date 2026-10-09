@@ -5,7 +5,8 @@ param(
     [Parameter(Mandatory)][string]$CursorCliPath,
     [Parameter(Mandatory)][string]$SdkPath,
     [Parameter(Mandatory)][string]$OutputDirectory,
-    [ValidateRange(10, 180)][int]$TimeoutSeconds = 120
+    [ValidateRange(10, 180)][int]$TimeoutSeconds = 120,
+    [switch]$OrdinaryWorkspace
 )
 $ErrorActionPreference = 'Stop'
 foreach ($inputPath in @($NodePath, $CursorCliPath, $SdkPath)) {
@@ -17,7 +18,7 @@ $SdkPath = (Resolve-Path -LiteralPath $SdkPath).Path
 $root = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $root) { throw 'OutputDirectory must be new; evidence is never overwritten.' }
 [void][IO.Directory]::CreateDirectory($root)
-$workspace = Join-Path $root "workspace ' dollar `$ semicolon ; unicode é"
+$workspace = Join-Path $root $(if ($OrdinaryWorkspace) { 'control-workspace' } else { "workspace ' dollar `$ semicolon ; unicode é" })
 $state = Join-Path $root 'state'
 [void][IO.Directory]::CreateDirectory($workspace)
 $gitPath = (Get-Command git -CommandType Application | Select-Object -First 1).Source

@@ -6,6 +6,15 @@ translation and qualification; consumer applications keep their own review rules
 
 ## Cursor: Windows native hook dispatch
 
+The 2026-10-09 ordinary-path control isolates an SDK input issue: native Windows
+hook stdin prefixes JSON with a UTF-8 BOM. The decoder now consumes one transport
+marker while preserving its size, scope and privacy checks. A fresh matched
+native run records one SDK tool Block and prevents the gated write. The same
+fixed handler still fails the punctuation/Unicode path probe before journaling.
+Use `-OrdinaryWorkspace` for the control; retain the default path stress case.
+See the qualification record for exact digests and limits. Neither result
+promotes completion or messaging contracts.
+
 The fresh 2026-10-07 probe using SDK source 972807b and Cursor
 2026.09.02-c22c1a3 reproduced the earlier Windows print failure. Without hooks,
 the requested Write created its file. With owned hooks, the native generated

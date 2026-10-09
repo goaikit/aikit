@@ -60,6 +60,102 @@ impl Fixture {
     }
 }
 struct Fixed(Decision);
+
+struct CaptureTool {
+    decision: Decision,
+    input: std::sync::Mutex<Option<Value>>,
+}
+impl HookHandler for CaptureTool {
+    fn decide<'a>(&'a self, request: &'a HookRequest) -> DecisionFuture<'a> {
+        Box::pin(async move {
+            let AgentEventPayload::ToolUse { input, .. } = &request.payload else {
+                panic!("expected native tool request")
+            };
+            *self.input.lock().unwrap() = Some(input.clone());
+            Ok(self.decision.clone())
+        })
+    }
+}
+
+#[tokio::test]
+async fn native_utf8_bom_preserves_tool_payload_and_records_the_policy_decision() {
+    let f = Fixture::new();
+    let start = [
+        b"\xef\xbb\xbf".as_slice(),
+        f.input("sessionStart").to_string().as_bytes(),
+    ]
+    .concat();
+    let response = f
+        .service
+        .handle_hook(&f.installation.id, &start, &Fixed(Decision::Allow))
+        .await;
+    assert_eq!(response.stdout, "{}");
+    let mut tool = f.input("preToolUse");
+    tool["tool_name"] = json!("Write");
+    tool["tool_use_id"] = json!("bom-native-call");
+    tool["tool_input"] = json!({"content":"\u{feff}literal payload é Ω"});
+    let input = [b"\xef\xbb\xbf".as_slice(), tool.to_string().as_bytes()].concat();
+    let decision = Decision::Block {
+        reason: "review pending".into(),
+    };
+    let handler = CaptureTool {
+        decision: decision.clone(),
+        input: std::sync::Mutex::new(None),
+    };
+    let response = f
+        .service
+        .handle_hook(&f.installation.id, &input, &handler)
+        .await;
+    assert_eq!(
+        serde_json::from_str::<Value>(&response.stdout).unwrap()["permission"],
+        "deny"
+    );
+    let page = f.service.events(&f.installation.id, 0, 100).unwrap();
+    assert!(page.records.iter().any(|record| {
+        record.request.event == HookEvent::BeforeTool && record.decision.as_ref() == Some(&decision)
+    }));
+    assert_eq!(
+        handler.input.lock().unwrap().as_ref(),
+        Some(&tool["tool_input"])
+    );
+    // Durable records retain their existing privacy boundary.
+    assert!(!serde_json::to_string(&page)
+        .unwrap()
+        .contains("literal payload"));
+}
+
+#[tokio::test]
+async fn bom_compatibility_does_not_accept_extra_markers_oversize_or_foreign_roots() {
+    let f = Fixture::new();
+    let mut tool = f.input("preToolUse");
+    tool["tool_name"] = json!("Write");
+    tool["tool_use_id"] = json!("invalid-native-call");
+    tool["tool_input"] = json!({"content":"body"});
+    let duplicate = [
+        b"\xef\xbb\xbf\xef\xbb\xbf".as_slice(),
+        tool.to_string().as_bytes(),
+    ]
+    .concat();
+    let mut oversized = [b"\xef\xbb\xbf".as_slice(), tool.to_string().as_bytes()].concat();
+    oversized.resize(1024 * 1024 + 1, b' ');
+    tool["workspace_roots"] = json!([f.installation.spec.workspace.parent().unwrap()]);
+    let foreign = [b"\xef\xbb\xbf".as_slice(), tool.to_string().as_bytes()].concat();
+    for input in [duplicate, oversized, foreign] {
+        let response = f
+            .service
+            .handle_hook(&f.installation.id, &input, &Fixed(Decision::Allow))
+            .await;
+        assert_eq!(response.exit_code, 2);
+        assert!(response.stdout.is_empty());
+    }
+    assert!(f
+        .service
+        .events(&f.installation.id, 0, 100)
+        .unwrap()
+        .records
+        .is_empty());
+}
+
 impl HookHandler for Fixed {
     fn decide<'a>(&'a self, _: &'a HookRequest) -> DecisionFuture<'a> {
         Box::pin(async { Ok(self.0.clone()) })

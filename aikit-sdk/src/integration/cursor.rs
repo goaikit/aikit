@@ -26,7 +26,13 @@ pub(super) fn decode(
     if input.len() > 1024 * 1024 {
         return Err(IntegrationError::Invalid("hook input exceeds 1 MiB".into()));
     }
-    let value: Value = serde_json::from_slice(input)?;
+    // Native Windows Cursor command hooks can prefix redirected JSON with a
+    // UTF-8 BOM. Consume one transport marker, preserving JSON string payloads
+    // and enforcing the byte limit above against the original input.
+    let json_input = input
+        .strip_prefix(b"\xef\xbb\xbf".as_slice())
+        .unwrap_or(input);
+    let value: Value = serde_json::from_slice(json_input)?;
     let native = required_string(&value, "hook_event_name", 128)?;
     let event = installation
         .spec

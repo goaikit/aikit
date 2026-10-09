@@ -22,6 +22,11 @@ Pass the installed Node executable and Cursor entrypoint explicitly:
   -OutputDirectory C:/path/to/new-disposable-evidence
 ```
 
+Add `-OrdinaryWorkspace` to use a path without punctuation or Unicode. Keep the
+same installed CLI, SDK executable and prompt to distinguish native shell-wrapper
+failures from SDK input decoding. The default retains the literal-path stress case;
+an ordinary-path pass does not qualify it.
+
 Each native process has a bounded timeout. Timeout terminates its process tree;
 the script retains stdout/stderr, exit/timeout/file results, installation plan,
 SDK event replay and executable digest. The owned hooks are removed in `finally`;
