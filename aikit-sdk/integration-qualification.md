@@ -406,6 +406,36 @@ native dispatch and one tool denial. Capability reports remain conservative;
 prompt denial, successful tool outcomes, session replay, completion enforcement
 and messaging still require their own evidence.
 
+### Fractional native tool durations, 2026-10-09
+
+The ordinary-path `-ToolPolicy Allow` probe initially created the hooked file
+and recorded two tool Allows, but no outcome. Metadata-only forwarding probes
+confirmed that native `postToolUse` for Write and `postToolUseFailure` for Read
+reached the SDK with BOM-prefixed JSON and nonnegative fractional durations.
+The integer-only duration decoder rejected both before journaling. Native tool
+output had the documented JSON-stringified shape; payloads, native identities
+and environment values were not persisted by the shape probe. Cursor's
+[hook reference](https://cursor.com/docs/hooks) declares duration as a number.
+
+The SDK now converts valid fractional milliseconds to canonical whole
+milliseconds by truncating the sub-millisecond fraction. Integer values,
+including u64::MAX, remain exact. Negative, nonnumeric, null and out-of-range
+values remain invalid. A red regression reproduced invalid-tool-duration before
+the fix. All 71 focused integration tests pass on Rust 1.88, including success
+and failure observation, privacy, integer precision and invalid input cases.
+Rust 1.96 library/example Clippy passes with warnings denied.
+
+A fresh uninstrumented native Allow probe passes: baseline and hooked Write
+files exist, one Write outcome matches the allowed session/call, two tool Allows
+and zero Blocks are recorded. Eight SDK records include the failed preliminary
+Read and the successful Write. Both processes exit 0 without timeout; owned
+hooks are removed. The native-tested handler SHA-256 is
+`44C08BCFCD4F645317A2181652344653E67252E3F8D6506220FA6B8DC9BD74BA`;
+subsequent Clippy cleanup changes only bool::then to equivalent bool::then_some.
+The installed CLI digest remains the one recorded above. Earlier failed probes
+remain retained. This closes the observed duration-decoding loss for these two
+native tool outcomes, not completion settlement, all edit paths or messaging.
+
 ### Repeatable fresh probe, 2026-10-07
 
 `examples/cursor-qualification/run.ps1` now provides a matched, bounded Windows

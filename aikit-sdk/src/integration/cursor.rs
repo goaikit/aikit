@@ -103,6 +103,13 @@ pub(super) fn decode(
                 None => None,
                 Some(v) => Some(
                     v.as_u64()
+                        .or_else(|| {
+                            // Cursor reports fractional milliseconds. The shared
+                            // payload stores whole milliseconds; discard only the
+                            // sub-millisecond fraction, never overflow or coerce types.
+                            let ms = v.as_f64()?;
+                            (ms.is_finite() && ms >= 0.0 && ms < u64::MAX as f64).then_some(ms as u64)
+                        })
                         .ok_or_else(|| IntegrationError::Invalid("invalid tool duration".into()))?,
                 ),
             };

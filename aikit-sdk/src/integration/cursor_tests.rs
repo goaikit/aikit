@@ -125,6 +125,62 @@ async fn native_utf8_bom_preserves_tool_payload_and_records_the_policy_decision(
 }
 
 #[tokio::test]
+async fn fractional_native_durations_preserve_success_and_failure_observations() {
+    let f = Fixture::new();
+    for event in ["postToolUse", "postToolUseFailure"] {
+        for (duration, expected) in [
+            (json!(0.75), 0),
+            (json!(15.75), 15),
+            (json!(15.0), 15),
+            (json!(u64::MAX), u64::MAX),
+        ] {
+            let mut value = f.input(event);
+            value["tool_use_id"] = json!("native-outcome");
+            value["tool_output"] = json!("{\"result\":\"private output\"}");
+            value["error_message"] = json!("private error");
+            value["duration"] = duration;
+            let decoded = decode(&f.installation, value.to_string().as_bytes()).unwrap();
+            let AgentEventPayload::ToolResult {
+                call_id,
+                duration_ms,
+                is_error,
+                ..
+            } = decoded.payload
+            else {
+                panic!("expected native outcome")
+            };
+            assert_eq!(call_id, "native-outcome");
+            assert_eq!(duration_ms, Some(expected));
+            assert_eq!(is_error, event == "postToolUseFailure");
+            assert_eq!(f.run(value, Decision::Allow).await.exit_code, 0);
+        }
+    }
+    let records = f.service.events(&f.installation.id, 0, 100).unwrap();
+    assert_eq!(records.records.len(), 8);
+    assert!(!serde_json::to_string(&records).unwrap().contains("private"));
+}
+
+#[test]
+fn native_duration_conversion_rejects_invalid_types_negative_and_overflow() {
+    let f = Fixture::new();
+    for duration in [
+        json!(-0.25),
+        json!(-1),
+        json!(true),
+        json!(null),
+        json!("15"),
+        json!(18446744073709551616.0),
+        json!(1e100),
+    ] {
+        let mut value = f.input("postToolUse");
+        value["tool_use_id"] = json!("native-outcome");
+        value["tool_output"] = json!("{}");
+        value["duration"] = duration;
+        assert!(decode(&f.installation, value.to_string().as_bytes()).is_err());
+    }
+}
+
+#[tokio::test]
 async fn bom_compatibility_does_not_accept_extra_markers_oversize_or_foreign_roots() {
     let f = Fixture::new();
     let mut tool = f.input("preToolUse");
