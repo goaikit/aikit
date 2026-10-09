@@ -26,7 +26,13 @@ pub(super) fn decode(
     if input.len() > 1024 * 1024 {
         return Err(IntegrationError::Invalid("hook input exceeds 1 MiB".into()));
     }
-    let value: Value = serde_json::from_slice(input)?;
+    // Native Windows Cursor command hooks can prefix redirected JSON with a
+    // UTF-8 BOM. Consume one transport marker, preserving JSON string payloads
+    // and enforcing the byte limit above against the original input.
+    let json_input = input
+        .strip_prefix(b"\xef\xbb\xbf".as_slice())
+        .unwrap_or(input);
+    let value: Value = serde_json::from_slice(json_input)?;
     let native = required_string(&value, "hook_event_name", 128)?;
     let event = installation
         .spec
@@ -97,6 +103,13 @@ pub(super) fn decode(
                 None => None,
                 Some(v) => Some(
                     v.as_u64()
+                        .or_else(|| {
+                            // Cursor reports fractional milliseconds. The shared
+                            // payload stores whole milliseconds; discard only the
+                            // sub-millisecond fraction, never overflow or coerce types.
+                            let ms = v.as_f64()?;
+                            (ms.is_finite() && ms >= 0.0 && ms < u64::MAX as f64).then_some(ms as u64)
+                        })
                         .ok_or_else(|| IntegrationError::Invalid("invalid tool duration".into()))?,
                 ),
             };

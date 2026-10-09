@@ -5,7 +5,9 @@ param(
     [Parameter(Mandatory)][string]$CursorCliPath,
     [Parameter(Mandatory)][string]$SdkPath,
     [Parameter(Mandatory)][string]$OutputDirectory,
-    [ValidateRange(10, 180)][int]$TimeoutSeconds = 120
+    [ValidateRange(10, 180)][int]$TimeoutSeconds = 120,
+    [switch]$OrdinaryWorkspace,
+    [ValidateSet('Deny', 'Allow')][string]$ToolPolicy = 'Deny'
 )
 $ErrorActionPreference = 'Stop'
 foreach ($inputPath in @($NodePath, $CursorCliPath, $SdkPath)) {
@@ -17,7 +19,7 @@ $SdkPath = (Resolve-Path -LiteralPath $SdkPath).Path
 $root = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $root) { throw 'OutputDirectory must be new; evidence is never overwritten.' }
 [void][IO.Directory]::CreateDirectory($root)
-$workspace = Join-Path $root "workspace ' dollar `$ semicolon ; unicode é"
+$workspace = Join-Path $root $(if ($OrdinaryWorkspace) { 'control-workspace' } else { "workspace ' dollar `$ semicolon ; unicode é" })
 $state = Join-Path $root 'state'
 [void][IO.Directory]::CreateDirectory($workspace)
 $gitPath = (Get-Command git -CommandType Application | Select-Object -First 1).Source
@@ -66,7 +68,7 @@ try {
     $spec = @{
         application_id = 'sdk-example'; agent_key = 'cursor'; workspace = $workspace; timeout_seconds = 15
         events = @('session_started', 'input_submitted', 'before_tool', 'after_tool', 'tool_failed', 'session_ended')
-        handler = @{ executable = $SdkPath; arguments = @('hook-cursor', $state, $workspace, '0', 'deny-tools') }
+        handler = @{ executable = $SdkPath; arguments = $(if ($ToolPolicy -eq 'Deny') { @('hook-cursor', $state, $workspace, '0', 'deny-tools') } else { @('hook-cursor', $state, $workspace, '0') }) }
     }
     $plan = Invoke-Sdk @('plan', $state) ($spec | ConvertTo-Json -Depth 10)
     $plan | ConvertTo-Json -Depth 20 | Set-Content (Join-Path $root 'plan.json')
@@ -75,10 +77,21 @@ try {
     $page = Invoke-Sdk @('events', $state, $plan.installation_id)
     $page | ConvertTo-Json -Depth 30 | Set-Content (Join-Path $root 'events.json')
     $blocks = @($page.records | Where-Object { $_.request.event -eq 'before_tool' -and $_.decision.decision -eq 'block' }).Count
+    $allows = @($page.records | Where-Object { $_.request.event -eq 'before_tool' -and $_.decision.decision -eq 'allow' }).Count
+    $outcomes = @($page.records | Where-Object { $_.request.event -eq 'after_tool' }).Count
+    $writeAllows = @($page.records | Where-Object {
+        $_.request.event -eq 'before_tool' -and $_.decision.decision -eq 'allow' -and $_.request.payload.tool_use.tool_name -eq 'Write'
+    })
+    $writeOutcomes = @($page.records | Where-Object {
+        $outcome = $_
+        $outcome.request.event -eq 'after_tool' -and $outcome.request.payload.tool_result.is_error -eq $false -and @($writeAllows | Where-Object {
+            $_.request.session_id -eq $outcome.request.session_id -and $_.request.payload.tool_use.call_id -eq $outcome.request.payload.tool_result.call_id
+        }).Count -gt 0
+    }).Count
     $report = @{
         baseline = $baseline; gated = $gated
         sdk_records = @($page.records).Count
-        sdk_tool_blocks = $blocks
+        sdk_tool_blocks = $blocks; sdk_tool_allows = $allows; sdk_tool_outcomes = $outcomes; sdk_write_outcomes = $writeOutcomes; tool_policy = $ToolPolicy
         sdk_sha256 = (Get-FileHash -LiteralPath $SdkPath -Algorithm SHA256).Hash
         cursor_cli_sha256 = (Get-FileHash -LiteralPath $CursorCliPath -Algorithm SHA256).Hash
         context = @{ platform = 'windows'; mode = 'print'; node = $NodePath; cursor_cli = $CursorCliPath }
@@ -88,8 +101,15 @@ try {
     if ($baseline.timed_out -or $baseline.exit_code -ne 0 -or -not $baseline.file_exists) {
         throw 'No-hook native write baseline failed; inspect retained evidence.'
     }
-    if ($gated.timed_out -or $gated.exit_code -ne 0 -or $gated.file_exists -or $blocks -lt 1) {
-        throw 'Native SDK denial was not qualified; inspect native output and SDK events.'
+    if ($gated.timed_out -or $gated.exit_code -ne 0) {
+        throw 'Native hooked process failed or timed out; inspect retained evidence.'
+    }
+    if ($ToolPolicy -eq 'Deny') {
+        if ($gated.file_exists -or $blocks -lt 1) {
+            throw 'Native SDK denial was not qualified; inspect native output and SDK events.'
+        }
+    } elseif (-not $gated.file_exists -or $allows -lt 1 -or $writeOutcomes -lt 1 -or $blocks -gt 0) {
+        throw 'Native SDK allow/outcome was not qualified; inspect native output and SDK events.'
     }
 } finally {
     if ($installation) {

@@ -371,6 +371,95 @@ handler invocation marker. Do not disable `failClosed` or relax workspace checks
 After repair, repeat prompt admission, tool allow/deny/failure and session replay;
 the independent SDK byte-stream regression is insufficient for native support.
 
+### Windows BOM decoding and path control, 2026-10-09
+
+Cursor 2026.09.02-c22c1a3 in Windows x86_64 print mode was tested with the
+same baseline/owned-hook Write request in an ordinary workspace path. At the
+merged SDK source `1e136544`, the baseline created its file, but the hooked run
+returned validation-unavailable with zero SDK records. Both exited 0 without
+timeout. A metadata-only stdin probe observed a leading UTF-8 BOM in all four
+native hook inputs; strict JSON decoding rejected them before journaling. No
+prompt, tool argument or native identity values were retained by that probe.
+
+The decoder now consumes one leading UTF-8 BOM, after checking the original
+1 MiB byte bound. It preserves BOM characters inside JSON strings. Duplicate
+markers, oversize input and foreign workspace roots remain rejected with exit 2.
+The two regression tests check the application callback's original tool input,
+the durable Block decision and existing journal redaction. All 69 focused SDK
+integration tests and the handler example build pass on Rust 1.88. Library and
+handler example Clippy pass with warnings denied on installed Rust 1.96; this
+host does not have the Rust 1.88 Clippy component.
+
+With the fixed handler, the ordinary-path native baseline write succeeded; the
+hooked Write was denied with one SDK BeforeTool Block among five records and no
+gated file. Both processes exited 0 without timeout. Handler SHA-256:
+`5E6361B66A46FFD032FD19B70572E039BDA7DAD85402C8D0A7835CE57C248642`.
+Cursor entrypoint SHA-256:
+`7C1957BB82B2B31F4BA53D3A9C11404FA263B31F84076E87FCB83539AC8F09A6`.
+
+The original punctuation/Unicode path was rerun with that same handler. Its
+baseline succeeded, but owned hooks again produced zero SDK records and zero
+Blocks, so the probe failed as required. Use the probe's `-OrdinaryWorkspace`
+option to reproduce the control; its default preserves the path stress case.
+The owned hooks were removed in both runs. This qualifies only ordinary-path
+native dispatch and one tool denial. Capability reports remain conservative;
+prompt denial, successful tool outcomes, session replay, completion enforcement
+and messaging still require their own evidence.
+
+### Fractional native tool durations, 2026-10-09
+
+The ordinary-path `-ToolPolicy Allow` probe initially created the hooked file
+and recorded two tool Allows, but no outcome. Metadata-only forwarding probes
+confirmed that native `postToolUse` for Write and `postToolUseFailure` for Read
+reached the SDK with BOM-prefixed JSON and nonnegative fractional durations.
+The integer-only duration decoder rejected both before journaling. Native tool
+output had the documented JSON-stringified shape; payloads, native identities
+and environment values were not persisted by the shape probe. Cursor's
+[hook reference](https://cursor.com/docs/hooks) declares duration as a number.
+
+The SDK now converts valid fractional milliseconds to canonical whole
+milliseconds by truncating the sub-millisecond fraction. Integer values,
+including u64::MAX, remain exact. Negative, nonnumeric, null and out-of-range
+values remain invalid. A red regression reproduced invalid-tool-duration before
+the fix. All 71 focused integration tests pass on Rust 1.88, including success
+and failure observation, privacy, integer precision and invalid input cases.
+Rust 1.96 library/example Clippy passes with warnings denied.
+
+A fresh uninstrumented native Allow probe passes: baseline and hooked Write
+files exist, one Write outcome matches the allowed session/call, two tool Allows
+and zero Blocks are recorded. Eight SDK records include the failed preliminary
+Read and the successful Write. Both processes exit 0 without timeout; owned
+hooks are removed. The native-tested handler SHA-256 is
+`44C08BCFCD4F645317A2181652344653E67252E3F8D6506220FA6B8DC9BD74BA`;
+subsequent Clippy cleanup changes only bool::then to equivalent bool::then_some.
+The installed CLI digest remains the one recorded above. Earlier failed probes
+remain retained. This closes the observed duration-decoding loss for these two
+native tool outcomes, not completion settlement, all edit paths or messaging.
+
+### Linux SDK qualification, 2026-10-09
+
+Public draft source `5ffd32b` plus one Pi test-only correction passes all 73
+focused SDK integration tests and builds the handler example on Linux x86_64
+with Rust 1.88. The corrected Windows suite passes all 71 tests. The Pi test now
+requires refusal for Unknown or Unsupported native completion contracts; installed
+Linux Pi 0.82.1 correctly reports the recorded missing-proposal contract as
+Unsupported. No production capability, version decoder or admission rule changed.
+
+The published library archive excludes its generated Cargo.lock. Qualification
+used the exact generated Windows lockfile, SHA-256
+`4b2b2e5b8b68c144b56cd0d07cd0a0521cfa71dfd9908730b181a2b3012d5654`.
+Initial missing-lock, offline-cache and platform-sensitive-test failures remain
+retained; public dependency downloads filled the cache before the offline rerun.
+
+Rust 1.88 Clippy with warnings denied fails on pre-existing format-string lint:
+17 dependency warnings stop the full command; SDK-only lint reports 100 warnings.
+Restoring the unchanged production decoder reproduces identical SDK diagnostics.
+This is an explicit older-toolchain lint limitation, not a passing Linux lint gate.
+Windows Rust 1.96 Clippy retains its earlier passing scope. The isolated source
+and corrected decoder are preserved; the host checkout HEAD, refs and tracked
+status match before/after. No Linux native agent workflow or macOS behavior is
+qualified by these SDK tests.
+
 ### Repeatable fresh probe, 2026-10-07
 
 `examples/cursor-qualification/run.ps1` now provides a matched, bounded Windows
