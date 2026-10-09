@@ -4,17 +4,23 @@ param(
     [Parameter(Mandatory)][string]$NodePath,
     [Parameter(Mandatory)][string]$PiCliPath,
     [Parameter(Mandatory)][string]$PiAiModulePath,
-    [Parameter(Mandatory)][string]$SdkPath,
-    [Parameter(Mandatory)][string]$OutputDirectory
+    [string]$SdkPath,
+    [Parameter(Mandatory)][string]$OutputDirectory,
+    [switch]$MessagingOnly
 )
 $ErrorActionPreference = 'Stop'
-foreach ($inputPath in @($NodePath, $PiCliPath, $PiAiModulePath, $SdkPath)) {
+$requiredPaths = @($NodePath, $PiCliPath, $PiAiModulePath)
+if (-not $MessagingOnly) {
+    if ([string]::IsNullOrWhiteSpace($SdkPath)) { throw 'SdkPath is required unless MessagingOnly is selected.' }
+    $requiredPaths += $SdkPath
+}
+foreach ($inputPath in $requiredPaths) {
     if (-not (Test-Path -LiteralPath $inputPath -PathType Leaf)) { throw "Missing input: $inputPath" }
 }
 $NodePath = (Resolve-Path -LiteralPath $NodePath).Path
 $PiCliPath = (Resolve-Path -LiteralPath $PiCliPath).Path
 $PiAiModulePath = (Resolve-Path -LiteralPath $PiAiModulePath).Path
-$SdkPath = (Resolve-Path -LiteralPath $SdkPath).Path
+if (-not $MessagingOnly) { $SdkPath = (Resolve-Path -LiteralPath $SdkPath).Path }
 $root = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $root) { throw 'OutputDirectory must be new; existing evidence is never overwritten.' }
 [void][IO.Directory]::CreateDirectory($root)
@@ -138,6 +144,30 @@ function Run-Native([string]$Label, [string]$Scenario, [string]$WriteFile = 'pro
 try {
     $nodeVersion = (Invoke-Bounded $NodePath @('--version') 'node-version').Trim()
     $piVersion = (Invoke-Bounded $NodePath @($PiCliPath, '--version') 'pi-version').Trim()
+    if ($MessagingOnly) {
+        $messageResults = @()
+        foreach ($scenario in @('message-steer', 'message-followup', 'message-without-mode')) {
+            $native = Run-Native $scenario $scenario
+            $returned = @($native.events | Where-Object type -eq 'message_api_return')
+            $contexts = @($native.events | Where-Object type -eq 'message_context')
+            Assert-That ($returned.Count -eq 1 -and $returned[0].returned -eq 'undefined') "$scenario did not expose the expected void API return."
+            Assert-That ($contexts[0].occurrences -eq 0) "$scenario was present before submission."
+            if ($scenario -eq 'message-without-mode') {
+                Assert-That ($contexts.Count -eq 1 -and $contexts[0].occurrences -eq 0) 'Missing delivery mode unexpectedly reached a model context.'
+                $nativeError = [IO.File]::ReadAllText((Join-Path $root "$scenario-stderr.txt"))
+                Assert-That ($nativeError.Contains('Agent is already processing') -and $nativeError.Contains('steer') -and $nativeError.Contains('followUp')) 'The expected asynchronous native queue error was not observed.'
+            } else {
+                Assert-That ($contexts.Count -eq 2 -and $contexts[1].occurrences -eq 1) "$scenario did not consume exactly one queued user message in the next model context."
+            }
+            $messageResults += @{ scenario = $scenario; api_return = 'undefined'; model_calls = $contexts.Count; consumed = ($contexts.Count -eq 2) }
+        }
+        $messageSummary = @{ node = $nodeVersion; pi = $piVersion; scenarios = $messageResults;
+            native_queue_probe = $true; sdk_messaging = $false; durable_acknowledgement = $false;
+            provider_sha256 = (Get-FileHash -LiteralPath (Join-Path $root 'provider.mjs')).Hash }
+        $messageSummary | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $root 'summary.json') -Encoding utf8
+        $messageSummary | ConvertTo-Json -Depth 8
+        return
+    }
     $baseline = Run-Native 'write-baseline' 'write' 'baseline.txt'
     Assert-That ([IO.File]::ReadAllText((Join-Path $workspace 'baseline.txt')) -eq "native-write-probe`n") 'Baseline write failed.'
     Assert-That (@($baseline.events | Where-Object { $_.event -eq 'tool_result' -and $_.isError -eq $false }).Count -eq 1) 'Missing baseline success.'

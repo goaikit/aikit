@@ -200,6 +200,11 @@ fn report(
         && architecture == "x86_64"
         && mode == SessionMode::Print
         && version_output.as_deref() == Some("1.0.4");
+    let pi_missing_proposal = agent_key == "pi"
+        && platform == "linux"
+        && architecture == "x86_64"
+        && mode == SessionMode::Print
+        && version_output.as_deref() == Some("0.82.1");
     let assessments = CAPABILITIES.into_iter().map(|capability| {
         use IntegrationCapability::*;
         let (implemented, support, detail) = if agent_key == "cursor" {
@@ -217,6 +222,7 @@ fn report(
             }
         } else if agent_key == "pi" {
             match capability {
+                CompletionDecision | RepeatedCompletionBlocking | FinalAnswerCapture | FailedCompletionObservation if pi_missing_proposal => (true, Support::Unsupported, "Recorded Linux x86_64 Pi 0.82.1 print-context gap: the installed extension event union lacks agent_before_settle, and four bounded native runs emit no proposal event. The SDK bridge depends on that event for these operations. Type-only agent_settled and process exit cannot substitute. Other versions/platforms/modes remain separately unqualified."),
                 RepeatedCompletionBlocking if pi_boundary_gap => (true, Support::Unknown, "Recorded Windows Pi 1.0.4 print-mode counterexample: a later extension observed the SDK Block and continue:true, returned continue:false, and Pi settled after one model turn without an Allow. Native continuation decisions are not monotonic; effective extension ordering and enforced blocking remain unqualified."),
                 SuccessfulCompletionObservation if pi_boundary_gap => (false, Support::Unsupported, "Recorded Windows Pi 1.0.4 print-mode counterexample: a later extension aborted after the SDK Allow. Both normal and aborted agent_settled events contained only type, with no outcome/proposal ID and no available abort signal. Allow followed by settlement cannot prove accepted completion. A native correlated final-outcome contract is required."),
                 HookInstallation | ObservationBinding | DurableReplay | SafeDetach => (true, Support::Supported, "SDK owns one generated Pi extension file, with fingerprint-checked plans/removal, observation bindings and replay. Loading and native project trust are not attested."),
@@ -401,10 +407,12 @@ mod tests {
             SessionMode::Print,
             Ok("2.1.269 (Claude Code)".into()),
         );
-        assert!(report
-            .assessments
-            .iter()
-            .all(|value| !value.implemented && value.support == Support::Unsupported));
+        assert!(
+            report
+                .assessments
+                .iter()
+                .all(|value| !value.implemented && value.support == Support::Unsupported)
+        );
     }
     #[test]
     fn absent_and_duplicate_requirements_fail_explicitly() {
@@ -451,6 +459,102 @@ mod tests {
             for assessment in error.unmet {
                 assert_eq!(assessment.detail.contains("counterexample"), matched);
             }
+        }
+    }
+
+    #[test]
+    fn pi_missing_proposal_rejects_dependent_contracts_only_in_recorded_context() {
+        use IntegrationCapability::*;
+        let dependent = [
+            CompletionDecision,
+            RepeatedCompletionBlocking,
+            FinalAnswerCapture,
+            FailedCompletionObservation,
+        ];
+        for (platform, architecture, mode, probe, matched) in [
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Print,
+                Ok("0.82.1".into()),
+                true,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                Ok("0.82.1".into()),
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Unknown,
+                Ok("0.82.1".into()),
+                false,
+            ),
+            (
+                "windows",
+                "x86_64",
+                SessionMode::Print,
+                Ok("0.82.1".into()),
+                false,
+            ),
+            (
+                "linux",
+                "aarch64",
+                SessionMode::Print,
+                Ok("0.82.1".into()),
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Print,
+                Ok("0.82.2".into()),
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Print,
+                Err("binary_not_found".into()),
+                false,
+            ),
+        ] {
+            let report = report("pi", platform, architecture, mode, probe);
+            let unmet = report.require(&dependent).unwrap_err().unmet;
+            assert_eq!(unmet.len(), dependent.len());
+            for (assessment, capability) in unmet.iter().zip(dependent) {
+                assert_eq!(assessment.capability, capability);
+                assert!(assessment.implemented);
+                assert_eq!(
+                    assessment.support,
+                    if matched {
+                        Support::Unsupported
+                    } else {
+                        Support::Unknown
+                    }
+                );
+                assert_eq!(
+                    assessment.detail.contains("lacks agent_before_settle"),
+                    matched
+                );
+            }
+            report
+                .require(&[
+                    HookInstallation,
+                    ObservationBinding,
+                    DurableReplay,
+                    SafeDetach,
+                ])
+                .unwrap();
+            let pre_tool = report.require(&[PreToolDecision]).unwrap_err();
+            assert_eq!(pre_tool.unmet[0].support, Support::Unknown);
+            let completion = report
+                .require(&[SuccessfulCompletionObservation])
+                .unwrap_err();
+            assert_eq!(completion.unmet[0].support, Support::Unsupported);
         }
     }
 }

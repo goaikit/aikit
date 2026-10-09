@@ -13,6 +13,17 @@ fn native_command_preserves_argv_utf8_streams_and_exit_status() {
         "quote\"and\\".into(),
         "'$(not-a-command); & %NAME% !NAME!\nUTF8-é".into(),
     ];
+    let inputs = [
+        Vec::new(),
+        "stdin-é\\n".as_bytes().to_vec(),
+        [b"\xef\xbb\xbf".as_slice(), "stdin-é".as_bytes()].concat(),
+        vec![0, 255, 195],
+    ];
+    let expected_inputs = inputs
+        .iter()
+        .map(|input| format!("vec!{input:?}"))
+        .collect::<Vec<_>>()
+        .join(",");
     // A tiny native process tests the real platform parser and byte streams,
     // rather than validating a serializer against another copy of its rules.
     let source = format!(
@@ -20,9 +31,11 @@ fn native_command_preserves_argv_utf8_streams_and_exit_status() {
         use std::io::{{Read, Write}};
         fn main() {{
             assert_eq!(std::env::args().skip(1).collect::<Vec<_>>(), {arguments:?});
-            let mut input = String::new();
-            std::io::stdin().read_to_string(&mut input).unwrap();
-            assert_eq!(input, "stdin-é\\n");
+            let inputs: Vec<Vec<u8>> = vec![{expected_inputs}];
+            let case: usize = std::env::var("AIKIT_COMMAND_TEST_CASE").unwrap().parse().unwrap();
+            let mut input = Vec::new();
+            std::io::stdin().read_to_end(&mut input).unwrap();
+            assert_eq!(input, inputs[case]);
             std::io::stdout().write_all("stdout-é".as_bytes()).unwrap();
             std::io::stderr().write_all("stderr-é".as_bytes()).unwrap();
             std::process::exit(23);
@@ -47,36 +60,34 @@ fn native_command_preserves_argv_utf8_streams_and_exit_status() {
         arguments,
     })
     .unwrap();
-    let mut process = if cfg!(windows) {
-        let mut cmd = Command::new("powershell.exe");
-        cmd.args(serialized.split(' ').skip(1));
-        cmd
-    } else {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", &serialized]);
-        cmd
-    };
-    let mut child = process
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all("stdin-é\\n".as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(
-        output.status.code(),
-        Some(23),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, "stdout-é".as_bytes());
-    assert_eq!(output.stderr, "stderr-é".as_bytes());
+    for (case, input) in inputs.iter().enumerate() {
+        let mut process = if cfg!(windows) {
+            let mut cmd = Command::new("powershell.exe");
+            cmd.args(serialized.split(' ').skip(1));
+            cmd
+        } else {
+            let mut cmd = Command::new("sh");
+            cmd.args(["-c", &serialized]);
+            cmd
+        };
+        let mut child = process
+            .env("AIKIT_COMMAND_TEST_CASE", case.to_string())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(23),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, "stdout-é".as_bytes());
+        assert_eq!(output.stderr, "stderr-é".as_bytes());
+    }
 }
 
 #[test]

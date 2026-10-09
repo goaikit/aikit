@@ -6,6 +6,8 @@ export default async function (pi) {
   const { fauxProvider, fauxAssistantMessage, fauxToolCall } =
     await import(pathToFileURL(process.env.AIKIT_PI_AI_MODULE).href);
   const scenario = process.env.AIKIT_PI_SCENARIO;
+  const messageProbe = scenario.startsWith("message-");
+  const messageText = "Native message fixture 雪";
   const record = (row) => fs.appendFileSync(process.env.AIKIT_PI_EVIDENCE, `${JSON.stringify(row)}\n`);
   const faux = fauxProvider({
     provider: "aikit-fixture",
@@ -13,6 +15,19 @@ export default async function (pi) {
   });
   faux.setResponses(Array.from({ length: 8 }, () => (_context, _options, state) => {
     record({ type: "fixture_model_call", call: state.callCount, scenario });
+    if (messageProbe) {
+      const users = _context.messages.filter((message) => message.role === "user")
+        .map((message) => typeof message.content === "string" ? message.content :
+          message.content.filter((part) => part.type === "text").map((part) => part.text).join(""));
+      record({ type: "message_context", call: state.callCount,
+        occurrences: users.filter((text) => text === messageText).length });
+      if (state.callCount === 1) {
+        const options = scenario === "message-without-mode" ? undefined :
+          { deliverAs: scenario === "message-steer" ? "steer" : "followUp" };
+        const result = pi.sendUserMessage(messageText, options);
+        record({ type: "message_api_return", returned: typeof result });
+      }
+    }
     if (scenario === "failure") {
       return fauxAssistantMessage([], {
         stopReason: "error", errorMessage: "Qualification fixture failure",

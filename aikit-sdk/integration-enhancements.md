@@ -28,6 +28,59 @@ their separate contracts; repairing dispatch alone does not qualify Codelaya.
 
 ## Pi: authoritative completion settlement
 
+### Bridge invocation replacement isolation
+
+The local bridge now scopes shutdown cleanup and continuation state to the
+invocation captured before its asynchronous handler request. A shutdown that
+settles after a replacement SessionStart no longer clears the replacement's
+UUID. A stale completion callback still blocks its own decision but cannot set
+the replacement's `stop_hook_active`; failure correlation also checks invocation.
+
+Synchronized real Node child handlers reproduced both prior failures: the new
+invocation's input became handled after old shutdown, and its first completion
+was incorrectly marked as a continuation. The bridge regression now pauses each
+old child after its request is recorded, starts the replacement, releases the
+child and asserts identity plus first/subsequent continuation state. This is
+generated-bridge process evidence, not an installed native Pi lifecycle claim or
+completion/delivery capability promotion. The correction remains local pending
+upstream publication authorization and is not in Codelaya's pinned dependency.
+
+### Linux Pi 0.82.1 compatibility gap, 2026-10-07
+
+Installed Linux x86_64 Pi 0.82.1, exercised under Bun 1.4.2 with the unchanged
+qualification `provider.mjs`, runs four bounded print scenarios: normal, steer,
+followUp and missing delivery mode. All exit 0. The installed extension event
+union includes `agent_settled` but no `agent_before_settle`; the four actual runs
+emit no proposal event and each settles with event keys exactly `type`.
+This runtime cannot inherit the recorded Pi 1.0.4 completion proposal scenarios.
+The existing generated bridge depends on that proposal event. Report the missing
+version-specific native contract before attempting completion qualification;
+do not replace it with agent_end/settled or process exit.
+
+Installed source evidence digests:
+`dist/core/extensions/types.d.ts`:
+`d3fb9d55d312e47df861507aeef41c1183261c3a577588dc2ddb1c97cc909d6e`;
+`dist/core/agent-session.js`:
+`d300f57a70b7ca3f86e8e41b5336b0579268cbcecfedf1d99c176f2add2dd39b`.
+The extension API declares `sendUserMessage` void and the runtime forwards its
+asynchronous rejection to the extension error stream. Native queue probes reuse
+provider SHA-256 `13ab6aca2793570b8eb945bcdc6bb0b34dfeba5757ff35536315263b715420c0`:
+steer/followUp each deliver one fixture message in the second model context;
+missing mode returns undefined, then reports the already-processing error with
+no consumption. No SDK hooks are installed, profile/state are isolated, and no
+external model account is used. This is a candidate queue API, not durable SDK
+messaging or completion enforcement. Native identity, interactive mode, queue
+acknowledgement/reconciliation and restart lifetime remain unqualified.
+
+The local SDK capability report now marks CompletionDecision,
+RepeatedCompletionBlocking, FinalAnswerCapture and FailedCompletionObservation
+Unsupported for exactly Linux/x86_64/print/Pi 0.82.1. The translation code remains
+implemented, but its required proposal event is unavailable in this recorded
+context. Regression cases retain Unknown for other modes, platforms,
+architectures, versions and missing probes; local install/replay/binding/detach
+semantics are unchanged. This change is not yet published or consumed by the
+Codelaya pinned dependency. It does not claim native enforcement or add a fallback.
+
 Observed on Pi 1.0.4, Windows x86_64 print mode, Node 24.19.0 and SDK fff6aa7:
 
 - An extension ran after a recorded SDK Allow and called `ctx.abort()`. The native
@@ -82,3 +135,22 @@ and must not be used as an attachment mechanism. Pi's public extension messaging
 functions are a candidate bridge; qualify their queue acknowledgement and lifetime
 before connecting them to the existing session binding. Preserve immutable
 operation IDs/content and never blindly replay an unknown handoff.
+
+### Pi native queue feasibility, 2026-10-07
+
+The existing qualification harness now has a MessagingOnly mode. Two runs on
+Windows Pi 1.0.4 / Node 24.19.0 use the real extension API, native loop and a
+controlled provider. sendUserMessage with steer or followUp delivers one Unicode
+fixture message to the next model context. Without a streaming delivery mode,
+the wrapper still returns undefined, then asynchronously reports the already
+processing error; no fixture message reaches the model. Thus neither void return
+nor absence of a synchronous exception proves acceptance or consumption.
+
+This advances the candidate bridge feasibility, not IntegrationService messaging.
+Before exposing a supported session transport, qualify or request a correlated
+native acknowledgement/error contract: stable operation id and session generation,
+observable enqueue/consume/reject evidence, lookup/reconciliation and explicit
+shutdown/restart queue lifetime. SDK durable records must preserve uncertainty
+across the dispatch boundary and never replay a message merely because a native
+error or acknowledgement was lost. Reuse this existing API where its semantics
+match, without substituting managed gateway process ownership for attachment.

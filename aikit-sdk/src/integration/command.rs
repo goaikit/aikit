@@ -22,7 +22,15 @@ fn command_for(handler: &HookCommand, windows: bool) -> Result<String, Integrati
             .map(|v| windows_argument(v))
             .collect::<Vec<_>>()
             .join(" ");
-        let script = format!("$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$p=[System.Diagnostics.ProcessStartInfo]::new();$p.FileName={};$p.Arguments={};$p.UseShellExecute=$false;$p.RedirectStandardInput=$true;$p.RedirectStandardOutput=$true;$p.RedirectStandardError=$true;$c=[System.Diagnostics.Process]::Start($p);$o=$c.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput());$e=$c.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError());[Console]::OpenStandardInput().CopyTo($c.StandardInput.BaseStream);$c.StandardInput.Close();$c.WaitForExit();[void]$o.GetAwaiter().GetResult();[void]$e.GetAwaiter().GetResult();exit $c.ExitCode", ps_literal(executable), ps_literal(&argv));
+        // StandardInput creates a StreamWriter even though we copy into its
+        // BaseStream. Its default encoding can emit a BOM when initialized or
+        // closed, depending on the host console encoding. Disable that preamble
+        // explicitly; payload bytes (including any actual BOM) remain untouched.
+        // Windows PowerShell's .NET Framework lacks StandardInputEncoding, so
+        // Process.Start captures a BOM-free UTF-8 Console.InputEncoding instead.
+        // The code page stays 65001 and the original encoding is immediately
+        // restored after construction, including if process creation fails.
+        let script = format!("$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$p=[System.Diagnostics.ProcessStartInfo]::new();$p.FileName={};$p.Arguments={};$p.UseShellExecute=$false;$p.RedirectStandardInput=$true;$p.RedirectStandardOutput=$true;$p.RedirectStandardError=$true;$encoding=[Console]::InputEncoding;if($encoding.CodePage -eq 65001){{[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false)}};try{{$c=[System.Diagnostics.Process]::Start($p)}}finally{{[Console]::InputEncoding=$encoding}};$o=$c.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput());$e=$c.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError());[Console]::OpenStandardInput().CopyTo($c.StandardInput.BaseStream);$c.StandardInput.Close();$c.WaitForExit();[void]$o.GetAwaiter().GetResult();[void]$e.GetAwaiter().GetResult();exit $c.ExitCode", ps_literal(executable), ps_literal(&argv));
         let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
         let command =

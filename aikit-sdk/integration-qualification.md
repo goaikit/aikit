@@ -460,3 +460,14 @@ SuccessfulCompletionObservation stays Unsupported. Other contexts inherit neithe
 the experiment nor support. Required native proposal/outcome/gate contracts and
 loader deduplication are documented in `integration-enhancements.md`. Do not add
 an inferred accepted-completion event to bridge this missing native information.
+
+### Native Pi message queue candidate
+
+The messaging-only qualification mode passed steer, followUp and missing-mode
+scenarios twice on Windows Pi 1.0.4 / Node 24.19.0 on 2026-10-07. Positive modes
+reach the next deterministic model context once; all API calls return undefined,
+including the asynchronously rejected missing-mode case. See the harness README
+and integration-enhancements.md for reproduction and the acknowledgement gap.
+SDK existing-session messaging remains unavailable; no capability was promoted.
+The tests qualify native queue behavior in a trusted fixture, not operation-level
+receipts/reconciliation, identity, crash/restart or queue lifetime.
