@@ -1,6 +1,6 @@
 # A session hook can be a file aikit owns whole
 
-Status: proposed. Date: 2026-10-17. Plan: [session hooks for Codex, Cursor and Pi](../plans/session-hooks-codex-cursor-pi.md).
+Status: accepted. Date: 2026-10-17. Plan: [session hooks for Codex, Cursor and Pi](../plans/session-hooks-codex-cursor-pi.md).
 
 `session_hooks` so far merged one entry into an agent's JSON settings file and recognised it by its id. Pi has no command hooks; it runs a command at session start only from a TypeScript extension. aikit therefore writes, for Pi, a whole extension file named after the hook id, rendered from a fixed template, marked with a generated-file line that names the id. It never edits a file it didn't render: a file at that path without the marker is refused, and unregistering deletes only a file whose marker names the same id.
 

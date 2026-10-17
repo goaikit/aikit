@@ -523,7 +523,7 @@ pub use paths::{
 pub use session_hooks::{
     admin_hook_entry, admin_hook_file, admin_hook_present, format_notice, has_session_hook,
     register_session_hook, session_hook_agents, session_hook_support, unregister_session_hook,
-    HookChange, SessionHook, SessionHookError, SessionHookSupport,
+    AdminHookEntry, AdminHookFormat, HookChange, SessionHook, SessionHookError, SessionHookSupport,
 };
 pub use skill_entry::{
     deploy_skill_entry, remove_skill_entry, DeployMode, DeployedEntry, SkillEntryError,
