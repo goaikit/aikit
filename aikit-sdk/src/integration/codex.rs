@@ -12,7 +12,7 @@ pub(super) fn event_name(event: HookEvent) -> Result<&'static str, IntegrationEr
         HookEvent::AfterTool => Ok("PostToolUse"),
         HookEvent::CompletionProposed => Ok("Stop"),
         HookEvent::SessionEnded => Ok("SessionEnd"),
-        HookEvent::ToolFailed | HookEvent::CompletionFailed => Err(IntegrationError::Unsupported(
+        HookEvent::ToolFailed | HookEvent::CompletionFailed | HookEvent::NativeTurnStarted | HookEvent::NativeTurnFinished => Err(IntegrationError::Unsupported(
             "Codex does not expose the required distinct tool/turn failure hook; PostToolUse and Interrupt are not substitutes".into(),
         )),
     }
@@ -113,6 +113,7 @@ pub(super) fn decode(
         installation_id: installation.id.clone(),
         session_id,
         invocation_id: None,
+        native_turn: None,
         prompt_id,
         agent_id: optional_string(&value, "agent_id", 256)?,
         event,

@@ -53,6 +53,287 @@ impl Fixture {
 }
 
 struct Fixed(Decision);
+
+#[test]
+fn native_turn_observations_are_typed_bounded_and_match_inherited_turn() {
+    let f = Fixture::new(10);
+    let installation = f.service.installed(&f.id).unwrap();
+    let invocation = uuid::Uuid::new_v4().to_string();
+    let environment = json!({"schema_version":1,"installation_id":f.id,
+        "native_context":{"session_id":"native-session","invocation_id":invocation,"cwd":f.workspace},
+        "native_turn_id":"turn-native"});
+    for reason in ["answer", "aborted", "refusal", "error"] {
+        let mut value = f.input("AIKitNativeTurnFinished");
+        value["aikit_native_turn_version"] = json!(1);
+        value["native_turn"] = json!({"id":"turn-native","outcome":{"reason":reason,"is_aborted":reason == "aborted"}});
+        value["last_assistant_message"] = json!("Exact answer 雪\n");
+        let mut request = decode(&installation, value.to_string().as_bytes()).unwrap();
+        assert_eq!(request.event, HookEvent::NativeTurnFinished);
+        assert_eq!(request.final_answer.as_deref(), Some("Exact answer 雪\n"));
+        super::super::agent_tool_session::bind_environment(
+            &installation,
+            &mut request,
+            Some(&environment.to_string()),
+        )
+        .unwrap();
+        assert_eq!(request.invocation_id.as_deref(), Some(invocation.as_str()));
+        assert_eq!(request.native_turn.as_ref().unwrap().id, "turn-native");
+        let mut foreign = environment.clone();
+        foreign["native_turn_id"] = json!("previous-turn");
+        assert!(super::super::agent_tool_session::bind_environment(
+            &installation,
+            &mut request,
+            Some(&foreign.to_string())
+        )
+        .is_err());
+        value["native_turn"]["outcome"]["reason"] = json!("unknown");
+        assert!(decode(&installation, value.to_string().as_bytes()).is_err());
+    }
+    let mut start = f.input("AIKitNativeTurnStarted");
+    start["aikit_native_turn_version"] = json!(1);
+    start["native_turn"] = json!({"id":"turn-native"});
+    assert!(matches!(
+        decode(&installation, start.to_string().as_bytes())
+            .unwrap()
+            .payload,
+        AgentEventPayload::Hook {
+            phase: HookPhase::RunStart,
+            ..
+        }
+    ));
+    assert_eq!(
+        decode(&installation, start.to_string().as_bytes())
+            .unwrap()
+            .event,
+        HookEvent::NativeTurnStarted
+    );
+    start["native_turn"]["outcome"] = json!({"reason":"answer","is_aborted":false});
+    assert!(decode(&installation, start.to_string().as_bytes()).is_err());
+    start["aikit_native_turn_version"] = json!(2);
+    assert!(decode(&installation, start.to_string().as_bytes()).is_err());
+    let mut stop = decode(&installation, f.input("Stop").to_string().as_bytes()).unwrap();
+    super::super::agent_tool_session::bind_environment(
+        &installation,
+        &mut stop,
+        Some(&environment.to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        stop.native_turn,
+        Some(NativeTurn {
+            id: "turn-native".into(),
+            outcome: None
+        })
+    );
+}
+
+#[tokio::test]
+async fn native_turn_without_owned_module_is_refused_before_journal_and_policy() {
+    let f = Fixture::new(10);
+    let mut value = f.input("AIKitNativeTurnFinished");
+    value["aikit_native_turn_version"] = json!(1);
+    value["native_turn"] =
+        json!({"id":"turn-native","outcome":{"reason":"answer","is_aborted":false}});
+    let response = f
+        .service
+        .handle_hook(&f.id, value.to_string().as_bytes(), &Fixed(Decision::Allow))
+        .await;
+    assert_eq!(response.exit_code, 2);
+    assert!(f.service.events(&f.id, 0, 100).unwrap().records.is_empty());
+    let mut spec = f.service.installed(&f.id).unwrap().spec;
+    spec.events.push(HookEvent::NativeTurnFinished);
+    assert!(f.service.plan_install(spec).is_err());
+}
+
+#[test]
+fn inherited_tool_generation_is_bounded_scoped_and_never_copied_from_hook_json() {
+    let f = Fixture::new(10);
+    let installation = f.service.installed(&f.id).unwrap();
+    let mut input = f.input("SessionStart");
+    input["invocation_id"] = json!("model-cannot-select-this");
+    let mut request = decode(&installation, input.to_string().as_bytes()).unwrap();
+    assert!(request.invocation_id.is_none());
+    let invocation = uuid::Uuid::new_v4().to_string();
+    let valid = json!({"schema_version":1,"installation_id":f.id,
+        "native_context":{"session_id":"native-session","invocation_id":invocation,"cwd":f.workspace}});
+    let bind = |request: &mut HookRequest, value: Option<&str>| {
+        super::super::agent_tool_session::bind_environment(&installation, request, value)
+    };
+    bind(&mut request, Some(&valid.to_string())).unwrap();
+    assert_eq!(request.invocation_id.as_deref(), Some(invocation.as_str()));
+    assert!(bind(&mut request, None).is_err());
+    assert!(bind(&mut request, Some(&"x".repeat(65537))).is_err());
+    for (pointer, value) in [
+        ("/schema_version", json!(2)),
+        ("/installation_id", json!("foreign")),
+        ("/native_context/session_id", json!("another-session")),
+        ("/native_context/invocation_id", json!("invalid")),
+        ("/native_context/cwd", json!(f._dir.path())),
+    ] {
+        let mut bad = valid.clone();
+        *bad.pointer_mut(pointer).unwrap() = value;
+        let failure = bind(&mut request, Some(&bad.to_string())).unwrap_err();
+        assert!(!failure.to_string().contains("another-session"));
+    }
+}
+
+#[tokio::test]
+async fn owned_module_without_inherited_generation_refuses_before_journaling_a_start() {
+    let f = Fixture::new(10);
+    let plan = f
+        .service
+        .plan_agent_tool(
+            &f.id,
+            crate::integration::AgentToolSpec {
+                application_id: "example".into(),
+                installation_id: f.id.clone(),
+                tool_name: "review".into(),
+                description: "Selected application operations".into(),
+                input_schema: json!({"type":"object"}),
+                instructions: "Use selected operations".into(),
+                handler: HookCommand {
+                    executable: std::env::current_exe().unwrap(),
+                    arguments: vec![],
+                },
+                timeout_ms: 5000,
+            },
+        )
+        .unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+    let mut input = f.input("SessionStart");
+    input["invocation_id"] = json!(uuid::Uuid::new_v4().to_string());
+    let response = f
+        .service
+        .handle_hook(&f.id, input.to_string().as_bytes(), &Never)
+        .await;
+    assert_eq!(response.exit_code, 0); // deferred notification, no authority
+    input["hook_event_name"] = json!("UserPromptSubmit");
+    let response = f
+        .service
+        .handle_hook(&f.id, input.to_string().as_bytes(), &Never)
+        .await;
+    assert_ne!(response.exit_code, 0);
+    assert!(f.service.events(&f.id, 0, 100).unwrap().records.is_empty());
+}
+
+#[tokio::test]
+async fn recorded_admission_serializes_journal_detach_and_installation_writers_until_drop() {
+    let f = Fixture::new(10);
+    assert_eq!(
+        f.service
+            .handle_hook(
+                &f.id,
+                f.input("SessionStart").to_string().as_bytes(),
+                &Never
+            )
+            .await
+            .exit_code,
+        0
+    );
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let cursor = binding.events(0, 100).unwrap().next_cursor;
+    let guard = binding.admit_recorded(cursor).unwrap();
+    assert!(binding.status().is_err()); // public status also takes the writer lock
+    assert!(binding.admit_recorded(cursor).is_err());
+    assert!(f.service.plan_remove(&f.id).is_err());
+    let writer = f.service.connection().unwrap();
+    writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+    assert!(writer.execute_batch("BEGIN IMMEDIATE").is_err());
+    assert!(writer
+        .execute(
+            "UPDATE session_bindings SET detached=1 WHERE id=?1",
+            [binding.id()]
+        )
+        .is_err());
+    drop(guard);
+    assert_eq!(
+        f.service
+            .handle_hook(
+                &f.id,
+                f.input("SessionStart").to_string().as_bytes(),
+                &Never
+            )
+            .await
+            .exit_code,
+        0
+    );
+    assert!(matches!(
+        binding.admit_recorded(cursor),
+        Err(IntegrationError::StaleSession)
+    ));
+    let current = f.service.observed_session(&f.id, "native-session").unwrap();
+    let replacement = f.service.bind_existing(&current).unwrap();
+    replacement.detach().unwrap();
+    assert!(matches!(
+        replacement.admit_recorded(cursor),
+        Err(IntegrationError::Detached)
+    ));
+    assert!(f.service.plan_remove(&f.id).is_ok());
+}
+
+#[tokio::test]
+async fn recorded_admission_refuses_pending_observations_ahead_cursors_and_ended_sessions() {
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let cursor = binding.events(0, 100).unwrap().next_cursor;
+    assert!(matches!(
+        binding.admit_recorded(cursor + 1),
+        Err(IntegrationError::Invalid(_))
+    ));
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("UserPromptSubmit").to_string().as_bytes(),
+            &Fixed(Decision::Allow),
+        )
+        .await;
+    assert!(matches!(
+        binding.admit_recorded(cursor),
+        Err(IntegrationError::Conflict(_))
+    ));
+    let projected = binding.events(cursor, 100).unwrap().next_cursor;
+    drop(binding.admit_recorded(projected).unwrap());
+    f.service
+        .handle_hook(&f.id, f.input("SessionEnd").to_string().as_bytes(), &Never)
+        .await;
+    assert!(matches!(
+        binding.admit_recorded(projected),
+        Err(IntegrationError::SessionEnded)
+    ));
+}
+
+#[tokio::test]
+async fn recorded_admission_releases_both_existing_locks_on_unwind() {
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let cursor = binding.events(0, 100).unwrap().next_cursor;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = binding.admit_recorded(cursor).unwrap();
+        panic!("application fixture unwind");
+    }));
+    assert!(result.is_err());
+    drop(binding.admit_recorded(cursor).unwrap());
+    binding.detach().unwrap();
+    assert!(f.service.plan_remove(&f.id).is_ok());
+}
+
 impl HookHandler for Fixed {
     fn decide<'a>(&'a self, _: &'a HookRequest) -> DecisionFuture<'a> {
         Box::pin(async { Ok(self.0.clone()) })

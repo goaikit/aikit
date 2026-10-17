@@ -8,6 +8,8 @@
 /// Existing managed-session persistence used by the HTTP gateway and embeddings.
 pub mod gateway_store;
 
+mod agent_tool_session;
+mod agent_tools;
 mod capabilities;
 mod codex;
 mod command;
@@ -17,17 +19,22 @@ mod install;
 mod pi;
 mod sessions;
 mod tool_effects;
+pub use agent_tools::{
+    render_agent_tool_plugin, AgentToolCall, AgentToolPlugin, AgentToolSpec, NativeToolContext,
+    AGENT_TOOL_CALL_LIMIT, AGENT_TOOL_REQUEST_LIMIT, AGENT_TOOL_SPEC_LIMIT,
+};
 pub use capabilities::{
     CapabilityAssessment, CapabilityReport, CapabilityRequirementsError, IntegrationCapability,
     SessionMode, Support,
 };
 pub use hooks::{
     Decision, DecisionFuture, HandlerError, HookHandler, HookPage, HookRecord, HookRequest,
-    HookResponse,
+    HookResponse, NativeTurn, NativeTurnOutcome, NativeTurnReason,
 };
 pub use install::{
-    HookCommand, HookEvent, InstallPlan, InstallSpec, Installation, InstallationStatus,
-    IntegrationError, IntegrationService,
+    AgentToolFileChange, CompletionBlockingPolicy, HookCommand, HookEvent, InstallPlan,
+    InstallSpec, Installation, InstallationStatus, IntegrationError, IntegrationService,
+    SettingChange,
 };
-pub use sessions::{SessionBinding, SessionRef, SessionStatus};
+pub use sessions::{RecordedSessionGuard, SessionBinding, SessionRef, SessionStatus};
 pub use tool_effects::{TextReplacement, ToolEffect};

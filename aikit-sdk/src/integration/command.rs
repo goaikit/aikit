@@ -1,6 +1,37 @@
 //! Literal executable/argv transport for command-string hook providers.
 use super::{HookCommand, IntegrationError};
 
+pub(super) fn validate_handler(handler: &HookCommand) -> Result<(), IntegrationError> {
+    if !handler.executable.is_absolute() || !handler.executable.is_file() {
+        return Err(IntegrationError::Invalid(
+            "handler must be an existing absolute executable path".into(),
+        ));
+    }
+    if cfg!(windows)
+        && !handler
+            .executable
+            .extension()
+            .is_some_and(|v| v.eq_ignore_ascii_case("exe"))
+    {
+        return Err(IntegrationError::Unsupported(
+            "Windows hooks require a native .exe".into(),
+        ));
+    }
+    if !handler
+        .executable
+        .to_str()
+        .is_some_and(|value| !value.contains("${"))
+        || handler.arguments.len() > 128
+        || handler
+            .arguments
+            .iter()
+            .any(|arg| arg.len() > 8192 || arg.contains('\0') || arg.contains("${"))
+    {
+        return Err(IntegrationError::Invalid("use a UTF-8 executable and at most 128 bounded arguments without NUL or native path placeholders; pass resolved values".into()));
+    }
+    Ok(())
+}
+
 pub(super) fn command(handler: &HookCommand) -> Result<String, IntegrationError> {
     command_for(handler, cfg!(windows))
 }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -15,6 +15,13 @@ use std::{
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+
+#[path = "install_completion.rs"]
+mod completion;
+pub use completion::{CompletionBlockingPolicy, SettingChange};
+#[path = "install_agent_tools.rs"]
+mod agent_tools_install;
+use agent_tools_install::{check_agent_tool, prune_removed_tool_directories, tool_file_changes};
 
 #[derive(Debug)]
 pub enum IntegrationError {
@@ -84,6 +91,10 @@ pub enum HookEvent {
     CompletionProposed,
     /// Native turn failed. Notification only; never an accepted completion.
     CompletionFailed,
+    /// Owned module observation, not a settings hook or a policy decision.
+    NativeTurnStarted,
+    /// Native outcome evidence; never inferred from Stop Allow or process exit.
+    NativeTurnFinished,
     SessionEnded,
 }
 impl HookEvent {
@@ -96,6 +107,8 @@ impl HookEvent {
             Self::ToolFailed => "PostToolUseFailure",
             Self::CompletionProposed => "Stop",
             Self::CompletionFailed => "StopFailure",
+            Self::NativeTurnStarted => "AIKitNativeTurnStarted",
+            Self::NativeTurnFinished => "AIKitNativeTurnFinished",
             Self::SessionEnded => "SessionEnd",
         }
     }
@@ -126,6 +139,15 @@ pub struct Installation {
     pub id: String,
     pub spec: InstallSpec,
     pub config_path: PathBuf,
+    #[serde(default)]
+    pub completion_policy: CompletionBlockingPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentToolFileChange {
+    pub path: PathBuf,
+    pub before_fingerprint: String,
+    pub after_fingerprint: String,
 }
 
 /// Safe preview: deliberately excludes unrelated configuration contents.
@@ -138,6 +160,14 @@ pub struct InstallPlan {
     pub removal: bool,
     pub before_fingerprint: String,
     pub after_fingerprint: String,
+    /// Exact related setting changes only; no unrelated configuration is exposed.
+    #[serde(default)]
+    pub settings: Vec<SettingChange>,
+    #[serde(default)]
+    pub completion_policy: CompletionBlockingPolicy,
+    /// Owned plugin files only, with no instructions or handler arguments.
+    #[serde(default)]
+    pub files: Vec<AgentToolFileChange>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +203,23 @@ struct Receipt {
     /// Complete ownership of a generated extension file, not merged JSON.
     #[serde(default)]
     source_fingerprint: Option<String>,
+    #[serde(default)]
+    completion: Option<completion::OwnedCompletion>,
+    #[serde(default)]
+    agent_tool: Option<OwnedAgentTool>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OwnedAgentTool {
+    relative_root: PathBuf,
+    files: BTreeMap<String, String>,
+    #[serde(default)]
+    invocation_env_key: Option<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingToolFile {
+    path: PathBuf,
+    before: String,
+    after: Option<Vec<u8>>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Pending {
@@ -184,6 +231,8 @@ struct Pending {
     workspace: PathBuf,
     #[serde(default)]
     delete: bool,
+    #[serde(default)]
+    tool_files: Vec<PendingToolFile>,
 }
 
 /// Reusable integration entry point. Construction opens metadata only; it never
@@ -219,17 +268,17 @@ impl IntegrationService {
             state: fs::canonicalize(state)?,
         };
         let connection = service.connection()?;
-        // Version 5 enforces adapter invocation scopes in hook/binding JSON.
-        // Older readers must not ignore those scopes and accept stale callbacks.
+        // Version 9 adds native Turn observations and inherited Turn identity.
+        // Older readers must not silently drop those journal semantics.
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 5 {
+        if version > 9 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if version < 5 {
+        if version < 9 {
             let _lock = service.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 5 {
+            if version > 9 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {
@@ -243,17 +292,17 @@ impl IntegrationService {
             INSERT INTO installation_revisions SELECT id,lower(hex(randomblob(16))) FROM installations;
             CREATE TABLE session_bindings(id TEXT PRIMARY KEY, reference TEXT NOT NULL, detached INTEGER NOT NULL DEFAULT 0);
             CREATE UNIQUE INDEX active_session_binding ON session_bindings(reference) WHERE detached=0;
-            PRAGMA user_version=5; COMMIT;")?;
+            PRAGMA user_version=9; COMMIT;")?;
             } else {
                 // Version 3 already has the binding tables and revision column.
-                // Persisted JSON semantics changed in v4 and v5. Keep all rows.
-                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=5; COMMIT;")?;
+                // Persisted JSON semantics changed in v4-v9. Keep all rows.
+                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=9; COMMIT;")?;
             }
         }
         Ok(service)
     }
 
-    fn state_lock(&self) -> Result<InstallationLock, IntegrationError> {
+    pub(super) fn state_lock(&self) -> Result<InstallationLock, IntegrationError> {
         lock(&self.state.join("integration.lock"))
     }
     pub(super) fn connection(&self) -> Result<Connection, IntegrationError> {
@@ -267,7 +316,27 @@ impl IntegrationService {
 
     /// Installation and update follow the same path. Existing owned entries must
     /// still match their receipt; unrelated settings and hooks are retained.
-    pub fn plan_install(&self, mut spec: InstallSpec) -> Result<InstallPlan, IntegrationError> {
+    pub fn plan_install(&self, spec: InstallSpec) -> Result<InstallPlan, IntegrationError> {
+        self.plan_install_inner(spec, None)
+    }
+
+    /// Request native completion-loop configuration through the existing owned
+    /// prepare/apply/remove path. A plan is not evidence of effective native
+    /// settings, repeated blocking, or accepted completion. Unsupported adapters
+    /// fail explicitly; no managed session or weaker fallback is substituted.
+    pub fn plan_install_with_completion_policy(
+        &self,
+        spec: InstallSpec,
+        completion_policy: CompletionBlockingPolicy,
+    ) -> Result<InstallPlan, IntegrationError> {
+        self.plan_install_inner(spec, Some(completion_policy))
+    }
+
+    fn plan_install_inner(
+        &self,
+        mut spec: InstallSpec,
+        requested_policy: Option<CompletionBlockingPolicy>,
+    ) -> Result<InstallPlan, IntegrationError> {
         validate_spec(&mut spec)?;
         if self.state.starts_with(&spec.workspace) {
             return Err(IntegrationError::Invalid(
@@ -281,6 +350,31 @@ impl IntegrationService {
         reject_pending(&connection, &id)?;
         reject_prepared_config(&connection, &config_path, None)?;
         let previous = receipt_json(&connection, &id)?;
+        let retained_tool = previous
+            .as_deref()
+            .map(serde_json::from_str::<Receipt>)
+            .transpose()?
+            .and_then(|receipt| receipt.agent_tool);
+        if let Some(tool) = &retained_tool {
+            check_agent_tool(&spec.workspace, tool)?;
+            let old: Receipt =
+                serde_json::from_str(previous.as_deref().expect("retained receipt"))?;
+            if tool.invocation_env_key.is_some() && old.installation.spec.handler != spec.handler {
+                return Err(IntegrationError::Conflict("owned native startup handler changed; remove/reinstall the integration while idle before replacing its command".into()));
+            }
+        }
+        // Legacy callers updating an installation retain its explicit policy.
+        // Choose under the metadata lock so concurrent plans cannot downgrade it.
+        let completion_policy = match requested_policy {
+            Some(policy) => policy,
+            None => previous
+                .as_deref()
+                .map(serde_json::from_str::<Receipt>)
+                .transpose()?
+                .map(|receipt| receipt.installation.completion_policy)
+                .unwrap_or_default(),
+        };
+        completion::validate(&spec, completion_policy)?;
         let before = read_config(&spec.workspace, &config_path)?;
         if spec.agent_key == "pi" {
             if let Some(raw) = &previous {
@@ -294,6 +388,7 @@ impl IntegrationService {
                 id,
                 spec,
                 config_path,
+                completion_policy,
             };
             let after = super::pi::extension(&installation)?;
             let receipt = Receipt {
@@ -302,6 +397,8 @@ impl IntegrationService {
                 owned: Vec::new(),
                 inserted_version: false,
                 source_fingerprint: Some(fingerprint(Some(&after))),
+                completion: None,
+                agent_tool: None,
             };
             return self.save_bytes_plan(
                 &connection,
@@ -313,8 +410,19 @@ impl IntegrationService {
             );
         }
         let mut document = document(before.as_deref())?;
+        let mut retained_completion = None;
+        let mut retained_ownership = None;
         if let Some(raw) = &previous {
-            remove_owned(&mut document, &serde_json::from_str(raw)?)?;
+            let receipt: Receipt = serde_json::from_str(raw)?;
+            if completion_policy == CompletionBlockingPolicy::RequireUnbounded
+                && receipt.completion.is_some()
+            {
+                strip_owned(&mut document, &receipt, false)?;
+                retained_completion = receipt.completion.clone();
+                retained_ownership = Some(receipt);
+            } else {
+                remove_owned(&mut document, &receipt)?;
+            }
         }
         if document.get("disableAllHooks").and_then(Value::as_bool) == Some(true) {
             return Err(IntegrationError::Conflict(
@@ -325,8 +433,23 @@ impl IntegrationService {
             id,
             spec,
             config_path,
+            completion_policy,
         };
-        let receipt = add_owned(&mut document, installation)?;
+        let completion = match retained_completion {
+            Some(retained) => Some(retained),
+            None => completion::install(&mut document, completion_policy)?,
+        };
+        let mut receipt = add_owned(&mut document, installation)?;
+        if let Some(previous) = retained_ownership {
+            receipt.hooks_existed = previous.hooks_existed;
+            for hook in &mut receipt.owned {
+                if let Some(old) = previous.owned.iter().find(|old| old.event == hook.event) {
+                    hook.event_existed = old.event_existed;
+                }
+            }
+        }
+        receipt.completion = completion;
+        receipt.agent_tool = retained_tool;
         self.save_plan(
             &connection,
             before,
@@ -343,6 +466,9 @@ impl IntegrationService {
         reject_pending(&connection, id)?;
         let raw = receipt_json(&connection, id)?.ok_or(IntegrationError::NotFound)?;
         let receipt: Receipt = serde_json::from_str(&raw)?;
+        if let Some(tool) = &receipt.agent_tool {
+            check_agent_tool(&receipt.installation.spec.workspace, tool)?;
+        }
         reject_prepared_config(&connection, &receipt.installation.config_path, None)?;
         let before = read_config(
             &receipt.installation.spec.workspace,
@@ -401,6 +527,28 @@ impl IntegrationService {
         next_receipt: Option<Receipt>,
         installation: &Installation,
     ) -> Result<InstallPlan, IntegrationError> {
+        self.save_bytes_plan_with_tool(
+            connection,
+            before,
+            after,
+            previous_receipt,
+            next_receipt,
+            installation,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn save_bytes_plan_with_tool(
+        &self,
+        connection: &Connection,
+        before: Option<Vec<u8>>,
+        after: Option<Vec<u8>>,
+        previous_receipt: Option<String>,
+        next_receipt: Option<Receipt>,
+        installation: &Installation,
+        plugin: Option<&super::AgentToolPlugin>,
+    ) -> Result<InstallPlan, IntegrationError> {
         if after
             .as_ref()
             .is_some_and(|bytes| bytes.len() as u64 > MAX_CONFIG_BYTES)
@@ -409,6 +557,12 @@ impl IntegrationService {
                 "resulting config exceeds 1 MiB".into(),
             ));
         }
+        let tool_files = tool_file_changes(
+            &installation.spec.workspace,
+            previous_receipt.as_deref(),
+            next_receipt.as_ref(),
+            plugin,
+        )?;
         let preview = InstallPlan {
             id: uuid::Uuid::new_v4().to_string(),
             installation_id: installation.id.clone(),
@@ -417,6 +571,20 @@ impl IntegrationService {
             removal: next_receipt.is_none(),
             before_fingerprint: fingerprint(before.as_deref()),
             after_fingerprint: fingerprint(after.as_deref()),
+            settings: if installation.spec.agent_key == "claude" {
+                completion::changes(before.as_deref(), after.as_deref())?
+            } else {
+                Vec::new()
+            },
+            completion_policy: installation.completion_policy,
+            files: tool_files
+                .iter()
+                .map(|file| AgentToolFileChange {
+                    path: file.path.clone(),
+                    before_fingerprint: file.before.clone(),
+                    after_fingerprint: fingerprint(file.after.as_deref()),
+                })
+                .collect(),
         };
         let pending = Pending {
             preview: preview.clone(),
@@ -426,6 +594,7 @@ impl IntegrationService {
             previous_receipt,
             next_receipt,
             workspace: installation.spec.workspace.clone(),
+            tool_files,
         };
         connection.execute(
             "INSERT INTO install_plans VALUES (?1,?2,'planned',?3)",
@@ -450,6 +619,15 @@ impl IntegrationService {
         &self,
         plan_id: &str,
         interrupt_after_write: bool,
+    ) -> Result<InstallationStatus, IntegrationError> {
+        self.apply_with_tool_fault(plan_id, interrupt_after_write, None)
+    }
+
+    fn apply_with_tool_fault(
+        &self,
+        plan_id: &str,
+        interrupt_after_write: bool,
+        interrupt_after_tool: Option<usize>,
     ) -> Result<InstallationStatus, IntegrationError> {
         let _lock = self.state_lock()?;
         let mut connection = self.connection()?;
@@ -489,9 +667,94 @@ impl IntegrationService {
                 "configuration changed since planning; no files were replaced".into(),
             ));
         }
+        if phase == "planned" {
+            let previous = pending
+                .previous_receipt
+                .as_deref()
+                .map(serde_json::from_str::<Receipt>)
+                .transpose()?;
+            if previous
+                .as_ref()
+                .and_then(|receipt| receipt.agent_tool.as_ref())
+                .is_none()
+            {
+                if let Some(tool) = pending
+                    .next_receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.agent_tool.as_ref())
+                {
+                    let root = pending.workspace.join(&tool.relative_root);
+                    check_config_path(&pending.workspace, &root)?;
+                    if root.try_exists()? {
+                        return Err(IntegrationError::Conflict(
+                            "unowned tool directory appeared after planning".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(tool) = pending
+            .next_receipt
+            .as_ref()
+            .and_then(|receipt| receipt.agent_tool.as_ref())
+        {
+            for (name, expected) in &tool.files {
+                let path = pending.workspace.join(&tool.relative_root).join(name);
+                if !pending.tool_files.iter().any(|file| file.path == path)
+                    && fingerprint(read_config(&pending.workspace, &path)?.as_deref()) != *expected
+                {
+                    return Err(IntegrationError::Conflict(
+                        "unchanged owned tool file drifted after planning".into(),
+                    ));
+                }
+            }
+        }
+        // Validate every file before the first write. Only a prepared plan may
+        // accept its own exact after bytes when recovering a partial application.
+        for file in &pending.tool_files {
+            let hash = fingerprint(read_config(&pending.workspace, &file.path)?.as_deref());
+            if hash != file.before
+                && !(phase == "prepared" && hash == fingerprint(file.after.as_deref()))
+            {
+                return Err(IntegrationError::Conflict(
+                    "owned tool file changed since planning".into(),
+                ));
+            }
+        }
         connection.execute(
             "UPDATE install_plans SET phase='prepared' WHERE id=?1",
             [plan_id],
+        )?;
+        // Install/update module files before publishing the manifest. Removal
+        // withdraws the manifest first. Hooks refuse a prepared generation.
+        for (index, file) in pending.tool_files.iter().enumerate() {
+            let hash = fingerprint(read_config(&pending.workspace, &file.path)?.as_deref());
+            if hash != fingerprint(file.after.as_deref()) {
+                ensure_config_parent(&pending.workspace, &file.path)?;
+                if let Some(bytes) = &file.after {
+                    replace_config(&pending.workspace, &file.path, &file.before, bytes)?;
+                } else {
+                    // Recheck immediately before removing the exact owned file.
+                    if fingerprint(read_config(&pending.workspace, &file.path)?.as_deref())
+                        != file.before
+                    {
+                        return Err(IntegrationError::Conflict(
+                            "owned tool file changed before removal".into(),
+                        ));
+                    }
+                    fs::remove_file(&file.path)?;
+                    #[cfg(unix)]
+                    fs::File::open(file.path.parent().expect("validated parent"))?.sync_all()?;
+                }
+            }
+            if interrupt_after_tool == Some(index + 1) {
+                return Err(IntegrationError::RecoveryRequired(plan_id.into()));
+            }
+        }
+        prune_removed_tool_directories(
+            &pending.workspace,
+            pending.previous_receipt.as_deref(),
+            pending.next_receipt.as_ref(),
         )?;
         if !already_written {
             if pending.delete {
@@ -531,6 +794,7 @@ impl IntegrationService {
         completed.after.clear();
         completed.previous_receipt = None;
         completed.next_receipt = None;
+        completed.tool_files.clear();
         tx.execute(
             "UPDATE install_plans SET phase='applied',body=?2 WHERE id=?1",
             params![plan_id, serde_json::to_string(&completed)?],
@@ -568,7 +832,16 @@ impl IntegrationService {
         Ok(receipt.installation)
     }
 
-    fn status_inner(
+    pub(super) fn agent_tool_environment_key(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, IntegrationError> {
+        let raw = receipt_json(&self.connection()?, id)?.ok_or(IntegrationError::NotFound)?;
+        let receipt: Receipt = serde_json::from_str(&raw)?;
+        Ok(receipt.agent_tool.and_then(|tool| tool.invocation_env_key))
+    }
+
+    pub(super) fn status_inner(
         &self,
         connection: &Connection,
         id: &str,
@@ -591,9 +864,13 @@ impl IntegrationService {
                 if value.get("disableAllHooks").and_then(Value::as_bool) == Some(true) {
                     return Err(IntegrationError::Conflict("hooks are disabled".into()));
                 }
-                remove_owned(&mut value, &receipt)
+                strip_owned(&mut value, &receipt, false)
             })
         };
+        let check = check.and_then(|()| match &receipt.agent_tool {
+            Some(tool) => check_agent_tool(&receipt.installation.spec.workspace, tool),
+            None => Ok(()),
+        });
         match check {
             Ok(()) => Ok(InstallationStatus::Configured {
                 installation: receipt.installation,
@@ -636,35 +913,16 @@ fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
             "workspace must be a directory".into(),
         ));
     }
-    if !spec.handler.executable.is_absolute() || !spec.handler.executable.is_file() {
+    super::command::validate_handler(&spec.handler)?;
+    if spec.events.iter().any(|event| {
+        matches!(
+            event,
+            HookEvent::NativeTurnStarted | HookEvent::NativeTurnFinished
+        )
+    }) {
         return Err(IntegrationError::Invalid(
-            "handler must be an existing absolute executable path".into(),
+            "native Turn observations require the owned module, not settings hooks".into(),
         ));
-    }
-    if cfg!(windows)
-        && !spec
-            .handler
-            .executable
-            .extension()
-            .is_some_and(|v| v.eq_ignore_ascii_case("exe"))
-    {
-        return Err(IntegrationError::Unsupported(
-            "Windows hooks require a native .exe".into(),
-        ));
-    }
-    if !spec
-        .handler
-        .executable
-        .to_str()
-        .is_some_and(|value| !value.contains("${"))
-        || spec.handler.arguments.len() > 128
-        || spec
-            .handler
-            .arguments
-            .iter()
-            .any(|arg| arg.len() > 8192 || arg.contains('\0') || arg.contains("${"))
-    {
-        return Err(IntegrationError::Invalid("use a UTF-8 executable and at most 128 bounded arguments without NUL or native path placeholders; pass resolved values".into()));
     }
     if spec.events.is_empty()
         || spec.events.iter().copied().collect::<BTreeSet<_>>().len() != spec.events.len()
@@ -839,6 +1097,8 @@ fn add_owned(
         owned,
         inserted_version,
         source_fingerprint: None,
+        completion: None,
+        agent_tool: None,
     })
 }
 
@@ -851,6 +1111,13 @@ fn check_source(current: Option<&[u8]>, receipt: &Receipt) -> Result<(), Integra
     Ok(())
 }
 fn remove_owned(document: &mut Value, receipt: &Receipt) -> Result<(), IntegrationError> {
+    strip_owned(document, receipt, true)
+}
+fn strip_owned(
+    document: &mut Value,
+    receipt: &Receipt,
+    restore_completion: bool,
+) -> Result<(), IntegrationError> {
     if receipt.installation.spec.agent_key == "cursor"
         && document.get("version").and_then(Value::as_u64) != Some(1)
     {
@@ -889,6 +1156,13 @@ fn remove_owned(document: &mut Value, receipt: &Receipt) -> Result<(), Integrati
     // Preserve the required version if another application's hooks remain.
     if receipt.inserted_version && document.get("hooks").is_none() {
         document.as_object_mut().expect("object").remove("version");
+    }
+    if let Some(completion) = &receipt.completion {
+        if restore_completion {
+            completion::remove(document, completion)?;
+        } else {
+            completion::check(document)?;
+        }
     }
     Ok(())
 }
@@ -954,7 +1228,7 @@ fn read_config(workspace: &Path, path: &Path) -> Result<Option<Vec<u8>>, Integra
 }
 // Explicitly unlock before closing: a concurrent Unix fork can inherit the
 // open file description until exec, extending a close-only lock's lifetime.
-struct InstallationLock(fs::File);
+pub(super) struct InstallationLock(fs::File);
 
 impl Drop for InstallationLock {
     fn drop(&mut self) {

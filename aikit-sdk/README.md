@@ -40,6 +40,12 @@ from each external hook invocation. User-started hooks use the separate
 
 ## User-started agent hooks (integration feature)
 
+The same feature provides a reusable [native application tool bridge](agent-tools.md)
+for selected JSON operations and instructions. Claude rendering and controlled
+Linux native execution are implemented. [Owned tool-file planning](owned-agent-tools.md)
+reuses the existing installer; authenticated callers and effective qualification
+remain required before application mutations can be enabled.
+
 The additive `integration` feature exposes `IntegrationService`, owned hook
 configuration and one `HookHandler::decide` callback. Construction never launches
 an agent. Claude hooks, a Cursor prompt/tool/session subset, and a Codex
@@ -68,6 +74,15 @@ ambiguous recovery refuse mutation. Unrelated hooks/settings survive update/remo
 Retry the same plan ID after interruption; do not synthesize a replacement plan.
 Pending journals may contain existing configuration values; completed plans discard
 their config bodies. `Configured` means matching config, not qualified enforcement.
+
+`plan_install_with_completion_policy(spec, CompletionBlockingPolicy::RequireUnbounded)`
+explicitly requests owned native continuation-limit configuration. Currently Claude
+configures `env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP="0"`; unsupported adapters fail
+explicitly. The preview includes exact setting changes; update/removal preserve
+the previous value and refuse unsafe restoration under dependent Stop hooks.
+Ordinary updates retain a previously selected policy. See
+[completion-policy.md](completion-policy.md) for schema compatibility, native
+qualification limits and reproducible checks. This does not promote capabilities.
 
 `handle_hook(installation_id, input, handler).await` consumes bounded native bytes
 and returns stdout, stderr and an exit code. The provider comes from the receipt.
@@ -142,6 +157,13 @@ explicit install update to subscribe to this additional event.
 
 ### Existing-session observation binding
 
+`SessionBinding::admit_recorded(projected_through)` supplies a short-lived
+`RecordedSessionGuard` over the existing installation lock and journal database.
+Applications can stage their transaction, refuse new/revoked recorded generations
+and retain this guard through commit. This is recorded-state coordination, not
+native caller authentication or a capability promotion. See
+[consumer order and qualification limits](recorded-session-admission.md).
+
 Resolve `observed_session(installation_id, native_session_id)` after a SessionStart
 hook, then call `bind_existing(&reference)`. Repeating the bind returns the same
 active binding ID. `binding(id)` reopens it after application restart. The handle
@@ -184,6 +206,7 @@ The resulting executable offers these operations:
 
 ```text
 integration_hooks plan STATE                   # InstallSpec JSON on stdin
+integration_hooks plan-unbounded STATE         # same spec; explicit completion policy
 integration_hooks apply STATE PLAN_ID
 integration_hooks remove-plan STATE INSTALLATION_ID
 integration_hooks status STATE INSTALLATION_ID
