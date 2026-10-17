@@ -151,6 +151,13 @@ explicit install update to subscribe to this additional event.
 
 ### Existing-session observation binding
 
+`SessionBinding::admit_recorded(projected_through)` supplies a short-lived
+`RecordedSessionGuard` over the existing installation lock and journal database.
+Applications can stage their transaction, refuse new/revoked recorded generations
+and retain this guard through commit. This is recorded-state coordination, not
+native caller authentication or a capability promotion. See
+[consumer order and qualification limits](recorded-session-admission.md).
+
 Resolve `observed_session(installation_id, native_session_id)` after a SessionStart
 hook, then call `bind_existing(&reference)`. Repeating the bind returns the same
 active binding ID. `binding(id)` reopens it after application restart. The handle

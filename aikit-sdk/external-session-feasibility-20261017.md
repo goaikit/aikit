@@ -47,6 +47,26 @@ The SDK must coordinate that boundary and retain durable native evidence for
 message acknowledgement and actual next-model-input consumption. User-started
 sessions must remain user-started throughout.
 
+The SDK now adds [recorded admission](recorded-session-admission.md) using its
+existing installation lock and journal transaction. This closes recorded
+check/commit races when held through an application commit. It does not supply
+native process authentication, notification buffering or deadline qualification.
+
+## Credential-free interactive startup check
+
+The same Linux executable/hash was started under a fresh disposable container
+UID/home with `--plugin-dir` and no credentials or prompt. With networking
+disconnected, startup exits on its service connectivity check, including with
+the documented nonessential-traffic option. Allowing connectivity reaches theme
+selection and then the login-method screen. The check stopped there without
+signing in or submitting a model request; no `.claude-plugin/types` files had
+been generated. The offline `plugin init --with hooks` scaffold creates classic
+command hooks, not mod declarations. The owned container was removed afterward.
+
+This records the attempted supported paths and the current declaration gap; it
+does not prove no credential-free generation path exists. Windows machine policy
+and native authentication remain separate requirements, neither bypassed here.
+
 ## Required next work
 
 1. Obtain the target executable's generated mod type declarations and qualify native loading/trust in the user-started interactive topology.

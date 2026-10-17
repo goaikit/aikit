@@ -29,5 +29,5 @@ pub use install::{
     CompletionBlockingPolicy, HookCommand, HookEvent, InstallPlan, InstallSpec, Installation,
     InstallationStatus, IntegrationError, IntegrationService, SettingChange,
 };
-pub use sessions::{SessionBinding, SessionRef, SessionStatus};
+pub use sessions::{RecordedSessionGuard, SessionBinding, SessionRef, SessionStatus};
 pub use tool_effects::{TextReplacement, ToolEffect};

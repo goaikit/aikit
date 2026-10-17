@@ -53,6 +53,125 @@ impl Fixture {
 }
 
 struct Fixed(Decision);
+
+#[tokio::test]
+async fn recorded_admission_serializes_journal_detach_and_installation_writers_until_drop() {
+    let f = Fixture::new(10);
+    assert_eq!(
+        f.service
+            .handle_hook(
+                &f.id,
+                f.input("SessionStart").to_string().as_bytes(),
+                &Never
+            )
+            .await
+            .exit_code,
+        0
+    );
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let cursor = binding.events(0, 100).unwrap().next_cursor;
+    let guard = binding.admit_recorded(cursor).unwrap();
+    assert!(binding.status().is_err()); // public status also takes the writer lock
+    assert!(binding.admit_recorded(cursor).is_err());
+    assert!(f.service.plan_remove(&f.id).is_err());
+    let writer = f.service.connection().unwrap();
+    writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+    assert!(writer.execute_batch("BEGIN IMMEDIATE").is_err());
+    assert!(writer
+        .execute(
+            "UPDATE session_bindings SET detached=1 WHERE id=?1",
+            [binding.id()]
+        )
+        .is_err());
+    drop(guard);
+    assert_eq!(
+        f.service
+            .handle_hook(
+                &f.id,
+                f.input("SessionStart").to_string().as_bytes(),
+                &Never
+            )
+            .await
+            .exit_code,
+        0
+    );
+    assert!(matches!(
+        binding.admit_recorded(cursor),
+        Err(IntegrationError::StaleSession)
+    ));
+    let current = f.service.observed_session(&f.id, "native-session").unwrap();
+    let replacement = f.service.bind_existing(&current).unwrap();
+    replacement.detach().unwrap();
+    assert!(matches!(
+        replacement.admit_recorded(cursor),
+        Err(IntegrationError::Detached)
+    ));
+    assert!(f.service.plan_remove(&f.id).is_ok());
+}
+
+#[tokio::test]
+async fn recorded_admission_refuses_pending_observations_ahead_cursors_and_ended_sessions() {
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let cursor = binding.events(0, 100).unwrap().next_cursor;
+    assert!(matches!(
+        binding.admit_recorded(cursor + 1),
+        Err(IntegrationError::Invalid(_))
+    ));
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("UserPromptSubmit").to_string().as_bytes(),
+            &Fixed(Decision::Allow),
+        )
+        .await;
+    assert!(matches!(
+        binding.admit_recorded(cursor),
+        Err(IntegrationError::Conflict(_))
+    ));
+    let projected = binding.events(cursor, 100).unwrap().next_cursor;
+    drop(binding.admit_recorded(projected).unwrap());
+    f.service
+        .handle_hook(&f.id, f.input("SessionEnd").to_string().as_bytes(), &Never)
+        .await;
+    assert!(matches!(
+        binding.admit_recorded(projected),
+        Err(IntegrationError::SessionEnded)
+    ));
+}
+
+#[tokio::test]
+async fn recorded_admission_releases_both_existing_locks_on_unwind() {
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let cursor = binding.events(0, 100).unwrap().next_cursor;
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = binding.admit_recorded(cursor).unwrap();
+        panic!("application fixture unwind");
+    }));
+    assert!(result.is_err());
+    drop(binding.admit_recorded(cursor).unwrap());
+    binding.detach().unwrap();
+    assert!(f.service.plan_remove(&f.id).is_ok());
+}
+
 impl HookHandler for Fixed {
     fn decide<'a>(&'a self, _: &'a HookRequest) -> DecisionFuture<'a> {
         Box::pin(async { Ok(self.0.clone()) })

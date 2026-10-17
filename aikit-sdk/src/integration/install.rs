@@ -266,7 +266,7 @@ impl IntegrationService {
         Ok(service)
     }
 
-    fn state_lock(&self) -> Result<InstallationLock, IntegrationError> {
+    pub(super) fn state_lock(&self) -> Result<InstallationLock, IntegrationError> {
         lock(&self.state.join("integration.lock"))
     }
     pub(super) fn connection(&self) -> Result<Connection, IntegrationError> {
@@ -646,7 +646,7 @@ impl IntegrationService {
         Ok(receipt.installation)
     }
 
-    fn status_inner(
+    pub(super) fn status_inner(
         &self,
         connection: &Connection,
         id: &str,
@@ -1047,7 +1047,7 @@ fn read_config(workspace: &Path, path: &Path) -> Result<Option<Vec<u8>>, Integra
 }
 // Explicitly unlock before closing: a concurrent Unix fork can inherit the
 // open file description until exec, extending a close-only lock's lifetime.
-struct InstallationLock(fs::File);
+pub(super) struct InstallationLock(fs::File);
 
 impl Drop for InstallationLock {
     fn drop(&mut self) {
