@@ -40,10 +40,10 @@ Prepared writes and removals reuse the existing crash recovery mechanism.
 
 ## Metadata compatibility
 
-This change is based on `feat/codelaya-integration` at `4b5bb1d`, not current
-main. PRs #187/#188 merged into that feature branch. Main at `f91c37f` has newer
-per-user session-start hook APIs and a newer root ZIP dependency. The parent
-integration branch needs reconciliation with those changes before release.
+This change originated on `feat/codelaya-integration` at `4b5bb1d`.
+PRs #187/#188 merged into that feature branch. Main at `f91c37f`, including its
+per-user session-start hook APIs and newer SDK ZIP dependency, was merged into
+the parent at `bfa592c` and this child at `9a9a726` without textual conflicts.
 Its project-scoped durable lifecycle service covers more than the startup-only
 registration API; reuse shared native format/configuration primitives where their
 semantics match, preserving ownership, replay and conflict guarantees.
@@ -81,10 +81,11 @@ cargo +1.88.0 clippy --no-deps -p aikit-sdk --lib --no-default-features --featur
 ### Reproduce the bounded SDK gate
 
 This feature-branch baseline ignores Cargo.lock. Fresh workspace resolution also
-encounters its root CLI dependency on yanked zip 0.6.6, already superseded on main.
+encounters its root CLI dependency on yanked zip 0.6.6. Main upgraded the SDK ZIP
+dependency to version 9; the root CLI still uses 0.6.6 after reconciliation.
 The resolved lock used here
 is retained as `qualification/20261017/validation-cargo.lock` with SHA-256
-`4b2b2e5b8b68c144b56cd0d07cd0a0521cfa71dfd9908730b181a2b3012d5654`.
+`ef111e91aec4cc31cc1810e077dfc357d1d5010539b7d239434744792c9fbf06`.
 In a fresh isolated checkout, copy it to the workspace root as Cargo.lock, then
 run the command below. Preserve any existing local lock rather than replacing it
 silently. Rust 1.88 is explicit because the repository's toolchain file selects a
@@ -99,6 +100,16 @@ The Linux run used the pinned validation image
 read-only tracked source plus the new module/lockfile, dependency cache trees and
 no network or provider profile/credentials. The fixture lock makes the selected
 versions reproducible.
+
+### Reconciled main gate
+
+The combined source at `9a9a726` passed the entire SDK library test suite on
+native Windows with Rust 1.88: **594 passed, 4 ignored**. This includes the newer
+session-hook, skill, ZIP and user-folder code alongside the integration service.
+The ignored tests require live agents/pipeline behavior and are not acceptance
+evidence. Run the same command above without the `integration::` filter to
+reproduce this broader gate. The lock snapshot above now records the reconciled
+dependencies; the original pre-reconciliation lock remains in Git history.
 
 ## Required native qualification
 
