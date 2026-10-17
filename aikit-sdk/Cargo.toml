@@ -81,3 +81,7 @@ tokio = { version = "1", features = ["rt", "macros"] }
 [[example]]
 name = "integration_hooks"
 required-features = ["integration"]
+
+[[example]]
+name = "agent_tool_plugin"
+required-features = ["integration"]

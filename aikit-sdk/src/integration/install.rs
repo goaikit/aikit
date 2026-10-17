@@ -714,36 +714,7 @@ fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
             "workspace must be a directory".into(),
         ));
     }
-    if !spec.handler.executable.is_absolute() || !spec.handler.executable.is_file() {
-        return Err(IntegrationError::Invalid(
-            "handler must be an existing absolute executable path".into(),
-        ));
-    }
-    if cfg!(windows)
-        && !spec
-            .handler
-            .executable
-            .extension()
-            .is_some_and(|v| v.eq_ignore_ascii_case("exe"))
-    {
-        return Err(IntegrationError::Unsupported(
-            "Windows hooks require a native .exe".into(),
-        ));
-    }
-    if !spec
-        .handler
-        .executable
-        .to_str()
-        .is_some_and(|value| !value.contains("${"))
-        || spec.handler.arguments.len() > 128
-        || spec
-            .handler
-            .arguments
-            .iter()
-            .any(|arg| arg.len() > 8192 || arg.contains('\0') || arg.contains("${"))
-    {
-        return Err(IntegrationError::Invalid("use a UTF-8 executable and at most 128 bounded arguments without NUL or native path placeholders; pass resolved values".into()));
-    }
+    super::command::validate_handler(&spec.handler)?;
     if spec.events.is_empty()
         || spec.events.iter().copied().collect::<BTreeSet<_>>().len() != spec.events.len()
         || !(1..=60).contains(&spec.timeout_seconds)

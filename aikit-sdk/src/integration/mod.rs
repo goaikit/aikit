@@ -8,6 +8,7 @@
 /// Existing managed-session persistence used by the HTTP gateway and embeddings.
 pub mod gateway_store;
 
+mod agent_tools;
 mod capabilities;
 mod codex;
 mod command;
@@ -17,6 +18,10 @@ mod install;
 mod pi;
 mod sessions;
 mod tool_effects;
+pub use agent_tools::{
+    render_agent_tool_plugin, AgentToolCall, AgentToolPlugin, AgentToolSpec, NativeToolContext,
+    AGENT_TOOL_CALL_LIMIT, AGENT_TOOL_REQUEST_LIMIT, AGENT_TOOL_SPEC_LIMIT,
+};
 pub use capabilities::{
     CapabilityAssessment, CapabilityReport, CapabilityRequirementsError, IntegrationCapability,
     SessionMode, Support,

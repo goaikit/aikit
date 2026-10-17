@@ -7,6 +7,10 @@ import { randomUUID } from 'node:crypto';
 
 const evidence = process.argv[2];
 const fixtureKey = 'sk-ant-aikit-local-fixture-not-a-credential';
+const bridge = process.argv[3] ? JSON.parse(fs.readFileSync(process.argv[3], 'utf8')) : null;
+const nativeTool = bridge ? bridge.tool_name : 'mcp__aikit-mod-feasibility__echo';
+const marker = bridge ? 'AIKIT_NATIVE_BRIDGE_PROBE' : 'AIKIT_NATIVE_TOOL_PROBE';
+const toolId = bridge ? 'fixture-native-bridge' : 'fixture-native-echo';
 if (!evidence || !path.isAbsolute(evidence)) throw new Error('absolute evidence directory required');
 fs.mkdirSync(evidence, { recursive: true });
 let requests = 0;
@@ -34,12 +38,12 @@ http.createServer(async (request, response) => {
   record({ sequence: requests, method: request.method, path: request.url, body });
   if (request.url.startsWith('/v1/messages/count_tokens')) return json(response, 200, { input_tokens: 100 });
   if (request.url.startsWith('/v1/messages') && request.method === 'POST') {
-    const probe = body.tools?.some(tool => tool.name === 'mcp__aikit-mod-feasibility__echo')
-      && JSON.stringify(body.messages).includes('AIKIT_NATIVE_TOOL_PROBE');
-    const answeredTool = JSON.stringify(body.messages).includes('fixture-native-echo');
+    const probe = body.tools?.some(tool => tool.name === nativeTool)
+      && JSON.stringify(body.messages).includes(marker);
+    const answeredTool = JSON.stringify(body.messages).includes(toolId);
     const toolCall = probe && !answeredTool;
-    const content = toolCall ? [{ type: 'tool_use', id: 'fixture-native-echo',
-      name: 'mcp__aikit-mod-feasibility__echo', input: { text: 'Native tool stdin 雪\n' } }] : [{ type: 'text', text: 'Fixture answer' }];
+    const content = toolCall ? [{ type: 'tool_use', id: toolId,
+      name: nativeTool, input: bridge ? { request: { text: 'Native SDK bridge stdin 雪\n' } } : { text: 'Native tool stdin 雪\n' } }] : [{ type: 'text', text: 'Fixture answer' }];
     const message = { id: `msg_fixture_${requests}`, type: 'message', role: 'assistant', model: body.model,
       content, stop_reason: toolCall ? 'tool_use' : 'end_turn', stop_sequence: null,
       usage: { input_tokens: 100, output_tokens: 3 } };
