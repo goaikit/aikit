@@ -69,6 +69,15 @@ Retry the same plan ID after interruption; do not synthesize a replacement plan.
 Pending journals may contain existing configuration values; completed plans discard
 their config bodies. `Configured` means matching config, not qualified enforcement.
 
+`plan_install_with_completion_policy(spec, CompletionBlockingPolicy::RequireUnbounded)`
+explicitly requests owned native continuation-limit configuration. Currently Claude
+configures `env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP="0"`; unsupported adapters fail
+explicitly. The preview includes exact setting changes; update/removal preserve
+the previous value and refuse unsafe restoration under dependent Stop hooks.
+Ordinary updates retain a previously selected policy. See
+[completion-policy.md](completion-policy.md) for schema compatibility, native
+qualification limits and reproducible checks. This does not promote capabilities.
+
 `handle_hook(installation_id, input, handler).await` consumes bounded native bytes
 and returns stdout, stderr and an exit code. The provider comes from the receipt.
 The thin executable must honor all three response fields. `HookHandler` receives
@@ -184,6 +193,7 @@ The resulting executable offers these operations:
 
 ```text
 integration_hooks plan STATE                   # InstallSpec JSON on stdin
+integration_hooks plan-unbounded STATE         # same spec; explicit completion policy
 integration_hooks apply STATE PLAN_ID
 integration_hooks remove-plan STATE INSTALLATION_ID
 integration_hooks status STATE INSTALLATION_ID

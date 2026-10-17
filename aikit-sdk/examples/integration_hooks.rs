@@ -1,8 +1,8 @@
 //! Library-only integration example. The example never launches an agent.
 //! Run with --features integration. Usage is described in the SDK README.
 use aikit_sdk::integration::{
-    Decision, DecisionFuture, HookEvent, HookHandler, HookRequest, InstallSpec, IntegrationService,
-    SessionMode,
+    CompletionBlockingPolicy, Decision, DecisionFuture, HookEvent, HookHandler, HookRequest,
+    InstallSpec, IntegrationService, SessionMode,
 };
 use serde_json::{json, Value};
 use std::{
@@ -93,7 +93,7 @@ async fn main() {
 
 async fn run(args: &[String]) -> anyhow::Result<i32> {
     if args.len() < 2 {
-        anyhow::bail!("usage: integration_hooks <capabilities|plan|apply|remove-plan|status|events|hook|bind|binding-status|detach> STATE [ID | WORKSPACE BLOCKS | INSTALLATION_ID SESSION_ID | AGENT_KEY MODE]");
+        anyhow::bail!("usage: integration_hooks <capabilities|plan|plan-unbounded|apply|remove-plan|status|events|hook|bind|binding-status|detach> STATE [ID | WORKSPACE BLOCKS | INSTALLATION_ID SESSION_ID | AGENT_KEY MODE]");
     }
     let service = IntegrationService::open(&args[1])?;
     if matches!(
@@ -141,7 +141,7 @@ async fn run(args: &[String]) -> anyhow::Result<i32> {
             };
             serde_json::to_value(service.capabilities(key, mode)?)?
         }
-        "plan" => {
+        "plan" | "plan-unbounded" => {
             let mut input = String::new();
             std::io::stdin()
                 .take(1024 * 1024 + 1)
@@ -150,7 +150,14 @@ async fn run(args: &[String]) -> anyhow::Result<i32> {
                 anyhow::bail!("spec exceeds 1 MiB");
             }
             let spec: InstallSpec = serde_json::from_str(&input)?;
-            serde_json::to_value(service.plan_install(spec)?)?
+            serde_json::to_value(if args[0] == "plan-unbounded" {
+                service.plan_install_with_completion_policy(
+                    spec,
+                    CompletionBlockingPolicy::RequireUnbounded,
+                )?
+            } else {
+                service.plan_install(spec)?
+            })?
         }
         "apply" => serde_json::to_value(
             service.apply_install(

@@ -26,8 +26,8 @@ pub use hooks::{
     HookResponse,
 };
 pub use install::{
-    HookCommand, HookEvent, InstallPlan, InstallSpec, Installation, InstallationStatus,
-    IntegrationError, IntegrationService,
+    CompletionBlockingPolicy, HookCommand, HookEvent, InstallPlan, InstallSpec, Installation,
+    InstallationStatus, IntegrationError, IntegrationService, SettingChange,
 };
 pub use sessions::{SessionBinding, SessionRef, SessionStatus};
 pub use tool_effects::{TextReplacement, ToolEffect};

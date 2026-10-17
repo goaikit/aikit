@@ -27,6 +27,248 @@ struct Fixture {
 }
 
 #[test]
+fn completion_policy_preview_update_remove_restore_prior_value_and_preserve_other_settings() {
+    let f = Fixture::new();
+    let original = json!({"env":{"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":"12","OTHER":"retain"},"permissions":{"deny":["Bash(rm *)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-hook"}]}]}});
+    f.write(&original);
+    let policy = CompletionBlockingPolicy::RequireUnbounded;
+    let plan = f
+        .service
+        .plan_install_with_completion_policy(f.spec.clone(), policy)
+        .unwrap();
+    assert_eq!(f.read(), original);
+    assert_eq!(plan.completion_policy, policy);
+    assert_eq!(
+        plan.settings,
+        vec![SettingChange {
+            pointer: "/env/CLAUDE_CODE_STOP_HOOK_BLOCK_CAP".into(),
+            before: Some(json!("12")),
+            after: Some(json!("0"))
+        }]
+    );
+    let status = f.service.apply_install(&plan.id).unwrap();
+    let InstallationStatus::Configured { installation } = status else {
+        panic!("expected configured")
+    };
+    assert_eq!(installation.completion_policy, policy);
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "0");
+    let mut changed = f.spec.clone();
+    changed.handler.arguments.push("updated".into());
+    let update = f.service.plan_install(changed).unwrap();
+    assert_eq!(update.completion_policy, policy);
+    assert!(update.settings.is_empty());
+    f.service.apply_install(&update.id).unwrap();
+    let remove = f.service.plan_remove(&plan.installation_id).unwrap();
+    assert_eq!(remove.settings[0].after, Some(json!("12")));
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), original);
+}
+
+#[test]
+fn completion_policy_preserves_absence_empty_environment_and_existing_zero() {
+    for original in [
+        json!({}),
+        json!({"env":{}}),
+        json!({"env":{"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":"0","OTHER":"retain"}}),
+    ] {
+        let f = Fixture::new();
+        f.write(&original);
+        let plan = f
+            .service
+            .plan_install_with_completion_policy(
+                f.spec.clone(),
+                CompletionBlockingPolicy::RequireUnbounded,
+            )
+            .unwrap();
+        f.service.apply_install(&plan.id).unwrap();
+        let remove = f.service.plan_remove(&plan.installation_id).unwrap();
+        f.service.apply_install(&remove.id).unwrap();
+        assert_eq!(f.read(), original);
+    }
+}
+
+#[test]
+fn completion_policy_drift_and_stale_plan_never_overwrite_external_changes() {
+    let f = Fixture::new();
+    f.write(&json!({"env":{"OTHER":"retain"}}));
+    let plan = f
+        .service
+        .plan_install_with_completion_policy(
+            f.spec.clone(),
+            CompletionBlockingPolicy::RequireUnbounded,
+        )
+        .unwrap();
+    f.write(&json!({"env":{"OTHER":"changed"}}));
+    assert!(matches!(
+        f.service.apply_install(&plan.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    let plan = f
+        .service
+        .plan_install_with_completion_policy(
+            f.spec.clone(),
+            CompletionBlockingPolicy::RequireUnbounded,
+        )
+        .unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+    let mut value = f.read();
+    value["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"] = json!("1");
+    f.write(&value);
+    assert!(matches!(
+        f.service
+            .installation_status(&plan.installation_id)
+            .unwrap(),
+        InstallationStatus::Drifted { .. }
+    ));
+    assert!(matches!(
+        f.service.plan_remove(&plan.installation_id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(f.read(), value);
+}
+
+#[test]
+fn completion_policy_shared_zero_cannot_be_silently_restored_to_a_limit_under_another_hook() {
+    let f = Fixture::new();
+    f.write(&json!({"env":{"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":"8"}}));
+    let policy = CompletionBlockingPolicy::RequireUnbounded;
+    let first = f
+        .service
+        .plan_install_with_completion_policy(f.spec.clone(), policy)
+        .unwrap();
+    f.service.apply_install(&first.id).unwrap();
+    let other = IntegrationService::open(f._dir.path().join("other-state")).unwrap();
+    let mut spec = f.spec.clone();
+    spec.application_id = "other-app".into();
+    spec.handler.arguments.push("other-app".into());
+    let second = other
+        .plan_install_with_completion_policy(spec, policy)
+        .unwrap();
+    other.apply_install(&second.id).unwrap();
+    assert!(matches!(
+        f.service
+            .installation_status(&first.installation_id)
+            .unwrap(),
+        InstallationStatus::Configured { .. }
+    ));
+    let before = f.read();
+    assert!(matches!(
+        f.service.plan_remove(&first.installation_id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(f.read(), before);
+    let mut update = f.spec.clone();
+    update.handler.arguments.push("updated-first-app".into());
+    let update = f
+        .service
+        .plan_install_with_completion_policy(update, policy)
+        .unwrap();
+    f.service.apply_install(&update.id).unwrap();
+    let remove_second = other.plan_remove(&second.installation_id).unwrap();
+    other.apply_install(&remove_second.id).unwrap();
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "0");
+    let remove_first = f.service.plan_remove(&first.installation_id).unwrap();
+    f.service.apply_install(&remove_first.id).unwrap();
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "8");
+    assert!(f.read().pointer("/hooks/Stop").is_none());
+}
+
+#[test]
+fn completion_policy_recovers_prepared_write_and_legacy_records_default_without_new_policy() {
+    let f = Fixture::new();
+    let original = json!({"env":{"OTHER":"retain"}});
+    f.write(&original);
+    let plan = f
+        .service
+        .plan_install_with_completion_policy(
+            f.spec.clone(),
+            CompletionBlockingPolicy::RequireUnbounded,
+        )
+        .unwrap();
+    assert!(matches!(
+        f.service.apply_inner(&plan.id, true),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "0");
+    let reopened = IntegrationService::open(f._dir.path().join("private-state")).unwrap();
+    reopened.apply_install(&plan.id).unwrap();
+    let remove = reopened.plan_remove(&plan.installation_id).unwrap();
+    reopened.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), original);
+    let legacy = reopened.plan_install(f.spec.clone()).unwrap();
+    reopened.connection().unwrap().execute_batch("UPDATE install_plans SET body=json_remove(body,'$.preview.settings','$.preview.completion_policy','$.next_receipt.completion','$.next_receipt.installation.completion_policy') WHERE phase='planned';").unwrap();
+    let InstallationStatus::Configured { installation } =
+        reopened.apply_install(&legacy.id).unwrap()
+    else {
+        panic!("configured")
+    };
+    assert_eq!(
+        installation.completion_policy,
+        CompletionBlockingPolicy::NativeDefault
+    );
+    assert_eq!(f.read()["env"], original["env"]);
+}
+
+#[test]
+fn completion_policy_requires_claude_stop_and_refuses_malformed_environment() {
+    let f = Fixture::new();
+    let policy = CompletionBlockingPolicy::RequireUnbounded;
+    let mut wrong = f.spec.clone();
+    wrong.agent_key = "cursor".into();
+    assert!(matches!(
+        f.service.plan_install_with_completion_policy(wrong, policy),
+        Err(IntegrationError::Unsupported(_))
+    ));
+    let mut wrong = f.spec.clone();
+    wrong.events = vec![HookEvent::BeforeTool];
+    assert!(matches!(
+        f.service.plan_install_with_completion_policy(wrong, policy),
+        Err(IntegrationError::Invalid(_))
+    ));
+    f.write(&json!({"env":"invalid"}));
+    assert!(matches!(
+        f.service
+            .plan_install_with_completion_policy(f.spec.clone(), policy),
+        Err(IntegrationError::Invalid(_))
+    ));
+    assert_eq!(f.read(), json!({"env":"invalid"}));
+}
+
+#[test]
+fn completion_policy_explicit_native_default_releases_control_but_legacy_updates_preserve_it() {
+    let f = Fixture::new();
+    f.write(&json!({"env":{"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":"9"}}));
+    let plan = f
+        .service
+        .plan_install_with_completion_policy(
+            f.spec.clone(),
+            CompletionBlockingPolicy::RequireUnbounded,
+        )
+        .unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+    let unchanged = f.service.plan_install(f.spec.clone()).unwrap();
+    assert_eq!(
+        unchanged.completion_policy,
+        CompletionBlockingPolicy::RequireUnbounded
+    );
+    f.service.apply_install(&unchanged.id).unwrap();
+    let release = f
+        .service
+        .plan_install_with_completion_policy(
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+        )
+        .unwrap();
+    assert_eq!(release.settings[0].after, Some(json!("9")));
+    f.service.apply_install(&release.id).unwrap();
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "9");
+    let remove = f.service.plan_remove(&plan.installation_id).unwrap();
+    assert!(remove.settings.is_empty());
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "9");
+}
+
+#[test]
 fn generated_extension_recovers_after_install_and_delete_without_adopting_external_edits() {
     let f = Fixture::new();
     let mut spec = f.spec.clone();
@@ -86,7 +328,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 6);
     assert!(matches!(
         reopened.apply_install(&plan.id).unwrap(),
         InstallationStatus::Configured { .. }
@@ -97,7 +339,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
     reopened
         .connection()
         .unwrap()
-        .execute_batch("PRAGMA user_version=6;")
+        .execute_batch("PRAGMA user_version=7;")
         .unwrap();
     assert!(matches!(
         IntegrationService::open(f._dir.path().join("private-state")),

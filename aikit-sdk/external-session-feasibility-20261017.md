@@ -12,6 +12,12 @@ Channels are another documented push mechanism for running sessions, with explic
 
 The command-hook documentation now describes an eight-consecutive-continuation Stop cap, reset by tool calls. This can conflict with unconditional repeated-stop enforcement. Qualify the effective configured behavior on the target version and retain Unknown until there is sufficient evidence.
 
+The current environment-variable reference explicitly documents zero as disabling
+that cap. `plan_install_with_completion_policy` now provides owned configuration
+and restoration through the existing installer, as described in
+[completion-policy.md](completion-policy.md). This closes a configuration API gap;
+it supplies no native enforcement or effective-settings qualification.
+
 ## Bounded static probe
 
 Claude Code 2.1.296 on Linux in a disposable Docker container statically validates a plugin registering `turn.start`, `turn.complete`, `classic.Stop` and `session.receive`. Native validation passes with warnings about author attribution and absent catch handlers. The probe makes no model request, installs no user-profile settings and supplies no model credentials.
@@ -19,6 +25,27 @@ Claude Code 2.1.296 on Linux in a disposable Docker container statically validat
 The reproducible pass-through probe is retained in [examples/claude-mod-qualification](../examples/claude-mod-qualification/README.md); the retained version supplies author attribution and may still report the catch-handler warnings.
 
 This establishes event-name recognition by that Linux executable only. It does not prove native Windows loading, executed callback shapes, actual completion/abort behavior, message acknowledgement, consumption, durable lookup or enforcement. Existing SDK Unsupported/Unknown assessments remain unchanged.
+
+## Executed offline plugin-engine probes
+
+The same Linux 2.1.296 executable also ran four credential-free, network-isolated
+test-kit cases. These retain a valid denial over twelve separate Stop calls,
+preserve abort correlation/text, show receive suppression, and demonstrate that
+a wrapper can erase a valid downstream Stop denial by returning an empty result.
+The monotonic-denial hypothesis was falsified; the retained test asserts the
+counterexample and keeps readiness unqualified. It does not exercise the native
+model loop, model input, actual sessions or Windows behavior.
+
+Mod Stop decisions require the engine's object wrapper with behavior allow/deny;
+plain command-hook JSON is rejected and skipped. Native callable signatures and
+generated interactive declarations still need inspection before production use.
+
+Native authoring also needs a qualified admission boundary shared with generation
+changes. Comparing a recorded SessionRef before an application SQLite commit
+cannot prevent the native journal changing between verification and commit.
+The SDK must coordinate that boundary and retain durable native evidence for
+message acknowledgement and actual next-model-input consumption. User-started
+sessions must remain user-started throughout.
 
 ## Required next work
 
@@ -34,3 +61,5 @@ Sources inspected on 2026-10-17:
 - [Mod creation, versions and generated types](https://code.claude.com/docs/en/plugins/mods/create)
 - [Channels](https://code.claude.com/docs/en/channels)
 - [Stop hook behavior](https://code.claude.com/docs/en/hooks#stop)
+- [Environment variables](https://code.claude.com/docs/en/env-vars)
+- [Offline plugin test kit](https://code.claude.com/docs/en/plugins/mods/test)

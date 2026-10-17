@@ -16,6 +16,10 @@ use std::{
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
+#[path = "install_completion.rs"]
+mod completion;
+pub use completion::{CompletionBlockingPolicy, SettingChange};
+
 #[derive(Debug)]
 pub enum IntegrationError {
     Io(std::io::Error),
@@ -126,6 +130,8 @@ pub struct Installation {
     pub id: String,
     pub spec: InstallSpec,
     pub config_path: PathBuf,
+    #[serde(default)]
+    pub completion_policy: CompletionBlockingPolicy,
 }
 
 /// Safe preview: deliberately excludes unrelated configuration contents.
@@ -138,6 +144,11 @@ pub struct InstallPlan {
     pub removal: bool,
     pub before_fingerprint: String,
     pub after_fingerprint: String,
+    /// Exact related setting changes only; no unrelated configuration is exposed.
+    #[serde(default)]
+    pub settings: Vec<SettingChange>,
+    #[serde(default)]
+    pub completion_policy: CompletionBlockingPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +184,8 @@ struct Receipt {
     /// Complete ownership of a generated extension file, not merged JSON.
     #[serde(default)]
     source_fingerprint: Option<String>,
+    #[serde(default)]
+    completion: Option<completion::OwnedCompletion>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Pending {
@@ -219,17 +232,17 @@ impl IntegrationService {
             state: fs::canonicalize(state)?,
         };
         let connection = service.connection()?;
-        // Version 5 enforces adapter invocation scopes in hook/binding JSON.
-        // Older readers must not ignore those scopes and accept stale callbacks.
+        // Version 6 adds owned completion policy metadata. Older readers must
+        // not ignore it and orphan its setting during update/removal.
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 5 {
+        if version > 6 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if version < 5 {
+        if version < 6 {
             let _lock = service.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 5 {
+            if version > 6 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {
@@ -243,11 +256,11 @@ impl IntegrationService {
             INSERT INTO installation_revisions SELECT id,lower(hex(randomblob(16))) FROM installations;
             CREATE TABLE session_bindings(id TEXT PRIMARY KEY, reference TEXT NOT NULL, detached INTEGER NOT NULL DEFAULT 0);
             CREATE UNIQUE INDEX active_session_binding ON session_bindings(reference) WHERE detached=0;
-            PRAGMA user_version=5; COMMIT;")?;
+            PRAGMA user_version=6; COMMIT;")?;
             } else {
                 // Version 3 already has the binding tables and revision column.
-                // Persisted JSON semantics changed in v4 and v5. Keep all rows.
-                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=5; COMMIT;")?;
+                // Persisted JSON semantics changed in v4-v6. Keep all rows.
+                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=6; COMMIT;")?;
             }
         }
         Ok(service)
@@ -267,7 +280,27 @@ impl IntegrationService {
 
     /// Installation and update follow the same path. Existing owned entries must
     /// still match their receipt; unrelated settings and hooks are retained.
-    pub fn plan_install(&self, mut spec: InstallSpec) -> Result<InstallPlan, IntegrationError> {
+    pub fn plan_install(&self, spec: InstallSpec) -> Result<InstallPlan, IntegrationError> {
+        self.plan_install_inner(spec, None)
+    }
+
+    /// Request native completion-loop configuration through the existing owned
+    /// prepare/apply/remove path. A plan is not evidence of effective native
+    /// settings, repeated blocking, or accepted completion. Unsupported adapters
+    /// fail explicitly; no managed session or weaker fallback is substituted.
+    pub fn plan_install_with_completion_policy(
+        &self,
+        spec: InstallSpec,
+        completion_policy: CompletionBlockingPolicy,
+    ) -> Result<InstallPlan, IntegrationError> {
+        self.plan_install_inner(spec, Some(completion_policy))
+    }
+
+    fn plan_install_inner(
+        &self,
+        mut spec: InstallSpec,
+        requested_policy: Option<CompletionBlockingPolicy>,
+    ) -> Result<InstallPlan, IntegrationError> {
         validate_spec(&mut spec)?;
         if self.state.starts_with(&spec.workspace) {
             return Err(IntegrationError::Invalid(
@@ -281,6 +314,18 @@ impl IntegrationService {
         reject_pending(&connection, &id)?;
         reject_prepared_config(&connection, &config_path, None)?;
         let previous = receipt_json(&connection, &id)?;
+        // Legacy callers updating an installation retain its explicit policy.
+        // Choose under the metadata lock so concurrent plans cannot downgrade it.
+        let completion_policy = match requested_policy {
+            Some(policy) => policy,
+            None => previous
+                .as_deref()
+                .map(serde_json::from_str::<Receipt>)
+                .transpose()?
+                .map(|receipt| receipt.installation.completion_policy)
+                .unwrap_or_default(),
+        };
+        completion::validate(&spec, completion_policy)?;
         let before = read_config(&spec.workspace, &config_path)?;
         if spec.agent_key == "pi" {
             if let Some(raw) = &previous {
@@ -294,6 +339,7 @@ impl IntegrationService {
                 id,
                 spec,
                 config_path,
+                completion_policy,
             };
             let after = super::pi::extension(&installation)?;
             let receipt = Receipt {
@@ -302,6 +348,7 @@ impl IntegrationService {
                 owned: Vec::new(),
                 inserted_version: false,
                 source_fingerprint: Some(fingerprint(Some(&after))),
+                completion: None,
             };
             return self.save_bytes_plan(
                 &connection,
@@ -313,8 +360,19 @@ impl IntegrationService {
             );
         }
         let mut document = document(before.as_deref())?;
+        let mut retained_completion = None;
+        let mut retained_ownership = None;
         if let Some(raw) = &previous {
-            remove_owned(&mut document, &serde_json::from_str(raw)?)?;
+            let receipt: Receipt = serde_json::from_str(raw)?;
+            if completion_policy == CompletionBlockingPolicy::RequireUnbounded
+                && receipt.completion.is_some()
+            {
+                strip_owned(&mut document, &receipt, false)?;
+                retained_completion = receipt.completion.clone();
+                retained_ownership = Some(receipt);
+            } else {
+                remove_owned(&mut document, &receipt)?;
+            }
         }
         if document.get("disableAllHooks").and_then(Value::as_bool) == Some(true) {
             return Err(IntegrationError::Conflict(
@@ -325,8 +383,22 @@ impl IntegrationService {
             id,
             spec,
             config_path,
+            completion_policy,
         };
-        let receipt = add_owned(&mut document, installation)?;
+        let completion = match retained_completion {
+            Some(retained) => Some(retained),
+            None => completion::install(&mut document, completion_policy)?,
+        };
+        let mut receipt = add_owned(&mut document, installation)?;
+        if let Some(previous) = retained_ownership {
+            receipt.hooks_existed = previous.hooks_existed;
+            for hook in &mut receipt.owned {
+                if let Some(old) = previous.owned.iter().find(|old| old.event == hook.event) {
+                    hook.event_existed = old.event_existed;
+                }
+            }
+        }
+        receipt.completion = completion;
         self.save_plan(
             &connection,
             before,
@@ -417,6 +489,12 @@ impl IntegrationService {
             removal: next_receipt.is_none(),
             before_fingerprint: fingerprint(before.as_deref()),
             after_fingerprint: fingerprint(after.as_deref()),
+            settings: if installation.spec.agent_key == "claude" {
+                completion::changes(before.as_deref(), after.as_deref())?
+            } else {
+                Vec::new()
+            },
+            completion_policy: installation.completion_policy,
         };
         let pending = Pending {
             preview: preview.clone(),
@@ -591,7 +669,7 @@ impl IntegrationService {
                 if value.get("disableAllHooks").and_then(Value::as_bool) == Some(true) {
                     return Err(IntegrationError::Conflict("hooks are disabled".into()));
                 }
-                remove_owned(&mut value, &receipt)
+                strip_owned(&mut value, &receipt, false)
             })
         };
         match check {
@@ -839,6 +917,7 @@ fn add_owned(
         owned,
         inserted_version,
         source_fingerprint: None,
+        completion: None,
     })
 }
 
@@ -851,6 +930,13 @@ fn check_source(current: Option<&[u8]>, receipt: &Receipt) -> Result<(), Integra
     Ok(())
 }
 fn remove_owned(document: &mut Value, receipt: &Receipt) -> Result<(), IntegrationError> {
+    strip_owned(document, receipt, true)
+}
+fn strip_owned(
+    document: &mut Value,
+    receipt: &Receipt,
+    restore_completion: bool,
+) -> Result<(), IntegrationError> {
     if receipt.installation.spec.agent_key == "cursor"
         && document.get("version").and_then(Value::as_u64) != Some(1)
     {
@@ -889,6 +975,13 @@ fn remove_owned(document: &mut Value, receipt: &Receipt) -> Result<(), Integrati
     // Preserve the required version if another application's hooks remain.
     if receipt.inserted_version && document.get("hooks").is_none() {
         document.as_object_mut().expect("object").remove("version");
+    }
+    if let Some(completion) = &receipt.completion {
+        if restore_completion {
+            completion::remove(document, completion)?;
+        } else {
+            completion::check(document)?;
+        }
     }
     Ok(())
 }
