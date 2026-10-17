@@ -1,5 +1,9 @@
 # External-session message journal
 
+The [recorded-context RPC preparation](recorded-message-bridge.md) now connects
+bounded fixed-command requests to this journal. It does not yet provide the
+native module client, admission lease, send or proof capture.
+
 This is the durable local portion of existing-session messaging. It reuses
 `IntegrationService`, `SessionBinding`, installation locks, the recorded session
 journal and the same `integration.db`. It starts no process/server, installs no

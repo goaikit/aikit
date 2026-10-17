@@ -89,3 +89,7 @@ required-features = ["integration"]
 [[example]]
 name = "integration_messages"
 required-features = ["integration"]
+
+[[example]]
+name = "integration_message_bridge"
+required-features = ["integration"]

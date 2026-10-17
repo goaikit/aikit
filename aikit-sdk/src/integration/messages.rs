@@ -215,12 +215,15 @@ impl SessionBinding<'_> {
     /// Historical local lookup; never follows a replacement or sends anything.
     /// Remains available for the original binding after detach/end/replacement.
     pub fn message_status(&self, operation: &str) -> Result<MessageReceipt, IntegrationError> {
-        let receipt = load(
-            &self.service.connection()?,
-            &self.reference.installation_id,
-            operation,
-        )?
-        .ok_or(IntegrationError::NotFound)?;
+        self.message_status_record(&self.service.connection()?, operation)
+    }
+    pub(super) fn message_status_record(
+        &self,
+        connection: &Connection,
+        operation: &str,
+    ) -> Result<MessageReceipt, IntegrationError> {
+        let receipt = load(connection, &self.reference.installation_id, operation)?
+            .ok_or(IntegrationError::NotFound)?;
         if receipt.binding_id != self.id || receipt.target != self.reference {
             return Err(IntegrationError::NotFound);
         }
@@ -233,13 +236,22 @@ impl SessionBinding<'_> {
         let _lock = self.service.state_lock()?;
         let mut connection = self.service.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        self.require_recorded_message_target(&tx)?;
+        let reservation = self.reserve_message_record(&tx, operation)?;
+        tx.commit()?;
+        Ok(reservation)
+    }
+    pub(super) fn reserve_message_record(
+        &self,
+        tx: &Connection,
+        operation: &str,
+    ) -> Result<MessageReservation, IntegrationError> {
+        self.require_recorded_message_target(tx)?;
         if self.reference.invocation_id.is_none() {
             return Err(IntegrationError::Unsupported(
                 "message reservation requires an observed invocation generation".into(),
             ));
         }
-        let mut receipt = load(&tx, &self.reference.installation_id, operation)?
+        let mut receipt = load(tx, &self.reference.installation_id, operation)?
             .ok_or(IntegrationError::NotFound)?;
         if receipt.binding_id != self.id
             || receipt.target != self.reference
@@ -256,8 +268,7 @@ impl SessionBinding<'_> {
         };
         receipt.state = MessageState::Dispatching;
         receipt.reservation_id = Some(reservation.reservation_id.clone());
-        save(&tx, &receipt)?;
-        tx.commit()?;
+        save(tx, &receipt)?;
         Ok(reservation)
     }
     /// Conservative local recovery, not a native query. Lost handoff/receipt is

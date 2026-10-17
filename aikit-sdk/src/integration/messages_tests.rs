@@ -47,6 +47,30 @@ impl Fixture {
         fixture
     }
     async fn start(&self, generation: bool) {
+        if self
+            .service
+            .agent_tool_environment_key(&self.installation)
+            .unwrap()
+            .is_some()
+        {
+            // Owned modules defer classic startup without inherited context.
+            // Supply a synthetic journal start at the current revision for this
+            // storage/RPC fixture; do not pretend a native module was executed.
+            let mut start = self
+                .service
+                .events(&self.installation, 0, 100)
+                .unwrap()
+                .records[0]
+                .request
+                .clone();
+            start.id = uuid::Uuid::new_v4().to_string();
+            start.event = HookEvent::SessionStarted;
+            start.native_turn = None;
+            start.invocation_id = generation.then(|| uuid::Uuid::new_v4().to_string());
+            self.service.connection().unwrap().execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,'session',?3,?4)",
+                params![start.id,self.installation,serde_json::to_string(&start).unwrap(),self.service.installation_revision(&self.installation).unwrap()]).unwrap();
+            return;
+        }
         let input =
             json!({"hook_event_name":"SessionStart","session_id":"session","cwd":self.workspace});
         assert_eq!(
@@ -94,6 +118,237 @@ fn ack(id: &str) -> MessageObservation {
             receipt_reference: "native-receipt-ref".into(),
         },
     )
+}
+
+async fn bridge_fixture() -> Fixture {
+    let f = Fixture::new().await;
+    let mut hook_spec = f.service.installed(&f.installation).unwrap().spec;
+    hook_spec.events.push(HookEvent::InputSubmitted);
+    let hooks = f.service.plan_install(hook_spec).unwrap();
+    f.service.apply_install(&hooks.id).unwrap();
+    let plan = f
+        .service
+        .plan_agent_tool(
+            &f.installation,
+            crate::integration::AgentToolSpec {
+                application_id: "message-fixture".into(),
+                installation_id: f.installation.clone(),
+                tool_name: "review".into(),
+                description: "Fixture only".into(),
+                input_schema: json!({"type":"object"}),
+                instructions: "".into(),
+                handler: HookCommand {
+                    executable: std::env::current_exe().unwrap(),
+                    arguments: vec![],
+                },
+                timeout_ms: 1000,
+            },
+        )
+        .unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+    f.start(true).await;
+    f
+}
+fn bridge_frame(
+    f: &Fixture,
+    action: crate::integration::RecordedMessageAction,
+) -> (crate::integration::RecordedMessageRequest, String) {
+    let reference = f.binding().reference().clone();
+    let frame = crate::integration::RecordedMessageRequest {
+        schema_version: 1,
+        application_id: "message-fixture".into(),
+        installation_id: f.installation.clone(),
+        agent_key: "claude".into(),
+        native_context: crate::integration::NativeToolContext {
+            session_id: reference.native_session_id,
+            invocation_id: reference.invocation_id.unwrap(),
+            cwd: f.workspace.clone(),
+        },
+        action,
+    };
+    let inherited=json!({"schema_version":1,"installation_id":f.installation,"native_context":frame.native_context}).to_string();
+    (frame, inherited)
+}
+fn synthetic_idle(f: &Fixture) {
+    synthetic_bridge_event(f, HookEvent::NativeTurnFinished);
+}
+fn synthetic_bridge_event(f: &Fixture, event: HookEvent) {
+    let binding = f.binding();
+    let mut request = f
+        .service
+        .events(&f.installation, 0, 100)
+        .unwrap()
+        .records
+        .last()
+        .unwrap()
+        .request
+        .clone();
+    request.event = event;
+    request.invocation_id = binding.reference().invocation_id.clone();
+    request.native_turn = Some(crate::integration::NativeTurn {
+        id: "synthetic-completed-turn".into(),
+        outcome: Some(crate::integration::NativeTurnOutcome {
+            reason: crate::integration::NativeTurnReason::Answer,
+            is_aborted: false,
+        }),
+    });
+    f.service.connection().unwrap().execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,'session',?3,?4)",
+        params![uuid::Uuid::new_v4().to_string(),f.installation,serde_json::to_string(&request).unwrap(),binding.reference().installation_revision]).unwrap();
+}
+
+#[tokio::test]
+async fn recorded_bridge_defers_busy_reserves_once_and_rechecks_without_sending() {
+    use crate::integration::RecordedMessageAction::{Poll, Recheck};
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    binding.stage_message(request("op")).unwrap();
+    let (frame, env) = bridge_frame(&f, Poll);
+    let deferred = f
+        .service
+        .recorded_message_with_context(&f.installation, frame.clone(), Some(&env))
+        .unwrap();
+    assert!(!deferred.recorded_idle);
+    assert!(deferred.reservation.is_none());
+    assert_eq!(
+        binding.message_status("op").unwrap().state,
+        MessageState::Accepted
+    );
+    synthetic_idle(&f);
+    let prepared = f
+        .service
+        .recorded_message_with_context(&f.installation, frame.clone(), Some(&env))
+        .unwrap();
+    assert!(prepared.recorded_idle);
+    assert!(!prepared.recorded_ready);
+    let ticket = prepared.reservation.unwrap();
+    assert_eq!(ticket.request, request("op"));
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, frame, Some(&env))
+        .unwrap()
+        .reservation
+        .is_none());
+    let (recheck, env) = bridge_frame(
+        &f,
+        Recheck {
+            operation_id: "op".into(),
+            reservation_id: ticket.reservation_id.clone(),
+        },
+    );
+    assert!(
+        f.service
+            .recorded_message_with_context(&f.installation, recheck.clone(), Some(&env))
+            .unwrap()
+            .recorded_ready
+    );
+    synthetic_bridge_event(&f, HookEvent::InputSubmitted);
+    let busy = f
+        .service
+        .recorded_message_with_context(&f.installation, recheck.clone(), Some(&env))
+        .unwrap();
+    assert!(!busy.recorded_idle);
+    assert!(!busy.recorded_ready);
+    binding.recover_message_record("op").unwrap();
+    assert!(
+        !f.service
+            .recorded_message_with_context(&f.installation, recheck, Some(&env))
+            .unwrap()
+            .recorded_ready
+    );
+    assert_eq!(
+        binding.message_status("op").unwrap().state,
+        MessageState::Unknown
+    );
+}
+
+#[tokio::test]
+async fn recorded_bridge_rejects_claims_replacement_detach_and_missing_owned_module() {
+    use crate::integration::RecordedMessageAction::Poll;
+    let plain = Fixture::new().await;
+    let (frame, env) = bridge_frame(&plain, Poll);
+    assert!(plain
+        .service
+        .recorded_message_with_context(&plain.installation, frame, Some(&env))
+        .is_err());
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    binding.stage_message(request("op")).unwrap();
+    synthetic_idle(&f);
+    let (frame, env) = bridge_frame(&f, Poll);
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, frame.clone(), None)
+        .is_err());
+    let mut foreign = frame.clone();
+    foreign.application_id = "foreign-app".into();
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, foreign, Some(&env))
+        .is_err());
+    let mut foreign = frame.clone();
+    foreign.native_context.invocation_id = uuid::Uuid::new_v4().to_string();
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, foreign, Some(&env))
+        .is_err());
+    binding.detach().unwrap();
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, frame.clone(), Some(&env))
+        .is_err());
+    // Polling cannot undo detach or create another application binding.
+    let count: i64 = f
+        .service
+        .connection()
+        .unwrap()
+        .query_row("SELECT count(*) FROM session_bindings", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+    f.start(true).await;
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, frame, Some(&env))
+        .is_err());
+    assert_eq!(
+        binding.message_status("op").unwrap().state,
+        MessageState::Accepted
+    );
+}
+
+#[tokio::test]
+async fn recorded_bridge_bounds_fail_before_reservation_and_frames_cannot_choose_state_paths() {
+    use crate::integration::{
+        RecordedMessageAction::Poll, RecordedMessageRequest, MESSAGE_BRIDGE_PAYLOAD_LIMIT,
+    };
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    binding
+        .stage_message(MessageRequest {
+            operation_id: "large".into(),
+            content: "x".repeat(MESSAGE_BRIDGE_PAYLOAD_LIMIT + 1),
+        })
+        .unwrap();
+    synthetic_idle(&f);
+    let (frame, env) = bridge_frame(&f, Poll);
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, frame.clone(), Some(&env))
+        .is_err());
+    assert_eq!(
+        binding.message_status("large").unwrap().state,
+        MessageState::Accepted
+    );
+    let mut json = serde_json::to_value(&frame).unwrap();
+    json["database"] = json!("arbitrary.db");
+    assert!(RecordedMessageRequest::read(json.to_string().as_bytes()).is_err());
+    assert!(RecordedMessageRequest::read(
+        vec![b'x'; super::super::AGENT_TOOL_CALL_LIMIT + 1].as_slice()
+    )
+    .is_err());
+    json.as_object_mut().unwrap().remove("database");
+    json["schema_version"] = json!(2);
+    assert!(RecordedMessageRequest::read(json.to_string().as_bytes()).is_err());
+    assert!(RecordedMessageRequest::read(serde_json::to_vec(&frame).unwrap().as_slice()).is_ok());
 }
 
 #[tokio::test]

@@ -14,6 +14,32 @@ struct SessionEnvironment {
     native_turn_id: Option<String>,
 }
 
+/// Compare inherited module claims with a separate envelope. This is correlation
+/// only, not authentication of a physical native caller or native admission.
+pub(super) fn validate_tool_environment(
+    installation: &Installation,
+    native: &NativeToolContext,
+    value: Option<&str>,
+) -> Result<(), IntegrationError> {
+    let refused =
+        || IntegrationError::Invalid("owned message context is missing or inconsistent".into());
+    let context: SessionEnvironment =
+        serde_json::from_str(value.filter(|v| v.len() <= 64 * 1024).ok_or_else(refused)?)
+            .map_err(|_| refused())?;
+    if context.schema_version != 1
+        || context.installation_id != installation.id
+        || context.native_context.session_id != native.session_id
+        || context.native_context.invocation_id != native.invocation_id
+        || !context.native_context.cwd.is_absolute()
+        || std::fs::canonicalize(&native.cwd).map_err(|_| refused())? != installation.spec.workspace
+        || std::fs::canonicalize(context.native_context.cwd).map_err(|_| refused())?
+            != installation.spec.workspace
+    {
+        return Err(refused());
+    }
+    Ok(())
+}
+
 pub(super) fn bind_environment(
     installation: &Installation,
     request: &mut HookRequest,

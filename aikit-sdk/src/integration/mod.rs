@@ -16,6 +16,7 @@ mod command;
 mod cursor;
 mod hooks;
 mod install;
+mod message_bridge;
 mod messages;
 mod pi;
 mod sessions;
@@ -36,6 +37,10 @@ pub use install::{
     AgentToolFileChange, CompletionBlockingPolicy, HookCommand, HookEvent, InstallPlan,
     InstallSpec, Installation, InstallationStatus, IntegrationError, IntegrationService,
     SettingChange,
+};
+pub use message_bridge::{
+    RecordedMessageAction, RecordedMessageReply, RecordedMessageRequest,
+    MESSAGE_BRIDGE_PAYLOAD_LIMIT,
 };
 pub use messages::{
     MessageEvidence, MessageObservation, MessagePage, MessageProof, MessageReceipt, MessageRequest,
