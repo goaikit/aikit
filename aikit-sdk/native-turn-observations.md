@@ -23,6 +23,10 @@ Public normalized evidence:
   application completion unproven and can be replayed only if already journaled.
 - Subagent lifecycle events do not overwrite the main Turn context or emit main
   Turn outcomes. Session replacement still uses the existing generation guards.
+- Owned tool calls await their main Turn-start observation before invoking the
+  application. Native lifecycle observers are asynchronous and do not themselves
+  serialize the model/tool loop. Missing/failed startup refuses the tool; it does
+  not retry an application operation or guess its completion.
 
 The native event is not an application completion authorization. A consumer must
 match the recorded generation, current native Turn, latest allowed proposal,
@@ -59,3 +63,12 @@ allowance; this is not a claim of strict whole-SDK lint success. Local logs:
 The Linux harness was corrected to include current source files and the exact
 ignored lockfile before the passing run. No real native client run of this new
 forwarder or Codelaya accepted-completion transition is claimed by this gate.
+
+The subsequent native Codelaya canary exposed startup/tool overlap: get-context
+returned unavailable while the Turn-start handler was projecting, and the native
+error outcome left work Incomplete. Raw evidence is retained locally in the
+implementation chat's `.local/native-completion-generated/start-race-negative`.
+The owned tool now awaits that start observation. Four Node behavior tests cover
+the barrier, including a deliberately deferred startup and exactly one eventual
+tool dispatch. A fresh successful native run is still required before claiming
+the new forwarder has native acceptance evidence.

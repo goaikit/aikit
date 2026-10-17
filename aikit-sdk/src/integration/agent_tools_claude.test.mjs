@@ -7,7 +7,7 @@ let sequence = 0;
 async function fixture() {
   const hooks = new Map(), frames = [], environment = new Map();
   const config = {applicationId:'fixture',installationId:'fixture-install',toolName:'review',description:'Fixture',
-    schema:{type:'object'},instructions:'',sessionArgv:['fixed-handler','fixed-arg'],timeoutMs:1000};
+    schema:{type:'object'},instructions:'',sessionArgv:['fixed-handler','fixed-arg'],argv:['tool-handler'],timeoutMs:1000};
   const module = await import('data:text/javascript,'+encodeURIComponent(source.replace('/* AIKIT_CONFIG */null',JSON.stringify(config)))+`#${++sequence}`);
   module.register((name, ...args) => { hooks.set(name,args.at(-1)); return {catch(){}}; });
   const api = {session:{id:async()=> 'native-session',cwd:async()=>'/workspace'},
@@ -56,4 +56,22 @@ test('downstream failure emits no outcome and process failure is attempted only 
   f.api.process.run=async()=>{calls++;return {exitCode:2,isStdoutTruncated:false,isStderrTruncated:false};};
   await assert.rejects(f.hooks.get('turn.complete')(f.api,event,async()=>({})));
   assert.equal(calls,1);
+});
+test('owned tool waits for an asynchronous native Turn startup without retrying',async()=>{
+  const f=await fixture();
+  assert.match((await f.hooks.get('tool.call')(f.api,{request:{}})).deny,/startup/);
+  let release,entered,toolCalls=0;
+  const ready=new Promise(resolve=>{entered=resolve;});
+  const pending=new Promise(resolve=>{release=resolve;});
+  f.api.process.run=async(argv)=>{
+    if(argv[0]==='fixed-handler') {entered();await pending;}
+    else {assert.equal(argv[0],'tool-handler');toolCalls++;}
+    return {exitCode:0,isStdoutTruncated:false,isStderrTruncated:false,stdout:'{"ok":true}'};
+  };
+  const start=f.hooks.get('turn.start')(f.api,{turnId:'main'},async()=>({}));
+  await ready;
+  const result=f.hooks.get('tool.call')(f.api,{request:{}});
+  await Promise.resolve();assert.equal(toolCalls,0);
+  release();await start;
+  assert.deepEqual(await result,{result:'{"ok":true}'});assert.equal(toolCalls,1);
 });

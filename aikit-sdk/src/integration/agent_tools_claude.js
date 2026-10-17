@@ -2,6 +2,7 @@
 const config = /* AIKIT_CONFIG */null;
 const invocationId = crypto.randomUUID();
 let nativeTurnId;
+let turnStartObservation;
 async function publishContext($) {
   const native = { session_id: await $.session.id(), invocation_id: invocationId, cwd: await $.session.cwd() };
   await $.env.set('AIKIT_INVOCATION_ENV_KEY', JSON.stringify({ schema_version: 1,
@@ -33,6 +34,10 @@ const unavailable = 'Agent operation unavailable. Retain an uncertain operation 
 async function invoke($, event) {
   try {
     if (event.agentId !== undefined) return { deny: 'Subagent authoring is not qualified.' };
+    if (config.sessionArgv) {
+      if (!turnStartObservation) return { deny: 'Native Turn startup observation unavailable.' };
+      await turnStartObservation;
+    }
     const request = event.request;
     if (!request || typeof request !== 'object' || Array.isArray(request)
         || new TextEncoder().encode(JSON.stringify(request)).length > 65536)
@@ -65,7 +70,10 @@ export function register(on) {
     return next(event);
   });
   on('turn.start', async ($, event, next) => {
-    await observeTurn($, event, false);
+    if (event.agentId === undefined) {
+      turnStartObservation = observeTurn($, event, false);
+      await turnStartObservation;
+    }
     return next(event);
   });
   on('turn.complete', async ($, event, next) => {
