@@ -4,6 +4,11 @@ This plugin only registers pass-through observers. It performs no file write,
 network request, model call or application policy decision. Validation does not
 install it into the user's profile or launch a session.
 
+That describes the default `hooks/register.js`. A separate, explicitly selected
+`hooks/native-probe.js` performs child-process and evidence writes only inside
+the disposable [native/local-gateway fixture](native-gateway-probe.md). It is not
+loaded by the default manifest and is not a production adapter.
+
 Run with the executable whose exact version/platform you intend to inspect:
 
 ```powershell
@@ -49,6 +54,15 @@ returning the command-hook JSON's scalar `decision: 'block'` is invalid and the
 handler is skipped. A native bridge must translate the result correctly and
 qualify error behavior. The test engine supplied this validation feedback; no
 generated declarations from a signed-in interactive session were obtained.
+
+The later [native gateway probe](native-gateway-probe.md) generated the target
+version's declarations without a real account by using a local deterministic
+gateway and normal workspace trust. It then verified real process stdin, native
+tool registration, a correlated answer and the tool result in the subsequent
+actual API input. Its model responses are scripted and it qualifies no Windows
+or Codelaya delivery capability. The offline aborted fixture now uses the
+generated `reason: aborted` field instead of treating the interrupt flag as the
+complete outcome contract.
 
 Claude's [environment reference](https://code.claude.com/docs/en/env-vars)
 documents `CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=0` as disabling the continuation cap.

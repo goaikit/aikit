@@ -12,8 +12,8 @@ test('12 isolated Stop events preserve a downstream denial', async ($, on) => {
 test('aborted completion retains correlation and exact final text', async ($, on) => {
   const seen: unknown[] = [];
   on('turn.complete', ($, event) => { seen.push(event); return { text: '' }; });
-  await $.turn.complete({ turnId: 'fixture-turn', answer: 'Exact answer 雪\n', durationMs: 7, isAborted: true, usage: null });
-  expect(seen).toEqual([{ turnId: 'fixture-turn', answer: 'Exact answer 雪\n', durationMs: 7, isAborted: true, usage: null }]);
+  await $.turn.complete({ turnId: 'fixture-turn', answer: 'Exact answer 雪\n', durationMs: 7, isAborted: true, reason: 'aborted' });
+  expect(seen).toEqual([{ turnId: 'fixture-turn', answer: 'Exact answer 雪\n', durationMs: 7, isAborted: true, reason: 'aborted' }]);
 });
 
 test('receive can be suppressed downstream and is not consumption evidence', async ($, on) => {

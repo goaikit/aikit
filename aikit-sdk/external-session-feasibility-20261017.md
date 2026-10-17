@@ -37,8 +37,8 @@ counterexample and keeps readiness unqualified. It does not exercise the native
 model loop, model input, actual sessions or Windows behavior.
 
 Mod Stop decisions require the engine's object wrapper with behavior allow/deny;
-plain command-hook JSON is rejected and skipped. Native callable signatures and
-generated interactive declarations still need inspection before production use.
+plain command-hook JSON is rejected and skipped. At that point native callable
+signatures and generated interactive declarations still needed inspection.
 
 Native authoring also needs a qualified admission boundary shared with generation
 changes. Comparing a recorded SessionRef before an application SQLite commit
@@ -67,9 +67,25 @@ This records the attempted supported paths and the current declaration gap; it
 does not prove no credential-free generation path exists. Windows machine policy
 and native authentication remain separate requirements, neither bypassed here.
 
+## Local gateway follow-up
+
+The subsequent [native terminal fixture](../examples/claude-mod-qualification/native-gateway-probe.md)
+uses a public dummy key and a deterministic server on container loopback. Normal
+key approval/workspace trust generated the exact 2.1.296 declarations. A fresh
+ordinary terminal session then passed the command/tool stdin and real outgoing
+input verifier with Docker networking disabled, without demo mode or a real
+account. This resolves the Linux declaration/process-stdin signature gap.
+
+Generated completion has a reason (`answer`, `aborted`, `refusal`, `error`), so
+the non-aborted flag alone is insufficient. The native fixture captured a
+correlated `answer` and exact tool result in the next API request. It registers an
+echo rather than Codelaya operations and supplies scripted model responses. It
+does not qualify Windows, original-session review delivery, caller authentication,
+protected completion ordering or final acceptance under competing handlers.
+
 ## Required next work
 
-1. Obtain the target executable's generated mod type declarations and qualify native loading/trust in the user-started interactive topology.
+1. Use the retained Linux declarations/signatures to implement the bridge, and qualify the corresponding native Windows loading/trust and caller contracts.
 2. Extend the existing Claude adapter/installer with owned plugin configuration if this API satisfies the required contracts; preserve unrelated user hooks and the command-hook path.
 3. Normalize native Turn/generation/outcome evidence into the existing integration journal. Preserve the distinction between the application's Allow and the final observed result.
 4. Qualify repeated denial/deadlines and transport receipt/consumption/reconciliation. Report a concrete native gap wherever a primitive is absent; never promote support from this static probe.
