@@ -52,8 +52,11 @@ anything that doesn't parse as the expected shape.
 ### Codex: hooks in `config.toml`
 
 Codex also reads inline `[hooks]` tables in `~/.codex/config.toml`, and warns when one layer uses
-both files. When `~/.codex/config.toml` holds a `hooks` table, `register_session_hook` refuses
-with a new `SessionHookError::OtherHookFile` naming that file, and writes nothing. aikit doesn't
+both files. When `~/.codex/config.toml` defines hooks, `register_session_hook` refuses
+with a new `SessionHookError::OtherHookFile` naming that file, and writes nothing. Defining hooks
+means a `hooks` key holding anything but `hooks.state`: that is where Codex keeps the trust
+records `/hooks` writes (`[hooks.state."<file>:session_start:0:0"] trusted_hash = ...`, seen on
+Codex 0.163.0), so it is there on every machine whose user trusted our hook. aikit doesn't
 write TOML in this change.
 
 ### Pi: the extension file
@@ -117,8 +120,9 @@ The seam stays the module's public functions over a temporary home directory, as
 - register into a missing file, an empty file, a file with other hooks, and a file of the wrong
   shape (refused, untouched);
 - register twice (`Unchanged`), change the command (`Updated`), unregister (`Removed`), unregister
-  again (`Absent`);
-- Codex: `config.toml` with a `hooks` table is refused;
+  again (`Unchanged`);
+- Codex: `config.toml` that defines hooks is refused; Codex's own `hooks.state` trust
+  records are not;
 - Cursor: `version` other than `1` is refused;
 - Pi: the rendered file for a known hook matches a checked-in golden file; a file without the
   marker is refused and never deleted; a marker naming another id is left alone;

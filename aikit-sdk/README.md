@@ -131,60 +131,85 @@ remove_skill_entry(target, "my-skill")?;
 ## Session-start hooks
 
 For a tool that wants to run a command whenever an agent session starts,
-`session_hooks` registers that command in an agent's per-user settings file,
-describes the machine-wide equivalent for administrators, and formats the
-notice a hook prints. Only agents whose hook format has been verified are
-supported (`session_hook_agents()`); any other key is unsupported.
+`session_hooks` registers that command in an agent's per-user settings, describes
+the machine-wide equivalent for administrators, and formats the notice a hook
+prints. Only agents whose hook format has been verified are supported
+(`session_hook_agents()`); any other key is unsupported.
 
-| Key | Per-user file (under `~`) | Machine-wide file (Linux / macOS / Windows) | Group `matcher` | Entry identified by |
-|-----|---------------------------|---------------------------------------------|-----------------|---------------------|
-| `claude` | `.claude/settings.json` | `/etc/claude-code/managed-settings.json` / `/Library/Application Support/ClaudeCode/managed-settings.json` / `C:\Program Files\ClaudeCode\managed-settings.json` | `""` | the id as a whole word in `command` |
-| `gemini` | `.gemini/settings.json` | `/etc/gemini-cli/settings.json` / `/Library/Application Support/GeminiCli/settings.json` / `C:\ProgramData\gemini-cli\settings.json` | `"*"` | `name` set to the id |
+| Key | Per-user location (under `~`) | Machine-wide file (Linux / macOS / Windows) | Runs on | Entry identified by | Notice |
+|-----|-------------------------------|---------------------------------------------|---------|---------------------|--------|
+| `claude` | `.claude/settings.json` | `/etc/claude-code/managed-settings.json` / `/Library/Application Support/ClaudeCode/managed-settings.json` / `C:\Program Files\ClaudeCode\managed-settings.json` | every start (`matcher` `""`) | the id as a whole word in `command` | `{"systemMessage": ...}` |
+| `gemini` | `.gemini/settings.json` | `/etc/gemini-cli/settings.json` / `/Library/Application Support/GeminiCli/settings.json` / `C:\ProgramData\gemini-cli\settings.json` | every start (`matcher` `"*"`) | `name` set to the id | `{"systemMessage": ...}` |
+| `codex` | `.codex/hooks.json` | `requirements.toml`: `/etc/codex/` (Linux and macOS) / `C:\ProgramData\OpenAI\Codex\` | `startup` and `resume` | the id as a whole word in `command` | `{"systemMessage": ...}` |
+| `cursor` | `.cursor/hooks.json` | `/etc/cursor/hooks.json` / `/Library/Application Support/Cursor/hooks.json` / `C:\ProgramData\Cursor\hooks.json` | a new conversation | the id as a whole word in `command` | `{"additional_context": ...}` |
+| `pi` | `.pi/agent/extensions/<id>.ts` | none | `startup`, `new` and `resume` | the file's first line | plain text |
 
-Hooks live under `hooks.SessionStart[]`, each group holding
-`{"matcher": ..., "hooks": [{"type": "command", "command": ...}]}`.
+- **Claude Code, Gemini CLI, Codex**: hooks live under `hooks.SessionStart[]`,
+  each group holding `{"matcher": ..., "hooks": [{"type": "command", "command": ...}]}`
+  (Codex entries also carry `"timeout": 10`). Codex is refused, with nothing
+  written, when `~/.codex/config.toml` already has a `hooks` table.
+- **Cursor**: entries sit directly under `hooks.sessionStart[]` as
+  `{"command": ..., "timeout": 10}`, with `"version": 1` at the top level; a
+  file with another `version` is refused.
+- **Pi**: each hook is its own TypeScript extension file, rendered whole from a
+  fixed template ([ADR 0025](../docs/adr/0025-a-session-hook-can-be-a-file-aikit-owns-whole.md)).
+  Its first line is `// aikit session hook <id>; generated, do not edit`; a file
+  without that line is never overwritten or deleted. The extension runs the
+  hook's program without a shell and shows what it prints with `ctx.ui.notify`
+  when Pi has a UI. A Pi hook must be built with `SessionHook::from_argv`.
 
-- A `SessionHook` has a stable `id` (ASCII letters, digits, `-`, `_`) that
-  must appear as a whole word in its `command`.
-- `register_session_hook(home, key, &hook)` adds the hook in a new group, or
-  replaces the command of the existing entry with the same id; it returns
-  `HookChange::Added`, `Updated` or `Unchanged` (nothing written).
-- `unregister_session_hook(home, key, id)` removes only that entry, then any
-  group, `SessionStart` array or `hooks` object the removal emptied
-  (`Removed` or `Unchanged`; a missing file is `Unchanged`).
-- `has_session_hook(home, key, id)` checks the per-user file;
-  `admin_hook_present(key, id)` checks the machine-wide one.
+The API:
+
+- A `SessionHook` has a stable `id` (ASCII letters, digits, `-`, `_`).
+  `SessionHook::from_argv(id, program, args)` keeps the argument vector and
+  derives a shell `command` from it, quoted for the platform's shell; the id
+  must be one of the arguments. `SessionHook::new(id, command)` takes a shell
+  command directly, which must hold the id as a whole word.
+- `register_session_hook(home, key, &hook)` adds the hook, or replaces the
+  existing one with the same id; it returns `HookChange::Added`, `Updated` or
+  `Unchanged` (nothing written).
+- `unregister_session_hook(home, key, id)` removes only that hook, then any
+  group, event list or `hooks` object the removal emptied (`Removed` or
+  `Unchanged`; a missing file is `Unchanged`).
+- `has_session_hook(home, key, id)` checks the per-user location;
+  `admin_hook_present(key, id)` checks the machine-wide file.
 - `admin_hook_file(key)` and `admin_hook_entry(key, &hook)` give the
-  machine-wide file for this platform and the `{"hooks": {...}}` fragment to
-  merge into it. Administrator files are never written.
+  machine-wide file for this platform and an `AdminHookEntry { format, text }`
+  to place in it: `AdminHookFormat::Json` (a fragment to merge) or, for Codex,
+  `AdminHookFormat::Toml` (tables to add to `requirements.toml`). Agents with
+  no machine-wide file (Pi) return `None` and `Unsupported`. Administrator
+  files are never written.
 - `format_notice(key, text)` returns the one line a hook prints on standard
-  output to show a notice: `{"systemMessage":"<text>"}`.
+  output to show a notice, in the agent's format (table above).
 - `SessionHookSupport::approval_note` is set when the agent asks the user to
-  review hooks changed outside it (Claude Code: its `/hooks` menu).
+  review hooks changed outside it (Claude Code: its `/hooks` menu; Codex: trust
+  in `/hooks`, asked again whenever the hook changes).
 
 Settings files are merged, never clobbered: every other key and hook keeps
-its place, and a file that is not valid JSON or whose `hooks` /
-`SessionStart` has an unexpected type is refused untouched. Writes go to a
-temporary file in the same folder and are renamed into place (pretty-printed,
-two-space indent, trailing newline, existing permissions kept). A symbolic
-link is resolved and its target replaced, so the link stays a link; a
-dangling link is refused.
+its place, and a file that is not valid JSON or whose `hooks` or event list
+has an unexpected type is refused untouched. Writes go to a temporary file in
+the same folder and are renamed into place (pretty-printed, two-space indent,
+trailing newline, existing permissions kept). A symbolic link is resolved and
+its target replaced, so the link stays a link; a dangling link is refused.
 
 ```rust
 use aikit_sdk::{register_session_hook, session_hook_support, HookChange, SessionHook};
 use std::path::Path;
 
 let home = Path::new("/home/me");
-let hook = SessionHook {
-    id: "mytool-session".into(),
-    command: "mytool on-session-start --hook mytool-session".into(),
-};
-if register_session_hook(home, "claude", &hook)? != HookChange::Unchanged {
-    if let Some(note) = session_hook_support("claude").and_then(|s| s.approval_note) {
-        println!("{note}");
+let hook = SessionHook::from_argv(
+    "mytool-session",
+    "/usr/local/bin/mytool",
+    ["on-session-start", "--hook", "mytool-session"],
+);
+for key in ["claude", "codex", "cursor", "pi"] {
+    if register_session_hook(home, key, &hook)? != HookChange::Unchanged {
+        if let Some(note) = session_hook_support(key).and_then(|s| s.approval_note) {
+            println!("{note}");
+        }
     }
 }
-// Inside the hook command: print a notice the agent shows the user.
+// Inside the hook program: print a notice the agent shows the user.
 println!("{}", aikit_sdk::format_notice("claude", "mytool is ready").unwrap());
 # Ok::<(), aikit_sdk::SessionHookError>(())
 ```
