@@ -42,6 +42,9 @@ pub struct HookRequest {
     /// repeated starts of the same session. Absent for unqualified adapters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
+    /// Owned module Turn identity/outcome. These are native claims, not credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_turn: Option<NativeTurn>,
     pub prompt_id: Option<String>,
     pub agent_id: Option<String>,
     pub event: HookEvent,
@@ -49,6 +52,30 @@ pub struct HookRequest {
     pub payload: AgentEventPayload,
     pub final_answer: Option<String>,
     pub stop_hook_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTurn {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<NativeTurnOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTurnOutcome {
+    pub reason: NativeTurnReason,
+    pub is_aborted: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeTurnReason {
+    Answer,
+    Aborted,
+    Refusal,
+    Error,
 }
 
 pub trait HookHandler: Send + Sync {
@@ -140,6 +167,19 @@ impl IntegrationService {
                 &mut request,
                 value.as_deref(),
             )?;
+        } else if matches!(
+            request.event,
+            HookEvent::NativeTurnStarted | HookEvent::NativeTurnFinished
+        ) {
+            return Err(IntegrationError::Invalid(
+                "native Turn observations require an owned module".into(),
+            ));
+        }
+        if matches!(
+            request.event,
+            HookEvent::NativeTurnStarted | HookEvent::NativeTurnFinished
+        ) {
+            self.require_configured(&installation)?;
         }
         let journal_body = serde_json::to_string(&journal_copy(&request))?;
         // Reserve response/commit time within the configured native process limit.
@@ -351,14 +391,37 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
         return Err(IntegrationError::Invalid("hook input exceeds 1 MiB".into()));
     }
     let value: Value = serde_json::from_slice(input)?;
-    let event = installation
-        .spec
-        .events
-        .iter()
-        .find(|event| {
-            value.get("hook_event_name").and_then(Value::as_str) == Some(event.claude_name())
+    let native_event = match value.get("aikit_native_turn_version") {
+        None => None,
+        Some(version) if version.as_u64() == Some(1) => {
+            match value.get("hook_event_name").and_then(Value::as_str) {
+                Some("AIKitNativeTurnStarted") => Some(HookEvent::NativeTurnStarted),
+                Some("AIKitNativeTurnFinished") => Some(HookEvent::NativeTurnFinished),
+                _ => {
+                    return Err(IntegrationError::Invalid(
+                        "invalid native Turn event".into(),
+                    ))
+                }
+            }
+        }
+        Some(_) => {
+            return Err(IntegrationError::Invalid(
+                "invalid native Turn version".into(),
+            ))
+        }
+    };
+    let event = native_event
+        .or_else(|| {
+            installation
+                .spec
+                .events
+                .iter()
+                .find(|event| {
+                    value.get("hook_event_name").and_then(Value::as_str)
+                        == Some(event.claude_name())
+                })
+                .copied()
         })
-        .copied()
         .ok_or_else(|| {
             IntegrationError::Invalid("event is not registered by this installation".into())
         })?;
@@ -412,8 +475,29 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
     };
     // StopFailure's similarly named field is an API error, not conversational
     // output. Neither that text nor arbitrary error details belong in replay.
-    let final_answer = if event == HookEvent::CompletionProposed {
-        optional_string(&value, "last_assistant_message", 512 * 1024)?
+    let final_answer =
+        if event == HookEvent::CompletionProposed || event == HookEvent::NativeTurnFinished {
+            optional_string(&value, "last_assistant_message", 512 * 1024)?
+        } else {
+            None
+        };
+    let native_turn = if native_event.is_some() {
+        let native: NativeTurn = serde_json::from_value(
+            value
+                .get("native_turn")
+                .cloned()
+                .ok_or_else(|| IntegrationError::Invalid("missing native Turn".into()))?,
+        )?;
+        if native.id.trim().is_empty()
+            || native.id.len() > 256
+            || native.id.contains('\0')
+            || (event == HookEvent::NativeTurnStarted) != native.outcome.is_none()
+        {
+            return Err(IntegrationError::Invalid(
+                "invalid native Turn observation".into(),
+            ));
+        }
+        Some(native)
     } else {
         None
     };
@@ -428,6 +512,7 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
         installation_id: installation.id.clone(),
         session_id,
         invocation_id: None,
+        native_turn,
         prompt_id,
         agent_id,
         event,

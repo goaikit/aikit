@@ -128,6 +128,7 @@ pub(super) fn decode(
         installation_id: installation.id.clone(),
         session_id,
         invocation_id: Some(invocation_id),
+        native_turn: None,
         // Pi exposes no stable turn/process identity here. Never manufacture one.
         prompt_id: None,
         agent_id: optional_string(&value, "agent_id", 256)?,

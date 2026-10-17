@@ -1,5 +1,8 @@
 # Recorded native tool generations
 
+Schema 9 extends this mechanism with [native Turn observations](native-turn-observations.md).
+The startup evidence below retains its original schema 8/source scope.
+
 Owned Claude modules bridge the module-issued invocation UUID into the existing
 hook journal, SessionRef and binding validation. This is recorded generation
 correlation, not native-process authentication or liveness.

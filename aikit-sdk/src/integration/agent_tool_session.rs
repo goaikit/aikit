@@ -10,6 +10,8 @@ struct SessionEnvironment {
     schema_version: u32,
     installation_id: String,
     native_context: NativeToolContext,
+    #[serde(default)]
+    native_turn_id: Option<String>,
 }
 
 pub(super) fn bind_environment(
@@ -38,5 +40,15 @@ pub(super) fn bind_environment(
         return Err(refused());
     }
     request.invocation_id = Some(context.native_context.invocation_id);
+    if let Some(turn) = &request.native_turn {
+        if Some(&turn.id) != context.native_turn_id.as_ref() {
+            return Err(refused());
+        }
+    } else if let Some(id) = context.native_turn_id {
+        if id.trim().is_empty() || id.len() > 256 || id.contains('\0') {
+            return Err(refused());
+        }
+        request.native_turn = Some(super::NativeTurn { id, outcome: None });
+    }
     Ok(())
 }

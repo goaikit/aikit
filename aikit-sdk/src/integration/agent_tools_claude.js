@@ -1,6 +1,34 @@
 // Generated provider bridge. Native context is not application authorization.
 const config = /* AIKIT_CONFIG */null;
 const invocationId = crypto.randomUUID();
+let nativeTurnId;
+async function publishContext($) {
+  const native = { session_id: await $.session.id(), invocation_id: invocationId, cwd: await $.session.cwd() };
+  await $.env.set('AIKIT_INVOCATION_ENV_KEY', JSON.stringify({ schema_version: 1,
+    installation_id: config.installationId, native_context: native, ...(nativeTurnId ? { native_turn_id: nativeTurnId } : {}) }));
+  return native;
+}
+async function observeTurn($, event, finished) {
+  if (event.agentId !== undefined || !config.sessionArgv) return;
+  if (typeof event.turnId !== 'string' || !event.turnId.trim() || event.turnId.length > 256)
+    throw new Error('Native Turn identity unavailable');
+  if (!finished) nativeTurnId = event.turnId;
+  if (event.turnId !== nativeTurnId) throw new Error('Native Turn identity changed');
+  const native = await publishContext($);
+  const frame = { aikit_native_turn_version: 1,
+    hook_event_name: finished ? 'AIKitNativeTurnFinished' : 'AIKitNativeTurnStarted',
+    session_id: native.session_id, cwd: native.cwd, native_turn: { id: event.turnId } };
+  if (finished) {
+    if (!['answer', 'aborted', 'refusal', 'error'].includes(event.reason)
+        || typeof event.isAborted !== 'boolean' || typeof event.answer !== 'string')
+      throw new Error('Native Turn outcome unavailable');
+    frame.native_turn.outcome = { reason: event.reason, is_aborted: event.isAborted };
+    frame.last_assistant_message = event.answer;
+  }
+  const result = await $.process.run(config.sessionArgv, { stdin: JSON.stringify(frame), timeoutMs: config.timeoutMs });
+  if (result.exitCode !== 0 || result.isStdoutTruncated !== false || result.isStderrTruncated !== false)
+    throw new Error('Native Turn observation unavailable');
+}
 const unavailable = 'Agent operation unavailable. Retain an uncertain operation ID; do not infer success or blindly resend.';
 async function invoke($, event) {
   try {
@@ -23,9 +51,7 @@ async function invoke($, event) {
 }
 export function register(on) {
   on('session.start', async ($, event, next) => {
-    const native = { session_id: await $.session.id(), invocation_id: invocationId, cwd: await $.session.cwd() };
-    await $.env.set('AIKIT_INVOCATION_ENV_KEY', JSON.stringify({ schema_version: 1,
-      installation_id: config.installationId, native_context: native }));
+    const native = await publishContext($);
     if (config.sessionArgv) {
       const started = await $.process.run(config.sessionArgv, { stdin: JSON.stringify({
         hook_event_name: 'SessionStart', session_id: native.session_id, cwd: native.cwd,
@@ -37,6 +63,17 @@ export function register(on) {
       inputSchema: { type: 'object', properties: { request: config.schema }, required: ['request'], additionalProperties: false } });
     $.ui.invalidate('prompt.context');
     return next(event);
+  });
+  on('turn.start', async ($, event, next) => {
+    await observeTurn($, event, false);
+    return next(event);
+  });
+  on('turn.complete', async ($, event, next) => {
+    // A proposal/Allow is never an outcome. Observe only the completed native
+    // chain, retain abort/refusal/error, and never retry a failed observation.
+    const result = await next(event);
+    await observeTurn($, event, true);
+    return result;
   });
   on('prompt.context', async ($, event, next) => {
     const context = await next(event);

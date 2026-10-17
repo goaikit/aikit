@@ -244,7 +244,7 @@ fn report(
                 PreToolDecision => (true, Support::Unknown, "Native pre-tool blocking and all edit paths need live qualification for this context; a decoder fixture or allowed Write is insufficient."),
                 RepeatedCompletionBlocking => (true, Support::Unknown, "Effective continuation limits and competing settings are not attested. A bounded scenario with an explicit unlimited setting does not prove unconditional enforcement."),
                 CompletionDecision | FinalAnswerCapture | FailedCompletionObservation => (true, Support::Unknown, "Adapter exists, but this version/platform/mode has no matching native qualification scenario."),
-                SuccessfulCompletionObservation => (false, Support::Unsupported, "No accepted-completion observation is implemented for user-started sessions. Stop Allow and SessionEnd are insufficient."),
+                SuccessfulCompletionObservation => (true, Support::Unknown, "Owned Claude modules forward correlated native Turn start/outcome observations through the existing journal, retaining answer/abort/refusal/error. An application must correlate the latest authorized proposal and unchanged evidence. Native outcome delivery, competing hooks, protected caller identity and this host/version/mode remain unqualified; Stop Allow and SessionEnd are insufficient."),
                 MessageSubmission | MessageReconciliation => (false, Support::Unsupported, "Existing-session native message transport and receipt reconciliation are not implemented. Managed session transports are a different topology."),
                 NativeSessionIdentity => (true, Support::Unknown, "Owned Claude tool modules publish a fresh invocation ID into installation-scoped inherited process context and bootstrap a matching recorded SessionStart. Existing binding/journal checks reject observed old invocations. Controlled Linux startup matches tool/native session and recorded generation; this is not native process authentication, liveness, proof against an unseen delayed start, or Windows qualification."),
                 HardHookDeadline => (true, Support::Unknown, "Callback timeout reserves 250 ms for response handling; blocking workers and operating-system I/O do not establish a universal hard deadline."),
@@ -347,7 +347,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.unmet.len(), 4);
         assert_eq!(error.unmet[0].support, Support::Unknown);
-        assert_eq!(error.unmet[1].support, Support::Unsupported);
+        assert_eq!(error.unmet[1].support, Support::Unknown);
+        assert!(error.unmet[1].implemented);
+        assert_eq!(error.unmet[2].support, Support::Unsupported);
         assert_eq!(error.unmet[3].support, Support::Unknown);
     }
     #[test]

@@ -29,11 +29,12 @@ pub use capabilities::{
 };
 pub use hooks::{
     Decision, DecisionFuture, HandlerError, HookHandler, HookPage, HookRecord, HookRequest,
-    HookResponse,
+    HookResponse, NativeTurn, NativeTurnOutcome, NativeTurnReason,
 };
 pub use install::{
-    AgentToolFileChange, CompletionBlockingPolicy, HookCommand, HookEvent, InstallPlan, InstallSpec,
-    Installation, InstallationStatus, IntegrationError, IntegrationService, SettingChange,
+    AgentToolFileChange, CompletionBlockingPolicy, HookCommand, HookEvent, InstallPlan,
+    InstallSpec, Installation, InstallationStatus, IntegrationError, IntegrationService,
+    SettingChange,
 };
 pub use sessions::{RecordedSessionGuard, SessionBinding, SessionRef, SessionStatus};
 pub use tool_effects::{TextReplacement, ToolEffect};

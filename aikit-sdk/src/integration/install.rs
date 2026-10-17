@@ -91,6 +91,10 @@ pub enum HookEvent {
     CompletionProposed,
     /// Native turn failed. Notification only; never an accepted completion.
     CompletionFailed,
+    /// Owned module observation, not a settings hook or a policy decision.
+    NativeTurnStarted,
+    /// Native outcome evidence; never inferred from Stop Allow or process exit.
+    NativeTurnFinished,
     SessionEnded,
 }
 impl HookEvent {
@@ -103,6 +107,8 @@ impl HookEvent {
             Self::ToolFailed => "PostToolUseFailure",
             Self::CompletionProposed => "Stop",
             Self::CompletionFailed => "StopFailure",
+            Self::NativeTurnStarted => "AIKitNativeTurnStarted",
+            Self::NativeTurnFinished => "AIKitNativeTurnFinished",
             Self::SessionEnded => "SessionEnd",
         }
     }
@@ -262,17 +268,17 @@ impl IntegrationService {
             state: fs::canonicalize(state)?,
         };
         let connection = service.connection()?;
-        // Version 8 requires inherited native invocation context for newly owned
-        // tool bridges. Older readers must not silently ignore that requirement.
+        // Version 9 adds native Turn observations and inherited Turn identity.
+        // Older readers must not silently drop those journal semantics.
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 8 {
+        if version > 9 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if version < 8 {
+        if version < 9 {
             let _lock = service.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 8 {
+            if version > 9 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {
@@ -286,11 +292,11 @@ impl IntegrationService {
             INSERT INTO installation_revisions SELECT id,lower(hex(randomblob(16))) FROM installations;
             CREATE TABLE session_bindings(id TEXT PRIMARY KEY, reference TEXT NOT NULL, detached INTEGER NOT NULL DEFAULT 0);
             CREATE UNIQUE INDEX active_session_binding ON session_bindings(reference) WHERE detached=0;
-            PRAGMA user_version=8; COMMIT;")?;
+            PRAGMA user_version=9; COMMIT;")?;
             } else {
                 // Version 3 already has the binding tables and revision column.
-                // Persisted JSON semantics changed in v4-v8. Keep all rows.
-                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=8; COMMIT;")?;
+                // Persisted JSON semantics changed in v4-v9. Keep all rows.
+                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=9; COMMIT;")?;
             }
         }
         Ok(service)
@@ -908,6 +914,16 @@ fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
         ));
     }
     super::command::validate_handler(&spec.handler)?;
+    if spec.events.iter().any(|event| {
+        matches!(
+            event,
+            HookEvent::NativeTurnStarted | HookEvent::NativeTurnFinished
+        )
+    }) {
+        return Err(IntegrationError::Invalid(
+            "native Turn observations require the owned module, not settings hooks".into(),
+        ));
+    }
     if spec.events.is_empty()
         || spec.events.iter().copied().collect::<BTreeSet<_>>().len() != spec.events.len()
         || !(1..=60).contains(&spec.timeout_seconds)

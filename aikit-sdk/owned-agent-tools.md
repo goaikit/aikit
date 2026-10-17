@@ -1,7 +1,8 @@
 # Owned native tool files
 
-The current schema is 8: owned tools now bootstrap inherited recorded generation
-context as described in [tool generations](agent-tool-generations.md). The
+The current schema is 9: owned tools bootstrap inherited recorded generation
+context as described in [tool generations](agent-tool-generations.md), and forward
+[native Turn observations](native-turn-observations.md). The
 ownership gate below originally introduced schema 7 and retains its own evidence.
 
 `IntegrationService::plan_agent_tool(installation_id, spec)` adds or updates the

@@ -13,7 +13,7 @@ pub(super) fn event_name(event: HookEvent) -> Result<&'static str, IntegrationEr
         HookEvent::AfterTool => "postToolUse",
         HookEvent::ToolFailed => "postToolUseFailure",
         HookEvent::SessionEnded => "sessionEnd",
-        HookEvent::CompletionProposed | HookEvent::CompletionFailed => return Err(
+        HookEvent::CompletionProposed | HookEvent::CompletionFailed | HookEvent::NativeTurnStarted | HookEvent::NativeTurnFinished => return Err(
             IntegrationError::Unsupported("Cursor completion hooks require a distinct continuation/observation contract; stop follow-ups are not an enforced completion proposal".into())
         ),
     })
@@ -138,6 +138,7 @@ pub(super) fn decode(
         installation_id: installation.id.clone(),
         session_id,
         invocation_id: None,
+        native_turn: None,
         prompt_id: optional_string(&value, "generation_id", 256)?,
         agent_id: optional_string(&value, "subagent_id", 256)?,
         event,

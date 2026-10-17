@@ -55,6 +55,88 @@ impl Fixture {
 struct Fixed(Decision);
 
 #[test]
+fn native_turn_observations_are_typed_bounded_and_match_inherited_turn() {
+    let f = Fixture::new(10);
+    let installation = f.service.installed(&f.id).unwrap();
+    let invocation = uuid::Uuid::new_v4().to_string();
+    let environment = json!({"schema_version":1,"installation_id":f.id,
+        "native_context":{"session_id":"native-session","invocation_id":invocation,"cwd":f.workspace},
+        "native_turn_id":"turn-native"});
+    for reason in ["answer", "aborted", "refusal", "error"] {
+        let mut value = f.input("AIKitNativeTurnFinished");
+        value["aikit_native_turn_version"] = json!(1);
+        value["native_turn"] = json!({"id":"turn-native","outcome":{"reason":reason,"is_aborted":reason == "aborted"}});
+        value["last_assistant_message"] = json!("Exact answer 雪\n");
+        let mut request = decode(&installation, value.to_string().as_bytes()).unwrap();
+        assert_eq!(request.event, HookEvent::NativeTurnFinished);
+        assert_eq!(request.final_answer.as_deref(), Some("Exact answer 雪\n"));
+        super::super::agent_tool_session::bind_environment(
+            &installation,
+            &mut request,
+            Some(&environment.to_string()),
+        )
+        .unwrap();
+        assert_eq!(request.invocation_id.as_deref(), Some(invocation.as_str()));
+        assert_eq!(request.native_turn.as_ref().unwrap().id, "turn-native");
+        let mut foreign = environment.clone();
+        foreign["native_turn_id"] = json!("previous-turn");
+        assert!(super::super::agent_tool_session::bind_environment(
+            &installation,
+            &mut request,
+            Some(&foreign.to_string())
+        )
+        .is_err());
+        value["native_turn"]["outcome"]["reason"] = json!("unknown");
+        assert!(decode(&installation, value.to_string().as_bytes()).is_err());
+    }
+    let mut start = f.input("AIKitNativeTurnStarted");
+    start["aikit_native_turn_version"] = json!(1);
+    start["native_turn"] = json!({"id":"turn-native"});
+    assert_eq!(
+        decode(&installation, start.to_string().as_bytes())
+            .unwrap()
+            .event,
+        HookEvent::NativeTurnStarted
+    );
+    start["native_turn"]["outcome"] = json!({"reason":"answer","is_aborted":false});
+    assert!(decode(&installation, start.to_string().as_bytes()).is_err());
+    start["aikit_native_turn_version"] = json!(2);
+    assert!(decode(&installation, start.to_string().as_bytes()).is_err());
+    let mut stop = decode(&installation, f.input("Stop").to_string().as_bytes()).unwrap();
+    super::super::agent_tool_session::bind_environment(
+        &installation,
+        &mut stop,
+        Some(&environment.to_string()),
+    )
+    .unwrap();
+    assert_eq!(
+        stop.native_turn,
+        Some(NativeTurn {
+            id: "turn-native".into(),
+            outcome: None
+        })
+    );
+}
+
+#[tokio::test]
+async fn native_turn_without_owned_module_is_refused_before_journal_and_policy() {
+    let f = Fixture::new(10);
+    let mut value = f.input("AIKitNativeTurnFinished");
+    value["aikit_native_turn_version"] = json!(1);
+    value["native_turn"] =
+        json!({"id":"turn-native","outcome":{"reason":"answer","is_aborted":false}});
+    let response = f
+        .service
+        .handle_hook(&f.id, value.to_string().as_bytes(), &Fixed(Decision::Allow))
+        .await;
+    assert_eq!(response.exit_code, 2);
+    assert!(f.service.events(&f.id, 0, 100).unwrap().records.is_empty());
+    let mut spec = f.service.installed(&f.id).unwrap().spec;
+    spec.events.push(HookEvent::NativeTurnFinished);
+    assert!(f.service.plan_install(spec).is_err());
+}
+
+#[test]
 fn inherited_tool_generation_is_bounded_scoped_and_never_copied_from_hook_json() {
     let f = Fixture::new(10);
     let installation = f.service.installed(&f.id).unwrap();
