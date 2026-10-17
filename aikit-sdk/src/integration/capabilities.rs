@@ -407,12 +407,10 @@ mod tests {
             SessionMode::Print,
             Ok("2.1.269 (Claude Code)".into()),
         );
-        assert!(
-            report
-                .assessments
-                .iter()
-                .all(|value| !value.implemented && value.support == Support::Unsupported)
-        );
+        assert!(report
+            .assessments
+            .iter()
+            .all(|value| !value.implemented && value.support == Support::Unsupported));
     }
     #[test]
     fn absent_and_duplicate_requirements_fail_explicitly() {
