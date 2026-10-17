@@ -1,12 +1,11 @@
-use crate::context::{ContextPacket, TurnRole};
+//! Context compression. The algorithm lives in
+//! [`aikit_agent_core::compression`], shared with the on-device hosts; this
+//! module keeps the [`ContextPacket`] entry point.
+
+use crate::context::ContextPacket;
 use crate::errors::AgentError;
 
-#[derive(Debug, Clone)]
-pub struct CompressionResult {
-    pub original_tokens: u64,
-    pub compressed_tokens: u64,
-    pub turns_summarized: u64,
-}
+pub use aikit_agent_core::compression::CompressionResult;
 
 /// Compress the context packet if it exceeds the token budget.
 ///
@@ -17,104 +16,17 @@ pub struct CompressionResult {
 /// 4. Summarize oldest turns into a single summary turn
 /// 5. Idempotent: same input + budget → same output
 pub fn maybe_compress(packet: &mut ContextPacket) -> Result<Option<CompressionResult>, AgentError> {
-    let available = packet.token_budget.available();
-    let current_tokens = packet.estimated_tokens();
-
-    if current_tokens <= available {
-        return Ok(None);
-    }
-
-    let original_tokens = current_tokens;
-    let result = compress(packet, available)?;
-    let compressed_tokens = packet.estimated_tokens();
-
-    Ok(Some(CompressionResult {
-        original_tokens,
-        compressed_tokens,
-        turns_summarized: result,
-    }))
-}
-
-fn compress(packet: &mut ContextPacket, _target_tokens: u64) -> Result<u64, AgentError> {
-    let conversation = &mut packet.conversation;
-    if conversation.is_empty() {
-        return Ok(0);
-    }
-
-    let last_user_idx = conversation.iter().rposition(|t| t.role == TurnRole::User);
-    let last_tool_idx = conversation.iter().rposition(|t| t.role == TurnRole::Tool);
-
-    let preserve_tool_boundary = last_tool_idx.and_then(|tool_idx| {
-        conversation[..tool_idx]
-            .iter()
-            .rposition(|t| t.role == TurnRole::Assistant && t.tool_calls.is_some())
-    });
-
-    let preserve_from = [last_user_idx, preserve_tool_boundary]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(conversation.len());
-
-    if preserve_from == 0 {
-        return Ok(0);
-    }
-
-    let turns_to_summarize: Vec<_> = conversation.drain(..preserve_from).collect();
-    let turns_summarized = turns_to_summarize.len() as u64;
-
-    let summary = build_summary(&turns_to_summarize);
-
-    let summary_turn = crate::context::Turn::assistant(summary);
-    conversation.insert(0, summary_turn);
-
-    Ok(turns_summarized)
-}
-
-fn build_summary(turns: &[crate::context::Turn]) -> String {
-    let mut parts = Vec::new();
-    for turn in turns {
-        let role_str = match turn.role {
-            TurnRole::User => "User",
-            TurnRole::Assistant => "Assistant",
-            TurnRole::Tool => "Tool",
-        };
-        if !turn.content.is_empty() {
-            parts.push(format!("[{}]: {}", role_str, truncate(&turn.content, 80)));
-        }
-        if let Some(calls) = &turn.tool_calls {
-            for call in calls {
-                parts.push(format!(
-                    "[Tool call: {}({})]",
-                    call.name,
-                    truncate(&call.arguments, 60)
-                ));
-            }
-        }
-        if let Some(results) = &turn.tool_results {
-            for result in results {
-                parts.push(format!("[Tool result: {}]", truncate(&result.output, 60)));
-            }
-        }
-    }
-    format!("[Summary of {} turns]\n{}", turns.len(), parts.join("\n"))
-}
-
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        let mut end = max;
-        while !s.is_char_boundary(end) {
-            end -= 1;
-        }
-        &s[..end]
-    }
+    Ok(aikit_agent_core::compression::maybe_compress(
+        &packet.system_instructions,
+        &mut packet.conversation,
+        &packet.token_budget,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::TurnRole;
     use crate::context::{ContextPacket, TokenBudget, Turn};
 
     fn make_packet_over_budget() -> ContextPacket {

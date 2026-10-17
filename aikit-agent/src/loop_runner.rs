@@ -1,12 +1,17 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use crate::compression::maybe_compress;
+use aikit_agent_core::{
+    AgentCore, CoreConfig, Effect, Input, Outcome, RunError, ToolOutcome, ToolTiming,
+};
+
 use crate::config::AgentConfig;
-use crate::context::{ContextPacket, ContextToolCall, ContextToolResult, TokenBudget, Turn};
+use crate::context::{ContextPacket, TokenBudget, Turn};
 use crate::errors::AgentError;
 use crate::llm::gateway::LlmGateway;
-use crate::llm::types::{LlmMessage, LlmRequest, LlmStreamEvent, LlmUsage, ToolCall};
+#[cfg(test)]
+use crate::llm::types::LlmRequest;
 use crate::skills::SkillProvider;
 
 #[cfg(not(feature = "fastskill"))]
@@ -20,8 +25,6 @@ use crate::{hook_names, AgentInternalEvent, HookAction, HookPhase};
 
 #[cfg(feature = "fastskill")]
 use crate::skills::FastskillSkillBackend;
-
-type LlmCallResult = (String, Vec<ToolCall>, Option<String>, Option<LlmUsage>);
 
 /// Run the agent to completion, collecting every [`AgentInternalEvent`] into a `Vec`
 /// that is returned once the run finishes.
@@ -225,6 +228,10 @@ fn epoch_ms_now() -> i64 {
         .unwrap_or(0)
 }
 
+/// Run the loop of [`aikit_agent_core::AgentCore`] natively: model calls go
+/// through `gateway`, tool calls to `tools`, events to `on_event` as soon as
+/// the core emits them. The decisions (iterations, tool dispatch, events,
+/// errors) are the core's.
 fn run_loop<F: FnMut(AgentInternalEvent)>(
     config: &AgentConfig,
     context: &mut ContextPacket,
@@ -232,140 +239,132 @@ fn run_loop<F: FnMut(AgentInternalEvent)>(
     gateway: &Arc<dyn LlmGateway>,
     on_event: &mut F,
 ) -> Result<(), AgentError> {
-    for iteration in 0..config.max_iterations {
-        // Check context budget and compress if needed
-        if let Some(compression) =
-            maybe_compress(context).map_err(|e| AgentError::ContextCompression {
-                message: e.to_string(),
-            })?
-        {
-            on_event(AgentInternalEvent::ContextCompressed {
-                original_tokens: compression.original_tokens,
-                compressed_tokens: compression.compressed_tokens,
-                turns_summarized: compression.turns_summarized,
-            });
-        }
+    let core_config = CoreConfig {
+        model: config.model.clone(),
+        stream: config.stream,
+        max_iterations: config.max_iterations,
+        token_budget: context.token_budget.clone(),
+        system_instructions: context.system_instructions.clone(),
+        tools: tools.iter().map(|t| t.schema()).collect(),
+    };
+    let mut core = AgentCore::new(core_config, std::mem::take(&mut context.conversation));
+    let tool_ctx = ToolContext::new(config.workdir.clone(), config.allowed_roots.clone());
 
-        // Build LLM request
-        let tool_schemas: Vec<_> = tools.iter().map(|t| t.schema()).collect();
-        let req = build_llm_request(config, context, tool_schemas);
-
-        // Call LLM
-        let (response_text, tool_calls, finish_reason, usage) = if config.stream {
-            call_stream(gateway.as_ref(), req, on_event)?
-        } else {
-            call_complete(gateway.as_ref(), req, on_event)?
-        };
-
-        // Emit usage event if present
-        if let Some(u) = usage {
-            on_event(AgentInternalEvent::TokenUsage {
-                input_tokens: u.input_tokens,
-                output_tokens: u.output_tokens,
-                total_tokens: u.total_tokens,
-            });
-        }
-
-        // Add assistant turn to context
-        if tool_calls.is_empty() {
-            context.add_turn(Turn::assistant(&response_text));
-        } else {
-            let ctx_tool_calls: Vec<ContextToolCall> = tool_calls
-                .iter()
-                .map(|tc| ContextToolCall {
-                    id: tc.id.clone(),
-                    name: tc.function.name.clone(),
-                    arguments: tc.function.arguments.clone(),
-                })
-                .collect();
-            context.add_turn(Turn::assistant_with_tool_calls(
-                &response_text,
-                ctx_tool_calls,
-            ));
-        }
-
-        // If finish reason is "stop" with no tool calls, we're done
-        let done = finish_reason.as_deref() == Some("stop") && tool_calls.is_empty();
-
-        // Execute tool calls
-        if !tool_calls.is_empty() {
-            let tool_ctx = ToolContext::new(config.workdir.clone(), config.allowed_roots.clone());
-
-            let mut tool_results = Vec::new();
-            for tc in &tool_calls {
-                let call_id = tc.id.clone();
-                let tool_name = tc.function.name.clone();
-                let args: serde_json::Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
-
-                on_event(AgentInternalEvent::ToolUse {
-                    tool_name: tool_name.clone(),
-                    tool_input: args.clone(),
-                    call_id: call_id.clone(),
-                });
-
-                // ADR 0022: a call to a tool the model was never offered is
-                // the loop refusing, not the tool failing. Record the refusal
-                // as a hook before the error result it produces.
-                if !tools.iter().any(|t| t.name() == tool_name) {
-                    on_event(AgentInternalEvent::Hook {
-                        phase: HookPhase::BeforeTool,
-                        hook_name: hook_names::TOOL_DISPATCH.to_string(),
-                        action: HookAction::Blocked,
-                        payload: Some(serde_json::json!({
-                            "call_id": call_id,
-                            "tool_name": tool_name,
-                            "reason": "unknown_tool",
-                        })),
-                    });
+    let mut queue: VecDeque<Effect> = core.start().into();
+    let mut outcome = Outcome::Completed;
+    while let Some(effect) = queue.pop_front() {
+        match effect {
+            Effect::Emit { event } => on_event(event),
+            Effect::Done { outcome: o } => {
+                outcome = o;
+                break;
+            }
+            Effect::CallModel { request } => {
+                let req = request.into_llm_request(config.base_url.clone(), config.api_key.clone());
+                if req.stream {
+                    match gateway.stream(req) {
+                        Err(error) => feed(&mut core, Input::ModelError { error }, &mut queue),
+                        Ok(handle) => {
+                            for item in handle {
+                                let input = match item {
+                                    Ok(event) => Input::ModelEvent { event },
+                                    Err(error) => Input::ModelError { error },
+                                };
+                                feed(&mut core, input, &mut queue);
+                                // Deltas reach the caller while the stream runs.
+                                flush_emits(&mut queue, on_event);
+                                if core.is_finished() {
+                                    break;
+                                }
+                            }
+                            if !core.is_finished() {
+                                feed_now(&mut core);
+                                feed(&mut core, Input::ModelEnd, &mut queue);
+                            }
+                        }
+                    }
+                } else {
+                    let input = match gateway.complete(req) {
+                        Ok(response) => Input::ModelResponse { response },
+                        Err(error) => Input::ModelError { error },
+                    };
+                    feed_now(&mut core);
+                    feed(&mut core, input, &mut queue);
                 }
-
+            }
+            Effect::CallTool {
+                call_id,
+                name,
+                arguments,
+            } => {
                 let started_at_ms = epoch_ms_now();
                 let started = Instant::now();
-                let output = execute_tool(tools, &tool_name, args, &tool_ctx);
+                let output = execute_tool(tools, &name, arguments, &tool_ctx);
                 let duration_ms = started.elapsed().as_millis() as u64;
-
-                on_event(AgentInternalEvent::ToolResult {
-                    call_id: call_id.clone(),
-                    output: output.content.clone(),
-                    is_error: output.is_error,
-                    duration_ms,
-                    started_at_ms,
-                });
-
-                tool_results.push(ContextToolResult {
-                    call_id,
-                    output: output.content,
-                    is_error: output.is_error,
-                });
+                feed_now(&mut core);
+                feed(
+                    &mut core,
+                    Input::ToolResult {
+                        call_id,
+                        result: ToolOutcome {
+                            content: output.content,
+                            is_error: output.is_error,
+                        },
+                        timing: Some(ToolTiming {
+                            started_at_ms,
+                            duration_ms,
+                        }),
+                    },
+                    &mut queue,
+                );
             }
-
-            context.add_turn(Turn::tool_result(tool_results));
-        }
-
-        // Emit step finish
-        on_event(AgentInternalEvent::StepFinish {
-            iteration,
-            finish_reason: finish_reason.unwrap_or_else(|| "unknown".to_string()),
-        });
-
-        if done {
-            break;
-        }
-
-        // When we have exhausted iterations but still have pending tool calls, error
-        if iteration + 1 >= config.max_iterations && !tool_calls.is_empty() {
-            on_event(AgentInternalEvent::Error {
-                code: "E_AIKIT_MAX_ITERATIONS".to_string(),
-                message: format!("exceeded max iterations ({})", config.max_iterations),
-            });
-            return Err(AgentError::MaxIterations {
-                max: config.max_iterations,
-            });
         }
     }
 
-    Ok(())
+    context.conversation = core.conversation().to_vec();
+    match outcome {
+        // The driver never cancels, so `Cancelled` can't happen here.
+        Outcome::Completed | Outcome::Cancelled => Ok(()),
+        Outcome::Failed { error } => Err(match error {
+            RunError::Model { error } => map_llm_error(error),
+            RunError::Provider { code, message } => AgentError::LlmRequestFailed {
+                message: format!("{code}: {message}"),
+            },
+            RunError::MaxIterations { max } => AgentError::MaxIterations { max },
+        }),
+    }
+}
+
+/// Give `input` to the core and queue what it returns. The driver only sends
+/// what the core asked for, so a refusal is a bug in the driver.
+fn feed(core: &mut AgentCore, input: Input, queue: &mut VecDeque<Effect>) {
+    let effects = core
+        .on(input)
+        .unwrap_or_else(|e| panic!("aikit-agent driver sent an input the core refused: {e}"));
+    queue.extend(effects);
+}
+
+/// The core reads no clock: tell it the time before an input that may stamp
+/// an event (an unknown tool's refusal is timed at that moment).
+fn feed_now(core: &mut AgentCore) {
+    let mut ignored = VecDeque::new();
+    feed(
+        core,
+        Input::Now {
+            unix_ms: epoch_ms_now(),
+        },
+        &mut ignored,
+    );
+}
+
+/// Hand the queued events to the caller, up to the first effect that isn't
+/// one.
+fn flush_emits<F: FnMut(AgentInternalEvent)>(queue: &mut VecDeque<Effect>, on_event: &mut F) {
+    while let Some(Effect::Emit { .. }) = queue.front() {
+        if let Some(Effect::Emit { event }) = queue.pop_front() {
+            on_event(event);
+        }
+    }
 }
 
 pub(crate) fn discover_skills_for_run(
@@ -529,227 +528,30 @@ fn build_tools_reporting(
     }
 }
 
+/// The request the core sends for `context`, with the endpoint and key
+/// added. The loop gets its requests from the core; this keeps the request
+/// shape testable on its own.
+#[cfg(test)]
 fn build_llm_request(
     config: &AgentConfig,
     context: &ContextPacket,
     tools: Vec<crate::llm::types::ToolDefinition>,
 ) -> LlmRequest {
-    let mut messages = Vec::new();
-
-    if !context.system_instructions.is_empty() {
-        messages.push(LlmMessage {
-            role: "system".to_string(),
-            content: Some(context.system_instructions.clone()),
-            tool_calls: None,
-            tool_call_id: None,
-        });
-    }
-
-    for turn in &context.conversation {
-        match turn.role {
-            crate::context::TurnRole::User => {
-                messages.push(LlmMessage {
-                    role: "user".to_string(),
-                    content: Some(turn.content.clone()),
-                    tool_calls: None,
-                    tool_call_id: None,
-                });
-            }
-            crate::context::TurnRole::Assistant => {
-                let tool_calls = turn.tool_calls.as_ref().map(|calls| {
-                    calls
-                        .iter()
-                        .map(|tc| crate::llm::types::MessageToolCall {
-                            id: tc.id.clone(),
-                            call_type: "function".to_string(),
-                            function: crate::llm::types::MessageToolCallFunction {
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                            },
-                        })
-                        .collect::<Vec<_>>()
-                });
-                let content = if turn.content.is_empty() && tool_calls.is_some() {
-                    None
-                } else {
-                    Some(turn.content.clone())
-                };
-                messages.push(LlmMessage {
-                    role: "assistant".to_string(),
-                    content,
-                    tool_calls,
-                    tool_call_id: None,
-                });
-            }
-            crate::context::TurnRole::Tool => {
-                if let Some(results) = &turn.tool_results {
-                    for result in results {
-                        messages.push(LlmMessage {
-                            role: "tool".to_string(),
-                            content: Some(result.output.clone()),
-                            tool_calls: None,
-                            tool_call_id: Some(result.call_id.clone()),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    let has_tools = !tools.is_empty();
-    LlmRequest {
+    let tool_choice = (!tools.is_empty()).then(crate::llm::types::ToolChoice::auto);
+    aikit_agent_core::ModelRequest {
         model: config.model.clone(),
-        base_url: config.base_url.clone(),
-        api_key: config.api_key.clone(),
-        messages,
+        messages: aikit_agent_core::context::build_messages(
+            &context.system_instructions,
+            &context.conversation,
+        ),
         tools,
-        tool_choice: if has_tools {
-            Some(crate::llm::types::ToolChoice::auto())
-        } else {
-            None
-        },
+        tool_choice,
         temperature: None,
         top_p: None,
         max_tokens: None,
         stream: config.stream,
     }
-}
-
-fn call_complete<F: FnMut(AgentInternalEvent)>(
-    gateway: &dyn LlmGateway,
-    req: LlmRequest,
-    on_event: &mut F,
-) -> Result<LlmCallResult, AgentError> {
-    let response = gateway.complete(req).map_err(|e| {
-        let code = extract_error_code(&e);
-        let msg = e.to_string();
-        on_event(AgentInternalEvent::Error { code, message: msg });
-        map_llm_error(e)
-    })?;
-
-    let content = response.content.unwrap_or_default();
-    on_event(AgentInternalEvent::TextFinal {
-        content: content.clone(),
-        turn_id: None,
-    });
-
-    Ok((
-        content,
-        response.tool_calls,
-        response.finish_reason,
-        response.usage,
-    ))
-}
-
-fn call_stream<F: FnMut(AgentInternalEvent)>(
-    gateway: &dyn LlmGateway,
-    req: LlmRequest,
-    on_event: &mut F,
-) -> Result<LlmCallResult, AgentError> {
-    let handle = gateway.stream(req).map_err(|e| {
-        let code = extract_error_code(&e);
-        let msg = e.to_string();
-        on_event(AgentInternalEvent::Error { code, message: msg });
-        map_llm_error(e)
-    })?;
-
-    let mut full_text = String::new();
-    let mut finish_reason: Option<String> = None;
-    let mut usage: Option<LlmUsage> = None;
-    let mut tool_calls: Vec<ToolCall> = Vec::new();
-    let mut pending_tool: Option<PartialToolCall> = None;
-
-    for event_result in handle {
-        match event_result {
-            Ok(event) => match event {
-                LlmStreamEvent::TextDelta { content } => {
-                    full_text.push_str(&content);
-                    on_event(AgentInternalEvent::TextDelta {
-                        content,
-                        turn_id: None,
-                    });
-                }
-                LlmStreamEvent::ToolCallDelta {
-                    id,
-                    function_name,
-                    arguments_delta,
-                } => {
-                    if !id.is_empty() {
-                        if let Some(prev) = pending_tool.take() {
-                            tool_calls.push(prev.into_tool_call());
-                        }
-                        pending_tool = Some(PartialToolCall {
-                            id,
-                            function_name,
-                            arguments: arguments_delta,
-                        });
-                    } else if let Some(ref mut tc) = pending_tool {
-                        tc.arguments.push_str(&arguments_delta);
-                        if !function_name.is_empty() && tc.function_name.is_empty() {
-                            tc.function_name = function_name;
-                        }
-                    }
-                }
-                LlmStreamEvent::UsageUpdate { usage: u } => {
-                    usage = Some(u);
-                }
-                LlmStreamEvent::Completed {
-                    finish_reason: fr,
-                    usage: u,
-                } => {
-                    finish_reason = Some(fr);
-                    if let Some(u) = u {
-                        usage = Some(u);
-                    }
-                }
-                LlmStreamEvent::ProviderError { code, message } => {
-                    on_event(AgentInternalEvent::Error {
-                        code: code.clone(),
-                        message: message.clone(),
-                    });
-                    return Err(AgentError::LlmRequestFailed {
-                        message: format!("{}: {}", code, message),
-                    });
-                }
-            },
-            Err(e) => {
-                let code = extract_error_code(&e);
-                let msg = e.to_string();
-                on_event(AgentInternalEvent::Error { code, message: msg });
-                return Err(map_llm_error(e));
-            }
-        }
-    }
-
-    if let Some(tc) = pending_tool.take() {
-        tool_calls.push(tc.into_tool_call());
-    }
-
-    on_event(AgentInternalEvent::TextFinal {
-        content: full_text.clone(),
-        turn_id: None,
-    });
-
-    Ok((full_text, tool_calls, finish_reason, usage))
-}
-
-struct PartialToolCall {
-    id: String,
-    function_name: String,
-    arguments: String,
-}
-
-impl PartialToolCall {
-    fn into_tool_call(self) -> ToolCall {
-        ToolCall {
-            id: self.id,
-            call_type: Some("function".to_string()),
-            function: crate::llm::types::ToolCallFunction {
-                name: self.function_name,
-                arguments: self.arguments,
-            },
-        }
-    }
+    .into_llm_request(config.base_url.clone(), config.api_key.clone())
 }
 
 fn execute_tool(
@@ -782,22 +584,10 @@ fn map_llm_error(e: crate::llm::types::LlmError) -> AgentError {
     }
 }
 
-fn extract_error_code(e: &crate::llm::types::LlmError) -> String {
-    match e {
-        crate::llm::types::LlmError::NoApiKey { .. } => "E_AIKIT_NO_API_KEY".to_string(),
-        crate::llm::types::LlmError::RequestFailed { .. } => {
-            "E_AIKIT_LLM_REQUEST_FAILED".to_string()
-        }
-        crate::llm::types::LlmError::ErrorResponse { .. } => {
-            "E_AIKIT_LLM_ERROR_RESPONSE".to_string()
-        }
-        crate::llm::types::LlmError::StreamProtocol { .. } => "E_AIKIT_STREAM_PROTOCOL".to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::{ContextToolCall, ContextToolResult};
     use crate::llm::mock::{MockGateway, MockResponse};
     use crate::llm::types::{
         LlmError, LlmRequest, LlmResponse, LlmStreamEvent, LlmStreamHandle, ToolCall,

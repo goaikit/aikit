@@ -89,28 +89,6 @@ impl MockResponse {
     }
 }
 
-impl Clone for LlmError {
-    fn clone(&self) -> Self {
-        match self {
-            Self::NoApiKey { checked } => Self::NoApiKey {
-                checked: checked.clone(),
-            },
-            Self::RequestFailed { message } => Self::RequestFailed {
-                message: message.clone(),
-            },
-            Self::ErrorResponse { status, url, body } => Self::ErrorResponse {
-                status: *status,
-                url: url.clone(),
-                body: body.clone(),
-            },
-            Self::StreamProtocol { line, detail } => Self::StreamProtocol {
-                line: *line,
-                detail: detail.clone(),
-            },
-        }
-    }
-}
-
 impl MockGateway {
     pub fn new(responses: Vec<MockResponse>) -> Self {
         Self {
