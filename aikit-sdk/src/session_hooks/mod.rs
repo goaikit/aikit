@@ -449,8 +449,10 @@ const HOOK_ROWS: &[HookRow] = &[
         notice: Notice::SystemMessage,
         other_hook_file: Some(".codex/config.toml"),
     },
-    // Cursor. `sessionStart` runs on each new conversation and is not
-    // awaited; the notice reaches the model, not the user.
+    // Cursor, verified on the CLI 2026.10.16-e3cb207. `sessionStart` runs
+    // when a process starts a new chat, interactive or `-p`, and is not
+    // awaited; `/clear`, `--resume` and `--continue` run none. User hooks
+    // need no approval. `additional_context` reaches the model, not the user.
     HookRow {
         key: "cursor",
         user_settings: ".cursor/hooks.json",
