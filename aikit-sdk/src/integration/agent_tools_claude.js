@@ -3,6 +3,7 @@ const config = /* AIKIT_CONFIG */null;
 const invocationId = crypto.randomUUID();
 let nativeTurnId;
 let turnStartObservation;
+/* AIKIT_MESSAGE_HELPERS */
 async function publishContext($) {
   const native = { session_id: await $.session.id(), invocation_id: invocationId, cwd: await $.session.cwd() };
   await $.env.set('AIKIT_INVOCATION_ENV_KEY', JSON.stringify({ schema_version: 1,
@@ -55,6 +56,7 @@ async function invoke($, event) {
   } catch { return { deny: unavailable }; }
 }
 export function register(on) {
+  /* AIKIT_MESSAGE_LIFECYCLE */
   on('session.start', async ($, event, next) => {
     const native = await publishContext($);
     if (config.sessionArgv) {
@@ -67,10 +69,12 @@ export function register(on) {
     await $.tool.register({ name: config.toolName, description: config.description, isDeferred: false,
       inputSchema: { type: 'object', properties: { request: config.schema }, required: ['request'], additionalProperties: false } });
     $.ui.invalidate('prompt.context');
+    /* AIKIT_MESSAGE_START */
     return next(event);
   });
   on('turn.start', async ($, event, next) => {
     if (event.agentId === undefined) {
+      /* AIKIT_MESSAGE_BUSY */
       turnStartObservation = observeTurn($, event, false);
       await turnStartObservation;
     }
@@ -81,6 +85,7 @@ export function register(on) {
     // chain, retain abort/refusal/error, and never retry a failed observation.
     const result = await next(event);
     await observeTurn($, event, true);
+    /* AIKIT_MESSAGE_IDLE */
     return result;
   });
   on('prompt.context', async ($, event, next) => {

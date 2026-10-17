@@ -8,6 +8,23 @@ use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 
+/// Raw native return/error retained for qualification. These are claims, not
+/// authenticated native events and never create acknowledgement/consumption.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum MessageHandoffOutcome {
+    Returned { result: serde_json::Value },
+    Uncertain { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageHandoffRecord {
+    pub schema_version: u32,
+    pub reservation: MessageReservation,
+    pub outcome: MessageHandoffOutcome,
+    pub recorded_at_unix_ms: u64,
+}
+
 pub const MESSAGE_BRIDGE_PAYLOAD_LIMIT: usize = 64 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +45,11 @@ pub enum RecordedMessageAction {
     Recheck {
         operation_id: String,
         reservation_id: String,
+    },
+    RecordHandoff {
+        operation_id: String,
+        reservation_id: String,
+        outcome: MessageHandoffOutcome,
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +91,11 @@ impl RecordedMessageRequest {
         if let RecordedMessageAction::Recheck {
             operation_id,
             reservation_id,
+        }
+        | RecordedMessageAction::RecordHandoff {
+            operation_id,
+            reservation_id,
+            ..
         } = &frame.action
         {
             if [operation_id, reservation_id]
@@ -79,6 +106,9 @@ impl RecordedMessageRequest {
                     "invalid message bridge operation/reservation".into(),
                 ));
             }
+        }
+        if let RecordedMessageAction::RecordHandoff { outcome, .. } = &frame.action {
+            validate_handoff(outcome)?;
         }
         Ok(frame)
     }
@@ -167,7 +197,16 @@ impl IntegrationService {
             recorded_ready: false,
             reservation: None,
         };
-        if idle {
+        if let RecordedMessageAction::RecordHandoff {
+            operation_id,
+            reservation_id,
+            outcome,
+        } = &frame.action
+        {
+            // A native return can arrive during the resulting Turn. Never gate
+            // retaining that return on the idle snapshot.
+            binding.record_handoff_record(&tx, operation_id, reservation_id, outcome)?;
+        } else if idle {
             match frame.action {
                 RecordedMessageAction::Poll => {
                     // Never issue a second ticket while the first is in flight.
@@ -194,6 +233,7 @@ impl IntegrationService {
                     reply.recorded_ready = receipt.state == MessageState::Dispatching
                         && receipt.reservation_id.as_deref() == Some(reservation_id.as_str());
                 }
+                RecordedMessageAction::RecordHandoff { .. } => unreachable!("handled above"),
             }
         }
         tx.commit()?;
@@ -202,6 +242,106 @@ impl IntegrationService {
 }
 
 impl SessionBinding<'_> {
+    /// Resolve retained candidate evidence for this exact historical operation.
+    /// A returned value is not qualified acknowledgement or model consumption.
+    pub fn message_handoff(
+        &self,
+        operation: &str,
+    ) -> Result<Option<MessageHandoffRecord>, IntegrationError> {
+        let connection = self.service.connection()?;
+        let receipt = self.message_status_record(&connection, operation)?;
+        let body: Option<String> = connection
+            .query_row(
+                "SELECT body FROM message_handoffs WHERE installation_id=?1 AND operation_id=?2",
+                params![self.reference.installation_id, operation],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let record = body
+            .map(|v| serde_json::from_str::<MessageHandoffRecord>(&v))
+            .transpose()?;
+        if let Some(record) = &record {
+            if record.schema_version != 1
+                || record.reservation != reservation_from_receipt(&receipt)?
+            {
+                return Err(IntegrationError::Invalid(
+                    "stored handoff scope does not match".into(),
+                ));
+            }
+            validate_handoff(&record.outcome)?;
+        }
+        Ok(record)
+    }
+
+    fn record_handoff_record(
+        &self,
+        tx: &rusqlite::Connection,
+        operation: &str,
+        reservation_id: &str,
+        outcome: &MessageHandoffOutcome,
+    ) -> Result<(), IntegrationError> {
+        validate_handoff(outcome)?;
+        let receipt = self.message_status_record(tx, operation)?;
+        let reservation = reservation_from_receipt(&receipt)?;
+        if reservation.reservation_id != reservation_id {
+            return Err(IntegrationError::Conflict(
+                "handoff reservation does not match".into(),
+            ));
+        }
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT body FROM message_handoffs WHERE installation_id=?1 AND operation_id=?2",
+                params![self.reference.installation_id, operation],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(body) = existing {
+            let existing: MessageHandoffRecord = serde_json::from_str(&body)?;
+            if existing.schema_version != 1
+                || existing.reservation != reservation
+                || existing.outcome != *outcome
+            {
+                return Err(IntegrationError::Conflict("handoff replay changed".into()));
+            }
+            return Ok(());
+        }
+        let recorded_at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|v| u64::try_from(v.as_millis()).ok())
+            .ok_or_else(|| IntegrationError::Invalid("system clock unavailable".into()))?;
+        let record = MessageHandoffRecord {
+            schema_version: 1,
+            reservation,
+            outcome: outcome.clone(),
+            recorded_at_unix_ms,
+        };
+        tx.execute(
+            "INSERT INTO message_handoffs(installation_id,operation_id,body) VALUES (?1,?2,?3)",
+            params![
+                self.reference.installation_id,
+                operation,
+                serde_json::to_string(&record)?
+            ],
+        )?;
+        // Without qualified proof the only conservative projection is Unknown.
+        // Late qualified evidence may already have resolved this operation; leave
+        // that independent projection untouched.
+        if receipt.state == MessageState::Dispatching {
+            let mut uncertain = receipt;
+            uncertain.state = MessageState::Unknown;
+            tx.execute(
+                "UPDATE outgoing_messages SET body=?3 WHERE installation_id=?1 AND operation_id=?2",
+                params![
+                    self.reference.installation_id,
+                    operation,
+                    serde_json::to_string(&uncertain)?
+                ],
+            )?;
+        }
+        Ok(())
+    }
+
     fn recorded_message_idle(
         &self,
         connection: &rusqlite::Connection,
@@ -220,4 +360,39 @@ impl SessionBinding<'_> {
                     .is_some_and(|turn| turn.outcome.is_some())
         }))
     }
+}
+
+fn validate_handoff(outcome: &MessageHandoffOutcome) -> Result<(), IntegrationError> {
+    match outcome {
+        MessageHandoffOutcome::Returned { result }
+            if serde_json::to_vec(result)?.len() <= 98304 =>
+        {
+            Ok(())
+        }
+        MessageHandoffOutcome::Uncertain { reason }
+            if matches!(
+                reason.as_str(),
+                "native_submit_threw" | "native_receipt_unavailable"
+            ) =>
+        {
+            Ok(())
+        }
+        _ => Err(IntegrationError::Invalid(
+            "invalid or oversized native handoff outcome".into(),
+        )),
+    }
+}
+
+fn reservation_from_receipt(
+    receipt: &super::MessageReceipt,
+) -> Result<MessageReservation, IntegrationError> {
+    Ok(MessageReservation {
+        binding_id: receipt.binding_id.clone(),
+        target: receipt.target.clone(),
+        request: receipt.request.clone(),
+        payload_sha256: receipt.payload_sha256.clone(),
+        reservation_id: receipt.reservation_id.clone().ok_or_else(|| {
+            IntegrationError::Conflict("message has no handoff reservation".into())
+        })?,
+    })
 }

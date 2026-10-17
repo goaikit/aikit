@@ -172,6 +172,15 @@ pub(super) fn render_with_session_handler(
     spec: &AgentToolSpec,
     session_handler: Option<&HookCommand>,
 ) -> Result<AgentToolPlugin, IntegrationError> {
+    render_with_message_handler(agent_key, spec, session_handler, None)
+}
+
+pub(super) fn render_with_message_handler(
+    agent_key: &str,
+    spec: &AgentToolSpec,
+    session_handler: Option<&HookCommand>,
+    message_handler: Option<&HookCommand>,
+) -> Result<AgentToolPlugin, IntegrationError> {
     if crate::agent(agent_key).is_none() {
         return Err(IntegrationError::UnknownAgent(agent_key.into()));
     }
@@ -181,6 +190,14 @@ pub(super) fn render_with_session_handler(
         ));
     }
     super::command::validate_handler(&spec.handler)?;
+    if let Some(handler) = message_handler {
+        super::command::validate_handler(handler)?;
+        if session_handler.is_none() {
+            return Err(IntegrationError::Invalid(
+                "message bridge requires the owned session handler".into(),
+            ));
+        }
+    }
     if serde_json::to_vec(spec)?.len() > AGENT_TOOL_SPEC_LIMIT
         || !crate::paths::is_safe_id(&spec.application_id)
         || !crate::paths::is_safe_id(&spec.installation_id)
@@ -238,8 +255,15 @@ pub(super) fn render_with_session_handler(
     let config = json!({"applicationId":spec.application_id,"installationId":spec.installation_id,"toolName":spec.tool_name,"description":spec.description,
         "schema":spec.input_schema,"instructions":spec.instructions,"contextName":format!("{name}-instructions"),
         "argv":argv,"timeoutMs":spec.timeout_ms,
-        "sessionArgv": session_handler.map(|handler| std::iter::once(handler.executable.to_string_lossy().into_owned()).chain(handler.arguments.clone()).collect::<Vec<_>>())});
+        "sessionArgv": session_handler.map(|handler| std::iter::once(handler.executable.to_string_lossy().into_owned()).chain(handler.arguments.clone()).collect::<Vec<_>>()),
+        "messageArgv": message_handler.map(|handler| std::iter::once(handler.executable.to_string_lossy().into_owned()).chain(handler.arguments.clone()).collect::<Vec<_>>())});
+    let messaging = message_handler.is_some();
     let module = include_str!("agent_tools_claude.js")
+        .replace("/* AIKIT_MESSAGE_HELPERS */", if messaging { include_str!("agent_tools_messages_claude.js") } else { "" })
+        .replace("/* AIKIT_MESSAGE_START */", if messaging { "await startMessagePump($);" } else { "" })
+        .replace("/* AIKIT_MESSAGE_BUSY */", if messaging { "messageActive = true;" } else { "" })
+        .replace("/* AIKIT_MESSAGE_IDLE */", if messaging { "if (event.agentId === undefined && nativeTurnId === event.turnId) messageActive = false;" } else { "" })
+        .replace("/* AIKIT_MESSAGE_LIFECYCLE */", if messaging { "on('session.end', async ($, event, next) => { messageStopped = true; return next(event); });" } else { "" })
         .replace(
             "'AIKIT_NATIVE_TOOL_NAME'",
             &serde_json::to_string(&native_name)?,

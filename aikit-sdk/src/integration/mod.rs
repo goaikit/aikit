@@ -39,8 +39,8 @@ pub use install::{
     SettingChange,
 };
 pub use message_bridge::{
-    RecordedMessageAction, RecordedMessageReply, RecordedMessageRequest,
-    MESSAGE_BRIDGE_PAYLOAD_LIMIT,
+    MessageHandoffOutcome, MessageHandoffRecord, RecordedMessageAction, RecordedMessageReply,
+    RecordedMessageRequest, MESSAGE_BRIDGE_PAYLOAD_LIMIT,
 };
 pub use messages::{
     MessageEvidence, MessageObservation, MessagePage, MessageProof, MessageReceipt, MessageRequest,

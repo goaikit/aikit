@@ -1,5 +1,6 @@
-//! Fixed-command stdio adapter for recorded preparation only. No agent launch,
-//! native send, proof projection or readiness promotion occurs here.
+//! Fixed-command stdio adapter for recorded preparation and raw handoff storage.
+//! No agent launch, native send, proof projection or readiness promotion occurs
+//! in this process; the opt-in owned native module calls the native prompt API.
 use aikit_sdk::integration::IntegrationService;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();

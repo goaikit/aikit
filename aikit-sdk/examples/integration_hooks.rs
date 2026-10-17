@@ -1,8 +1,8 @@
 //! Library-only integration example. The example never launches an agent.
 //! Run with --features integration. Usage is described in the SDK README.
 use aikit_sdk::integration::{
-    AgentToolSpec, CompletionBlockingPolicy, Decision, DecisionFuture, HookEvent, HookHandler,
-    HookRequest, InstallSpec, IntegrationService, SessionMode,
+    AgentToolSpec, CompletionBlockingPolicy, Decision, DecisionFuture, HookCommand, HookEvent,
+    HookHandler, HookRequest, InstallSpec, IntegrationService, SessionMode,
 };
 use serde_json::{json, Value};
 use std::{
@@ -166,6 +166,30 @@ async fn run(args: &[String]) -> anyhow::Result<i32> {
                 AgentToolSpec::read(std::io::stdin().lock())?,
             )?,
         )?,
+        "plan-tool-message" => serde_json::to_value(
+            service.plan_agent_tool_with_message_bridge(
+                args.get(2)
+                    .ok_or_else(|| anyhow::anyhow!("missing installation ID"))?,
+                AgentToolSpec::read(std::io::stdin().lock())?,
+                HookCommand {
+                    executable: args
+                        .get(3)
+                        .ok_or_else(|| anyhow::anyhow!("missing absolute bridge executable"))?
+                        .into(),
+                    arguments: args[4..].to_vec(),
+                },
+            )?,
+        )?,
+        "message-status" => {
+            let binding = service.binding(
+                args.get(2)
+                    .ok_or_else(|| anyhow::anyhow!("missing binding ID"))?,
+            )?;
+            let operation = args
+                .get(3)
+                .ok_or_else(|| anyhow::anyhow!("missing operation ID"))?;
+            json!({"receipt":binding.message_status(operation)?, "unqualified_handoff":binding.message_handoff(operation)?})
+        }
         "apply" => serde_json::to_value(
             service.apply_install(
                 args.get(2)

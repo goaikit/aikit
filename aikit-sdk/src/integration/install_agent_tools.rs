@@ -10,6 +10,27 @@ impl IntegrationService {
         installation_id: &str,
         spec: super::super::AgentToolSpec,
     ) -> Result<InstallPlan, IntegrationError> {
+        self.plan_agent_tool_inner(installation_id, spec, None)
+    }
+
+    /// Opt-in Claude handoff candidate for qualification, using a fixed stdio
+    /// handler. This does not qualify native admission, acknowledgement or input
+    /// consumption, and does not enable readiness. Default tools have no pump.
+    pub fn plan_agent_tool_with_message_bridge(
+        &self,
+        installation_id: &str,
+        spec: super::super::AgentToolSpec,
+        message_handler: HookCommand,
+    ) -> Result<InstallPlan, IntegrationError> {
+        self.plan_agent_tool_inner(installation_id, spec, Some(&message_handler))
+    }
+
+    fn plan_agent_tool_inner(
+        &self,
+        installation_id: &str,
+        spec: super::super::AgentToolSpec,
+        message_handler: Option<&HookCommand>,
+    ) -> Result<InstallPlan, IntegrationError> {
         let _lock = self.state_lock()?;
         let connection = self.connection()?;
         reject_pending(&connection, installation_id)?;
@@ -33,10 +54,21 @@ impl IntegrationService {
                 "hook/tool installation has drifted".into(),
             ));
         }
-        let plugin = super::super::agent_tools::render_with_session_handler(
+        if message_handler.is_some()
+            && !installation
+                .spec
+                .events
+                .contains(&HookEvent::InputSubmitted)
+        {
+            return Err(IntegrationError::Invalid(
+                "message bridge requires input observations".into(),
+            ));
+        }
+        let plugin = super::super::agent_tools::render_with_message_handler(
             &installation.spec.agent_key,
             &spec,
             Some(&installation.spec.handler),
+            message_handler,
         )?;
         let relative_root = PathBuf::from(".claude").join("skills").join(plugin.name());
         receipt.agent_tool = Some(OwnedAgentTool {

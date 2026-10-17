@@ -1,8 +1,9 @@
 # External-session message journal
 
 The [recorded-context RPC preparation](recorded-message-bridge.md) now connects
-bounded fixed-command requests to this journal. It does not yet provide the
-native module client, admission lease, send or proof capture.
+bounded fixed-command requests to this journal. Its opt-in Claude module now
+contains a native handoff candidate with raw return storage. The candidate has
+not qualified admission, acknowledgement or actual model-input consumption.
 
 This is the durable local portion of existing-session messaging. It reuses
 `IntegrationService`, `SessionBinding`, installation locks, the recorded session
@@ -20,6 +21,7 @@ MessageSubmission/MessageReconciliation assessments are unchanged.
 | `recover_message_record(id)` | Conservatively change Dispatching to Unknown after possible lost handoff. Never resend/reset. Accepted remains unsent. Native reconciliation is not implemented by this method. |
 | `record_message_observation(reservation, observation)` | Trusted adapter projection of acknowledgement, consumption or evidenced failure. Commit native-reference journal and receipt atomically. |
 | `message_observations(id, after, limit)` | Replay immutable native-reference records/cursors for that original operation. |
+| `message_handoff(id)` | Read a raw, unqualified return/uncertainty record for that original operation. Never treat it as acknowledgement or consumption. |
 
 These are synchronous local storage operations, consistent with existing binding
 lookups. The planned high-level native `submit_message`/`reconcile_message` still
@@ -59,13 +61,14 @@ promote readiness. Original-scope late proof remains readable after replacement.
 
 ## Migration and remaining integration
 
-Schema 10 adds outgoing-message and observation tables without replacing existing
-hook/install/binding rows. Older schema-9 SDKs refuse the newer store when opened;
+Schema 10 adds outgoing-message and observation tables; schema 11 adds a separate
+raw-handoff table, without replacing existing hook/install/binding/message rows.
+Older schema-9/10 SDKs refuse the newer store when opened;
 coordinate consumer upgrades and preserve backups. No owner's state was migrated
 by development tests. The current Codelaya package still pins schema-9 code and
 does not use this draft API yet.
 
-Remaining: owned native bridge polling/reservation/projection; protected native
+Remaining: native qualification of the owned client; protected native
 admission/caller and actual send/consumption provenance; high-level submission
 and native reconciliation; Codelaya orchestration/projection integration; crash
 and busy/competing-hook native tests; interactive Windows and provider parity.

@@ -352,6 +352,193 @@ async fn recorded_bridge_bounds_fail_before_reservation_and_frames_cannot_choose
 }
 
 #[tokio::test]
+async fn raw_handoff_is_durable_and_replayed_exactly_without_qualifying_delivery() {
+    use crate::integration::{MessageHandoffOutcome, RecordedMessageAction};
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    binding.stage_message(request("op")).unwrap();
+    let ticket = binding.reserve_message("op").unwrap();
+    // Return arrives after native admission started a new busy Turn.
+    synthetic_bridge_event(&f, HookEvent::NativeTurnStarted);
+    let outcome = MessageHandoffOutcome::Returned {
+        result: json!({"text":ticket.request.content,"origin":{"type":"plugin","plugin":"fixture"}}),
+    };
+    let (frame, env) = bridge_frame(
+        &f,
+        RecordedMessageAction::RecordHandoff {
+            operation_id: "op".into(),
+            reservation_id: ticket.reservation_id.clone(),
+            outcome: outcome.clone(),
+        },
+    );
+    let reply = f
+        .service
+        .recorded_message_with_context(&f.installation, frame.clone(), Some(&env))
+        .unwrap();
+    assert!(!reply.recorded_idle);
+    assert!(!reply.recorded_ready);
+    let stored = binding.message_handoff("op").unwrap().unwrap();
+    assert_eq!(stored.reservation, ticket);
+    assert_eq!(stored.outcome, outcome);
+    let receipt = binding.message_status("op").unwrap();
+    assert_eq!(receipt.state, MessageState::Unknown);
+    assert!(receipt.acknowledgement.is_none() && receipt.consumption.is_none());
+    assert!(binding
+        .message_observations("op", 0, 10)
+        .unwrap()
+        .records
+        .is_empty());
+    f.service
+        .recorded_message_with_context(&f.installation, frame.clone(), Some(&env))
+        .unwrap();
+    let reopened = IntegrationService::open(f.dir.path().join("state")).unwrap();
+    assert_eq!(
+        reopened
+            .binding(binding.id())
+            .unwrap()
+            .message_handoff("op")
+            .unwrap()
+            .unwrap(),
+        stored
+    );
+    let mut changed = frame.clone();
+    if let RecordedMessageAction::RecordHandoff { outcome, .. } = &mut changed.action {
+        *outcome = MessageHandoffOutcome::Uncertain {
+            reason: "native_submit_threw".into(),
+        };
+    }
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, changed, Some(&env))
+        .is_err());
+    let mut wrong = frame;
+    if let RecordedMessageAction::RecordHandoff { reservation_id, .. } = &mut wrong.action {
+        *reservation_id = "foreign".into();
+    }
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, wrong, Some(&env))
+        .is_err());
+    assert!(binding.reserve_message("op").is_err());
+    // Independent trusted proof can resolve the operation later; candidate raw
+    // data neither creates nor overwrites it, and remains available after detach.
+    let proven = binding
+        .record_message_observation(&ticket, ack("native-ack"))
+        .unwrap();
+    assert!(proven.acknowledgement.is_some());
+    binding.detach().unwrap();
+    assert_eq!(binding.message_handoff("op").unwrap().unwrap(), stored);
+}
+
+#[tokio::test]
+async fn uncertain_handoff_and_schema_ten_upgrade_preserve_original_operation() {
+    use crate::integration::{
+        MessageHandoffOutcome, RecordedMessageAction, RecordedMessageRequest,
+    };
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    let original = binding.stage_message(request("op")).unwrap();
+    // Simulate the exact previous schema: no handoff table, all journal rows kept.
+    f.service
+        .connection()
+        .unwrap()
+        .execute_batch("DROP TABLE message_handoffs; PRAGMA user_version=10;")
+        .unwrap();
+    let reopened = IntegrationService::open(f.dir.path().join("state")).unwrap();
+    assert_eq!(
+        reopened
+            .binding(binding.id())
+            .unwrap()
+            .message_status("op")
+            .unwrap(),
+        original
+    );
+    let ticket = binding.reserve_message("op").unwrap();
+    let (mut frame, env) = bridge_frame(
+        &f,
+        RecordedMessageAction::RecordHandoff {
+            operation_id: "op".into(),
+            reservation_id: ticket.reservation_id,
+            outcome: MessageHandoffOutcome::Uncertain {
+                reason: "native_submit_threw".into(),
+            },
+        },
+    );
+    assert!(RecordedMessageRequest::read(serde_json::to_vec(&frame).unwrap().as_slice()).is_ok());
+    f.service
+        .recorded_message_with_context(&f.installation, frame.clone(), Some(&env))
+        .unwrap();
+    assert_eq!(
+        binding.message_status("op").unwrap().state,
+        MessageState::Unknown
+    );
+    if let RecordedMessageAction::RecordHandoff { outcome, .. } = &mut frame.action {
+        *outcome = MessageHandoffOutcome::Returned {
+            result: json!("x".repeat(98305)),
+        };
+    }
+    assert!(RecordedMessageRequest::read(serde_json::to_vec(&frame).unwrap().as_slice()).is_err());
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, frame, Some(&env))
+        .is_err());
+    assert!(binding
+        .message_status("op")
+        .unwrap()
+        .acknowledgement
+        .is_none());
+}
+
+#[tokio::test]
+async fn opt_in_message_module_uses_owned_file_plans_and_can_be_removed_without_a_pump() {
+    let f = bridge_fixture().await;
+    let spec = crate::integration::AgentToolSpec {
+        application_id: "message-fixture".into(),
+        installation_id: f.installation.clone(),
+        tool_name: "review".into(),
+        description: "Fixture only".into(),
+        input_schema: json!({"type":"object"}),
+        instructions: "".into(),
+        handler: HookCommand {
+            executable: std::env::current_exe().unwrap(),
+            arguments: vec![],
+        },
+        timeout_ms: 1000,
+    };
+    let module_path = || {
+        let skills = f.workspace.join(".claude/skills");
+        std::fs::read_dir(skills)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("hooks/register.js")
+    };
+    let plain = std::fs::read_to_string(module_path()).unwrap();
+    assert!(!plain.contains("$.clock.every") && !plain.contains("$.prompt.submit"));
+    let plan = f
+        .service
+        .plan_agent_tool_with_message_bridge(
+            &f.installation,
+            spec.clone(),
+            HookCommand {
+                executable: std::env::current_exe().unwrap(),
+                arguments: vec!["fixed-message-handler".into()],
+            },
+        )
+        .unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+    let source = std::fs::read_to_string(module_path()).unwrap();
+    assert!(source.contains("$.clock.every") && source.contains("$.prompt.submit"));
+    assert!(source.contains("fixed-message-handler"));
+    assert!(!source.contains("/* AIKIT_MESSAGE_"));
+    let plan = f.service.plan_agent_tool(&f.installation, spec).unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+    assert_eq!(std::fs::read_to_string(module_path()).unwrap(), plain);
+}
+
+#[tokio::test]
 async fn exact_payload_reopens_and_cannot_retarget_a_replacement_binding() {
     let f = Fixture::new().await;
     let binding = f.binding();
