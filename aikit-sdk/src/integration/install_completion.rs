@@ -18,7 +18,7 @@ pub enum CompletionBlockingPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingChange {
     pub pointer: String,
-    /// None means the key is absent; Some(Null) preserves an explicit null.
+    /// None means the key is absent. Completion environment values must be strings.
     pub before: Option<Value>,
     pub after: Option<Value>,
 }
@@ -81,6 +81,14 @@ pub(super) fn install(
                 "env must be an object to configure completion blocking".into(),
             )
         })?;
+    // Option<Value> receipts represent absence as null. Refuse malformed native
+    // environment values rather than accepting an explicit null that cannot
+    // round-trip distinctly from absence and would be lost during removal.
+    if env.get(CAP_KEY).is_some_and(|value| !value.is_string()) {
+        return Err(IntegrationError::Invalid(
+            "completion blocking environment value must be a string".into(),
+        ));
+    }
     let previous = env.insert(CAP_KEY.into(), json!("0"));
     Ok(Some(OwnedCompletion {
         previous,

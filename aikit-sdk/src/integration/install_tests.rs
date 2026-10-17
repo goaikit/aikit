@@ -232,6 +232,16 @@ fn completion_policy_requires_claude_stop_and_refuses_malformed_environment() {
         Err(IntegrationError::Invalid(_))
     ));
     assert_eq!(f.read(), json!({"env":"invalid"}));
+    for invalid in [Value::Null, json!(0), json!(false), json!({})] {
+        let original = json!({"env":{"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":invalid,"OTHER":"retain"}});
+        f.write(&original);
+        assert!(matches!(
+            f.service
+                .plan_install_with_completion_policy(f.spec.clone(), policy),
+            Err(IntegrationError::Invalid(_))
+        ));
+        assert_eq!(f.read(), original);
+    }
 }
 
 #[test]

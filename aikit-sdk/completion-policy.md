@@ -37,6 +37,9 @@ The receipt retains a fingerprint of preexisting Stop hooks rather than their
 contents. Shared-setting protection also works across separate SDK state
 directories. Native profile files are unchanged until an explicit plan apply.
 Prepared writes and removals reuse the existing crash recovery mechanism.
+Malformed non-string values of the owned environment setting (including null)
+are refused without changing configuration. The receipt must never collapse an
+explicit null into absence during removal.
 
 ## Metadata compatibility
 
