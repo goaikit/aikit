@@ -462,7 +462,9 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
             started_at_ms: None,
         },
         _ => AgentEventPayload::Hook {
-            phase: if event == HookEvent::InputSubmitted {
+            phase: if event == HookEvent::NativeTurnStarted {
+                HookPhase::RunStart
+            } else if event == HookEvent::InputSubmitted {
                 HookPhase::BeforeModel
             } else {
                 HookPhase::RunEnd

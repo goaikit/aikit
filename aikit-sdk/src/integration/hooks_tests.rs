@@ -92,6 +92,15 @@ fn native_turn_observations_are_typed_bounded_and_match_inherited_turn() {
     let mut start = f.input("AIKitNativeTurnStarted");
     start["aikit_native_turn_version"] = json!(1);
     start["native_turn"] = json!({"id":"turn-native"});
+    assert!(matches!(
+        decode(&installation, start.to_string().as_bytes())
+            .unwrap()
+            .payload,
+        AgentEventPayload::Hook {
+            phase: HookPhase::RunStart,
+            ..
+        }
+    ));
     assert_eq!(
         decode(&installation, start.to_string().as_bytes())
             .unwrap()
