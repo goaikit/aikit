@@ -82,7 +82,7 @@ async-trait = { version = "0.1", optional = true }
 
 # aikit SDK (agent catalog and deploy)
 # claude-control/codex-app-server enable bidirectional live-session bridges.
-aikit-sdk = { path = "aikit-sdk", version = "0.3.0", features = ["claude-control", "codex-app-server"] }
+aikit-sdk = { path = "aikit-sdk", version = "0.3.0", features = ["claude-control", "codex-app-server", "integration"] }
 
 # Magic-tool layer (optional; enabled by --features tools)
 aikit-magictool = { path = "aikit-magictool", version = "0.1.0", optional = true, features = ["agent"] }

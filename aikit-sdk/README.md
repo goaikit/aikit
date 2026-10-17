@@ -25,6 +25,294 @@ Or from this workspace:
 aikit-sdk = { path = "../aikit-sdk" }
 ```
 
+## Managed gateway persistence
+
+Enable the additive `integration` feature to reuse
+`aikit_sdk::integration::gateway_store::Store`. This is the existing managed
+gateway SQLite implementation, shared with the CLI through its compatibility
+re-export. Session payloads and command receipts remain the canonical
+`runner::session` types; existing storage/recovery behavior is preserved.
+
+Opening a persistent store acquires exclusive host ownership and recovers
+interrupted managed sessions and ambiguous commands. Do not open it independently
+from each external hook invocation. User-started hooks use the separate
+`IntegrationService` below, which does not open the managed gateway store.
+
+## User-started agent hooks (integration feature)
+
+The additive `integration` feature exposes `IntegrationService`, owned hook
+configuration and one `HookHandler::decide` callback. Construction never launches
+an agent. Claude hooks, a Cursor prompt/tool/session subset, and a Codex
+prompt/tool/Stop/session subset, and a Pi extension bridge are implemented. Other known catalog keys return
+`IntegrationError::Unsupported`.
+Existing-session observation bindings are available;
+native message delivery and contextual control qualification remain pending.
+
+```rust,no_run
+use aikit_sdk::integration::{IntegrationService, InstallSpec};
+# fn example(spec: InstallSpec) -> Result<(), Box<dyn std::error::Error>> {
+let service = IntegrationService::open("/private/application-state")?;
+let plan = service.plan_install(spec)?; // inspect paths, events and fingerprints
+let status = service.apply_install(&plan.id)?;
+let removal = service.plan_remove(&plan.installation_id)?;
+// Applying the removal is a separate explicit application action:
+// service.apply_install(&removal.id)?;
+# Ok(())
+# }
+```
+
+Keep state outside the reviewed worktree and private to the owner. Unix state
+directories require mode 0700; Windows uses the caller's inherited ACL. Installation
+receipts identify exactly owned entries. Stale plans, changed owned hooks and
+ambiguous recovery refuse mutation. Unrelated hooks/settings survive update/removal.
+Retry the same plan ID after interruption; do not synthesize a replacement plan.
+Pending journals may contain existing configuration values; completed plans discard
+their config bodies. `Configured` means matching config, not qualified enforcement.
+
+`handle_hook(installation_id, input, handler).await` consumes bounded native bytes
+and returns stdout, stderr and an exit code. The provider comes from the receipt.
+The thin executable must honor all three response fields. `HookHandler` receives
+input admission, before-tool and completion proposals; observations are journaled
+without calling a decision handler. Callbacks must cooperate with cancellation.
+Errors, timeouts and panics block. Allow preserves native permission checks.
+Decision requests recheck the owned local hook configuration before calling policy
+and after it returns. Disabled, missing or edited owned hooks block without a
+prepared Allow. Unrelated settings edits are preserved. The observation is saved
+before these checks; notification-only events remain available for recovery.
+This does not attest effective managed/user settings or prevent edits after the
+last check, and cannot enforce a hook the provider never invokes.
+
+`events(installation_id, after, limit)` returns immutable observation and prepared
+decision rows with separate cursors. Neither a saved Allow nor SessionEnd proves
+successful Turn completion. Tool arguments/results reach the callback but are
+omitted from replay; persist necessary derived application evidence during the
+callback. Records have `tool_payload_omitted` to make this visible. Final answers
+are retained. The current schema retains events without pruning.
+
+`tool_effect(&HookRequest)` translates the original BeforeTool payload to
+ReadOnly, ReplaceFile, EditText or Unknown. The Claude adapter normalizes exact
+Write/Edit intent; Bash, MCP and unrecognized tools remain Unknown. This helper
+does not edit files or prove success/attribution. Consumers compare the intent
+with observed file bytes and persist derived evidence before returning Allow.
+Replay omits inputs and therefore cannot reconstruct intent after the fact.
+
+Installation uses Claude exec-form command plus argument vectors. Windows needs
+a real executable, not a `.cmd`/`.bat` shim. The installer does not own global
+continuation-limit settings or override managed settings. Effective settings and
+native deadline behavior require qualification for the deployed version and mode.
+
+### Contextual capabilities
+
+`IntegrationService::capabilities(agent_key, SessionMode)` performs a fresh local
+`--version` probe through the existing Backend registry, command resolution and
+availability timeout. It reports host OS/architecture, intended mode, bounded
+version output, probe errors and typed capability assessments. It starts no agent
+session and does not install or alter hooks. Run this blocking operation outside
+an async executor thread; it is an explicit diagnostic, not a per-hook hot path.
+
+Each assessment separates adapter implementation from Supported, Unsupported or
+Unknown and includes its scope. SDK installation/replay/binding/detach contracts
+do not attest native execution. Native evidence currently matches only the recorded
+Windows x86_64 Claude 2.1.269 print-mode scenarios. Other contexts remain Unknown.
+Repeated blocking/effective settings and hard native deadlines remain Unknown even
+in that context. Successful completion, existing-session messaging/reconciliation
+and native process identity remain Unsupported. Missing external adapters report
+Unsupported even if their managed runner supports similar operations.
+
+`CapabilityReport::require` returns structured unmet requirements; Unknown cannot
+pass. `bind_existing_requiring(reference, mode, required)` checks them before
+creating a binding, then applies normal current-reference validation. The original
+observation-only `bind_existing` and `BackendCapabilities` flags retain their
+semantics. Reports describe a probe of this host and an intended mode, not proof
+of a particular running process's version, mode, effective settings or liveness.
+
+```text
+integration_hooks capabilities STATE claude print
+integration_hooks capabilities STATE cursor interactive
+```
+
+### Existing-session failure observations
+
+`HookEvent::CompletionFailed` installs Claude's `StopFailure` notification. It
+records a failed turn without calling the policy callback or closing the session
+binding. Error details and the native error-message field are not retained as a
+Final Answer. Consumers can recover their application state from this observation;
+it does not establish successful completion. Existing installations need an
+explicit install update to subscribe to this additional event.
+
+### Existing-session observation binding
+
+Resolve `observed_session(installation_id, native_session_id)` after a SessionStart
+hook, then call `bind_existing(&reference)`. Repeating the bind returns the same
+active binding ID. `binding(id)` reopens it after application restart. The handle
+exposes `reference`, `status`, `events(after, limit)` and idempotent `detach`.
+
+The reference contains the installation revision and the recorded start cursor.
+A later SessionStart for the same native ID invalidates it, including conservative
+invalidation on resume/compaction. Install/update/removal also invalidates existing
+bindings, even when the configuration bytes happen to be identical. Status is
+Observed, Ended, Stale or Detached. Ended observations remain readable; Ended is
+not proof of a successful Turn completion. Reopening never reactivates a detached
+handle. Detach does not remove hooks, delete history or signal a native process.
+Dropping a Rust handle releases its borrow; there is no native resource to stop.
+
+Session pages reuse installation cursors. The limit bounds scanned records: a
+page can be empty while advancing past another session's events. Keep reading
+until the cursor stops advancing. Stale/detached handles return typed errors.
+Schema 3 retains older events with an absent installation revision; they cannot
+establish a new binding until a new SessionStart is observed.
+
+Hook consumers should resolve `session_for_hook(&request)` before binding: it
+checks the invocation scope as well as the native session ID. Pi wire v2 uses a
+fresh extension-issued UUID at every `session_start`; shared journal transactions
+reject old invocations, reused start identifiers and hooks after shutdown. The
+SDK rechecks the scope when committing a callback decision. Pi installations must
+include SessionStarted. Other adapters expose `invocation_id: None` and retain
+their unqualified delayed-hook identity semantics.
+
+Schema 5 preserves historical rows and prevents older readers from ignoring the
+new scope. Upgrade consumers together; update Pi's owned extension through
+plan/apply between sessions and restart it. Wire v1 is rejected. The UUID is not a
+credential, process authentication or liveness attestation. A previously unseen
+delayed start and native event ordering still need qualification. Binding alone
+does not provide exclusive workspace admission, a transport or permission to send.
+
+### Library-only example
+
+Build `cargo build -p aikit-sdk --no-default-features --features integration --example integration_hooks`.
+The resulting executable offers these operations:
+
+```text
+integration_hooks plan STATE                   # InstallSpec JSON on stdin
+integration_hooks apply STATE PLAN_ID
+integration_hooks remove-plan STATE INSTALLATION_ID
+integration_hooks status STATE INSTALLATION_ID
+integration_hooks events STATE INSTALLATION_ID
+integration_hooks hook STATE WORKSPACE BLOCKS [deny-tools]
+integration_hooks bind STATE INSTALLATION_ID NATIVE_SESSION_ID
+integration_hooks binding-status STATE BINDING_ID
+integration_hooks detach STATE BINDING_ID
+```
+
+For this example, set application ID `sdk-example`, agent key `claude`, executable
+to the absolute built example path, and arguments to `hook`, absolute state path,
+absolute workspace path, and a block count. Register the events needed by the
+scenario, including SessionStarted. The example binds to that observed start and
+blocks the first BLOCKS completion proposals in its session-scoped replay, then
+allows a nonempty final answer. This is a qualification gate, not
+a review policy. Append `deny-tools` to the handler arguments to block every
+BeforeTool request for a native denial check. An external caller starts the
+native agent.
+
+Native qualification and its limits are recorded in
+[`integration-qualification.md`](integration-qualification.md).
+
+### Pi extension hooks
+
+The `pi` key installs one generated `.pi/extensions/aikit-<installation-id>.js`
+file. Its path is scoped to application, provider and workspace. Plans persist
+desired bytes outside the worktree; apply writes the file, and removal deletes
+only an unchanged owned file. Unrelated extensions/settings remain untouched.
+Schema 4 protects generated-source receipts and deletion plans from older readers;
+existing JSON installation plans and receipts migrate without losing ownership.
+Do not downgrade the integration state database.
+
+Pi loads this extension through its own project-trust/resource lifecycle. Reload
+or restart explicitly between sessions after installation/update/removal; removing
+a file does not revoke code already loaded into Pi. Configured status checks file
+ownership, not actual execution or effective settings. The library never starts Pi.
+
+The bridge registers Pi events and invokes the configured native executable with
+literal argv, bounded JSON stdin/stdout and a process timeout, without a shell.
+Use `hook-pi STATE WORKSPACE BLOCKS [deny-tools]` with the library example. Pi uses
+Node internally; this adds no Node runtime requirement to Codelaya's own binary.
+SDK development tests for the bridge require Node on PATH.
+
+All eight current HookEvents have translations: session_start, input, tool_call,
+tool_result (using its isError flag), agent_before_settle, correlated failed
+agent_settled, and session_shutdown. Failure settlement uses the same session's
+latest pre-settlement outcome and never assumes every settlement failed. Completion
+Block appends a custom-message reason and asks for continuation; Allow preserves
+other extensions' decisions. Every repeat runs application policy again. Native
+tool results are never rewritten by observation. `tool_effect` translates native
+`write` and `edit` inputs into `ReplaceFile` and `EditTextBatch` intent. Batch
+replacements are matched against the original content. `ToolEffect::path()` and
+`expected_content(before)` let applications predict exact bytes from their own
+immutable baseline without copying provider parsing or replacement logic.
+Compare the observed result before attributing an edit; these methods execute
+no tool, read no file, and establish no authorship by themselves.
+
+Pi's native fuzzy matching, newline/BOM normalization and path expansion are not
+reimplemented. Exact prediction rejects missing/ambiguous/overlapping matches;
+a differing native result must remain unattributed. Expanded paths (`@`, `~`,
+file URLs, special spaces and Windows shell drive forms) return Unknown, as do
+other Pi tools. Support for those semantics remains unfinished.
+`EditTextBatch` is an additional public enum variant: exhaustive consumers must
+handle it when upgrading. Existing serialized variants and fields are unchanged.
+
+An opt-in [native qualification harness](examples/pi-qualification/README.md)
+exercises the installed Pi loop with Pi's deterministic provider. Pi 1.0.4 on
+Windows print mode passed repeated completion blocking, native tool allow/deny,
+tool failure and provider failure. This bounded path does not qualify handler
+ordering, general settlement correlation, subagents or deadline guarantees.
+Later boundary handlers can override a
+continuation and non-runnable context can prevent it. Accepted completion and
+existing-session messaging are still unavailable. See `integration-qualification.md`
+for the exact inspected upstream revision and remaining enhancement requirements.
+
+### Codex hooks
+
+The `codex` catalog key supports SessionStarted, InputSubmitted, BeforeTool,
+AfterTool, CompletionProposed and SessionEnded in project `.codex/hooks.json`.
+ToolFailed and CompletionFailed reject the whole plan before any configuration
+change. A specification including SessionEnded must use a timeout of 1-3 seconds,
+matching that event's native limit. The example uses `hook-codex` with the same
+STATE/WORKSPACE/BLOCKS arguments as `hook`.
+
+Command transport shares the Cursor literal executable/argv serializer and its
+native-process byte-stream regression. The SDK writes no trust records and never
+bypasses native hook review. The owner must trust the project and current hook
+definitions using Codex's `/hooks` flow. Configured status only checks ownership;
+it does not attest trust, effective settings or actual invocation.
+
+Codex turn_id maps to prompt_id. Nullable Stop messages remain absent when null.
+Allow returns an empty JSON object; pre-tool denial and Stop continuation use
+the existing shared decision encoder. Every repeated Stop invokes policy again.
+PostToolUse becomes an `AgentEventPayload::Hook` observation with AfterTool phase
+and payload `{call_id, tool_name, outcome: "unknown"}`. Its arbitrary output cannot
+prove success or failure, so it never fabricates a successful ToolResult. Raw
+tool output/input is not retained in replay. Tool effect remains Unknown.
+
+The adapter reuses the installer, journal and binding contracts. Native control,
+effective trust, subagent attribution, accepted/failed completion, messaging and
+hard deadlines remain unqualified or unavailable. See `integration-qualification.md`
+before claiming a supported native workflow.
+
+### Cursor hooks
+
+Use the same service with catalog key `cursor`. The owned `.cursor/hooks.json`
+installer supports SessionStarted, InputSubmitted, BeforeTool, AfterTool,
+ToolFailed and SessionEnded. It preserves unrelated entries, checks version 1,
+and sets `failClosed` on owned commands. Unsupported completion events reject the
+entire plan before configuration changes. The example uses `hook-cursor` instead
+of `hook`, with the same arguments; `deny-tools` exercises tool denial.
+
+Cursor command strings use POSIX literal quoting on Unix. On Windows the SDK
+encodes a constant PowerShell script that starts the native executable with exact
+arguments and copies byte streams; Windows PowerShell must be available on PATH.
+The additional process is included in the native timeout and does not establish
+a hard deadline. A native-process test covers empty/quoted arguments, punctuation,
+Unicode paths, UTF-8 streams and nonzero exit propagation. Unix execution still
+needs platform qualification.
+
+The decoder requires one workspace root matching the installation and rejects
+foreign cwd/session identity. Conversation/generation IDs identify observations;
+they do not establish native process identity. Tool output is decoded from the
+native JSON string and omitted from replay. Tool effects remain Unknown until
+Cursor edit-intent schemas are qualified. Session notifications never decide
+admission or accepted completion. Stop continuation, final-answer capture and
+messaging remain unimplemented; the full Codelaya requirements cannot pass.
+
 ## Quick start
 
 ```rust
