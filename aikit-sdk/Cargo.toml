@@ -85,3 +85,7 @@ required-features = ["integration"]
 [[example]]
 name = "agent_tool_plugin"
 required-features = ["integration"]
+
+[[example]]
+name = "integration_messages"
+required-features = ["integration"]

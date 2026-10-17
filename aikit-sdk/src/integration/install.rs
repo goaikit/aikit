@@ -268,17 +268,17 @@ impl IntegrationService {
             state: fs::canonicalize(state)?,
         };
         let connection = service.connection()?;
-        // Version 9 adds native Turn observations and inherited Turn identity.
+        // Version 10 adds the external-session outgoing-message journal.
         // Older readers must not silently drop those journal semantics.
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 9 {
+        if version > 10 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if version < 9 {
+        if version < 10 {
             let _lock = service.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 9 {
+            if version > 10 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {
@@ -293,11 +293,14 @@ impl IntegrationService {
             CREATE TABLE session_bindings(id TEXT PRIMARY KEY, reference TEXT NOT NULL, detached INTEGER NOT NULL DEFAULT 0);
             CREATE UNIQUE INDEX active_session_binding ON session_bindings(reference) WHERE detached=0;
             PRAGMA user_version=9; COMMIT;")?;
-            } else {
-                // Version 3 already has the binding tables and revision column.
-                // Persisted JSON semantics changed in v4-v9. Keep all rows.
-                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=9; COMMIT;")?;
             }
+            // Version 3+ already has bindings/revisions. Retain every row;
+            // the outgoing-message migration is additive.
+            connection.execute_batch("BEGIN IMMEDIATE;
+                CREATE TABLE IF NOT EXISTS outgoing_messages(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id));
+                CREATE TABLE IF NOT EXISTS message_observations(cursor INTEGER PRIMARY KEY AUTOINCREMENT, installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, event_id TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(installation_id,event_id));
+                CREATE INDEX IF NOT EXISTS message_observations_by_operation ON message_observations(installation_id,operation_id,cursor);
+                PRAGMA user_version=10; COMMIT;")?;
         }
         Ok(service)
     }

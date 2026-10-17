@@ -16,6 +16,7 @@ mod command;
 mod cursor;
 mod hooks;
 mod install;
+mod messages;
 mod pi;
 mod sessions;
 mod tool_effects;
@@ -35,6 +36,10 @@ pub use install::{
     AgentToolFileChange, CompletionBlockingPolicy, HookCommand, HookEvent, InstallPlan,
     InstallSpec, Installation, InstallationStatus, IntegrationError, IntegrationService,
     SettingChange,
+};
+pub use messages::{
+    MessageEvidence, MessageObservation, MessagePage, MessageProof, MessageReceipt, MessageRequest,
+    MessageReservation, MessageState, MESSAGE_CONTENT_LIMIT,
 };
 pub use sessions::{RecordedSessionGuard, SessionBinding, SessionRef, SessionStatus};
 pub use tool_effects::{TextReplacement, ToolEffect};

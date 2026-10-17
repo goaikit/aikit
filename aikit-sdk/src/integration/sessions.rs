@@ -33,9 +33,9 @@ pub enum SessionStatus {
 /// reopen it with `binding(id)`. Explicit detach revokes all handles for its ID.
 /// There are no subscriptions or native resources to release on Drop.
 pub struct SessionBinding<'a> {
-    service: &'a IntegrationService,
-    id: String,
-    reference: SessionRef,
+    pub(super) service: &'a IntegrationService,
+    pub(super) id: String,
+    pub(super) reference: SessionRef,
 }
 
 /// Holds the existing installation writer lock and a read-only SQLite write
@@ -242,7 +242,10 @@ impl SessionBinding<'_> {
         self.status_inner(&connection)
     }
 
-    fn status_inner(&self, connection: &Connection) -> Result<SessionStatus, IntegrationError> {
+    pub(super) fn status_inner(
+        &self,
+        connection: &Connection,
+    ) -> Result<SessionStatus, IntegrationError> {
         let detached: bool = connection.query_row(
             "SELECT detached FROM session_bindings WHERE id=?1",
             [&self.id],
