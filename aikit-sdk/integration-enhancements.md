@@ -4,7 +4,30 @@ These are implementation requests backed by local source inspection and bounded
 native evidence. They are not promises of supported behavior. AIKit owns native
 translation and qualification; consumer applications keep their own review rules.
 
+## Publication status, 2026-10-09
+
+The integration corrections recorded before this date are published in merged
+[PR #187](https://github.com/goaikit/aikit/pull/187), merge `1e136544`.
+Historical statements below that those corrections were local or awaiting
+publication are superseded by that merge. Native contract limitations remain.
+The Cursor BOM and fractional-duration corrections are separately proposed in
+[draft PR #188](https://github.com/goaikit/aikit/pull/188).
+
 ## Cursor: Windows native hook dispatch
+
+The 2026-10-09 ordinary-path control isolates an SDK input issue: native Windows
+hook stdin prefixes JSON with a UTF-8 BOM. The decoder now consumes one transport
+marker while preserving its size, scope and privacy checks. A fresh matched
+native run records one SDK tool Block and prevents the gated write. The same
+fixed handler still fails the punctuation/Unicode path probe before journaling.
+Use `-OrdinaryWorkspace` for the control; retain the default path stress case.
+A subsequent allowed-Write probe exposed fractional native duration values
+rejected before outcome journaling. The decoder now maps valid durations to
+canonical whole milliseconds, retaining integer precision and invalid-value
+refusals. The fresh Allow case records correlated successful Write and failed
+Read outcomes. Use `-ToolPolicy Allow` to reproduce it. See the qualification
+record for exact digests and limits. Neither result
+promotes completion or messaging contracts.
 
 The fresh 2026-10-07 probe using SDK source 972807b and Cursor
 2026.09.02-c22c1a3 reproduced the earlier Windows print failure. Without hooks,
