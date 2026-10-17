@@ -43,7 +43,7 @@ Prepared writes and removals reuse the existing crash recovery mechanism.
 This change originated on `feat/codelaya-integration` at `4b5bb1d`.
 PRs #187/#188 merged into that feature branch. Main at `f91c37f`, including its
 per-user session-start hook APIs and newer SDK ZIP dependency, was merged into
-the parent at `bfa592c` and this child at `9a9a726` without textual conflicts.
+the parent at `a487c0c` and this child at `6196294` without textual conflicts.
 Its project-scoped durable lifecycle service covers more than the startup-only
 registration API; reuse shared native format/configuration primitives where their
 semantics match, preserving ownership, replay and conflict guarantees.
@@ -104,7 +104,9 @@ versions reproducible.
 ### Reconciled main gate
 
 The combined source at `9a9a726` passed the entire SDK library test suite on
-native Windows with Rust 1.88: **594 passed, 4 ignored**. This includes the newer
+native Windows with Rust 1.88: **594 passed, 4 ignored**. The isolated Linux
+container passed **633 tests, 4 ignored**, with networking disabled and no
+provider profile or credentials mounted. This includes the newer
 session-hook, skill, ZIP and user-folder code alongside the integration service.
 The ignored tests require live agents/pipeline behavior and are not acceptance
 evidence. Run the same command above without the `integration::` filter to
