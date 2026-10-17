@@ -1,5 +1,10 @@
 # Claude mod event feasibility probe
 
+See the later [native adversarial probes](native-adversarial-probes.md) for
+abort-after-Allow and a real competing-wrapper run. The native run did not
+reproduce the synthetic engine's denial-erasure prediction. These additional
+fixtures are explicitly selected and are not loaded by the default manifest.
+
 This plugin only registers pass-through observers. It performs no file write,
 network request, model call or application policy decision. Validation does not
 install it into the user's profile or launch a session.
@@ -54,6 +59,11 @@ returning the command-hook JSON's scalar `decision: 'block'` is invalid and the
 handler is skipped. A native bridge must translate the result correctly and
 qualify error behavior. The test engine supplied this validation feedback; no
 generated declarations from a signed-in interactive session were obtained.
+
+The later actual command-hook probe observed `{ block: string }` downstream from
+native Stop handlers. Returning `{}` did not erase 22 native Blocks. This differs
+from the offline synthetic result above; see the adversarial report for the
+failed prediction, exact executed sources and bounded scope.
 
 The later [native gateway probe](native-gateway-probe.md) generated the target
 version's declarations without a real account by using a local deterministic

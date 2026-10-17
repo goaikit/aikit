@@ -42,8 +42,10 @@ profile or policy configuration is changed by this source update.
 `SuccessfulCompletionObservation` is implemented but **Unknown**, never Supported.
 The earlier controlled Linux event probe is candidate API evidence; it does not
 qualify this implementation, native Windows, caller protection, notification
-delivery/deadlines or competing handlers. The known mod wrapper counterexample
-can erase a downstream Stop denial and still prevents unconditional readiness.
+delivery/deadlines or competing handlers. The earlier mod wrapper counterexample
+was an offline engine result. A later native run preserved 22 command-hook Blocks
+despite empty wrapper returns; it must not be represented as a native erasure
+counterexample. Other handler strategies remain unqualified.
 
 References: [native events](https://code.claude.com/docs/en/plugins/mods/events),
 [generated declarations](https://code.claude.com/docs/en/plugins/mods/create),
@@ -84,3 +86,10 @@ Request evidence SHA-256:
 This normal-outcome Linux evidence does not qualify native abort-after-Allow,
 competing handlers, protected caller identity/deadlines, review delivery,
 real-model semantics, Windows or other providers. Capability remains Unknown.
+
+The later [adversarial native probes](../examples/claude-mod-qualification/native-adversarial-probes.md)
+now verify one Linux abort-after-Allow case, preserving Incomplete/no ending
+snapshot. An exploratory competing-wrapper run preserved 22 actual native Blocks;
+the predicted native denial erasure was not observed. Those findings supersede
+the earlier unqualified assumptions for their exact scope, without promoting
+Windows, other handler strategies, caller protection or universal deadlines.

@@ -1,5 +1,11 @@
 # External-session feasibility refresh, 2026-10-17
 
+Later evidence: [normal native completion](native-turn-observations.md) and
+[adversarial native probes](../examples/claude-mod-qualification/native-adversarial-probes.md).
+The latter verifies Linux abort-after-Allow and did not reproduce the offline
+wrapper-erasure prediction against real command hooks (22 Blocks were retained).
+The historical engine observations below do not override that native evidence.
+
 Baseline: SDK `4b5bb1d937352708bed5032521faa1e9e6620e76`. No capability is promoted by this report. User-started interactive Windows sessions remain the target topology.
 
 ## Claude candidate APIs

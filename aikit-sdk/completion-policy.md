@@ -118,6 +118,12 @@ dependencies; the original pre-reconciliation lock remains in Git history.
 
 ## Required native qualification
 
+Later [native adversarial evidence](../examples/claude-mod-qualification/native-adversarial-probes.md)
+verifies one Linux abort-after-Allow case and preserves 22 command-hook Blocks
+despite empty wrapper returns. The offline erasure result below did not reproduce
+in that native command-hook run. Other handler strategies, deadlines, effective
+policy changes and Windows remain separately unqualified.
+
 The [mod probes](../examples/claude-mod-qualification/README.md) demonstrate that
 a wrapper can erase a downstream Stop denial in Claude 2.1.296's offline plugin
 engine. A zero continuation cap does not establish protected middleware order.
