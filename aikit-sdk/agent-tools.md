@@ -30,9 +30,11 @@ manifest version changes when the module changes. `files()` supports embedding;
 A failed export may leave its new partial directory for inspection.
 
 **Export is not installation.** It creates no receipt, enables no settings and
-promotes no capability. Activation must use owned planning, conflict detection,
-update/removal and recovery. Existing deployment helpers should be reused where
-their semantics fit; replacing a directory alone does not establish ownership.
+promotes no capability. `IntegrationService::plan_agent_tool` now provides owned
+project-file planning on an existing hook installation, with the same
+`apply_install`/status/update/removal/recovery journal. See
+[owned tool installation](owned-agent-tools.md). Replacing a directory alone
+does not establish ownership or native readiness.
 Cursor, Codex and Pi rendering currently returns `Unsupported`; unknown catalog
 keys return `UnknownAgent`.
 

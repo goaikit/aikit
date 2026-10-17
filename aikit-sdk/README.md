@@ -42,7 +42,8 @@ from each external hook invocation. User-started hooks use the separate
 
 The same feature provides a reusable [native application tool bridge](agent-tools.md)
 for selected JSON operations and instructions. Claude rendering and controlled
-Linux native execution are implemented; owned activation and caller authentication
+Linux native execution are implemented. [Owned tool-file planning](owned-agent-tools.md)
+reuses the existing installer; authenticated callers and effective qualification
 remain required before application mutations can be enabled.
 
 The additive `integration` feature exposes `IntegrationService`, owned hook
