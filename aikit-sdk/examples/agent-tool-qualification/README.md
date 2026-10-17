@@ -31,7 +31,12 @@ session IDs and therefore different request hashes.
 
 ## Build
 
-From the AIKit root on a Linux x86_64 Rust 1.88 builder:
+From the AIKit root on a Linux x86_64 Rust 1.88 builder. In a fresh isolated
+checkout first copy `aikit-sdk/qualification/20261017/validation-cargo.lock` to
+the root as `Cargo.lock`; preserve any existing local lock. This baseline ignores
+the root lock, and fresh resolution otherwise encounters the root CLI's yanked
+ZIP dependency. The retained lock SHA-256 is
+`ef111e91aec4cc31cc1810e077dfc357d1d5010539b7d239434744792c9fbf06`.
 
 ```sh
 cargo +1.88.0 test -p aikit-sdk --lib --no-default-features --features integration --locked integration::
@@ -60,7 +65,7 @@ It mounts only public fixtures and the compiled inspector, not a provider home:
 
 ```powershell
 docker run -d --name aikit-sdk-tool-fixture --label com.codelaya.task=sdk-tool-fixture --cpus 2 --memory 3g --mount "type=bind,source=$probe,target=/fixture,readonly" --mount "type=bind,source=$qualification,target=/qualification,readonly" --mount "type=bind,source=$generated,target=/generated,readonly" --entrypoint sh aikit-claude-native-probe:2.1.296 -c 'sleep infinity'
-docker exec aikit-sdk-tool-fixture sh -c 'mkdir -p /home/node/evidence; /generated/agent_tool_plugin export claude /home/node/plugin < /qualification/spec.json > /home/node/evidence/plugin-info.json; cp /qualification/spec.json /home/node/evidence/spec.json; mkdir /home/node/plugin/tests; cp /qualification/bridge.test.ts /home/node/plugin/tests/; printf OTHER_CONTEXT_MUST_STAY > /home/node/workspace/CLAUDE.md'
+docker exec aikit-sdk-tool-fixture sh -ec 'mkdir -p /home/node/evidence; /generated/agent_tool_plugin export claude /home/node/plugin < /qualification/spec.json > /home/node/evidence/plugin-info.json; cp /qualification/spec.json /home/node/evidence/spec.json; mkdir /home/node/plugin/tests; cp /qualification/bridge.test.ts /home/node/plugin/tests/; printf OTHER_CONTEXT_MUST_STAY > /home/node/workspace/CLAUDE.md'
 docker exec aikit-sdk-tool-fixture claude plugin validate /home/node/plugin
 docker exec aikit-sdk-tool-fixture claude plugin test /home/node/plugin
 docker exec -d aikit-sdk-tool-fixture node /fixture/gateway.mjs /home/node/evidence /home/node/evidence/plugin-info.json
