@@ -70,5 +70,17 @@ error outcome left work Incomplete. Raw evidence is retained locally in the
 implementation chat's `.local/native-completion-generated/start-race-negative`.
 The owned tool now awaits that start observation. Four Node behavior tests cover
 the barrier, including a deliberately deferred startup and exactly one eventual
-tool dispatch. A fresh successful native run is still required before claiming
-the new forwarder has native acceptance evidence.
+tool dispatch.
+
+A subsequent fresh ordinary Claude Linux 2.1.296 session at SDK `3b22c60` /
+Codelaya `b83c633` passed actual context/name calls, native UTF-8 Write, fresh Work
+Note and correlated accepted completion. The ending snapshot and Completed state
+survived normal exit. The verifier passed both inside the isolated container and
+on retained host evidence. Replies were scripted; no owner profile/credentials,
+permission bypass or managed session. External networking was removed before
+trust/plugin loading; the disposable container was removed after evidence capture.
+Request evidence SHA-256:
+`ebfa815d7f5c19b8b9732b42e457aec251906f97919abe77ca014f9213ae54b0`.
+This normal-outcome Linux evidence does not qualify native abort-after-Allow,
+competing handlers, protected caller identity/deadlines, review delivery,
+real-model semantics, Windows or other providers. Capability remains Unknown.
