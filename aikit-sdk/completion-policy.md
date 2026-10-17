@@ -40,6 +40,14 @@ Prepared writes and removals reuse the existing crash recovery mechanism.
 
 ## Metadata compatibility
 
+This change is based on `feat/codelaya-integration` at `4b5bb1d`, not current
+main. PRs #187/#188 merged into that feature branch. Main at `f91c37f` has newer
+per-user session-start hook APIs and a newer root ZIP dependency. The parent
+integration branch needs reconciliation with those changes before release.
+Its project-scoped durable lifecycle service covers more than the startup-only
+registration API; reuse shared native format/configuration primitives where their
+semantics match, preserving ownership, replay and conflict guarantees.
+
 Integration state advances to schema 6 to protect completion-policy ownership.
 Older SDK readers reject that version instead of silently ignoring metadata and
 orphaning an owned setting. Coordinate SDK/application upgrades; do not run an
@@ -72,8 +80,9 @@ cargo +1.88.0 clippy --no-deps -p aikit-sdk --lib --no-default-features --featur
 
 ### Reproduce the bounded SDK gate
 
-The repository ignores Cargo.lock. Fresh workspace resolution also encounters
-the existing root CLI dependency on yanked zip 0.6.6. The resolved lock used here
+This feature-branch baseline ignores Cargo.lock. Fresh workspace resolution also
+encounters its root CLI dependency on yanked zip 0.6.6, already superseded on main.
+The resolved lock used here
 is retained as `qualification/20261017/validation-cargo.lock` with SHA-256
 `4b2b2e5b8b68c144b56cd0d07cd0a0521cfa71dfd9908730b181a2b3012d5654`.
 In a fresh isolated checkout, copy it to the workspace root as Cargo.lock, then
