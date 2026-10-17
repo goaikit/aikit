@@ -1,6 +1,6 @@
 # aikit-agent-core: the agent loop as an I/O-free step machine
 
-Status: in progress. Date: 2026-10-17. First consumer: Copane (the on-device Copilot), whose
+Status: core and driver implemented; the CI and publish workflow changes are pending (see Delivery). Date: 2026-10-17. First consumer: Copane (the on-device Copilot), whose
 ADR 0005 "The Copilot runs on the device, on aikit-agent-core" asks for this crate.
 
 ## Problem
@@ -136,10 +136,14 @@ the core.
 
 ## Delivery
 
-1. Pull request 1: the `aikit-agent-core` crate, this spec, the core tests (scripted inputs, no
-   network) and the CI job that builds the core for `wasm32-unknown-unknown`.
-2. Pull request 2: `aikit-agent` runs on the core. Its own tests stay as they are and must pass.
-   `publish-crates.yml` publishes `aikit-agent-core` before `aikit-agent`.
+1. Pull request 1: the `aikit-agent-core` crate, this spec and the core tests (scripted inputs, no
+   network).
+2. Pull request 2: `aikit-agent` runs on the core. Its own tests stay as they are and pass.
+3. A workflow change, pushed by someone allowed to change `.github/workflows/`:
+   - `ci.yml`: a job that builds the core for `wasm32-unknown-unknown` and fails if its source
+     names `std::fs`, `std::process`, `std::thread`, `std::time` or `std::net`;
+   - `publish-crates.yml`: publish `aikit-agent-core` before `aikit-agent`, which now depends
+     on it.
 
 ## Verification
 

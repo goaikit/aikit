@@ -1,13 +1,10 @@
 use std::time::Duration;
 
-use serde::Serialize;
+use aikit_agent_core::llm::wire::{ChatCompletionRequest, OpenAiResponse};
 
 use crate::llm::gateway::LlmGateway;
 use crate::llm::stream::parse_sse_body;
-use crate::llm::types::{
-    LlmError, LlmMessage, LlmRequest, LlmResponse, LlmStreamEvent, LlmStreamHandle, LlmUsage,
-    OpenAiResponse, OpenAiToolCall, ToolCall, ToolCallFunction, ToolDefinition,
-};
+use crate::llm::types::{LlmError, LlmRequest, LlmResponse, LlmStreamEvent, LlmStreamHandle};
 
 /// Resolves API key from environment variables.
 ///
@@ -64,44 +61,6 @@ where
     rt.block_on(future)
 }
 
-#[derive(Serialize)]
-struct OpenAiChatRequest<'a> {
-    model: &'a str,
-    messages: &'a [LlmMessage],
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<&'a ToolDefinition>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    temperature: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    // Always on the wire, `false` included: a judge (aikit-evals) asserts the
-    // body it sent, and an absent field is not the same statement as `false`.
-    stream: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream_options: Option<StreamOptions>,
-}
-
-#[derive(Serialize)]
-struct StreamOptions {
-    include_usage: bool,
-}
-
-fn convert_tool_calls(calls: &[OpenAiToolCall]) -> Vec<ToolCall> {
-    calls
-        .iter()
-        .map(|tc| ToolCall {
-            id: tc.id.clone(),
-            call_type: tc.call_type.clone(),
-            function: ToolCallFunction {
-                name: tc.function.name.clone(),
-                arguments: tc.function.arguments.clone(),
-            },
-        })
-        .collect()
-}
-
 /// A transport error as [`LlmError::RequestFailed`]. A timeout after the
 /// connection was made is marked with [`TIMED_OUT_PREFIX`]; a connect timeout
 /// is not, because that request never reached the server.
@@ -124,16 +83,7 @@ async fn send_complete(
     req: &LlmRequest,
 ) -> Result<LlmResponse, LlmError> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let body = OpenAiChatRequest {
-        model: &req.model,
-        messages: &req.messages,
-        tools: req.tools.iter().collect(),
-        temperature: req.temperature,
-        top_p: req.top_p,
-        max_tokens: req.max_tokens,
-        stream: false,
-        stream_options: None,
-    };
+    let body = ChatCompletionRequest::new(req, false);
 
     let response = client
         .post(&url)
@@ -159,32 +109,7 @@ async fn send_complete(
         .await
         .map_err(|e| request_failed(e, Some("failed to parse response")))?;
 
-    let first = resp.choices.into_iter().next();
-    let content = first
-        .as_ref()
-        .and_then(|c| c.message.as_ref())
-        .and_then(|m| m.content.clone());
-    let tool_calls = first
-        .as_ref()
-        .and_then(|c| c.message.as_ref())
-        .and_then(|m| m.tool_calls.as_ref())
-        .map(|tc| convert_tool_calls(tc))
-        .unwrap_or_default();
-    let finish_reason = first.and_then(|c| c.finish_reason);
-    let model = resp.model;
-    let usage = resp.usage.map(|u| LlmUsage {
-        input_tokens: u.prompt_tokens.unwrap_or(0),
-        output_tokens: u.completion_tokens.unwrap_or(0),
-        total_tokens: u.total_tokens,
-    });
-
-    Ok(LlmResponse {
-        content,
-        tool_calls,
-        finish_reason,
-        usage,
-        model,
-    })
+    Ok(resp.into())
 }
 
 async fn send_stream(
@@ -193,18 +118,7 @@ async fn send_stream(
     req: &LlmRequest,
 ) -> Result<Vec<LlmStreamEvent>, LlmError> {
     let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-    let body = OpenAiChatRequest {
-        model: &req.model,
-        messages: &req.messages,
-        tools: req.tools.iter().collect(),
-        temperature: req.temperature,
-        top_p: req.top_p,
-        max_tokens: req.max_tokens,
-        stream: true,
-        stream_options: Some(StreamOptions {
-            include_usage: true,
-        }),
-    };
+    let body = ChatCompletionRequest::new(req, true);
 
     let response = client
         .post(&url)
