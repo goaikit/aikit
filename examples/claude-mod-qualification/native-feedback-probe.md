@@ -70,3 +70,73 @@ existing review was never resent. All owned containers were removed.
 
 No production Rust code, capability assessment or consumer SDK pin changes in
 this evidence step.
+
+## Native API-view candidate, 2026-10-18
+
+A subsequent fresh session added `turn.step` sampling to this opt-in probe.
+Before delegating the stream it captured `session.messages({as:"api"})`, native
+session/Turn/index; after delegating it recorded the step result separately.
+The unchanged owner review remained Queued. Nine actual main API requests and
+both Completed application Turns were independently verified again. Both Turns
+survived exit; the owned container was removed.
+
+The first verifier required API-view length to equal `messageCount`. It failed:
+
+| Feedback step | Native `messageCount` | API-view messages | Outgoing messages |
+| --- | --- | --- | --- |
+| 0 | 42 | 13 | 19 |
+| 1 | 45 | 15 | 22 |
+| 2 | 48 | 17 | 25 |
+
+That original source and failure are retained. A separate payload-presence check
+then verified the exact complete frozen Unicode review text in both the native
+view and independent outgoing input, once each, at all three steps. It requires
+the same session/Turn/index, ordered post-step results, native stop reason and
+nonnull usage. It explicitly reports `full_request_view: false` and
+`production_consumption_contract_qualified: false`. This is not a repaired claim
+that the full-view hypothesis passed. The normal transcript and generated API
+view must not be described as the exact wire request.
+
+The check passed inside the container and on retained host evidence. Four local
+evidence mutations (wrong session, missing payload, missing response usage and
+wrong step index) were rejected. These are verifier sensitivity checks, not four
+additional native fault-injection runs.
+
+| Item | SHA-256 |
+| --- | --- |
+| Outgoing requests | `9c9ed3590593e4ffd97ec8e37c47ba3d8940d1efdb0d46fbc2d6814daf3b2057` |
+| Probe events including API views | `ad62c373ca9faee8c6ccedd9101685896042dd7d03c5797c7b47c67b42276434` |
+| Executed updated probe | `e6061b29fb81ad50e7edea3f536248c11d8db62da779201f8bdee9706cb2ca15` |
+
+Retained locally in `feedback-input-candidate` beside the prior run. Reproduce
+the preceding feedback scenario with this updated probe, then run Codelaya's
+`verify-feedback-input.mjs` instead of just `verify-feedback.mjs`. Keep all
+baseline captures; retain `input-verification.json` and native probe observations.
+
+### Reusable contract still needed
+
+`prompt.submit` acknowledgement and this API-view candidate are separate native
+observations. Store their exact original target/generation, operation, payload
+digest and stable references separately in AIKit. A successful local enqueue
+cannot synthesize either. Missing/truncated views, failed steps and uncertain
+handoff must retain unknown evidence and never cause an automatic resend.
+
+The target-generated declarations explicitly permit another `turn.step` hook to
+answer without sending a request, and to change the result seen by hooks above
+it. Therefore API-view plus a returned result/usage does not yet qualify a
+protected post-send observation. This is a declared API limitation/risk, not a
+claim that native short-circuit behavior was tested in this run. Qualify competing
+hooks and actual send/response provenance before promoting consumption support.
+
+Provider enhancement request: a stable native model-request reference, with an
+engine-authored observation after actual dispatch/response, identifying the
+session invocation, Turn and step and inclusion of the exact submitted message
+bytes (or its canonical digest). It must remain distinguishable from plugin
+short-circuit/rewritten results and survive reconciliation. AIKit should normalize
+that into the existing-session message journal; Codelaya should only project it.
+First investigate whether an existing native primitive supplies this contract;
+do not add a second transport or managed-session launcher to work around it.
+
+Durable submit/status/reconcile, busy/admission protection, protected native input
+provenance, native Windows and other providers remain open. No capability or
+production readiness was promoted by this candidate test.

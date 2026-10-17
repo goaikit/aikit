@@ -38,6 +38,18 @@ export function register(on) {
     if(event.agentId===undefined) active=true;
     await record($,'turn_start',event);return next(event);
   });
+  on('turn.step',async function*($,event,next){
+    // Candidate production evidence: native normalized API view at send boundary.
+    // Qualification compares it with the independently retained outgoing request.
+    if(attempted && event.agentId===undefined) {
+      const messages=await $.session.messages({as:'api'});
+      await record($,'input_candidate',{sessionId:await $.session.id(),event,messages});
+    }
+    const result=yield* next(event);
+    if(attempted && event.agentId===undefined)
+      await record($,'step_return',{sessionId:await $.session.id(),event,result});
+    return result;
+  });
   on('turn.complete',async($,event,next)=>{
     const result=await next(event);
     await record($,'turn_complete',event);
