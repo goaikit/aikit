@@ -44,6 +44,15 @@ jobs:
             exit 1
           fi
 
+      - name: Publish aikit-agent-core
+        # aikit-agent depends on it, so it goes first.
+        run: cargo publish -p aikit-agent-core
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for aikit-agent-core to be indexed
+        run: sleep 30
+
       - name: Publish aikit-agent
         run: cargo publish -p aikit-agent
         env:

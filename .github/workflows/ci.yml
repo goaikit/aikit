@@ -99,6 +99,34 @@ jobs:
         # cargo invocation here builds ONLY the root crate, not the workspace.
         run: cargo build --workspace --all-features
 
+  agent-core-wasm:
+    # aikit-agent-core is the agent loop for on-device hosts (browser, Android).
+    # It must stay I/O-free: see docs/plans/aikit-agent-core.md.
+    name: Agent Core (wasm32)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93.1"
+          targets: wasm32-unknown-unknown
+
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Forbid I/O modules in the core
+        run: |
+          if grep -rnE 'std::(fs|process|thread|time|net)\b' aikit-agent-core/src; then
+            echo "aikit-agent-core must not use std::fs, std::process, std::thread, std::time or std::net"
+            exit 1
+          fi
+
+      - name: Build aikit-agent-core for wasm32-unknown-unknown
+        run: cargo build -p aikit-agent-core --target wasm32-unknown-unknown
+
   test:
     name: Test
     runs-on: ubuntu-latest
