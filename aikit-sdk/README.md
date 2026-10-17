@@ -349,6 +349,169 @@ deploy_subagent("claude", root, "reviewer", "# subagent")?;
 # Ok::<(), aikit_sdk::DeployError>(())
 ```
 
+## Per-user skill folders
+
+`AgentConfig` paths are project-relative. `user_folders(key)` returns the
+per-user layout of a catalog agent, relative to the home directory: its
+configuration folder and every per-user skills folder it reads (its own
+folder first, then the shared `SHARED_SKILLS_DIR`, `.agents/skills`, when the
+agent reads it).
+
+| Key | Config folder | Skills folders read (under `~`) |
+|-----|---------------|---------------------------------|
+| `claude` | `.claude` | `.claude/skills` |
+| `gemini` | `.gemini` | `.gemini/skills`, `.agents/skills` |
+| `copilot` | `.copilot` | `.copilot/skills`, `.agents/skills` |
+| `cursor` | `.cursor` | `.cursor/skills`, `.agents/skills` |
+| `qwen` | `.qwen` | `.qwen/skills`, `.agents/skills` |
+| `newton` | `.newton` | `.newton/skills` |
+| `opencode` | `.config/opencode` | `.config/opencode/skills`, `.agents/skills` |
+| `codex` | `.codex` | `.codex/skills`, `.agents/skills` |
+| `pi` | `.pi` | `.pi/agent/skills`, `.agents/skills` |
+| `windsurf` | `.codeium/windsurf` | `.codeium/windsurf/skills` |
+| `kilocode` | `.kilocode` | `.kilocode/skills`, `.agents/skills` |
+| `auggie` | `.augment` | `.augment/skills`, `.agents/skills` |
+| `roo` | `.roo` | `.roo/skills`, `.agents/skills` |
+| `amp` | `.config/amp` | `.agents/skills` |
+| `codebuddy`, `qoder`, `shai`, `q`, `bob` | `.codebuddy`, `.qoder`, `.shai`, `.amazonq`, `.bob` | none known |
+
+```rust
+use aikit_sdk::{detect_present_agents, fewest_skill_dirs, user_skills_dirs};
+use std::path::Path;
+
+let home = Path::new("/home/me");
+// Absolute skills folders Codex reads.
+let _dirs = user_skills_dirs(home, "codex");
+// Agents whose per-user config folder exists (no CLI or runnability check).
+let present = detect_present_agents(home);
+// Fewest folders reaching every present agent, each with the agents reading it.
+for (dir, agents) in fewest_skill_dirs(home, &present) {
+    println!("{} -> {:?}", dir.display(), agents);
+}
+```
+
+`fewest_skill_dirs` is a deterministic greedy set cover that prefers the shared
+folder. An agent reading two chosen folders sees the same skill twice, so two
+folders read by the same agent are only chosen when that agent's
+`duplicate_skill_harmless` flag is set. The flag is enabled only after
+verifying, per agent, that a duplicate is tolerated; no agent has it yet.
+`detect_present_agents_for_current_user()` runs the presence check against the
+current user's home directory.
+
+## Deploy one skill entry
+
+`deploy_skill_entry(source_dir, target_dir, id, mode)` places one skill folder
+at `<target_dir>/<id>` as a symbolic link (`DeployMode::Link`), a verified copy
+(`DeployMode::Copy`) or `DeployMode::Auto` (link on Unix; on Windows a link,
+falling back to a copy). Other entries in `target_dir` are never touched.
+
+- `id` must pass `is_safe_id` (a single path component).
+- The new entry is built under a temporary name beside the old one and renamed
+  into place, so an existing link at `<target_dir>/<id>` is replaced without
+  being followed and never written through.
+- A copy refuses a source containing symbolic links and is compared to the
+  source (file list and bytes) after copying.
+
+`remove_skill_entry(target_dir, id)` removes only that entry; a link is
+unlinked without touching the folder it points to.
+
+```rust
+use aikit_sdk::{deploy_skill_entry, remove_skill_entry, DeployMode};
+use std::path::Path;
+
+let target = Path::new("/home/me/.agents/skills");
+let deployed = deploy_skill_entry(Path::new("./my-skill"), target, "my-skill", DeployMode::Auto)?;
+println!("{} via {:?}", deployed.path.display(), deployed.mode);
+remove_skill_entry(target, "my-skill")?;
+# Ok::<(), aikit_sdk::SkillEntryError>(())
+```
+
+## Session-start hooks
+
+For a tool that wants to run a command whenever an agent session starts,
+`session_hooks` registers that command in an agent's per-user settings, describes
+the machine-wide equivalent for administrators, and formats the notice a hook
+prints. Only agents whose hook format has been verified are supported
+(`session_hook_agents()`); any other key is unsupported.
+
+| Key | Per-user location (under `~`) | Machine-wide file (Linux / macOS / Windows) | Runs on | Entry identified by | Notice |
+|-----|-------------------------------|---------------------------------------------|---------|---------------------|--------|
+| `claude` | `.claude/settings.json` | `/etc/claude-code/managed-settings.json` / `/Library/Application Support/ClaudeCode/managed-settings.json` / `C:\Program Files\ClaudeCode\managed-settings.json` | every start (`matcher` `""`) | the id as a whole word in `command` | `{"systemMessage": ...}` |
+| `gemini` | `.gemini/settings.json` | `/etc/gemini-cli/settings.json` / `/Library/Application Support/GeminiCli/settings.json` / `C:\ProgramData\gemini-cli\settings.json` | every start (`matcher` `"*"`) | `name` set to the id | `{"systemMessage": ...}` |
+| `codex` | `.codex/hooks.json` | `requirements.toml`: `/etc/codex/` (Linux and macOS) / `C:\ProgramData\OpenAI\Codex\` | `startup` and `resume` | the id as a whole word in `command` | `{"systemMessage": ...}` |
+| `cursor` | `.cursor/hooks.json` | `/etc/cursor/hooks.json` / `/Library/Application Support/Cursor/hooks.json` / `C:\ProgramData\Cursor\hooks.json` | a new conversation | the id as a whole word in `command` | `{"additional_context": ...}` |
+| `pi` | `.pi/agent/extensions/<id>.ts` | none | `startup`, `new` and `resume` | the file's first line | plain text |
+
+- **Claude Code, Gemini CLI, Codex**: hooks live under `hooks.SessionStart[]`,
+  each group holding `{"matcher": ..., "hooks": [{"type": "command", "command": ...}]}`
+  (Codex entries also carry `"timeout": 10`). Codex is refused, with nothing
+  written, when `~/.codex/config.toml` already has a `hooks` table.
+- **Cursor**: entries sit directly under `hooks.sessionStart[]` as
+  `{"command": ..., "timeout": 10}`, with `"version": 1` at the top level; a
+  file with another `version` is refused.
+- **Pi**: each hook is its own TypeScript extension file, rendered whole from a
+  fixed template ([ADR 0025](../docs/adr/0025-a-session-hook-can-be-a-file-aikit-owns-whole.md)).
+  Its first line is `// aikit session hook <id>; generated, do not edit`; a file
+  without that line is never overwritten or deleted. The extension runs the
+  hook's program without a shell and shows what it prints with `ctx.ui.notify`
+  when Pi has a UI. A Pi hook must be built with `SessionHook::from_argv`.
+
+The API:
+
+- A `SessionHook` has a stable `id` (ASCII letters, digits, `-`, `_`).
+  `SessionHook::from_argv(id, program, args)` keeps the argument vector and
+  derives a shell `command` from it, quoted for the platform's shell; the id
+  must be one of the arguments. `SessionHook::new(id, command)` takes a shell
+  command directly, which must hold the id as a whole word.
+- `register_session_hook(home, key, &hook)` adds the hook, or replaces the
+  existing one with the same id; it returns `HookChange::Added`, `Updated` or
+  `Unchanged` (nothing written).
+- `unregister_session_hook(home, key, id)` removes only that hook, then any
+  group, event list or `hooks` object the removal emptied (`Removed` or
+  `Unchanged`; a missing file is `Unchanged`).
+- `has_session_hook(home, key, id)` checks the per-user location;
+  `admin_hook_present(key, id)` checks the machine-wide file.
+- `admin_hook_file(key)` and `admin_hook_entry(key, &hook)` give the
+  machine-wide file for this platform and an `AdminHookEntry { format, text }`
+  to place in it: `AdminHookFormat::Json` (a fragment to merge) or, for Codex,
+  `AdminHookFormat::Toml` (tables to add to `requirements.toml`). Agents with
+  no machine-wide file (Pi) return `None` and `Unsupported`. Administrator
+  files are never written.
+- `format_notice(key, text)` returns the one line a hook prints on standard
+  output to show a notice, in the agent's format (table above).
+- `SessionHookSupport::approval_note` is set when the agent asks the user to
+  review hooks changed outside it (Claude Code: its `/hooks` menu; Codex: trust
+  in `/hooks`, asked again whenever the hook changes).
+
+Settings files are merged, never clobbered: every other key and hook keeps
+its place, and a file that is not valid JSON or whose `hooks` or event list
+has an unexpected type is refused untouched. Writes go to a temporary file in
+the same folder and are renamed into place (pretty-printed, two-space indent,
+trailing newline, existing permissions kept). A symbolic link is resolved and
+its target replaced, so the link stays a link; a dangling link is refused.
+
+```rust
+use aikit_sdk::{register_session_hook, session_hook_support, HookChange, SessionHook};
+use std::path::Path;
+
+let home = Path::new("/home/me");
+let hook = SessionHook::from_argv(
+    "mytool-session",
+    "/usr/local/bin/mytool",
+    ["on-session-start", "--hook", "mytool-session"],
+);
+for key in ["claude", "codex", "cursor", "pi"] {
+    if register_session_hook(home, key, &hook)? != HookChange::Unchanged {
+        if let Some(note) = session_hook_support(key).and_then(|s| s.approval_note) {
+            println!("{note}");
+        }
+    }
+}
+// Inside the hook program: print a notice the agent shows the user.
+println!("{}", aikit_sdk::format_notice("claude", "mytool is ready").unwrap());
+# Ok::<(), aikit_sdk::SessionHookError>(())
+```
+
 ## MCP config merge
 
 Merge one MCP server definition into the config file each assistant expects. **Supported keys** (see `mcp_supported_agents()` and `MCP_SUPPORTED_AGENT_KEYS`): `cursor-agent`, `claude`, `gemini`, `copilot`, `opencode`, `codex`. **Aliases** (same as CLI): `cursor` → `cursor-agent`, `vscode` → `copilot`.
@@ -457,6 +620,8 @@ For incremental output, use `run_agent_events(...)`. Event payloads include norm
 - `get_installed_agents()`
 - `get_agent_status()`
 - `is_runnable(key)` and `runnable_agents()`
+- `detect_present_agents(home)`: agents whose per-user config folder exists,
+  whether or not they are runnable (see [Per-user skill folders](#per-user-skill-folders))
 
 ## Structured pipeline
 
