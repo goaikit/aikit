@@ -518,9 +518,24 @@ pub mod install;
 pub mod manifest;
 pub mod mcp_deploy;
 pub mod paths;
+pub mod session_hooks;
+pub mod skill_entry;
+pub mod user_folders;
 
 pub use paths::{
     copy_dir, copy_dir_excluding, is_safe_id, is_safe_relative_path, safe_join, PathError,
+};
+pub use session_hooks::{
+    admin_hook_entry, admin_hook_file, admin_hook_present, format_notice, has_session_hook,
+    register_session_hook, session_hook_agents, session_hook_support, unregister_session_hook,
+    AdminHookEntry, AdminHookFormat, HookChange, SessionHook, SessionHookError, SessionHookSupport,
+};
+pub use skill_entry::{
+    deploy_skill_entry, remove_skill_entry, DeployMode, DeployedEntry, SkillEntryError,
+};
+pub use user_folders::{
+    detect_present_agents, detect_present_agents_for_current_user, fewest_skill_dirs, user_folders,
+    user_skills_dirs, UserFolders, SHARED_SKILLS_DIR,
 };
 
 pub mod agent_runner;

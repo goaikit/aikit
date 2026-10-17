@@ -442,7 +442,12 @@ pub fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError
             InstallError::FetchFailed(format!("Failed to access zip entry {}: {}", i, e))
         })?;
 
-        let entry_name = file.name();
+        let entry_name = file
+            .name()
+            .map_err(|e| {
+                InstallError::FetchFailed(format!("Invalid zip entry name at index {}: {}", i, e))
+            })?
+            .into_owned();
 
         // Check for path traversal in the entry name before any processing
         if entry_name.contains("..") {
@@ -453,10 +458,10 @@ pub fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError
         }
 
         // Normalize the entry name to prevent path traversal (resolves . components)
-        let normalized = normalize_path(Path::new(entry_name));
+        let normalized = normalize_path(Path::new(&entry_name));
 
         // Reject absolute names portably (see `zip_entry_has_absolute_prefix`)
-        if zip_entry_has_absolute_prefix(entry_name) || !normalized.is_relative() {
+        if zip_entry_has_absolute_prefix(entry_name.as_ref()) || !normalized.is_relative() {
             return Err(InstallError::FetchFailed(format!(
                 "Absolute path detected in zip entry: {}",
                 entry_name
@@ -481,7 +486,7 @@ pub fn extract_zip(zip_bytes: &[u8], dest_dir: &Path) -> Result<(), InstallError
             )));
         }
 
-        if file.name().ends_with('/') {
+        if entry_name.ends_with('/') {
             fs::create_dir_all(&outpath)?;
         } else {
             if let Some(parent) = outpath.parent() {
