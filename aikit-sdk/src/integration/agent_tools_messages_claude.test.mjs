@@ -112,3 +112,36 @@ test('overlapping timer ticks cannot create a second submission',async()=>{
   f.api.prompt.submit=async(value)=>{f.submissions.push(value);entered();await pending;return {text:value.text};};
   const first=f.poll();await ready;await f.poll();assert.equal(f.submissions.length,1);release();await first;
 });
+
+test('retired exact attempts are never sent and do not block a later review',async()=>{
+  for(const state of ['unknown','failed','acknowledged']){
+    const f=await fixture(),run=f.api.process.run;let polls=0,checks=0;
+    f.api.process.run=async(argv,opts)=>{
+      const result=await run(argv,opts),action=JSON.parse(opts.stdin).action;
+      if(!action)return result;
+      const reply=JSON.parse(result.stdout);
+      if(action.kind==='recheck')reply.recorded_state=++checks===1?state:'dispatching';
+      if(action.kind==='poll' && ++polls===2){
+        const content='Second immutable review 雪';
+        reply.reservation={binding_id:'binding',target:reply.reference,reservation_id:'next-attempt',
+          request:{operation_id:'next-review',content},payload_sha256:createHash('sha256').update(content).digest('hex')};
+      }
+      result.stdout=JSON.stringify(reply);return result;
+    };
+    await f.poll();assert.equal(f.submissions.length,0,state);
+    await f.poll();await f.poll();assert.deepEqual(f.submissions,[{text:'Second immutable review 雪'}],state);
+    assert.equal(f.actions.find(a=>a.kind==='record_handoff').operation_id,'next-review');
+  }
+});
+
+test('a reserved attempt unexpectedly reported Accepted stops without native I/O',async()=>{
+  const f=await fixture(),run=f.api.process.run;
+  f.api.process.run=async(argv,opts)=>{
+    const result=await run(argv,opts);
+    if(JSON.parse(opts.stdin).action?.kind==='recheck'){
+      const reply=JSON.parse(result.stdout);reply.recorded_state='accepted';result.stdout=JSON.stringify(reply);
+    }
+    return result;
+  };
+  await f.poll();await f.poll();assert.equal(f.submissions.length,0);assert.equal(f.actions.length,2);
+});

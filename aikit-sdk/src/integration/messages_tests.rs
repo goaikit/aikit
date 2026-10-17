@@ -202,6 +202,83 @@ fn synthetic_bridge_event(f: &Fixture, event: HookEvent) {
 }
 
 #[tokio::test]
+async fn inspection_never_attaches_or_reserves_and_recheck_retires_only_the_exact_attempt() {
+    use crate::integration::RecordedMessageAction::{Inspect, Poll, Recheck};
+    let f = bridge_fixture().await;
+    let (inspect, env) = bridge_frame(&f, Inspect);
+    let before = f
+        .service
+        .recorded_message_with_context(&f.installation, inspect.clone(), Some(&env))
+        .unwrap();
+    assert!(!before.recorded_idle && before.reservation.is_none());
+    let count: i64 = f
+        .service
+        .connection()
+        .unwrap()
+        .query_row("SELECT count(*) FROM session_bindings", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    let binding = f.binding();
+    binding.stage_message(request("old")).unwrap();
+    synthetic_idle(&f);
+    let idle = f
+        .service
+        .recorded_message_with_context(&f.installation, inspect.clone(), Some(&env))
+        .unwrap();
+    assert!(idle.recorded_idle && !idle.recorded_ready && idle.reservation.is_none());
+    assert_eq!(
+        binding.message_status("old").unwrap().state,
+        MessageState::Accepted
+    );
+    let (poll, _) = bridge_frame(&f, Poll);
+    let ticket = f
+        .service
+        .recorded_message_with_context(&f.installation, poll.clone(), Some(&env))
+        .unwrap()
+        .reservation
+        .unwrap();
+    let (wrong, _) = bridge_frame(
+        &f,
+        Recheck {
+            operation_id: "old".into(),
+            reservation_id: "wrong".into(),
+        },
+    );
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, wrong, Some(&env))
+        .is_err());
+    binding.recover_message_record("old").unwrap();
+    let (recheck, _) = bridge_frame(
+        &f,
+        Recheck {
+            operation_id: "old".into(),
+            reservation_id: ticket.reservation_id,
+        },
+    );
+    let retired = f
+        .service
+        .recorded_message_with_context(&f.installation, recheck, Some(&env))
+        .unwrap();
+    assert!(!retired.recorded_ready);
+    assert_eq!(retired.recorded_state, Some(MessageState::Unknown));
+    binding.stage_message(request("next")).unwrap();
+    let next = f
+        .service
+        .recorded_message_with_context(&f.installation, poll, Some(&env))
+        .unwrap()
+        .reservation
+        .unwrap();
+    assert_eq!(next.request.operation_id, "next");
+    binding.detach().unwrap();
+    assert!(matches!(
+        f.service
+            .recorded_message_with_context(&f.installation, inspect, Some(&env)),
+        Err(IntegrationError::Detached)
+    ));
+}
+
+#[tokio::test]
 async fn module_poll_waits_for_first_application_binding_but_never_revives_detach() {
     use crate::integration::RecordedMessageAction::Poll;
     let f = bridge_fixture().await;

@@ -12,7 +12,7 @@ consumption and Codelaya orchestration remain open. Default tools have no pump.
 ## Envelope and scope
 
 The version-1 request contains application/installation/agent keys, a
-`NativeToolContext`, and tagged action `poll` or
+`NativeToolContext`, and tagged action `inspect`, `poll` or
 `recheck { operation_id, reservation_id }`, or
 `record_handoff { operation_id, reservation_id, outcome }`. Unknown fields, foreign scope,
 invalid versions/contexts and envelopes above 128 KiB are refused. There is no
@@ -30,6 +30,10 @@ without attaching, reserving or claiming idle readiness. An active application
 binding is required to issue/recheck a ticket or retain a handoff. An explicitly
 detached binding refuses rather than being treated as a new waiting attachment.
 Polling cannot attach or revive a detached binding.
+
+`inspect` runs these same inherited-context checks and reads recorded idle state
+without creating a binding/reservation or calling an application/provider. It
+lets an embedding application check its own admission before invoking `poll`.
 Configured-file drift, replaced generation and unavailable bindings refuse work.
 No provider settings, credentials or owner state were changed by fixture tests.
 
@@ -49,6 +53,13 @@ without truncation. The existing journal performs the atomic sole reservation.
 `recheck` compares the current Dispatching operation/reservation with the same
 recorded scope and idle snapshot. It holds no lock over I/O and does not return
 the payload again. A lost attempt changed to Unknown never becomes ready again.
+Wrong reservation IDs conflict. When rechecked while idle, the optional
+`recorded_state` identifies that exact attempt. Unknown/Failed/Acknowledged retire
+the module's local ticket without sending/resetting it; the next polling tick
+may handle a different queued operation. Accepted after reservation is an
+inconsistency and stops the pump. Older replies without this optional field
+retain their conservative waiting behavior. No wire-version/schema migration or
+readiness promotion is introduced.
 
 The version-1 reply contains the exact `SessionRef`, optional reservation and
 explicitly named `recorded_idle`/`recorded_ready`. A successful check is **not a
@@ -189,3 +200,14 @@ not qualify native caller authentication, protected admission, actual production
 acknowledgement/consumption provenance, mid-handoff crash recovery, prompt
 rewrite/drop, real-model semantics, Codelaya orchestration or Windows/provider
 parity. Unknown and all capability/readiness assessments remain unchanged.
+
+### Application callback preparation, 2026-10-18
+
+Added non-mutating `inspect` and exact-attempt `recorded_state` so an embedding
+application can enforce its own preflight before exposing a reserved ticket,
+and a retired Unknown/terminal ticket does not block later distinct operations.
+Windows passed 105 integration tests; offline Linux passed 107 serial tests and
+compiled both bridge/hook examples. All 14 default/opt-in Node behavior tests
+passed on both platforms. Scoped Windows library/bridge Clippy passed with the
+existing SDK allowance. New cases are synthetic context/state-machine tests;
+they do not constitute a fresh native application qualification or admission lease.

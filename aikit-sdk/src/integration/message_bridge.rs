@@ -41,6 +41,8 @@ pub struct RecordedMessageRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RecordedMessageAction {
+    /// Validate inherited scope and read idle state without attaching/reserving.
+    Inspect,
     Poll,
     Recheck {
         operation_id: String,
@@ -60,6 +62,10 @@ pub struct RecordedMessageReply {
     /// A recorded check, never authorization for native I/O by itself.
     pub recorded_ready: bool,
     pub reservation: Option<MessageReservation>,
+    /// Exact rechecked operation state. Terminal/Unknown retires the local
+    /// ticket without resending, so one uncertain operation need not block others.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_state: Option<MessageState>,
 }
 
 impl RecordedMessageRequest {
@@ -191,7 +197,10 @@ impl IntegrationService {
             if detached {
                 return Err(IntegrationError::Detached);
             }
-            if matches!(frame.action, RecordedMessageAction::Poll) {
+            if matches!(
+                frame.action,
+                RecordedMessageAction::Poll | RecordedMessageAction::Inspect
+            ) {
                 // The native module may start before the application attaches.
                 // Wait without creating a binding, claiming a ticket or treating
                 // a genuinely detached subscription as a new attachment.
@@ -201,6 +210,7 @@ impl IntegrationService {
                     recorded_idle: false,
                     recorded_ready: false,
                     reservation: None,
+                    recorded_state: None,
                 });
             }
             return Err(IntegrationError::NotFound);
@@ -219,6 +229,7 @@ impl IntegrationService {
             recorded_idle: idle,
             recorded_ready: false,
             reservation: None,
+            recorded_state: None,
         };
         if let RecordedMessageAction::RecordHandoff {
             operation_id,
@@ -231,6 +242,7 @@ impl IntegrationService {
             binding.record_handoff_record(&tx, operation_id, reservation_id, outcome)?;
         } else if idle {
             match frame.action {
+                RecordedMessageAction::Inspect => {}
                 RecordedMessageAction::Poll => {
                     // Never issue a second ticket while the first is in flight.
                     let pending: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM outgoing_messages WHERE installation_id=?1 AND json_extract(body,'$.binding_id')=?2 AND json_extract(body,'$.state')='dispatching')",
@@ -253,6 +265,12 @@ impl IntegrationService {
                     reservation_id,
                 } => {
                     let receipt = binding.message_status_record(&tx, &operation_id)?;
+                    if receipt.reservation_id.as_deref() != Some(reservation_id.as_str()) {
+                        return Err(IntegrationError::Conflict(
+                            "message recheck reservation does not match".into(),
+                        ));
+                    }
+                    reply.recorded_state = Some(receipt.state);
                     reply.recorded_ready = receipt.state == MessageState::Dispatching
                         && receipt.reservation_id.as_deref() == Some(reservation_id.as_str());
                 }

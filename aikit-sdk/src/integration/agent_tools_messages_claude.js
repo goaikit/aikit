@@ -61,6 +61,15 @@ async function pollMessages($) {
     const ticket = messageTicket;
     const check = await messageRpc($, {kind: 'recheck', operation_id: ticket.request.operation_id,
       reservation_id: ticket.reservation_id});
+    if (['unknown', 'failed', 'acknowledged'].includes(check.recorded_state)) {
+      // Retire this exact ticket, never reset/resend it. The SDK's immutable
+      // operation prevents it being reserved again; later reviews may still run.
+      messageAttempts.add(ticket.reservation_id);
+      messageTicket = undefined;
+      return;
+    }
+    if (check.recorded_state !== undefined && check.recorded_state !== 'dispatching')
+      throw new Error('Message attempt state changed unexpectedly');
     if (!check.recorded_idle || !check.recorded_ready || messageActive || messageStopped) return;
     if (!sameMessageReference(check.reference, ticket.target))
       throw new Error('Message target changed');
