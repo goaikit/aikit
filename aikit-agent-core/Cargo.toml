@@ -1,0 +1,16 @@
+[package]
+name = "aikit-agent-core"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "The aikit agent loop as an I/O-free step machine: no async runtime, no HTTP, no files, no clock. Builds for wasm32-unknown-unknown."
+repository = "https://github.com/goaikit/aikit"
+keywords = ["ai", "agents", "llm", "wasm", "openai"]
+categories = ["wasm"]
+
+# Keep this list short: every dependency must build for wasm32-unknown-unknown
+# and do no I/O. CI builds this crate for that target.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
