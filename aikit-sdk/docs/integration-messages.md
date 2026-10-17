@@ -4,6 +4,10 @@ The [recorded-context RPC preparation](recorded-message-bridge.md) now connects
 bounded fixed-command requests to this journal. Its opt-in Claude module now
 contains a native handoff candidate with raw return storage. The candidate has
 not qualified admission, acknowledgement or actual model-input consumption.
+The [generated-client native follow-up](../examples/message-client-qualification/README.md)
+now proves one limited ordinary Linux handoff, unchanged records on native resume
+and post-receipt crash/reopen. It also records and fixes the initial missing-binding
+startup failure. Production qualification and the Codelaya consumer upgrade remain open.
 
 This is the durable local portion of existing-session messaging. It reuses
 `IntegrationService`, `SessionBinding`, installation locks, the recorded session

@@ -182,7 +182,30 @@ impl IntegrationService {
                 |r| r.get(0),
             )
             .optional()?;
-        let binding = self.binding(&id.ok_or(IntegrationError::NotFound)?)?;
+        let Some(id) = id else {
+            let detached: bool = self.connection()?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE reference=?1 AND detached=1)",
+                [serde_json::to_string(&reference)?],
+                |row| row.get(0),
+            )?;
+            if detached {
+                return Err(IntegrationError::Detached);
+            }
+            if matches!(frame.action, RecordedMessageAction::Poll) {
+                // The native module may start before the application attaches.
+                // Wait without creating a binding, claiming a ticket or treating
+                // a genuinely detached subscription as a new attachment.
+                return Ok(RecordedMessageReply {
+                    schema_version: 1,
+                    reference,
+                    recorded_idle: false,
+                    recorded_ready: false,
+                    reservation: None,
+                });
+            }
+            return Err(IntegrationError::NotFound);
+        };
+        let binding = self.binding(&id)?;
         let _lock = self.state_lock()?;
         let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;

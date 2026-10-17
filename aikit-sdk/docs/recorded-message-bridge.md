@@ -24,8 +24,12 @@ compares the envelope with inherited module claims, canonical workspace and
 current recorded invocation. These are correlation checks, not authentication
 of a physical native caller. Required native identity/admission remains unqualified.
 
-The installation must have owned tool files, input observations and an existing
-active application binding. Polling cannot attach or revive a detached binding.
+The installation must have owned tool files and input observations. A native
+module can start before the application's first binding: `poll` then defers
+without attaching, reserving or claiming idle readiness. An active application
+binding is required to issue/recheck a ticket or retain a handoff. An explicitly
+detached binding refuses rather than being treated as a new waiting attachment.
+Polling cannot attach or revive a detached binding.
 Configured-file drift, replaced generation and unavailable bindings refuse work.
 No provider settings, credentials or owner state were changed by fixture tests.
 
@@ -150,6 +154,38 @@ consumer dependency upgrade or readiness promotion is claimed.
   run explicitly selected `/bin/sh`. No profiles/credentials were mounted and
   external networking was disabled.
 
-These tests use synthetic native APIs/journal generations. They do not prove the
-newly generated module loads or hands off a review in actual Claude, or close the
-native Windows policy-service blocker. Codelaya remains on its schema-9 pin.
+Those tests used synthetic native APIs/journal generations. They alone did not
+prove module loading/handoff or close the native Windows policy-service blocker.
+Codelaya remains on its schema-9 pin.
+
+## Native generated-client follow-up, 2026-10-18
+
+The [ordinary Linux qualification](../examples/message-client-qualification/README.md)
+now exercised the actual generated module, owned default project loading,
+fixed stdio RPC and durable journal. The first native attempt exposed the
+pre-attachment startup bug: NotFound stopped the pump before its first Turn.
+That unsent Accepted operation was retained separately and was never resent.
+The fix above defers initial polling without implicit attachment, while retaining
+detach refusal. The test envelope had silently created a binding; it now reads
+the observed reference without mutation and tests the initially empty table.
+
+A fresh run submitted the complete immutable payload once, to its original
+session. Independent outgoing-input capture found the exact payload once in the
+feedback request. The native raw return contained exact text/plugin origin and
+survived normal exit/reopen. Resume reused the native session with a new
+invocation, without changing/resending the old receipt. A separate owner prompt
+made one additional request, containing the old payload once in history. The
+original Unknown record/raw return also survived a subsequent container SIGKILL
+after receipt storage and completed owner work. No graceful end was synthesized.
+
+Windows 104 and Linux 106 serial SDK integration tests passed after the fix;
+scoped Windows library/example Clippy passed with the existing allowance. Six
+offline evidence mutations were rejected. Native containers used only synthetic
+context/public dummy key, no mounted profiles/credentials, and no external
+network after trust. Both were removed after retaining evidence.
+
+This proves this limited Linux native path and post-receipt persistence. It does
+not qualify native caller authentication, protected admission, actual production
+acknowledgement/consumption provenance, mid-handoff crash recovery, prompt
+rewrite/drop, real-model semantics, Codelaya orchestration or Windows/provider
+parity. Unknown and all capability/readiness assessments remain unchanged.

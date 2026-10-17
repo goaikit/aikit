@@ -153,7 +153,12 @@ fn bridge_frame(
     f: &Fixture,
     action: crate::integration::RecordedMessageAction,
 ) -> (crate::integration::RecordedMessageRequest, String) {
-    let reference = f.binding().reference().clone();
+    // A native poll supplies claims; it must not attach the application as an
+    // incidental effect of preparing its test envelope.
+    let reference = f
+        .service
+        .observed_session(&f.installation, "session")
+        .unwrap();
     let frame = crate::integration::RecordedMessageRequest {
         schema_version: 1,
         application_id: "message-fixture".into(),
@@ -194,6 +199,39 @@ fn synthetic_bridge_event(f: &Fixture, event: HookEvent) {
     });
     f.service.connection().unwrap().execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,'session',?3,?4)",
         params![uuid::Uuid::new_v4().to_string(),f.installation,serde_json::to_string(&request).unwrap(),binding.reference().installation_revision]).unwrap();
+}
+
+#[tokio::test]
+async fn module_poll_waits_for_first_application_binding_but_never_revives_detach() {
+    use crate::integration::RecordedMessageAction::Poll;
+    let f = bridge_fixture().await;
+    let (frame, env) = bridge_frame(&f, Poll);
+    let deferred = f
+        .service
+        .recorded_message_with_context(&f.installation, frame.clone(), Some(&env))
+        .unwrap();
+    assert!(!deferred.recorded_idle && !deferred.recorded_ready && deferred.reservation.is_none());
+    let count: i64 = f
+        .service
+        .connection()
+        .unwrap()
+        .query_row("SELECT count(*) FROM session_bindings", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "poll must not attach the application");
+    let binding = f.binding();
+    binding.stage_message(request("op")).unwrap();
+    synthetic_idle(&f);
+    let ticket = f
+        .service
+        .recorded_message_with_context(&f.installation, frame.clone(), Some(&env))
+        .unwrap();
+    assert!(ticket.reservation.is_some());
+    binding.detach().unwrap();
+    assert!(matches!(
+        f.service
+            .recorded_message_with_context(&f.installation, frame, Some(&env)),
+        Err(IntegrationError::Detached)
+    ));
 }
 
 #[tokio::test]

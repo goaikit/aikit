@@ -1,5 +1,13 @@
 # Existing-session feedback feasibility, 2026-10-18
 
+Subsequent reusable implementation and native evidence are recorded in the
+[generated SDK client qualification](../../aikit-sdk/examples/message-client-qualification/README.md).
+That run uses the owned native module and fixed-command durable SDK journal,
+without this probe's file rendezvous. It covers one original-session handoff,
+native resume without resend and post-receipt container crash/reopen, while
+retaining Unknown and the remaining production proof/admission/Windows gates.
+The original feasibility observations below remain historical evidence.
+
 `hooks/feedback-probe.js` is explicitly opt-in. The default plugin manifest still
 loads `register.js`. This is an ephemeral diagnostic rendezvous, not the SDK's
 durable messaging implementation or a readiness override.
