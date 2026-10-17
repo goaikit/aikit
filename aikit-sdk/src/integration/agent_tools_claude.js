@@ -23,6 +23,16 @@ async function invoke($, event) {
 }
 export function register(on) {
   on('session.start', async ($, event, next) => {
+    const native = { session_id: await $.session.id(), invocation_id: invocationId, cwd: await $.session.cwd() };
+    await $.env.set('AIKIT_INVOCATION_ENV_KEY', JSON.stringify({ schema_version: 1,
+      installation_id: config.installationId, native_context: native }));
+    if (config.sessionArgv) {
+      const started = await $.process.run(config.sessionArgv, { stdin: JSON.stringify({
+        hook_event_name: 'SessionStart', session_id: native.session_id, cwd: native.cwd,
+      }), timeoutMs: config.timeoutMs });
+      if (started.exitCode !== 0 || started.isStdoutTruncated !== false || started.isStderrTruncated !== false)
+        throw new Error('Recorded session startup unavailable');
+    }
     await $.tool.register({ name: config.toolName, description: config.description, isDeferred: false,
       inputSchema: { type: 'object', properties: { request: config.schema }, required: ['request'], additionalProperties: false } });
     $.ui.invalidate('prompt.context');

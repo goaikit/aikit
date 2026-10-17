@@ -26,6 +26,8 @@ timeout of 1–30,000 ms. The combined native tool name must fit 64 bytes.
 `.claude-plugin/plugin.json`, `hooks/hooks.json` and `hooks/register.js`.
 The name derives from application and installation identity; a content-derived
 manifest version changes when the module changes. `files()` supports embedding;
+`invocation_environment_key()` names its literal installation-scoped process
+environment variable; that name and its generation claims are not credentials.
 `export_to_new_directory` creates a new directory and refuses existing paths.
 A failed export may leave its new partial directory for inspection.
 
@@ -74,6 +76,13 @@ mutating state, the application must authenticate the invocation against trusted
 installation/credential data, validate the current recorded and native session
 generation and scope the request. Neither a UUID nor a session ID establishes
 that authority. This bridge supplies no new credential store or session registry.
+
+Owned installation now adds a startup callback through the existing hook handler
+and carries the module's invocation context into that handler's process environment.
+It bootstraps a recorded generation matching tool calls, without treating JSON
+metadata as authority. Standalone exports do not configure that handler. See
+[recorded tool generations](agent-tool-generations.md) for startup ordering,
+legacy compatibility and authentication limits.
 
 Return bounded JSON on stdout. Exit zero yields a normal tool result; a nonzero
 exit with valid JSON yields an application error result. Invalid JSON, exceptions,

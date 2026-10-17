@@ -8,6 +8,7 @@
 /// Existing managed-session persistence used by the HTTP gateway and embeddings.
 pub mod gateway_store;
 
+mod agent_tool_session;
 mod agent_tools;
 mod capabilities;
 mod codex;

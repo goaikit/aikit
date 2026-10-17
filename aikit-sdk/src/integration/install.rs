@@ -206,6 +206,8 @@ struct Receipt {
 struct OwnedAgentTool {
     relative_root: PathBuf,
     files: BTreeMap<String, String>,
+    #[serde(default)]
+    invocation_env_key: Option<String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PendingToolFile {
@@ -260,17 +262,17 @@ impl IntegrationService {
             state: fs::canonicalize(state)?,
         };
         let connection = service.connection()?;
-        // Version 7 adds owned plugin files. Older readers must not orphan them
-        // during update/removal or ignore a partially applied file journal.
+        // Version 8 requires inherited native invocation context for newly owned
+        // tool bridges. Older readers must not silently ignore that requirement.
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version > 7 {
+        if version > 8 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if version < 7 {
+        if version < 8 {
             let _lock = service.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 7 {
+            if version > 8 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {
@@ -284,11 +286,11 @@ impl IntegrationService {
             INSERT INTO installation_revisions SELECT id,lower(hex(randomblob(16))) FROM installations;
             CREATE TABLE session_bindings(id TEXT PRIMARY KEY, reference TEXT NOT NULL, detached INTEGER NOT NULL DEFAULT 0);
             CREATE UNIQUE INDEX active_session_binding ON session_bindings(reference) WHERE detached=0;
-            PRAGMA user_version=7; COMMIT;")?;
+            PRAGMA user_version=8; COMMIT;")?;
             } else {
                 // Version 3 already has the binding tables and revision column.
-                // Persisted JSON semantics changed in v4-v7. Keep all rows.
-                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=7; COMMIT;")?;
+                // Persisted JSON semantics changed in v4-v8. Keep all rows.
+                connection.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=8; COMMIT;")?;
             }
         }
         Ok(service)
@@ -349,6 +351,11 @@ impl IntegrationService {
             .and_then(|receipt| receipt.agent_tool);
         if let Some(tool) = &retained_tool {
             check_agent_tool(&spec.workspace, tool)?;
+            let old: Receipt =
+                serde_json::from_str(previous.as_deref().expect("retained receipt"))?;
+            if tool.invocation_env_key.is_some() && old.installation.spec.handler != spec.handler {
+                return Err(IntegrationError::Conflict("owned native startup handler changed; remove/reinstall the integration while idle before replacing its command".into()));
+            }
         }
         // Legacy callers updating an installation retain its explicit policy.
         // Choose under the metadata lock so concurrent plans cannot downgrade it.
@@ -817,6 +824,15 @@ impl IntegrationService {
         let raw = receipt_json(&connection, id)?.ok_or(IntegrationError::NotFound)?;
         let receipt: Receipt = serde_json::from_str(&raw)?;
         Ok(receipt.installation)
+    }
+
+    pub(super) fn agent_tool_environment_key(
+        &self,
+        id: &str,
+    ) -> Result<Option<String>, IntegrationError> {
+        let raw = receipt_json(&self.connection()?, id)?.ok_or(IntegrationError::NotFound)?;
+        let receipt: Receipt = serde_json::from_str(&raw)?;
+        Ok(receipt.agent_tool.and_then(|tool| tool.invocation_env_key))
     }
 
     pub(super) fn status_inner(

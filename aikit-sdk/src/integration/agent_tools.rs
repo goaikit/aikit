@@ -105,9 +105,14 @@ impl AgentToolCall {
 pub struct AgentToolPlugin {
     name: String,
     native_name: String,
+    invocation_env_key: String,
     files: BTreeMap<String, String>,
 }
 impl AgentToolPlugin {
+    /// Literal process-environment name used by this module, not a credential.
+    pub fn invocation_environment_key(&self) -> &str {
+        &self.invocation_env_key
+    }
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -158,6 +163,14 @@ impl jsonschema::Retrieve for LocalSchemaOnly {
 pub fn render_agent_tool_plugin(
     agent_key: &str,
     spec: &AgentToolSpec,
+) -> Result<AgentToolPlugin, IntegrationError> {
+    render_with_session_handler(agent_key, spec, None)
+}
+
+pub(super) fn render_with_session_handler(
+    agent_key: &str,
+    spec: &AgentToolSpec,
+    session_handler: Option<&HookCommand>,
 ) -> Result<AgentToolPlugin, IntegrationError> {
     if crate::agent(agent_key).is_none() {
         return Err(IntegrationError::UnknownAgent(agent_key.into()));
@@ -224,11 +237,19 @@ pub fn render_agent_tool_plugin(
     .collect();
     let config = json!({"applicationId":spec.application_id,"installationId":spec.installation_id,"toolName":spec.tool_name,"description":spec.description,
         "schema":spec.input_schema,"instructions":spec.instructions,"contextName":format!("{name}-instructions"),
-        "argv":argv,"timeoutMs":spec.timeout_ms});
+        "argv":argv,"timeoutMs":spec.timeout_ms,
+        "sessionArgv": session_handler.map(|handler| std::iter::once(handler.executable.to_string_lossy().into_owned()).chain(handler.arguments.clone()).collect::<Vec<_>>())});
     let module = include_str!("agent_tools_claude.js")
         .replace(
             "'AIKIT_NATIVE_TOOL_NAME'",
             &serde_json::to_string(&native_name)?,
+        )
+        .replace(
+            "'AIKIT_INVOCATION_ENV_KEY'",
+            &serde_json::to_string(&invocation_environment_key(
+                &spec.application_id,
+                &spec.installation_id,
+            ))?,
         )
         .replace("/* AIKIT_CONFIG */null", &serde_json::to_string(&config)?);
     let content_digest = format!("{:x}", Sha256::digest(module.as_bytes()));
@@ -249,8 +270,20 @@ pub fn render_agent_tool_plugin(
     Ok(AgentToolPlugin {
         name,
         native_name,
+        invocation_env_key: invocation_environment_key(&spec.application_id, &spec.installation_id),
         files,
     })
+}
+
+pub(super) fn invocation_environment_key(application_id: &str, installation_id: &str) -> String {
+    let hash = format!(
+        "{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&(application_id, installation_id))
+                .expect("string tuple serializes")
+        )
+    );
+    format!("AIKIT_NATIVE_{}", hash[..16].to_ascii_uppercase())
 }
 
 #[cfg(test)]

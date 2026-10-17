@@ -246,7 +246,7 @@ fn report(
                 CompletionDecision | FinalAnswerCapture | FailedCompletionObservation => (true, Support::Unknown, "Adapter exists, but this version/platform/mode has no matching native qualification scenario."),
                 SuccessfulCompletionObservation => (false, Support::Unsupported, "No accepted-completion observation is implemented for user-started sessions. Stop Allow and SessionEnd are insufficient."),
                 MessageSubmission | MessageReconciliation => (false, Support::Unsupported, "Existing-session native message transport and receipt reconciliation are not implemented. Managed session transports are a different topology."),
-                NativeSessionIdentity => (false, Support::Unsupported, "No native invocation nonce or equivalent process identity is implemented; delayed hooks may reuse session IDs."),
+                NativeSessionIdentity => (true, Support::Unknown, "Owned Claude tool modules publish a fresh invocation ID into installation-scoped inherited process context and bootstrap a matching recorded SessionStart. Existing binding/journal checks reject observed old invocations. Controlled Linux startup matches tool/native session and recorded generation; this is not native process authentication, liveness, proof against an unseen delayed start, or Windows qualification."),
                 HardHookDeadline => (true, Support::Unknown, "Callback timeout reserves 250 ms for response handling; blocking workers and operating-system I/O do not establish a universal hard deadline."),
             }
         };

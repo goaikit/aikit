@@ -54,6 +54,77 @@ impl Fixture {
 
 struct Fixed(Decision);
 
+#[test]
+fn inherited_tool_generation_is_bounded_scoped_and_never_copied_from_hook_json() {
+    let f = Fixture::new(10);
+    let installation = f.service.installed(&f.id).unwrap();
+    let mut input = f.input("SessionStart");
+    input["invocation_id"] = json!("model-cannot-select-this");
+    let mut request = decode(&installation, input.to_string().as_bytes()).unwrap();
+    assert!(request.invocation_id.is_none());
+    let invocation = uuid::Uuid::new_v4().to_string();
+    let valid = json!({"schema_version":1,"installation_id":f.id,
+        "native_context":{"session_id":"native-session","invocation_id":invocation,"cwd":f.workspace}});
+    let bind = |request: &mut HookRequest, value: Option<&str>| {
+        super::super::agent_tool_session::bind_environment(&installation, request, value)
+    };
+    bind(&mut request, Some(&valid.to_string())).unwrap();
+    assert_eq!(request.invocation_id.as_deref(), Some(invocation.as_str()));
+    assert!(bind(&mut request, None).is_err());
+    assert!(bind(&mut request, Some(&"x".repeat(65537))).is_err());
+    for (pointer, value) in [
+        ("/schema_version", json!(2)),
+        ("/installation_id", json!("foreign")),
+        ("/native_context/session_id", json!("another-session")),
+        ("/native_context/invocation_id", json!("invalid")),
+        ("/native_context/cwd", json!(f._dir.path())),
+    ] {
+        let mut bad = valid.clone();
+        *bad.pointer_mut(pointer).unwrap() = value;
+        let failure = bind(&mut request, Some(&bad.to_string())).unwrap_err();
+        assert!(!failure.to_string().contains("another-session"));
+    }
+}
+
+#[tokio::test]
+async fn owned_module_without_inherited_generation_refuses_before_journaling_a_start() {
+    let f = Fixture::new(10);
+    let plan = f
+        .service
+        .plan_agent_tool(
+            &f.id,
+            crate::integration::AgentToolSpec {
+                application_id: "example".into(),
+                installation_id: f.id.clone(),
+                tool_name: "review".into(),
+                description: "Selected application operations".into(),
+                input_schema: json!({"type":"object"}),
+                instructions: "Use selected operations".into(),
+                handler: HookCommand {
+                    executable: std::env::current_exe().unwrap(),
+                    arguments: vec![],
+                },
+                timeout_ms: 5000,
+            },
+        )
+        .unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+    let mut input = f.input("SessionStart");
+    input["invocation_id"] = json!(uuid::Uuid::new_v4().to_string());
+    let response = f
+        .service
+        .handle_hook(&f.id, input.to_string().as_bytes(), &Never)
+        .await;
+    assert_eq!(response.exit_code, 0); // deferred notification, no authority
+    input["hook_event_name"] = json!("UserPromptSubmit");
+    let response = f
+        .service
+        .handle_hook(&f.id, input.to_string().as_bytes(), &Never)
+        .await;
+    assert_ne!(response.exit_code, 0);
+    assert!(f.service.events(&f.id, 0, 100).unwrap().records.is_empty());
+}
+
 #[tokio::test]
 async fn recorded_admission_serializes_journal_detach_and_installation_writers_until_drop() {
     let f = Fixture::new(10);

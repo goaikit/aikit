@@ -1,0 +1,42 @@
+//! Inherited generation claims from the owned native module, not credentials or
+//! native-process authentication. The installation selects the environment key;
+//! native JSON cannot override it. Reuse existing journal/binding validation.
+use super::{HookRequest, Installation, IntegrationError, NativeToolContext};
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionEnvironment {
+    schema_version: u32,
+    installation_id: String,
+    native_context: NativeToolContext,
+}
+
+pub(super) fn bind_environment(
+    installation: &Installation,
+    request: &mut HookRequest,
+    value: Option<&str>,
+) -> Result<(), IntegrationError> {
+    let refused = || {
+        IntegrationError::Invalid(
+            "owned native invocation context is missing or inconsistent".into(),
+        )
+    };
+    let value = value
+        .filter(|value| value.len() <= 64 * 1024)
+        .ok_or_else(refused)?;
+    let context: SessionEnvironment = serde_json::from_str(value).map_err(|_| refused())?;
+    if installation.spec.agent_key != "claude"
+        || context.schema_version != 1
+        || context.installation_id != installation.id
+        || context.native_context.session_id != request.session_id
+        || uuid::Uuid::parse_str(&context.native_context.invocation_id).is_err()
+        || !context.native_context.cwd.is_absolute()
+        || std::fs::canonicalize(context.native_context.cwd).map_err(|_| refused())?
+            != installation.spec.workspace
+    {
+        return Err(refused());
+    }
+    request.invocation_id = Some(context.native_context.invocation_id);
+    Ok(())
+}

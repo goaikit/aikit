@@ -73,6 +73,16 @@ fn owned_tool_preview_update_legacy_hook_update_and_removal_preserve_unrelated_f
     assert_eq!(update.files.len(), 2);
     f.service.apply_install(&update.id).unwrap();
     let module = fs::read(root.join("hooks/register.js")).unwrap();
+    let mut incompatible = f.spec.clone();
+    incompatible
+        .handler
+        .arguments
+        .push("changed-handler".into());
+    assert!(matches!(
+        f.service.plan_install(incompatible),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(fs::read(root.join("hooks/register.js")).unwrap(), module);
     let hook_update = f.service.plan_install(f.spec.clone()).unwrap();
     assert!(hook_update.files.is_empty());
     f.service.apply_install(&hook_update.id).unwrap();
@@ -581,7 +591,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     assert!(matches!(
         reopened.apply_install(&plan.id).unwrap(),
         InstallationStatus::Configured { .. }
@@ -592,7 +602,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
     reopened
         .connection()
         .unwrap()
-        .execute_batch("PRAGMA user_version=8;")
+        .execute_batch("PRAGMA user_version=9;")
         .unwrap();
     assert!(matches!(
         IntegrationService::open(f._dir.path().join("private-state")),

@@ -16,6 +16,7 @@ impl IntegrationService {
         let raw = receipt_json(&connection, installation_id)?.ok_or(IntegrationError::NotFound)?;
         let mut receipt: Receipt = serde_json::from_str(&raw)?;
         let installation = receipt.installation.clone();
+        super::super::command::validate_handler(&installation.spec.handler)?;
         if spec.application_id != installation.spec.application_id
             || spec.installation_id != installation.id
         {
@@ -32,9 +33,14 @@ impl IntegrationService {
                 "hook/tool installation has drifted".into(),
             ));
         }
-        let plugin = super::super::render_agent_tool_plugin(&installation.spec.agent_key, &spec)?;
+        let plugin = super::super::agent_tools::render_with_session_handler(
+            &installation.spec.agent_key,
+            &spec,
+            Some(&installation.spec.handler),
+        )?;
         let relative_root = PathBuf::from(".claude").join("skills").join(plugin.name());
         receipt.agent_tool = Some(OwnedAgentTool {
+            invocation_env_key: Some(plugin.invocation_environment_key().into()),
             relative_root,
             files: plugin
                 .files()

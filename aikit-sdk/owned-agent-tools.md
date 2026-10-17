@@ -1,5 +1,9 @@
 # Owned native tool files
 
+The current schema is 8: owned tools now bootstrap inherited recorded generation
+context as described in [tool generations](agent-tool-generations.md). The
+ownership gate below originally introduced schema 7 and retains its own evidence.
+
 `IntegrationService::plan_agent_tool(installation_id, spec)` adds or updates the
 generated tool and instructions on an existing configured hook installation.
 The spec's application and installation IDs must match that receipt. Other

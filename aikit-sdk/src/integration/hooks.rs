@@ -121,7 +121,26 @@ impl IntegrationService {
         let started = Instant::now();
         let installation = self.installed(installation_id)?;
         let installation_revision = self.installation_revision(installation_id)?;
-        let request = decode(&installation, input)?;
+        let mut request = decode(&installation, input)?;
+        if let Some(key) = self.agent_tool_environment_key(installation_id)? {
+            let value = std::env::var(key).ok();
+            // Native classic startup precedes module session.start. Defer this
+            // notification without journaling/binding; the owned module sends
+            // its own start through this handler after publishing its context.
+            if value.is_none() && request.event == HookEvent::SessionStarted {
+                return Ok(HookResponse {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    request_id: None,
+                });
+            }
+            super::agent_tool_session::bind_environment(
+                &installation,
+                &mut request,
+                value.as_deref(),
+            )?;
+        }
         let journal_body = serde_json::to_string(&journal_copy(&request))?;
         // Reserve response/commit time within the configured native process limit.
         let deadline = started

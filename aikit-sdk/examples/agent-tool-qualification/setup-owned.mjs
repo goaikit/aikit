@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 
 const evidence = process.argv[2];
 assert(evidence && path.isAbsolute(evidence));
@@ -34,8 +35,8 @@ assert.equal(JSON.parse(fs.readFileSync(config)).env.OTHER_FIXTURE_SETTING, 'kee
 const info = JSON.parse(execFileSync('/generated/agent_tool_plugin', ['export', 'claude', path.join(evidence, 'rendered')],
   { input: JSON.stringify(spec), encoding: 'utf8' }));
 const root = path.join(workspace, '.claude/skills', info.plugin_name);
-for (const name of ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'hooks/register.js']) {
-  assert.deepEqual(fs.readFileSync(path.join(root, name)), fs.readFileSync(path.join(evidence, 'rendered', name)));
+for (const file of tool.files) {
+  assert.equal(createHash('sha256').update(fs.readFileSync(file.path)).digest('hex'), file.after_fingerprint);
 }
 fs.writeFileSync(path.join(evidence, 'spec.json'), JSON.stringify(spec));
 fs.writeFileSync(path.join(evidence, 'plugin-info.json'), JSON.stringify(info));
