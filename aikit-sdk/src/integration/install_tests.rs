@@ -39,7 +39,7 @@ fn existing_handle_cannot_recreate_a_journal_removed_after_open() {
 }
 
 #[test]
-fn existing_open_retains_owned_receipts_through_supported_schema_upgrade() {
+fn existing_open_requires_explicit_upgrade_without_losing_owned_receipts() {
     let fixture = Fixture::new();
     let installed = fixture.install();
     fixture
@@ -48,6 +48,21 @@ fn existing_open_retains_owned_receipts_through_supported_schema_upgrade() {
         .unwrap()
         .pragma_update(None, "user_version", 9)
         .unwrap();
+    assert!(matches!(
+        IntegrationService::open_existing(&fixture.service.state),
+        Err(IntegrationError::Invalid(_))
+    ));
+    assert_eq!(
+        fixture
+            .service
+            .connection()
+            .unwrap()
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        9
+    );
+    // Only the separate owner-controlled initializer performs an upgrade.
+    IntegrationService::open(&fixture.service.state).unwrap();
     let existing = IntegrationService::open_existing(&fixture.service.state).unwrap();
     assert_eq!(
         existing.installed(&installed.installation_id).unwrap().id,

@@ -6,14 +6,16 @@
 journal without creating a replacement state directory/database. Missing state
 returns NotFound; empty/unversioned state is refused. Subsequent connections
 through that handle also disable SQLite CREATE, including if the database is
-removed after construction. Supported additive schema upgrades still apply.
+removed after construction. An older schema is refused without changing its
+version; owner-controlled `open` can initialize or upgrade before existing-only use.
 This is not a read-only or authorization boundary: normal SDK mutations remain
 available against the existing journal. Initial owner-controlled setup continues
 to use `open`, which may create fresh state. Consumers need no SDK filename or
 schema knowledge to select between those construction modes.
 
 Tests cover missing directory, missing/empty journal, removal after construction
-and preserving owned receipts through a supported version-9 to version-11 upgrade.
+and refusing an implicit version-9 upgrade before preserving owned receipts through
+an explicit owner-controlled version-11 upgrade.
 The Windows integration gate passed 110 cases and scoped Clippy passed with the
 existing uninlined-format allowance. Offline Linux passed 112 integration cases
 serially, compiled both bridge/hook embedding examples and passed the 14 unchanged

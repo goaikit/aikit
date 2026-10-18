@@ -249,8 +249,8 @@ impl IntegrationService {
     }
 
     /// Open an existing integration journal without replacing missing state.
-    /// Supported schema upgrades remain explicit SDK behavior. Every subsequent
-    /// connection through this handle also disables SQLite file creation.
+    /// Requires the current schema; owner-controlled `open` may initialize or
+    /// upgrade first. Every later connection also disables SQLite file creation.
     pub fn open_existing(state: impl AsRef<Path>) -> Result<Self, IntegrationError> {
         Self::open_inner(state.as_ref(), false)
     }
@@ -310,6 +310,11 @@ impl IntegrationService {
         }
         if version > 11 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
+        }
+        if !allow_create && version < 11 {
+            return Err(IntegrationError::Invalid(
+                "existing integration journal requires an explicit schema upgrade".into(),
+            ));
         }
         if version < 11 {
             let _lock = service.state_lock()?;
