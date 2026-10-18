@@ -12,6 +12,7 @@ mod agent_tool_session;
 mod agent_tools;
 mod capabilities;
 mod codex;
+mod codex_messages;
 mod command;
 mod cursor;
 mod hooks;
@@ -28,6 +29,10 @@ pub use agent_tools::{
 pub use capabilities::{
     CapabilityAssessment, CapabilityReport, CapabilityRequirementsError, IntegrationCapability,
     SessionMode, Support,
+};
+pub use codex_messages::{
+    inspect_codex_message_snapshot, CodexMessageInspection, CodexMessageLocation,
+    CodexMessageMatch,
 };
 pub use hooks::{
     Decision, DecisionFuture, HandlerError, HookHandler, HookPage, HookRecord, HookRequest,

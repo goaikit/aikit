@@ -17,6 +17,48 @@ MessageSubmission/MessageReconciliation assessments are unchanged.
 
 ## Reusable surface
 
+### Codex copied-record inspection
+
+`inspect_codex_message_snapshot(thread_id, client_message_id, frozen_content,
+queue_json, history_json)` now decodes copied native `thread/queue/list` and
+`thread/read` results inside the SDK. It returns `CodexMessageInspection` with
+every matching caller-ID location, exact plain-text payload comparison, next queue
+cursor and whether supplied Turns have unloaded items. Queue locations contain
+the native queue ID; retained locations contain Turn/message IDs. Duplicate IDs
+and overlapping queue/history observations remain separate records. Changed
+bytes, attachments, annotations and unknown text framing never match.
+
+This is factual inspection for the future provider adapter and qualification
+tools. It does not connect, reserve, mutate a journal, emit `MessageProof`, infer
+native source/generation, prove acknowledgement/consumption or authorize resend.
+Codelaya must continue using the generic integration contracts rather than decode
+Codex records itself. Native source/version qualification, authenticated query
+context and canonical workspace validation belong to the eventual adapter.
+
+Inputs are bounded: nonempty target/client IDs up to 256 bytes, frozen content
+up to the existing 4 MiB limit, and at most 16 MiB per copied native response.
+Oversized inputs refuse without truncation. Missing target/shape/cursor fails;
+unknown item views are marked unloaded. A null next cursor ends only the supplied
+queue page, and no unloaded items in supplied Turns does not establish complete
+history. No-match output is not an authoritative absence or failure decision.
+
+The thin `inspect_codex_message` example reads only bounded JSON stdin and prints
+the result. `examples/codex-queue-qualification/verify-sdk.mjs` exercises that
+compiled example against retained native pending, post-restart and duplicate-ID
+records, plus changed payload, mixed-time overlap and wrong-target controls.
+Windows Rust 1.88 passed seven unit tests and six copied-native-record assertions.
+Scoped library/example Clippy passed with the existing uninlined-format allowance.
+The first lint caught a new use of a Rust 1.82 method; it was replaced with an
+equivalent compatible expression. The SDK MSRV/lint requirements were not raised
+or weakened; an actual Rust 1.75 build was not performed in this gate.
+
+Final Windows inspection example SHA-256:
+`77cfdc62b43175b02aaee99f5a9793c4bd1269ab8c9b2cdbd19e4150abfb0cc7`.
+Local logs are `windows-codex-record-inspection-final-{tests,build,clippy}.log`
+and `windows-codex-sdk-native-snapshots-final.json`. This is not a new native
+model run, production transport or Codelaya dependency upgrade. No SDK wire/schema
+or capability assessment changed.
+
 | Method | Local behavior |
 | --- | --- |
 | `stage_message(MessageRequest)` | Persist exact UTF-8 content, SHA-256 and original binding/session/revision/start-cursor/invocation. Return Accepted, meaning local storage only. |
