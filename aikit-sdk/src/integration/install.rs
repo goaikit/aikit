@@ -240,11 +240,26 @@ struct Pending {
 /// Journal rows may contain existing config values while an operation is pending.
 pub struct IntegrationService {
     state: PathBuf,
+    allow_create: bool,
 }
 
 impl IntegrationService {
     pub fn open(state: impl AsRef<Path>) -> Result<Self, IntegrationError> {
-        if !state.as_ref().exists() {
+        Self::open_inner(state.as_ref(), true)
+    }
+
+    /// Open an existing integration journal without replacing missing state.
+    /// Supported schema upgrades remain explicit SDK behavior. Every subsequent
+    /// connection through this handle also disables SQLite file creation.
+    pub fn open_existing(state: impl AsRef<Path>) -> Result<Self, IntegrationError> {
+        Self::open_inner(state.as_ref(), false)
+    }
+
+    fn open_inner(state: &Path, allow_create: bool) -> Result<Self, IntegrationError> {
+        if !state.exists() {
+            if !allow_create {
+                return Err(IntegrationError::NotFound);
+            }
             let mut builder = fs::DirBuilder::new();
             builder.recursive(true);
             #[cfg(unix)]
@@ -252,26 +267,47 @@ impl IntegrationService {
                 use std::os::unix::fs::DirBuilderExt;
                 builder.mode(0o700);
             }
-            builder.create(state.as_ref())?;
+            builder.create(state)?;
         }
-        reject_link(state.as_ref())?;
+        reject_link(state)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if fs::metadata(state.as_ref())?.permissions().mode() & 0o077 != 0 {
+            if fs::metadata(state)?.permissions().mode() & 0o077 != 0 {
                 return Err(IntegrationError::Invalid(
                     "integration state directory must be private (mode 0700)".into(),
                 ));
             }
         }
+        if !allow_create {
+            let database = state.join("integration.db");
+            reject_link(&database)?;
+            let metadata = match fs::metadata(&database) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(IntegrationError::NotFound);
+                }
+                other => other?,
+            };
+            if !metadata.is_file() || metadata.len() == 0 {
+                return Err(IntegrationError::Invalid(
+                    "existing integration journal is empty or not a file".into(),
+                ));
+            }
+        }
         let service = Self {
             state: fs::canonicalize(state)?,
+            allow_create,
         };
         let connection = service.connection()?;
         // Version 11 retains raw, unqualified native handoff returns separately
         // from the version 10 qualified message observation journal.
         // Older readers must not silently drop those journal semantics.
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        if !allow_create && version == 0 {
+            return Err(IntegrationError::Invalid(
+                "existing integration journal has no supported schema".into(),
+            ));
+        }
         if version > 11 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
@@ -322,7 +358,12 @@ impl IntegrationService {
     pub(super) fn connection(&self) -> Result<Connection, IntegrationError> {
         let path = self.state.join("integration.db");
         reject_link(&path)?;
-        let connection = Connection::open(path)?;
+        let flags = if self.allow_create {
+            rusqlite::OpenFlags::default()
+        } else {
+            rusqlite::OpenFlags::default() & !rusqlite::OpenFlags::SQLITE_OPEN_CREATE
+        };
+        let connection = Connection::open_with_flags(path, flags)?;
         connection.busy_timeout(Duration::from_secs(5))?;
         connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         Ok(connection)

@@ -1,5 +1,68 @@
 use super::*;
 
+#[test]
+fn existing_open_never_creates_a_missing_or_empty_journal() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    assert!(matches!(
+        IntegrationService::open_existing(&state),
+        Err(IntegrationError::NotFound)
+    ));
+    assert!(!state.exists());
+    let created = IntegrationService::open(&state).unwrap();
+    let database = state.join("integration.db");
+    fs::remove_file(&database).unwrap();
+    assert!(matches!(
+        IntegrationService::open_existing(&state),
+        Err(IntegrationError::NotFound)
+    ));
+    assert!(!database.exists());
+    fs::write(&database, []).unwrap();
+    assert!(matches!(
+        IntegrationService::open_existing(&state),
+        Err(IntegrationError::Invalid(_))
+    ));
+    assert_eq!(fs::metadata(&database).unwrap().len(), 0);
+    drop(created);
+}
+
+#[test]
+fn existing_handle_cannot_recreate_a_journal_removed_after_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    IntegrationService::open(&state).unwrap();
+    let existing = IntegrationService::open_existing(&state).unwrap();
+    let database = state.join("integration.db");
+    fs::remove_file(&database).unwrap();
+    assert!(existing.connection().is_err());
+    assert!(!database.exists());
+}
+
+#[test]
+fn existing_open_retains_owned_receipts_through_supported_schema_upgrade() {
+    let fixture = Fixture::new();
+    let installed = fixture.install();
+    fixture
+        .service
+        .connection()
+        .unwrap()
+        .pragma_update(None, "user_version", 9)
+        .unwrap();
+    let existing = IntegrationService::open_existing(&fixture.service.state).unwrap();
+    assert_eq!(
+        existing.installed(&installed.installation_id).unwrap().id,
+        installed.installation_id
+    );
+    assert_eq!(
+        existing
+            .connection()
+            .unwrap()
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        11
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn owner_drop_releases_installation_lock_with_inherited_description() {
