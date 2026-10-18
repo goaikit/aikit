@@ -152,6 +152,23 @@ for authentication or proof of liveness.
 
 ## Existing-session messaging
 
+### Codex native queue candidate, 2026-10-18
+
+The [native Windows fixture](../examples/codex-queue-qualification/README.md)
+now records standalone Codex 0.163.0 accepting a sole original-thread queue
+submission, exact UTF-8 input in the next recorded main request, two completed
+native Turns and post-terminal-exit history/queue lookup. Replies were scripted.
+Both terminal launches still reported native thread source `vscode`, including
+the fresh case with app identity variables cleared; topology labels remain
+unqualified. App-bundled packaging, long socket paths and proxy framing failures
+are retained separately. No owner session/profile was used.
+
+Generated experimental queue/add/list/start and retained client IDs warrant an
+existing-session adapter feasibility effort. Caller-selected ID idempotence,
+changed content, daemon/generation replacement, busy admission, uncertain handoff
+and consumption provenance are not qualified. No SDK message capability or
+production Codelaya readiness is promoted by this example.
+
 AIKit still needs native dispatch, durable operation receipts and reconciliation
 for user-started sessions. Managed gateway transports own the processes they start
 and must not be used as an attachment mechanism. Pi's public extension messaging
