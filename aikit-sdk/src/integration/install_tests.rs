@@ -97,6 +97,212 @@ fn owner_drop_releases_installation_lock_with_inherited_description() {
     assert!(lock(&path).is_ok());
 }
 
+#[test]
+fn explicit_upgrade_never_initializes_missing_empty_or_unsupported_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&state),
+        Err(IntegrationError::NotFound)
+    ));
+    assert!(!state.exists());
+    IntegrationService::open(&state).unwrap();
+    let database = state.join("integration.db");
+    fs::remove_file(&database).unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&state),
+        Err(IntegrationError::NotFound)
+    ));
+    assert!(!database.exists());
+    fs::write(&database, []).unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&state),
+        Err(IntegrationError::Invalid(_))
+    ));
+    assert_eq!(fs::metadata(&database).unwrap().len(), 0);
+    fs::remove_file(&database).unwrap();
+    for version in [0, 8, 12] {
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            IntegrationService::upgrade_existing(&state),
+            Err(IntegrationError::Invalid(_))
+        ));
+        let connection = Connection::open(&database).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            version
+        );
+        assert_eq!(
+            connection
+                .query_row::<u32, _, _>(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+            0
+        );
+        drop(connection);
+        fs::remove_file(&database).unwrap();
+    }
+}
+
+#[test]
+fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
+    let f = Fixture::new();
+    let plan = f.install();
+    let installation = f.service.installed(&plan.installation_id).unwrap();
+    let before = fs::read(&f.config).unwrap();
+    f.service.connection().unwrap().execute_batch("DROP TABLE message_handoffs; DROP TABLE message_observations; DROP TABLE outgoing_messages; PRAGMA user_version=9").unwrap();
+    let report = IntegrationService::upgrade_existing(&f.service.state).unwrap();
+    assert_eq!(
+        report,
+        StateUpgradeReport {
+            previous_schema: 9,
+            current_schema: 11,
+            changed: true
+        }
+    );
+    let upgraded = IntegrationService::open_existing(&f.service.state).unwrap();
+    assert_eq!(
+        upgraded.installed(&plan.installation_id).unwrap().spec,
+        installation.spec
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    assert_eq!(
+        IntegrationService::upgrade_existing(&f.service.state).unwrap(),
+        StateUpgradeReport {
+            previous_schema: 11,
+            current_schema: 11,
+            changed: false
+        }
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+}
+
+#[test]
+fn explicit_upgrade_refuses_attached_bindings_and_unapplied_plans() {
+    let f = Fixture::new();
+    f.install();
+    let config = fs::read(&f.config).unwrap();
+    let connection = f.service.connection().unwrap();
+    // Storage fixture only. No native session, identity or readiness is claimed.
+    connection
+        .execute_batch(
+            "INSERT INTO session_bindings VALUES ('fixture','{}',0); PRAGMA user_version=9",
+        )
+        .unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        9
+    );
+    connection
+        .execute_batch("UPDATE session_bindings SET detached=1")
+        .unwrap();
+    for phase in ["planned", "prepared"] {
+        connection
+            .execute(
+                "INSERT INTO install_plans VALUES ('pending','fixture',?1,'{}')",
+                [phase],
+            )
+            .unwrap();
+        assert!(
+            matches!(IntegrationService::upgrade_existing(&f.service.state), Err(IntegrationError::RecoveryRequired(id)) if id == "pending")
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            9
+        );
+        connection
+            .execute("DELETE FROM install_plans WHERE id='pending'", [])
+            .unwrap();
+    }
+    assert!(
+        IntegrationService::upgrade_existing(&f.service.state)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT reference FROM session_bindings WHERE id='fixture'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        "{}"
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), config);
+}
+
+#[test]
+fn explicit_upgrade_rollback_retains_old_schema_on_late_sql_failure() {
+    let f = Fixture::new();
+    let connection = f.service.connection().unwrap();
+    connection.execute_batch("DROP TABLE outgoing_messages; DROP TABLE message_handoffs; DROP TABLE message_observations; CREATE TABLE message_observations(broken TEXT); PRAGMA user_version=9").unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::Sql(_))
+    ));
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        9
+    );
+    assert_eq!(connection.query_row::<u32, _, _>("SELECT count(*) FROM sqlite_master WHERE name IN ('outgoing_messages','message_handoffs')", [], |row| row.get(0)).unwrap(), 0);
+}
+
+#[test]
+fn explicit_upgrade_refuses_missing_core_history_and_another_writer() {
+    let f = Fixture::new();
+    let connection = f.service.connection().unwrap();
+    connection.execute_batch("PRAGMA user_version=9").unwrap();
+    let guard = f.service.state_lock().unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::Conflict(_))
+    ));
+    drop(guard);
+    connection
+        .execute_batch("DROP TABLE hook_invocations")
+        .unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::Sql(_))
+    ));
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        9
+    );
+    assert_eq!(
+        connection
+            .query_row::<u32, _, _>(
+                "SELECT count(*) FROM sqlite_master WHERE name='hook_invocations'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     service: IntegrationService,

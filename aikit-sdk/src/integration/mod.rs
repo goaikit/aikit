@@ -31,8 +31,7 @@ pub use capabilities::{
     SessionMode, Support,
 };
 pub use codex_messages::{
-    inspect_codex_message_snapshot, CodexMessageInspection, CodexMessageLocation,
-    CodexMessageMatch,
+    inspect_codex_message_snapshot, CodexMessageInspection, CodexMessageLocation, CodexMessageMatch,
 };
 pub use hooks::{
     Decision, DecisionFuture, HandlerError, HookHandler, HookPage, HookRecord, HookRequest,
@@ -41,7 +40,7 @@ pub use hooks::{
 pub use install::{
     AgentToolFileChange, CompletionBlockingPolicy, HookCommand, HookEvent, InstallPlan,
     InstallSpec, Installation, InstallationStatus, IntegrationError, IntegrationService,
-    SettingChange,
+    SettingChange, StateUpgradeReport,
 };
 pub use message_bridge::{
     MessageHandoffOutcome, MessageHandoffRecord, RecordedMessageAction, RecordedMessageReply,

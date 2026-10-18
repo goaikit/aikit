@@ -239,6 +239,10 @@ only an unchanged owned file. Unrelated extensions/settings remain untouched.
 Schema 4 protects generated-source receipts and deletion plans from older readers;
 existing JSON installation plans and receipts migrate without losing ownership.
 Do not downgrade the integration state database.
+Owner maintenance can use the explicit, existing-only
+[`IntegrationService::upgrade_existing`](docs/integration-state-upgrade.md)
+for schemas 9/10 to 11. Runtime `open_existing` still refuses implicit upgrades;
+metadata migration neither qualifies native capabilities nor updates hooks.
 
 Pi loads this extension through its own project-trust/resource lifecycle. Reload
 or restart explicitly between sessions after installation/update/removal; removing

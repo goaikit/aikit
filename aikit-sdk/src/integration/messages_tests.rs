@@ -922,6 +922,61 @@ async fn journal_and_projection_roll_back_together_and_corrupt_content_is_not_se
 }
 
 #[tokio::test]
+async fn explicit_upgrade_retains_unknown_receipt_and_detached_binding_without_resend() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding
+        .stage_message(request("unknown-before-upgrade"))
+        .unwrap();
+    binding.reserve_message("unknown-before-upgrade").unwrap();
+    binding.recover_message_record("unknown-before-upgrade").unwrap();
+    let before = binding.message_status("unknown-before-upgrade").unwrap();
+    assert_eq!(before.state, MessageState::Unknown);
+    binding.detach().unwrap();
+    let events = f.service.events(&f.installation, 0, 100).unwrap();
+    let connection = f.service.connection().unwrap();
+    connection
+        .execute_batch("DROP TABLE message_handoffs; PRAGMA user_version=10")
+        .unwrap();
+    let report = IntegrationService::upgrade_existing(f.dir.path().join("state")).unwrap();
+    assert_eq!(report.previous_schema, 10);
+    assert_eq!(report.current_schema, 11);
+    assert!(report.changed);
+    let upgraded = IntegrationService::open_existing(f.dir.path().join("state")).unwrap();
+    let historical = upgraded.binding(binding.id()).unwrap();
+    assert_eq!(historical.status().unwrap(), SessionStatus::Detached);
+    assert_eq!(
+        historical.message_status("unknown-before-upgrade").unwrap(),
+        before
+    );
+    assert_eq!(
+        historical
+            .stage_message(request("unknown-before-upgrade"))
+            .unwrap(),
+        before
+    );
+    assert!(matches!(
+        historical.reserve_message("unknown-before-upgrade"),
+        Err(IntegrationError::Detached)
+    ));
+    assert_eq!(
+        upgraded
+            .events(&f.installation, 0, 100)
+            .unwrap()
+            .records
+            .len(),
+        events.records.len()
+    );
+    assert_eq!(
+        connection
+            .query_row::<u32, _, _>("SELECT count(*) FROM message_handoffs", [], |row| row
+                .get(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn migration_retains_history_and_legacy_generation_cannot_reserve() {
     let f = Fixture::new().await;
     let binding = f.binding();

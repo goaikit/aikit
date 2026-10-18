@@ -16,6 +16,17 @@ use std::{
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
+// Called only inside a transaction. The initializer and explicit owner upgrade
+// use the same additive migration; retained payloads and evidence are untouched.
+fn migrate_message_tables(connection: &Connection) -> Result<(), IntegrationError> {
+    connection.execute_batch("CREATE TABLE IF NOT EXISTS outgoing_messages(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id));
+        CREATE TABLE IF NOT EXISTS message_observations(cursor INTEGER PRIMARY KEY AUTOINCREMENT, installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, event_id TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(installation_id,event_id));
+        CREATE INDEX IF NOT EXISTS message_observations_by_operation ON message_observations(installation_id,operation_id,cursor);
+        CREATE TABLE IF NOT EXISTS message_handoffs(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id));
+        PRAGMA user_version=11;")?;
+    Ok(())
+}
+
 #[path = "install_completion.rs"]
 mod completion;
 pub use completion::{CompletionBlockingPolicy, SettingChange};
@@ -243,6 +254,15 @@ pub struct IntegrationService {
     allow_create: bool,
 }
 
+/// Local metadata migration only. This neither updates installed hooks nor
+/// qualifies the provider, its effective configuration or any native session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateUpgradeReport {
+    pub previous_schema: u32,
+    pub current_schema: u32,
+    pub changed: bool,
+}
+
 impl IntegrationService {
     pub fn open(state: impl AsRef<Path>) -> Result<Self, IntegrationError> {
         Self::open_inner(state.as_ref(), true)
@@ -256,6 +276,13 @@ impl IntegrationService {
     }
 
     fn open_inner(state: &Path, allow_create: bool) -> Result<Self, IntegrationError> {
+        let service = Self::open_state(state, allow_create)?;
+        let connection = service.connection()?;
+        service.initialize_schema(&connection, allow_create)?;
+        Ok(service)
+    }
+
+    fn open_state(state: &Path, allow_create: bool) -> Result<Self, IntegrationError> {
         if !state.exists() {
             if !allow_create {
                 return Err(IntegrationError::NotFound);
@@ -294,11 +321,90 @@ impl IntegrationService {
                 ));
             }
         }
-        let service = Self {
+        Ok(Self {
             state: fs::canonicalize(state)?,
             allow_create,
-        };
-        let connection = service.connection()?;
+        })
+    }
+
+    /// Explicitly upgrade an existing schema 9/10 journal to the current schema.
+    /// Never creates missing state, repairs malformed tables, changes native
+    /// configuration, detaches a binding or submits a message. Existing attached
+    /// bindings and unapplied installation plans must first be resolved by their
+    /// owner with the compatible runtime. The installation lock and one SQLite
+    /// transaction cover preflight and the additive migration together.
+    ///
+    /// Current-schema calls are idempotent and do not need quiescence because
+    /// they do not migrate anything. Older schemas need a separate legacy
+    /// upgrade procedure; `open` retains its existing initializer semantics.
+    pub fn upgrade_existing(
+        state: impl AsRef<Path>,
+    ) -> Result<StateUpgradeReport, IntegrationError> {
+        let service = Self::open_state(state.as_ref(), false)?;
+        let _guard = service.state_lock()?;
+        let mut connection = service.connection()?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let previous_schema: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if !(9..=11).contains(&previous_schema) {
+            return Err(IntegrationError::Invalid(
+                "explicit integration upgrade supports existing schemas 9 through 11 only".into(),
+            ));
+        }
+        // Do not turn a claimed legacy version with missing core history into
+        // a fresh journal. Preparing these reads verifies the expected columns
+        // without parsing, modifying or dropping retained application payloads.
+        for query in [
+            "SELECT id,body FROM installations LIMIT 0",
+            "SELECT id,installation_id,phase,body FROM install_plans LIMIT 0",
+            "SELECT sequence,id,installation_id,session_id,body,decision,installation_revision FROM hook_invocations LIMIT 0",
+            "SELECT installation_id,revision FROM installation_revisions LIMIT 0",
+            "SELECT id,reference,detached FROM session_bindings LIMIT 0",
+        ] {
+            tx.prepare(query)?;
+        }
+        if previous_schema >= 10 {
+            tx.prepare("SELECT installation_id,operation_id,body FROM outgoing_messages LIMIT 0")?;
+            tx.prepare("SELECT cursor,installation_id,operation_id,event_id,body FROM message_observations LIMIT 0")?;
+        }
+        if previous_schema == 11 {
+            tx.prepare("SELECT installation_id,operation_id,body FROM message_handoffs LIMIT 0")?;
+        }
+        if previous_schema != 11 {
+            let attached: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE detached=0)",
+                [],
+                |row| row.get(0),
+            )?;
+            if attached {
+                return Err(IntegrationError::Conflict(
+                    "detach recorded session bindings with the compatible runtime before upgrading integration state; no agent was stopped".into(),
+                ));
+            }
+            let pending: Option<String> = tx
+                .query_row(
+                    "SELECT id FROM install_plans WHERE phase != 'applied' ORDER BY id LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(plan) = pending {
+                return Err(IntegrationError::RecoveryRequired(plan));
+            }
+            migrate_message_tables(&tx)?;
+        }
+        tx.commit()?;
+        Ok(StateUpgradeReport {
+            previous_schema,
+            current_schema: 11,
+            changed: previous_schema != 11,
+        })
+    }
+
+    fn initialize_schema(
+        &self,
+        connection: &Connection,
+        allow_create: bool,
+    ) -> Result<(), IntegrationError> {
         // Version 11 retains raw, unqualified native handoff returns separately
         // from the version 10 qualified message observation journal.
         // Older readers must not silently drop those journal semantics.
@@ -317,7 +423,7 @@ impl IntegrationService {
             ));
         }
         if version < 11 {
-            let _lock = service.state_lock()?;
+            let _lock = self.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
             if version > 11 {
@@ -338,14 +444,14 @@ impl IntegrationService {
             }
             // Version 3+ already has bindings/revisions. Retain every row;
             // the outgoing-message migration is additive.
-            connection.execute_batch("BEGIN IMMEDIATE;
-                CREATE TABLE IF NOT EXISTS outgoing_messages(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id));
-                CREATE TABLE IF NOT EXISTS message_observations(cursor INTEGER PRIMARY KEY AUTOINCREMENT, installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, event_id TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(installation_id,event_id));
-                CREATE INDEX IF NOT EXISTS message_observations_by_operation ON message_observations(installation_id,operation_id,cursor);
-                CREATE TABLE IF NOT EXISTS message_handoffs(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id));
-                PRAGMA user_version=11; COMMIT;")?;
+            connection.execute_batch("BEGIN IMMEDIATE;")?;
+            if let Err(error) = migrate_message_tables(connection) {
+                let _ = connection.execute_batch("ROLLBACK;");
+                return Err(error);
+            }
+            connection.execute_batch("COMMIT;")?;
         }
-        Ok(service)
+        Ok(())
     }
 
     pub(super) fn state_lock(&self) -> Result<InstallationLock, IntegrationError> {
