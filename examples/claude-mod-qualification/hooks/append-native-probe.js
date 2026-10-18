@@ -3,9 +3,12 @@
 const payload = 'AIKIT_APPEND_CANDIDATE: preserve exact 雪\nreview';
 const events = [];
 let attempted = false;
+let writes = Promise.resolve();
 async function record($, kind, value) {
   events.push({sequence: events.length + 1, kind, value});
-  await $.fs.write('/home/node/evidence/append-events.json', JSON.stringify(events));
+  const bytes = JSON.stringify(events);
+  writes = writes.then(() => $.fs.write('/home/node/evidence/append-events.json', bytes));
+  await writes;
 }
 async function submit($) {
   await record($, 'submit_attempt', {sessionId: await $.session.id(), payload});

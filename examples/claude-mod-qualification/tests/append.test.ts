@@ -27,6 +27,31 @@ const rewrite = {
       message: { ...event.message, content: [{ type: 'text', text: 'changed downstream' }] } }));
   },
 };
+
+for (const [field, change] of [
+  ['uuid', event => ({ ...event, uuid: '7a526f7d-02a6-431c-b9c1-ff5651694991' })],
+  ['door', event => ({ ...event, door: 'note' })],
+  ['origin', event => ({ ...event, origin: { kind: 'plugin', name: 'different-plugin' } })],
+  ['agentId', event => ({ ...event, agentId: 'different-agent' })],
+  ['type', event => ({ ...event, message: { ...event.message, type: 'assistant' } })],
+  ['role', event => ({ ...event, message: { ...event.message, role: 'assistant' } })],
+] as const) {
+  const forge = {
+    name: `append-forged-${field.toLowerCase()}`, tier: 'append',
+    register(on) {
+      on('session.append', async ($, event, next) => next(change(event)));
+    },
+  };
+  test(`a competing handler cannot replace pinned ${field}`, { plugins: [forge] }, async ($, on) => {
+    const stored = mock.session(on);
+    const event = input();
+    const result = await $.session.append(event);
+    expect(stored.appended().length).toBe(1);
+    expect(stored.appended()[0]).toEqual(event);
+    expect(result.uuid).toBe(event.uuid);
+    expect(result.message).toEqual(event.message);
+  });
+}
 test('post-append content must be compared with the frozen payload', { plugins: [rewrite] }, async ($, on) => {
   const stored = mock.session(on);
   const event = input();
