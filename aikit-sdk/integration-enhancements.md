@@ -169,6 +169,15 @@ changed content, daemon/generation replacement, busy admission, uncertain handof
 and consumption provenance are not qualified. No SDK message capability or
 production Codelaya readiness is promoted by this example.
 
+The follow-up controlled busy fixture falsified native ID idempotence: identical
+client IDs with same or changed text produced three distinct successful queue
+entries. All probes were deleted before release. A separate sole feedback entry
+then waited for idle and retained its caller ID/text after real daemon restart
+and ordinary resume, without another recorded request. Preserve the SDK's
+immutable staging/sole reservation and generation requirement; never retry a
+native add to reconcile an uncertain result. The linked report/verifier retain
+the native counterexample and distinguish it from application T13 compliance.
+
 AIKit still needs native dispatch, durable operation receipts and reconciliation
 for user-started sessions. Managed gateway transports own the processes they start
 and must not be used as an attachment mechanism. Pi's public extension messaging

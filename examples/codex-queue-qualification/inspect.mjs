@@ -5,7 +5,7 @@ import {spawn} from 'node:child_process';
 import {Duplex} from 'node:stream';
 import WebSocket from 'ws';
 const [executable,home,directory,stage='live']=process.argv.slice(2);
-assert(['live','after-exit'].includes(stage));
+assert(['live','after-exit','after-restart'].includes(stage));
 for(const value of [executable,home,directory])assert(path.isAbsolute(value));
 assert.equal(fs.readFileSync(path.join(home,'config.toml'),'utf8').includes('Codelaya loopback fixture'),true);
 const owner=JSON.parse(fs.readFileSync(path.join(directory,'owner-review.json')));
@@ -31,6 +31,6 @@ try{
  assert.equal(history.thread.id,owner.thread_id);
  assert.equal(path.resolve(history.thread.cwd),path.join(directory,'workspace'));
  const queue=await rpc('thread/queue/list',{threadId:owner.thread_id,limit:100});
- fs.writeFileSync(path.join(directory,`native-inspection${stage==='live'?'':'-after-exit'}.json`),JSON.stringify({initialize,history,queue},null,2),{flag:'wx'});
+ fs.writeFileSync(path.join(directory,`native-inspection${stage==='live'?'':`-${stage}`}.json`),JSON.stringify({initialize,history,queue},null,2),{flag:'wx'});
  console.log(JSON.stringify({inspected:true,thread_id:history.thread.id,turns:history.thread.turns?.length,queued:queue.data.length}));
 }finally{clearTimeout(timer);socket.terminate();child.stdin.end();child.kill();}
