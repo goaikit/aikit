@@ -310,6 +310,15 @@ impl IntegrationService {
     pub(super) fn state_lock(&self) -> Result<InstallationLock, IntegrationError> {
         lock(&self.state.join("integration.lock"))
     }
+    // Retaining an already-returned native result may overlap its ensuing
+    // Turn-start notification. Wait only for this local journal writer; never
+    // retry the native call, semantic validation or a transaction body.
+    pub(super) fn handoff_record_lock(&self) -> Result<InstallationLock, IntegrationError> {
+        lock_with_wait(
+            &self.state.join("integration.lock"),
+            Duration::from_millis(250),
+        )
+    }
     pub(super) fn connection(&self) -> Result<Connection, IntegrationError> {
         let path = self.state.join("integration.db");
         reject_link(&path)?;
@@ -1242,6 +1251,10 @@ impl Drop for InstallationLock {
 }
 
 fn lock(path: &Path) -> Result<InstallationLock, IntegrationError> {
+    lock_with_wait(path, Duration::ZERO)
+}
+
+fn lock_with_wait(path: &Path, budget: Duration) -> Result<InstallationLock, IntegrationError> {
     reject_link(path)?;
     let file = fs::OpenOptions::new()
         .read(true)
@@ -1249,9 +1262,26 @@ fn lock(path: &Path) -> Result<InstallationLock, IntegrationError> {
         .create(true)
         .truncate(false)
         .open(path)?;
-    fs2::FileExt::try_lock_exclusive(&file).map_err(|_| {
-        IntegrationError::Conflict("another integration writer holds the lock".into())
-    })?;
+    let started = std::time::Instant::now();
+    loop {
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => break,
+            Err(error) => {
+                let contention = fs2::lock_contended_error();
+                let busy = error.kind() == std::io::ErrorKind::WouldBlock
+                    || (error.raw_os_error().is_some()
+                        && error.raw_os_error() == contention.raw_os_error());
+                if !busy || started.elapsed() >= budget {
+                    return Err(IntegrationError::Conflict(
+                        "another integration writer holds the lock".into(),
+                    ));
+                }
+                std::thread::sleep(
+                    Duration::from_millis(5).min(budget.saturating_sub(started.elapsed())),
+                );
+            }
+        }
+    }
     Ok(InstallationLock(file))
 }
 fn replace_config(

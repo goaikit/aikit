@@ -216,9 +216,20 @@ impl IntegrationService {
             return Err(IntegrationError::NotFound);
         };
         let binding = self.binding(&id)?;
-        let _lock = self.state_lock()?;
+        let inspecting = matches!(frame.action, RecordedMessageAction::Inspect);
+        let _lock = if inspecting {
+            None
+        } else if matches!(frame.action, RecordedMessageAction::RecordHandoff { .. }) {
+            Some(self.handoff_record_lock()?)
+        } else {
+            Some(self.state_lock()?)
+        };
         let mut connection = self.connection()?;
-        let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = connection.transaction_with_behavior(if inspecting {
+            TransactionBehavior::Deferred
+        } else {
+            TransactionBehavior::Immediate
+        })?;
         if binding.status_inner(&tx)? != super::SessionStatus::Observed {
             return Err(IntegrationError::StaleSession);
         }

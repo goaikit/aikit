@@ -1,5 +1,30 @@
 # Recorded-context message preparation RPC
 
+## Local writer contention
+
+`Inspect` uses a deferred SQLite read snapshot and never takes the SDK writer
+file lock or reserves a message. `Poll` and `Recheck` retain their existing
+exclusive recorded-state checks. Retaining an already-returned `RecordHandoff`
+may overlap the resulting native Turn-start writer; only that local lock
+acquisition has a 250 ms wait budget. It sleeps between contention checks and
+executes the transaction body once after acquisition. It does not repeat native
+I/O, retry semantic validation, retarget a message or change hook deadlines.
+Other SDK writers retain their existing immediate refusal behavior.
+
+Exhausting the local wait preserves Dispatching, with no invented raw receipt or
+proof. Existing explicit/passive recovery must conservatively retain Unknown;
+the module still stops rather than retrying native submission. This is bounded
+local journal coordination, not protected native admission or delivery proof.
+Tests hold the writer while inspecting, refuse Poll, exhaust raw retention's
+budget, release a competing writer, and verify exact idempotent raw retention
+with no second reservation. Windows integration gate: 107 cases passed, with
+scoped library/bridge-example Clippy using the existing uninlined-format allowance.
+Offline Linux: 109 integration cases passed serially (plus the separately run
+gateway recovery case, which overlaps that suite), both embedding examples
+compiled and 14 unchanged Node behavior tests passed. The first new Rust test
+compile used a misspelled fixture helper and is retained as failed evidence;
+the corrected Windows/Linux gates passed. Native qualification remains separate.
+
 `IntegrationService::handle_recorded_message_request(installation_id, reader)`
 provides bounded stdin/stdout preparation for an owned module's fixed command.
 The `integration_message_bridge` embedding example delegates directly to it.

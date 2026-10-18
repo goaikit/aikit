@@ -467,6 +467,86 @@ async fn recorded_bridge_bounds_fail_before_reservation_and_frames_cannot_choose
 }
 
 #[tokio::test]
+async fn inspection_reads_while_a_writer_is_held_but_poll_still_refuses_to_reserve() {
+    use crate::integration::RecordedMessageAction::{Inspect, Poll};
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    binding.stage_message(request("op")).unwrap();
+    synthetic_idle(&f);
+    let held = f.service.state_lock().unwrap();
+    let (inspect, env) = bridge_frame(&f, Inspect);
+    let reply = f
+        .service
+        .recorded_message_with_context(&f.installation, inspect, Some(&env))
+        .unwrap();
+    assert!(reply.recorded_idle && reply.reservation.is_none());
+    let (poll, _) = bridge_frame(&f, Poll);
+    assert!(matches!(
+        f.service
+            .recorded_message_with_context(&f.installation, poll, Some(&env)),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(
+        binding.message_status("op").unwrap().state,
+        MessageState::Accepted
+    );
+    drop(held);
+}
+
+#[tokio::test]
+async fn raw_return_waits_for_only_the_local_writer_and_budget_exhaustion_never_reserves_again() {
+    use crate::integration::{MessageHandoffOutcome, RecordedMessageAction};
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    binding.stage_message(request("op")).unwrap();
+    let ticket = binding.reserve_message("op").unwrap();
+    let (frame, env) = bridge_frame(
+        &f,
+        RecordedMessageAction::RecordHandoff {
+            operation_id: "op".into(),
+            reservation_id: ticket.reservation_id.clone(),
+            outcome: MessageHandoffOutcome::Returned {
+                result: json!({"text":ticket.request.content}),
+            },
+        },
+    );
+    let held = f.service.state_lock().unwrap();
+    assert!(matches!(
+        f.service
+            .recorded_message_with_context(&f.installation, frame.clone(), Some(&env)),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert!(binding.message_handoff("op").unwrap().is_none());
+    assert_eq!(
+        binding.message_status("op").unwrap().state,
+        MessageState::Dispatching
+    );
+    drop(held);
+    let held = f.service.state_lock().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        drop(held);
+    });
+    f.service
+        .recorded_message_with_context(&f.installation, frame.clone(), Some(&env))
+        .unwrap();
+    release.join().unwrap();
+    let stored = binding.message_handoff("op").unwrap().unwrap();
+    f.service
+        .recorded_message_with_context(&f.installation, frame, Some(&env))
+        .unwrap();
+    assert_eq!(binding.message_handoff("op").unwrap().unwrap(), stored);
+    let receipt = binding.message_status("op").unwrap();
+    assert_eq!(receipt.state, MessageState::Unknown);
+    assert_eq!(
+        receipt.reservation_id.as_deref(),
+        Some(ticket.reservation_id.as_str())
+    );
+    assert!(receipt.acknowledgement.is_none() && receipt.consumption.is_none());
+    assert!(binding.reserve_message("op").is_err());
+}
+
+#[tokio::test]
 async fn raw_handoff_is_durable_and_replayed_exactly_without_qualifying_delivery() {
     use crate::integration::{MessageHandoffOutcome, RecordedMessageAction};
     let f = bridge_fixture().await;
