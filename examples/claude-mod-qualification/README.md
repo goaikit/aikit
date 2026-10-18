@@ -37,6 +37,10 @@ No SDK capability is promoted by a static validation pass. Real interactive
 completion, abort/competing-handler behavior, accepted messaging, consumption and
 reconciliation require separate executed evidence.
 
+The later [append acknowledgement candidate](append-acknowledgement-candidate.md)
+adds four offline storage-contract tests. Its separate interactive probe is
+unqualified: normal onboarding could not finish with external networking disabled.
+
 ## Offline engine results, Claude 2.1.296 Linux x86_64
 
 Four tests run inside the executable's native plugin test engine, with every
