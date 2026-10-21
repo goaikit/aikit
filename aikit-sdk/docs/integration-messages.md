@@ -108,11 +108,13 @@ promote readiness. Original-scope late proof remains readable after replacement.
 ## Migration and remaining integration
 
 Schema 10 adds outgoing-message and observation tables; schema 11 adds a separate
-raw-handoff table, without replacing existing hook/install/binding/message rows.
-Older schema-9/10 SDKs refuse the newer store when opened;
+raw handoff journal. Schema 12 adds [candidate native append checkpoints](message-append-checkpoints.md)
+for pre/post-storage row correlation without qualifying delivery. Both later
+tables are additive and do not reinterpret existing message/observation records.
+Older schema-9/10/11 SDKs refuse the newer store when opened;
 coordinate consumer upgrades and preserve backups. No owner's state was migrated
-by development tests. The current Codelaya package still pins schema-9 code and
-does not use this draft API yet.
+by development tests. Consumer pins and package qualification are separate;
+this change does not upgrade a consumer dependency or qualify native delivery.
 
 Remaining: native qualification of the owned client; protected native
 admission/caller and actual send/consumption provenance; high-level submission

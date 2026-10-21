@@ -241,8 +241,10 @@ existing JSON installation plans and receipts migrate without losing ownership.
 Do not downgrade the integration state database.
 Owner maintenance can use the explicit, existing-only
 [`IntegrationService::upgrade_existing`](docs/integration-state-upgrade.md)
-for schemas 9/10 to 11. Runtime `open_existing` still refuses implicit upgrades;
+for schemas 9/10/11 to 12. Runtime `open_existing` still refuses implicit upgrades;
 metadata migration neither qualifies native capabilities nor updates hooks.
+Schema 12 adds [candidate native append checkpoints](docs/message-append-checkpoints.md)
+to retain stable pre-storage row identities independently of qualified receipts.
 
 Pi loads this extension through its own project-trust/resource lifecycle. Reload
 or restart explicitly between sessions after installation/update/removal; removing

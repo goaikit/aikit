@@ -104,6 +104,294 @@ fn request(id: &str) -> MessageRequest {
         content: "Exact frozen JSON 雪\n\0".into(),
     }
 }
+fn append_intent(row: &str) -> crate::integration::MessageAppendIntent {
+    crate::integration::MessageAppendIntent {
+        native_row_id: row.into(),
+        native_source: "claude-code/2.1.296/session.append".into(),
+        framed_payload_sha256: "a".repeat(64),
+    }
+}
+fn append_stored() -> crate::integration::MessageAppendStored {
+    crate::integration::MessageAppendStored {
+        stored_payload_sha256: "a".repeat(64),
+        evidence_reference: "retained-native-row-result".into(),
+    }
+}
+
+#[tokio::test]
+async fn append_checkpoint_survives_lost_return_and_reopen_without_ack_or_resend() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("append")).unwrap();
+    let ticket = binding.reserve_message("append").unwrap();
+    let prepared = binding
+        .prepare_message_append(&ticket, append_intent("row"))
+        .unwrap();
+    assert!(prepared.stored.is_none());
+    assert_eq!(
+        binding
+            .prepare_message_append(&ticket, append_intent("row"))
+            .unwrap(),
+        prepared
+    );
+    assert_ne!(prepared.intent.framed_payload_sha256, ticket.payload_sha256);
+    let recovered = binding.recover_message_record("append").unwrap();
+    assert_eq!(recovered.state, MessageState::Unknown);
+    assert!(recovered.acknowledgement.is_none() && recovered.consumption.is_none());
+    let reopened = IntegrationService::open_existing(f.dir.path().join("state")).unwrap();
+    let historical = reopened.binding(binding.id()).unwrap();
+    assert_eq!(
+        historical.message_append_checkpoint("append").unwrap(),
+        Some(prepared)
+    );
+    let stored = historical
+        .record_message_append_stored(&ticket, "row", append_stored())
+        .unwrap();
+    assert!(stored.stored_at_unix_ms.is_some());
+    assert_eq!(
+        historical
+            .record_message_append_stored(&ticket, "row", append_stored())
+            .unwrap(),
+        stored
+    );
+    assert_eq!(historical.message_status("append").unwrap(), recovered);
+    assert!(historical
+        .message_observations("append", 0, 10)
+        .unwrap()
+        .records
+        .is_empty());
+    assert!(historical.reserve_message("append").is_err());
+}
+
+#[tokio::test]
+async fn append_rewrite_is_retained_without_replacing_intent_or_qualified_proof() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("rewrite")).unwrap();
+    let ticket = binding.reserve_message("rewrite").unwrap();
+    binding
+        .prepare_message_append(&ticket, append_intent("row"))
+        .unwrap();
+    let mut changed = append_stored();
+    changed.stored_payload_sha256 = "b".repeat(64);
+    let result = binding
+        .record_message_append_stored(&ticket, "row", changed)
+        .unwrap();
+    assert_ne!(
+        result.intent.framed_payload_sha256,
+        result.stored.unwrap().stored_payload_sha256
+    );
+    assert!(binding
+        .record_message_append_stored(&ticket, "row", append_stored())
+        .is_err());
+    assert_eq!(
+        binding.message_status("rewrite").unwrap().state,
+        MessageState::Dispatching
+    );
+    let proven = binding
+        .record_message_observation(&ticket, ack("independent-proof"))
+        .unwrap();
+    assert_eq!(proven.state, MessageState::Acknowledged);
+    assert_eq!(binding.message_status("rewrite").unwrap(), proven);
+    assert!(binding
+        .message_append_checkpoint("rewrite")
+        .unwrap()
+        .unwrap()
+        .stored
+        .is_some());
+}
+
+#[tokio::test]
+async fn append_checkpoint_rejects_row_reuse_changed_scope_and_unprepared_storage() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("one")).unwrap();
+    binding.stage_message(request("two")).unwrap();
+    let one = binding.reserve_message("one").unwrap();
+    let two = binding.reserve_message("two").unwrap();
+    assert!(binding
+        .record_message_append_stored(&one, "row", append_stored())
+        .is_err());
+    let prepared = binding
+        .prepare_message_append(&one, append_intent("row"))
+        .unwrap();
+    assert!(binding
+        .prepare_message_append(&two, append_intent("row"))
+        .is_err());
+    assert!(binding
+        .prepare_message_append(&one, append_intent("changed-row"))
+        .is_err());
+    assert!(binding
+        .record_message_append_stored(&one, "changed-row", append_stored())
+        .is_err());
+    for fault in 0..4 {
+        let mut foreign = one.clone();
+        match fault {
+            0 => foreign.reservation_id = "foreign".into(),
+            1 => foreign.target.invocation_id = Some("foreign".into()),
+            2 => foreign.request.content.push_str("changed"),
+            _ => foreign.payload_sha256 = "b".repeat(64),
+        }
+        assert!(binding
+            .prepare_message_append(&foreign, append_intent("row"))
+            .is_err());
+        assert!(binding
+            .record_message_append_stored(&foreign, "row", append_stored())
+            .is_err());
+    }
+    assert_eq!(
+        binding.message_append_checkpoint("one").unwrap(),
+        Some(prepared)
+    );
+    assert!(binding.message_append_checkpoint("two").unwrap().is_none());
+}
+
+#[tokio::test]
+async fn append_late_storage_is_historical_but_new_intent_requires_original_active_attempt() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("one")).unwrap();
+    binding.stage_message(request("two")).unwrap();
+    let one = binding.reserve_message("one").unwrap();
+    let two = binding.reserve_message("two").unwrap();
+    binding
+        .prepare_message_append(&one, append_intent("row"))
+        .unwrap();
+    binding.detach().unwrap();
+    assert!(binding
+        .prepare_message_append(&two, append_intent("new-row"))
+        .is_err());
+    f.start(true).await;
+    let stored = binding
+        .record_message_append_stored(&one, "row", append_stored())
+        .unwrap();
+    assert_eq!(
+        binding
+            .prepare_message_append(&one, append_intent("row"))
+            .unwrap(),
+        stored
+    );
+    assert!(binding.reserve_message("one").is_err());
+    assert!(binding
+        .message_status("one")
+        .unwrap()
+        .acknowledgement
+        .is_none());
+}
+
+#[tokio::test]
+async fn append_invalid_bounds_digests_and_corrupt_stored_index_fail_closed() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("one")).unwrap();
+    let ticket = binding.reserve_message("one").unwrap();
+    for fault in 0..4 {
+        let mut intent = append_intent("row");
+        match fault {
+            0 => intent.native_row_id = "x".repeat(257),
+            1 => intent.native_row_id.push('\0'),
+            2 => intent.native_source.clear(),
+            _ => intent.framed_payload_sha256 = "A".repeat(64),
+        }
+        assert!(binding.prepare_message_append(&ticket, intent).is_err());
+    }
+    assert!(binding.message_append_checkpoint("one").unwrap().is_none());
+    binding
+        .prepare_message_append(&ticket, append_intent("row"))
+        .unwrap();
+    let mut invalid = append_stored();
+    invalid.evidence_reference = "x".repeat(4097);
+    assert!(binding
+        .record_message_append_stored(&ticket, "row", invalid)
+        .is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE message_append_checkpoints SET native_row_id='corrupt'",
+            [],
+        )
+        .unwrap();
+    assert!(binding.message_append_checkpoint("one").is_err());
+}
+
+#[tokio::test]
+async fn append_schema_eleven_upgrade_retains_unknown_handoff_and_never_reserves_again() {
+    use crate::integration::{MessageHandoffOutcome, MessageHandoffRecord};
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("old")).unwrap();
+    let ticket = binding.reserve_message("old").unwrap();
+    binding.recover_message_record("old").unwrap();
+    let before = binding.message_status("old").unwrap();
+    let handoff = MessageHandoffRecord {
+        schema_version: 1,
+        reservation: ticket.clone(),
+        outcome: MessageHandoffOutcome::Returned {
+            result: json!({"text":"raw return only"}),
+        },
+        recorded_at_unix_ms: 1,
+    };
+    let connection = f.service.connection().unwrap();
+    connection
+        .execute(
+            "INSERT INTO message_handoffs VALUES (?1,'old',?2)",
+            params![f.installation, serde_json::to_string(&handoff).unwrap()],
+        )
+        .unwrap();
+    connection
+        .execute_batch("DROP TABLE message_append_checkpoints; PRAGMA user_version=11;")
+        .unwrap();
+    assert!(IntegrationService::open_existing(f.dir.path().join("state")).is_err());
+    assert!(IntegrationService::upgrade_existing(f.dir.path().join("state")).is_err());
+    binding.detach().unwrap();
+    let report = IntegrationService::upgrade_existing(f.dir.path().join("state")).unwrap();
+    assert_eq!(
+        (
+            report.previous_schema,
+            report.current_schema,
+            report.changed
+        ),
+        (11, 12, true)
+    );
+    assert!(
+        !IntegrationService::upgrade_existing(f.dir.path().join("state"))
+            .unwrap()
+            .changed
+    );
+    let reopened = IntegrationService::open_existing(f.dir.path().join("state")).unwrap();
+    let old = reopened.binding(binding.id()).unwrap();
+    assert_eq!(old.message_handoff("old").unwrap(), Some(handoff));
+    assert_eq!(old.message_status("old").unwrap(), before);
+    assert!(old.message_append_checkpoint("old").unwrap().is_none());
+    assert!(old
+        .prepare_message_append(&ticket, append_intent("row"))
+        .is_err());
+    assert!(old.reserve_message("old").is_err());
+}
+
+#[tokio::test]
+async fn append_schema_upgrade_rolls_back_on_malformed_checkpoint_table() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("retained")).unwrap();
+    let before = binding.message_status("retained").unwrap();
+    binding.detach().unwrap();
+    let connection = f.service.connection().unwrap();
+    connection.execute_batch("DROP TABLE message_append_checkpoints; CREATE TABLE message_append_checkpoints(broken TEXT); PRAGMA user_version=11;").unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(f.dir.path().join("state")),
+        Err(IntegrationError::Sql(_))
+    ));
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        11
+    );
+    assert_eq!(binding.message_status("retained").unwrap(), before);
+}
+
 fn observation(id: &str, proof: MessageProof) -> MessageObservation {
     MessageObservation {
         event_id: id.into(),
@@ -929,7 +1217,9 @@ async fn explicit_upgrade_retains_unknown_receipt_and_detached_binding_without_r
         .stage_message(request("unknown-before-upgrade"))
         .unwrap();
     binding.reserve_message("unknown-before-upgrade").unwrap();
-    binding.recover_message_record("unknown-before-upgrade").unwrap();
+    binding
+        .recover_message_record("unknown-before-upgrade")
+        .unwrap();
     let before = binding.message_status("unknown-before-upgrade").unwrap();
     assert_eq!(before.state, MessageState::Unknown);
     binding.detach().unwrap();
@@ -940,7 +1230,7 @@ async fn explicit_upgrade_retains_unknown_receipt_and_detached_binding_without_r
         .unwrap();
     let report = IntegrationService::upgrade_existing(f.dir.path().join("state")).unwrap();
     assert_eq!(report.previous_schema, 10);
-    assert_eq!(report.current_schema, 11);
+    assert_eq!(report.current_schema, 12);
     assert!(report.changed);
     let upgraded = IntegrationService::open_existing(f.dir.path().join("state")).unwrap();
     let historical = upgraded.binding(binding.id()).unwrap();

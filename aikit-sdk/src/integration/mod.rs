@@ -17,6 +17,7 @@ mod command;
 mod cursor;
 mod hooks;
 mod install;
+mod message_append;
 mod message_bridge;
 mod messages;
 mod pi;
@@ -42,6 +43,7 @@ pub use install::{
     InstallSpec, Installation, InstallationStatus, IntegrationError, IntegrationService,
     SettingChange, StateUpgradeReport,
 };
+pub use message_append::{MessageAppendCheckpoint, MessageAppendIntent, MessageAppendStored};
 pub use message_bridge::{
     MessageHandoffOutcome, MessageHandoffRecord, RecordedMessageAction, RecordedMessageReply,
     RecordedMessageRequest, MESSAGE_BRIDGE_PAYLOAD_LIMIT,

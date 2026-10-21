@@ -127,7 +127,7 @@ The existing CLI example is an embedding seam, not a usable agent transport.
 It requires an already installed, journaled and application-bound session; it
 does not create one. Current Codelaya/package SDK pins and readiness are unchanged.
 Polling can reserve an operation, so it is not a read-only status command. Use
-`message_status` for inspection. Opening a store can upgrade it to schema 11;
+`message_status` for inspection. The owner initializer can upgrade it to schema 12;
 do not run the example against an older live consumer's state before a coordinated
 upgrade. Development tests touched only disposable fixture state.
 
@@ -139,6 +139,10 @@ credentials were absent from the Linux container and external networking was
 disabled. No native send/admission/receipt/consumption qualification is implied.
 
 ## Opt-in native client and raw handoffs
+
+Schema 12 additionally provides [candidate append checkpoints](message-append-checkpoints.md)
+through the reusable library. The generated client described below still retains
+raw submit returns; it is not yet wired to pre/post-append checkpoint capture.
 
 `plan_agent_tool_with_message_bridge(installation_id, spec, fixed_handler)` uses
 the existing owned file plan, fingerprints and recovery/removal machinery. It

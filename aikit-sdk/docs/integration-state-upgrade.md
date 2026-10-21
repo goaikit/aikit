@@ -1,9 +1,9 @@
 # Explicit existing integration-state upgrade
 
 `IntegrationService::upgrade_existing(state)` is an owner maintenance operation
-for existing schema 9/10 journals. It reuses the initializer's additive message
+for existing schema 9/10/11 journals. It reuses the initializer's additive message
 table migration and returns `StateUpgradeReport { previous_schema,
-current_schema, changed }`. The current schema is 11. It opens no native agent,
+current_schema, changed }`. The current schema is 12. It opens no native agent,
 transport, model or provider configuration.
 
 ```rust,no_run
@@ -12,7 +12,7 @@ use aikit_sdk::integration::IntegrationService;
 # fn upgrade() -> Result<(), Box<dyn std::error::Error>> {
 let report = IntegrationService::upgrade_existing("/private/application-state")?;
 let service = IntegrationService::open_existing("/private/application-state")?;
-assert_eq!(report.current_schema, 11);
+assert_eq!(report.current_schema, 12);
 # Ok(()) }
 ```
 

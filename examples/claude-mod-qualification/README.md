@@ -1,5 +1,10 @@
 # Claude mod event feasibility probe
 
+The later [native append interruption](native-append-interruption.md) captures
+SIGKILL after storage but before submit return, then original-session resume
+without resend. The separate reusable SDK checkpoint implementation retains
+candidate row correlation; the combined native module/journal path is pending.
+
 The later [native append competitors](native-append-adversarial.md) exercise a
 real downstream content rewrite/false return and a no-next fabricated receipt.
 Both preserve actual stored-row evidence in the tested Linux load order; submit

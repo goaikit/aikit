@@ -23,7 +23,9 @@ fn migrate_message_tables(connection: &Connection) -> Result<(), IntegrationErro
         CREATE TABLE IF NOT EXISTS message_observations(cursor INTEGER PRIMARY KEY AUTOINCREMENT, installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, event_id TEXT NOT NULL, body TEXT NOT NULL, UNIQUE(installation_id,event_id));
         CREATE INDEX IF NOT EXISTS message_observations_by_operation ON message_observations(installation_id,operation_id,cursor);
         CREATE TABLE IF NOT EXISTS message_handoffs(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id));
-        PRAGMA user_version=11;")?;
+        CREATE TABLE IF NOT EXISTS message_append_checkpoints(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, native_row_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id), UNIQUE(installation_id,native_row_id));
+        PRAGMA user_version=12;")?;
+    connection.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
     Ok(())
 }
 
@@ -327,7 +329,7 @@ impl IntegrationService {
         })
     }
 
-    /// Explicitly upgrade an existing schema 9/10 journal to the current schema.
+    /// Explicitly upgrade an existing schema 9/10/11 journal to the current schema.
     /// Never creates missing state, repairs malformed tables, changes native
     /// configuration, detaches a binding or submits a message. Existing attached
     /// bindings and unapplied installation plans must first be resolved by their
@@ -345,9 +347,9 @@ impl IntegrationService {
         let mut connection = service.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous_schema: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(9..=11).contains(&previous_schema) {
+        if !(9..=12).contains(&previous_schema) {
             return Err(IntegrationError::Invalid(
-                "explicit integration upgrade supports existing schemas 9 through 11 only".into(),
+                "explicit integration upgrade supports existing schemas 9 through 12 only".into(),
             ));
         }
         // Do not turn a claimed legacy version with missing core history into
@@ -366,10 +368,13 @@ impl IntegrationService {
             tx.prepare("SELECT installation_id,operation_id,body FROM outgoing_messages LIMIT 0")?;
             tx.prepare("SELECT cursor,installation_id,operation_id,event_id,body FROM message_observations LIMIT 0")?;
         }
-        if previous_schema == 11 {
+        if previous_schema >= 11 {
             tx.prepare("SELECT installation_id,operation_id,body FROM message_handoffs LIMIT 0")?;
         }
-        if previous_schema != 11 {
+        if previous_schema == 12 {
+            tx.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
+        }
+        if previous_schema != 12 {
             let attached: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE detached=0)",
                 [],
@@ -395,8 +400,8 @@ impl IntegrationService {
         tx.commit()?;
         Ok(StateUpgradeReport {
             previous_schema,
-            current_schema: 11,
-            changed: previous_schema != 11,
+            current_schema: 12,
+            changed: previous_schema != 12,
         })
     }
 
@@ -405,8 +410,8 @@ impl IntegrationService {
         connection: &Connection,
         allow_create: bool,
     ) -> Result<(), IntegrationError> {
-        // Version 11 retains raw, unqualified native handoff returns separately
-        // from the version 10 qualified message observation journal.
+        // Version 12 adds unqualified native row checkpoints before/after append;
+        // version 11 retains raw handoff returns independently of qualified proof.
         // Older readers must not silently drop those journal semantics.
         let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if !allow_create && version == 0 {
@@ -414,19 +419,19 @@ impl IntegrationService {
                 "existing integration journal has no supported schema".into(),
             ));
         }
-        if version > 11 {
+        if version > 12 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if !allow_create && version < 11 {
+        if !allow_create && version < 12 {
             return Err(IntegrationError::Invalid(
                 "existing integration journal requires an explicit schema upgrade".into(),
             ));
         }
-        if version < 11 {
+        if version < 12 {
             let _lock = self.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 11 {
+            if version > 12 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {
