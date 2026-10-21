@@ -104,6 +104,13 @@ node /home/node/probe/tests/verify-append-envelope.test.mjs /home/node/evidence
 
 ### Consequences for the existing SDK contract
 
+Later that day, [two real native append competitors](native-append-adversarial.md)
+showed that the observed append result exposes a downstream rewrite even when
+the competitor returns the original message, and that an unchained fabricated
+UUID is rejected. Submit return and Turn-start text still held the original text
+in the rewritten run and therefore cannot prove the actual stored/sent payload.
+These are bounded Linux cases, not general production capability qualification.
+
 Reuse `MessageRequest.content` / `MessageReceipt.payload_sha256` for the original
 logical payload. The existing contract explicitly assigns native framing to the
 adapter. A future qualified adapter must retain both original payload digest

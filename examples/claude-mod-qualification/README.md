@@ -1,5 +1,10 @@
 # Claude mod event feasibility probe
 
+The later [native append competitors](native-append-adversarial.md) exercise a
+real downstream content rewrite/false return and a no-next fabricated receipt.
+Both preserve actual stored-row evidence in the tested Linux load order; submit
+return and Turn-start text alone fail to identify rewritten outgoing content.
+
 See the later [native adversarial probes](native-adversarial-probes.md) for
 abort-after-Allow and a real competing-wrapper run. The native run did not
 reproduce the synthetic engine's denial-erasure prediction. These additional
