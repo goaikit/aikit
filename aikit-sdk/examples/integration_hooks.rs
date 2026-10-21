@@ -192,6 +192,16 @@ async fn run(args: &[String]) -> anyhow::Result<i32> {
             )?;
             serde_json::to_value(binding.stage_message(request)?)?
         }
+        "message-recover" => {
+            let binding = service.binding(
+                args.get(2)
+                    .ok_or_else(|| anyhow::anyhow!("missing binding ID"))?,
+            )?;
+            let operation = args
+                .get(3)
+                .ok_or_else(|| anyhow::anyhow!("missing operation ID"))?;
+            serde_json::to_value(binding.recover_message_record(operation)?)?
+        }
         "message-status" => {
             let binding = service.binding(
                 args.get(2)

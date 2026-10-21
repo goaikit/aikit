@@ -4,10 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 const suffix = process.argv[3];
-if (suffix !== undefined && suffix !== 'final') throw new Error('only the fixed final fixture suffix is supported');
-const workspace = suffix ? '/home/node/append-client-final' : '/home/node/workspace';
-const state = suffix ? '/home/node/sdk-state-final' : '/home/node/sdk-state';
-const evidence = suffix ? '/home/node/evidence-final' : '/home/node/evidence', bin = '/home/node/bin';
+if (suffix !== undefined && !['final','crash'].includes(suffix)) throw new Error('only fixed final/crash fixture suffixes are supported');
+const workspace = suffix ? `/home/node/append-client-${suffix}` : '/home/node/workspace';
+const state = suffix ? `/home/node/sdk-state-${suffix}` : '/home/node/sdk-state';
+const evidence = suffix ? `/home/node/evidence-${suffix}` : '/home/node/evidence', bin = '/home/node/bin';
 const hooks = path.join(bin, 'integration_hooks');
 const run = (args, input) => JSON.parse(execFileSync(hooks, args, {
   input: input === undefined ? undefined : JSON.stringify(input), encoding: 'utf8', maxBuffer: 8 * 1024 * 1024,
@@ -27,8 +27,11 @@ if (action === 'setup') {
   const tool = {application_id: 'sdk-example', installation_id: installation, tool_name: 'review',
     description: 'Synthetic qualification tool; not used by the scripted endpoint',
     input_schema: {type: 'object'}, instructions: '',
-    handler: {executable: path.join(bin, 'agent_tool_plugin'), arguments: ['inspect']}, timeout_ms: 5000};
-  const owned = run(['plan-tool-message', state, installation, path.join(bin, 'integration_message_bridge'), state, installation], tool);
+    handler: {executable: path.join(bin, 'agent_tool_plugin'), arguments: ['inspect']}, timeout_ms: suffix === 'crash' ? 30000 : 5000};
+  const bridge = suffix === 'crash'
+    ? [process.execPath, '/home/node/probe/append-crash-bridge.mjs', state, installation]
+    : [path.join(bin, 'integration_message_bridge'), state, installation];
+  const owned = run(['plan-tool-message', state, installation, ...bridge], tool);
   run(['apply', state, owned.id]);
   const skills = fs.readdirSync(path.join(workspace, '.claude/skills'));
   if (skills.length !== 1) throw new Error('expected one owned module');
@@ -49,6 +52,12 @@ if (action === 'setup') {
   save('stage.json', {binding_id: binding.id, request, receipt, session_id: session});
   save('initial-events.json', events);
   console.log(JSON.stringify({session_id: session, binding_id: binding.id}));
+} else if (action === 'recover') {
+  const setup = JSON.parse(fs.readFileSync(path.join(evidence, 'setup.json'), 'utf8'));
+  const stage = JSON.parse(fs.readFileSync(path.join(evidence, 'stage.json'), 'utf8'));
+  const receipt = run(['message-recover', state, stage.binding_id, stage.request.operation_id]);
+  save('recovered-receipt.json', receipt);
+  console.log(JSON.stringify(receipt));
 } else if (action === 'inspect') {
   const setup = JSON.parse(fs.readFileSync(path.join(evidence, 'setup.json'), 'utf8'));
   const stage = JSON.parse(fs.readFileSync(path.join(evidence, 'stage.json'), 'utf8'));
@@ -56,4 +65,4 @@ if (action === 'setup') {
   save('message-status.json', status);
   save('events.json', run(['events', state, setup.installation]));
   console.log(JSON.stringify(status));
-} else throw new Error('usage: setup-sdk-append.mjs setup|stage|inspect');
+} else throw new Error('usage: setup-sdk-append.mjs setup|stage|recover|inspect');

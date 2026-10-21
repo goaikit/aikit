@@ -1,5 +1,10 @@
 # Owned SDK append client, 2026-10-21
 
+Later follow-up: [one actual SDK post-commit/pre-reply SIGKILL window](native-sdk-append-crash.md)
+passed cold-journal inspection and no-resend recovery. The normal-exit evidence
+and pending work below retain their original scope; other failure boundaries
+and production native proof remain open.
+
 This step wires the previously implemented checkpoint APIs into the opt-in
 Claude module and existing fixed-command receiver. It also runs that combined
 path in a real ordinary Linux terminal session, using the SDK's existing

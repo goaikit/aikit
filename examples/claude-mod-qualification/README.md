@@ -1,5 +1,10 @@
 # Claude mod event feasibility probe
 
+The later [combined SDK crash recovery](native-sdk-append-crash.md) exercises a
+real post-storage/lost-reply SIGKILL, cold SQLite inspection, original-session
+resume under a new invocation and immutable no-resend recovery. It qualifies one
+Linux failure window and retains Unknown; production native proof stays open.
+
 The [combined native SDK append run](native-sdk-append-client.md) now exercises
 the real installed module, fixed-command receiver and SQLite checkpoint methods
 in one ordinary Linux session. It retains an initial strict-framing failure,

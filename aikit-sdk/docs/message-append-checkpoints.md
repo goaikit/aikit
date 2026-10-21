@@ -67,6 +67,11 @@ Raw submit returns remain separate. Normal-exit persistence is qualified only
 within that bounded Linux fixture; combined SIGKILL recovery and production
 native proof remain open.
 
+Later follow-up: [one actual combined SIGKILL window](../../examples/claude-mod-qualification/native-sdk-append-crash.md)
+now passed cold-journal/recovery/original-session-resume verification without
+resend. Other failure boundaries and production native proof remain open; the
+normal-exit report above retains its original scope.
+
 On an interrupted handoff, existing `recover_message_record` conservatively
 retains Unknown. Read the old checkpoint and independently reconcile its stable
 row/source against the original target. Only qualified native proof may later
