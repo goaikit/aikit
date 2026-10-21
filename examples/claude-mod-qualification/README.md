@@ -38,8 +38,11 @@ completion, abort/competing-handler behavior, accepted messaging, consumption an
 reconciliation require separate executed evidence.
 
 The later [append acknowledgement candidate](append-acknowledgement-candidate.md)
-adds ten offline storage-contract tests. Its separate interactive probe is
-unqualified: normal onboarding could not finish with external networking disabled.
+adds ten offline storage-contract tests. Its later isolated Linux interactive
+capture established a matching native UUID, provider-framed stored row and
+outgoing envelope block. The original unframed-message hypothesis failed and is
+retained. This is bounded scripted-endpoint evidence; production acknowledgement,
+protected consumption and Windows remain unqualified.
 
 ## Offline engine results, Claude 2.1.296 Linux x86_64
 
