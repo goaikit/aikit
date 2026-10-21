@@ -49,7 +49,7 @@ fn digest(value: &str) -> bool {
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
-fn validate_intent(intent: &MessageAppendIntent) -> Result<(), IntegrationError> {
+pub(super) fn validate_intent(intent: &MessageAppendIntent) -> Result<(), IntegrationError> {
     if !bounded(&intent.native_row_id, 256)
         || !bounded(&intent.native_source, 1024)
         || !digest(&intent.framed_payload_sha256)
@@ -58,7 +58,7 @@ fn validate_intent(intent: &MessageAppendIntent) -> Result<(), IntegrationError>
     }
     Ok(())
 }
-fn validate_stored(stored: &MessageAppendStored) -> Result<(), IntegrationError> {
+pub(super) fn validate_stored(stored: &MessageAppendStored) -> Result<(), IntegrationError> {
     if !digest(&stored.stored_payload_sha256) || !bounded(&stored.evidence_reference, 4096) {
         return Err(invalid());
     }
@@ -142,18 +142,29 @@ impl SessionBinding<'_> {
         reservation: &MessageReservation,
         intent: MessageAppendIntent,
     ) -> Result<MessageAppendCheckpoint, IntegrationError> {
-        validate_intent(&intent)?;
         let _lock = self.service.state_lock()?;
         let mut connection = self.service.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let state = self.append_reservation(&tx, reservation)?;
-        if let Some(existing) = self.append_checkpoint(&tx, &reservation.request.operation_id)? {
+        let checkpoint = self.prepare_message_append_record(&tx, reservation, intent)?;
+        tx.commit()?;
+        Ok(checkpoint)
+    }
+
+    pub(super) fn prepare_message_append_record(
+        &self,
+        tx: &Connection,
+        reservation: &MessageReservation,
+        intent: MessageAppendIntent,
+    ) -> Result<MessageAppendCheckpoint, IntegrationError> {
+        validate_intent(&intent)?;
+        let state = self.append_reservation(tx, reservation)?;
+        if let Some(existing) = self.append_checkpoint(tx, &reservation.request.operation_id)? {
             if existing.intent != intent {
                 return Err(conflict());
             }
             return Ok(existing);
         }
-        match self.status_inner(&tx)? {
+        match self.status_inner(tx)? {
             SessionStatus::Observed => (),
             SessionStatus::Ended => return Err(IntegrationError::SessionEnded),
             SessionStatus::Detached => return Err(IntegrationError::Detached),
@@ -179,7 +190,6 @@ impl SessionBinding<'_> {
         tx.execute("INSERT INTO message_append_checkpoints(installation_id,operation_id,native_row_id,body) VALUES (?1,?2,?3,?4)",
             params![self.reference.installation_id, reservation.request.operation_id, checkpoint.intent.native_row_id,
                 serde_json::to_string(&checkpoint)?])?;
-        tx.commit()?;
         Ok(checkpoint)
     }
 
@@ -194,13 +204,26 @@ impl SessionBinding<'_> {
         native_row_id: &str,
         stored: MessageAppendStored,
     ) -> Result<MessageAppendCheckpoint, IntegrationError> {
-        validate_stored(&stored)?;
         let _lock = self.service.state_lock()?;
         let mut connection = self.service.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        self.append_reservation(&tx, reservation)?;
+        let checkpoint =
+            self.record_message_append_stored_record(&tx, reservation, native_row_id, stored)?;
+        tx.commit()?;
+        Ok(checkpoint)
+    }
+
+    pub(super) fn record_message_append_stored_record(
+        &self,
+        tx: &Connection,
+        reservation: &MessageReservation,
+        native_row_id: &str,
+        stored: MessageAppendStored,
+    ) -> Result<MessageAppendCheckpoint, IntegrationError> {
+        validate_stored(&stored)?;
+        self.append_reservation(tx, reservation)?;
         let mut checkpoint = self
-            .append_checkpoint(&tx, &reservation.request.operation_id)?
+            .append_checkpoint(tx, &reservation.request.operation_id)?
             .ok_or(IntegrationError::NotFound)?;
         if checkpoint.intent.native_row_id != native_row_id {
             return Err(conflict());
@@ -215,7 +238,6 @@ impl SessionBinding<'_> {
         checkpoint.stored_at_unix_ms = Some(now()?);
         tx.execute("UPDATE message_append_checkpoints SET body=?3 WHERE installation_id=?1 AND operation_id=?2",
             params![self.reference.installation_id, reservation.request.operation_id, serde_json::to_string(&checkpoint)?])?;
-        tx.commit()?;
         Ok(checkpoint)
     }
 }

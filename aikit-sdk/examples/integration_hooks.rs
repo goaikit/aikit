@@ -2,7 +2,7 @@
 //! Run with --features integration. Usage is described in the SDK README.
 use aikit_sdk::integration::{
     AgentToolSpec, CompletionBlockingPolicy, Decision, DecisionFuture, HookCommand, HookEvent,
-    HookHandler, HookRequest, InstallSpec, IntegrationService, SessionMode,
+    HookHandler, HookRequest, InstallSpec, IntegrationService, MessageRequest, SessionMode,
 };
 use serde_json::{json, Value};
 use std::{
@@ -180,6 +180,18 @@ async fn run(args: &[String]) -> anyhow::Result<i32> {
                 },
             )?,
         )?,
+        "message-stage" => {
+            let binding = service.binding(
+                args.get(2)
+                    .ok_or_else(|| anyhow::anyhow!("missing binding ID"))?,
+            )?;
+            let request: MessageRequest = serde_json::from_reader(
+                std::io::stdin()
+                    .lock()
+                    .take(6 * aikit_sdk::integration::MESSAGE_CONTENT_LIMIT as u64 + 4096),
+            )?;
+            serde_json::to_value(binding.stage_message(request)?)?
+        }
         "message-status" => {
             let binding = service.binding(
                 args.get(2)
@@ -188,7 +200,8 @@ async fn run(args: &[String]) -> anyhow::Result<i32> {
             let operation = args
                 .get(3)
                 .ok_or_else(|| anyhow::anyhow!("missing operation ID"))?;
-            json!({"receipt":binding.message_status(operation)?, "unqualified_handoff":binding.message_handoff(operation)?})
+            json!({"receipt":binding.message_status(operation)?, "unqualified_handoff":binding.message_handoff(operation)?,
+                "unqualified_append":binding.message_append_checkpoint(operation)?})
         }
         "apply" => serde_json::to_value(
             service.apply_install(

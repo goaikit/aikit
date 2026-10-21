@@ -2,7 +2,8 @@
 //! native API is called and no admission lease or provider proof is supplied.
 use super::{
     AgentToolCall, HookEvent, HookRequest, IntegrationError, IntegrationService,
-    MessageReservation, MessageState, NativeToolContext, SessionBinding, SessionRef,
+    MessageAppendCheckpoint, MessageAppendIntent, MessageAppendStored, MessageReservation,
+    MessageState, NativeToolContext, SessionBinding, SessionRef,
 };
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,17 @@ pub enum RecordedMessageAction {
         reservation_id: String,
         outcome: MessageHandoffOutcome,
     },
+    PrepareAppend {
+        operation_id: String,
+        reservation_id: String,
+        intent: MessageAppendIntent,
+    },
+    RecordAppendStored {
+        operation_id: String,
+        reservation_id: String,
+        native_row_id: String,
+        stored: MessageAppendStored,
+    },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordedMessageReply {
@@ -66,6 +78,9 @@ pub struct RecordedMessageReply {
     /// ticket without resending, so one uncertain operation need not block others.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorded_state: Option<MessageState>,
+    /// Candidate correlation only; never qualified native receipt/consumption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub append_checkpoint: Option<MessageAppendCheckpoint>,
 }
 
 impl RecordedMessageRequest {
@@ -102,6 +117,16 @@ impl RecordedMessageRequest {
             operation_id,
             reservation_id,
             ..
+        }
+        | RecordedMessageAction::PrepareAppend {
+            operation_id,
+            reservation_id,
+            ..
+        }
+        | RecordedMessageAction::RecordAppendStored {
+            operation_id,
+            reservation_id,
+            ..
         } = &frame.action
         {
             if [operation_id, reservation_id]
@@ -115,6 +140,27 @@ impl RecordedMessageRequest {
         }
         if let RecordedMessageAction::RecordHandoff { outcome, .. } = &frame.action {
             validate_handoff(outcome)?;
+        }
+        match &frame.action {
+            RecordedMessageAction::PrepareAppend { intent, .. } => {
+                super::message_append::validate_intent(intent)?
+            }
+            RecordedMessageAction::RecordAppendStored {
+                native_row_id,
+                stored,
+                ..
+            } => {
+                if native_row_id.trim().is_empty()
+                    || native_row_id.len() > 256
+                    || native_row_id.contains('\0')
+                {
+                    return Err(IntegrationError::Invalid(
+                        "invalid append row identity".into(),
+                    ));
+                }
+                super::message_append::validate_stored(stored)?;
+            }
+            _ => (),
         }
         Ok(frame)
     }
@@ -211,6 +257,7 @@ impl IntegrationService {
                     recorded_ready: false,
                     reservation: None,
                     recorded_state: None,
+                    append_checkpoint: None,
                 });
             }
             return Err(IntegrationError::NotFound);
@@ -219,7 +266,12 @@ impl IntegrationService {
         let inspecting = matches!(frame.action, RecordedMessageAction::Inspect);
         let _lock = if inspecting {
             None
-        } else if matches!(frame.action, RecordedMessageAction::RecordHandoff { .. }) {
+        } else if matches!(
+            frame.action,
+            RecordedMessageAction::RecordHandoff { .. }
+                | RecordedMessageAction::PrepareAppend { .. }
+                | RecordedMessageAction::RecordAppendStored { .. }
+        ) {
             Some(self.handoff_record_lock()?)
         } else {
             Some(self.state_lock()?)
@@ -241,6 +293,7 @@ impl IntegrationService {
             recorded_ready: false,
             reservation: None,
             recorded_state: None,
+            append_checkpoint: None,
         };
         if let RecordedMessageAction::RecordHandoff {
             operation_id,
@@ -251,6 +304,41 @@ impl IntegrationService {
             // A native return can arrive during the resulting Turn. Never gate
             // retaining that return on the idle snapshot.
             binding.record_handoff_record(&tx, operation_id, reservation_id, outcome)?;
+        } else if let RecordedMessageAction::PrepareAppend {
+            operation_id,
+            reservation_id,
+            intent,
+        } = &frame.action
+        {
+            let reservation =
+                reservation_from_receipt(&binding.message_status_record(&tx, operation_id)?)?;
+            if reservation.reservation_id != *reservation_id {
+                return Err(IntegrationError::Conflict(
+                    "append reservation does not match".into(),
+                ));
+            }
+            reply.append_checkpoint =
+                Some(binding.prepare_message_append_record(&tx, &reservation, intent.clone())?);
+        } else if let RecordedMessageAction::RecordAppendStored {
+            operation_id,
+            reservation_id,
+            native_row_id,
+            stored,
+        } = &frame.action
+        {
+            let reservation =
+                reservation_from_receipt(&binding.message_status_record(&tx, operation_id)?)?;
+            if reservation.reservation_id != *reservation_id {
+                return Err(IntegrationError::Conflict(
+                    "append reservation does not match".into(),
+                ));
+            }
+            reply.append_checkpoint = Some(binding.record_message_append_stored_record(
+                &tx,
+                &reservation,
+                native_row_id,
+                stored.clone(),
+            )?);
         } else if idle {
             match frame.action {
                 RecordedMessageAction::Inspect => {}
@@ -285,7 +373,9 @@ impl IntegrationService {
                     reply.recorded_ready = receipt.state == MessageState::Dispatching
                         && receipt.reservation_id.as_deref() == Some(reservation_id.as_str());
                 }
-                RecordedMessageAction::RecordHandoff { .. } => unreachable!("handled above"),
+                RecordedMessageAction::RecordHandoff { .. }
+                | RecordedMessageAction::PrepareAppend { .. }
+                | RecordedMessageAction::RecordAppendStored { .. } => unreachable!("handled above"),
             }
         }
         tx.commit()?;

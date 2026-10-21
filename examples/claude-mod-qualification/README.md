@@ -1,5 +1,11 @@
 # Claude mod event feasibility probe
 
+The [combined native SDK append run](native-sdk-append-client.md) now exercises
+the real installed module, fixed-command receiver and SQLite checkpoint methods
+in one ordinary Linux session. It retains an initial strict-framing failure,
+six native label cases and a corrected successful capture. Delivery/consumption
+remain unqualified, and Windows remains deferred.
+
 The later [native append interruption](native-append-interruption.md) captures
 SIGKILL after storage but before submit return, then original-session resume
 without resend. The separate reusable SDK checkpoint implementation retains

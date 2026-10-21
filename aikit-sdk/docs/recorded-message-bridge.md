@@ -141,8 +141,31 @@ disabled. No native send/admission/receipt/consumption qualification is implied.
 ## Opt-in native client and raw handoffs
 
 Schema 12 additionally provides [candidate append checkpoints](message-append-checkpoints.md)
-through the reusable library. The generated client described below still retains
-raw submit returns; it is not yet wired to pre/post-append checkpoint capture.
+through the reusable library. The opt-in generated Claude module now uses
+`prepare_append` and `record_append_stored` actions around native storage,
+retaining raw submit returns separately. The additive `append_checkpoint` reply
+field carries the original reservation and candidate metadata. This does not
+create qualified message evidence. See the
+[actual combined native run](../../examples/claude-mod-qualification/native-sdk-append-client.md).
+
+The candidate requires Claude 2.1.296 and SDK-generated ASCII plugin names.
+Before native storage it checks exact known framing, full native plugin origin,
+main-session scope and the sampled row UUID. It persists the prepared row before
+calling `next` once, then retains the returned row's digest and stable native
+reference. Long display labels are shortened by the qualified native rule;
+provenance matching always uses the full name. A rewrite is retained as a hash
+mismatch. Missing/foreign/corrupt checkpoint responses, unknown framing or
+missing append events stop future pumping without retrying or inventing failure.
+A capture error does not establish that the engine blocked native storage.
+
+Both checkpoint actions use the existing bounded local writer lock and journal
+transaction without nesting another public write lock. They can retain candidates
+while the resulting Turn is busy. RPCs still refuse stale/detached context;
+the library's separate historical lookup/late-candidate APIs remain available.
+The generated-source digest/owned receipt changes, so pair the updated module
+and receiver through the existing installer and restart before qualification.
+Do not manually overwrite loaded owner modules. Older receivers reject the new
+action variants; that is not permission to resend.
 
 `plan_agent_tool_with_message_bridge(installation_id, spec, fixed_handler)` uses
 the existing owned file plan, fingerprints and recovery/removal machinery. It

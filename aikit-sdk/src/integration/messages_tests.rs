@@ -392,6 +392,180 @@ async fn append_schema_upgrade_rolls_back_on_malformed_checkpoint_table() {
     assert_eq!(binding.message_status("retained").unwrap(), before);
 }
 
+#[tokio::test]
+async fn recorded_append_bridge_retains_busy_candidates_and_never_projects_delivery() {
+    use crate::integration::RecordedMessageAction;
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    binding.stage_message(request("bridge-append")).unwrap();
+    let ticket = binding.reserve_message("bridge-append").unwrap();
+    synthetic_bridge_event(&f, HookEvent::NativeTurnStarted);
+    let (prepare, env) = bridge_frame(
+        &f,
+        RecordedMessageAction::PrepareAppend {
+            operation_id: ticket.request.operation_id.clone(),
+            reservation_id: ticket.reservation_id.clone(),
+            intent: append_intent("native-row"),
+        },
+    );
+    let reply = f
+        .service
+        .recorded_message_with_context(&f.installation, prepare.clone(), Some(&env))
+        .unwrap();
+    assert!(!reply.recorded_idle && !reply.recorded_ready);
+    assert_eq!(
+        reply.append_checkpoint,
+        binding.message_append_checkpoint("bridge-append").unwrap()
+    );
+    let mut stored = append_stored();
+    stored.stored_payload_sha256 = "b".repeat(64);
+    let (record, _) = bridge_frame(
+        &f,
+        RecordedMessageAction::RecordAppendStored {
+            operation_id: ticket.request.operation_id.clone(),
+            reservation_id: ticket.reservation_id.clone(),
+            native_row_id: "native-row".into(),
+            stored,
+        },
+    );
+    let reply = f
+        .service
+        .recorded_message_with_context(&f.installation, record.clone(), Some(&env))
+        .unwrap();
+    let checkpoint = reply.append_checkpoint.unwrap();
+    assert_ne!(
+        checkpoint.intent.framed_payload_sha256,
+        checkpoint.stored.as_ref().unwrap().stored_payload_sha256
+    );
+    assert_eq!(
+        f.service
+            .recorded_message_with_context(&f.installation, record, Some(&env))
+            .unwrap()
+            .append_checkpoint,
+        Some(checkpoint.clone())
+    );
+    assert_eq!(
+        binding.message_status("bridge-append").unwrap().state,
+        MessageState::Dispatching
+    );
+    assert!(binding
+        .message_observations("bridge-append", 0, 10)
+        .unwrap()
+        .records
+        .is_empty());
+    binding.recover_message_record("bridge-append").unwrap();
+    assert_eq!(
+        f.service
+            .recorded_message_with_context(&f.installation, prepare, Some(&env))
+            .unwrap()
+            .append_checkpoint,
+        Some(checkpoint)
+    );
+    assert!(binding.reserve_message("bridge-append").is_err());
+}
+
+#[tokio::test]
+async fn recorded_append_bridge_rejects_foreign_attempt_rows_and_inherited_scope() {
+    use crate::integration::RecordedMessageAction;
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    binding.stage_message(request("bridge-append")).unwrap();
+    let ticket = binding.reserve_message("bridge-append").unwrap();
+    let (mut prepare, env) = bridge_frame(
+        &f,
+        RecordedMessageAction::PrepareAppend {
+            operation_id: ticket.request.operation_id.clone(),
+            reservation_id: "foreign".into(),
+            intent: append_intent("row"),
+        },
+    );
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, prepare.clone(), Some(&env))
+        .is_err());
+    assert!(binding
+        .message_append_checkpoint("bridge-append")
+        .unwrap()
+        .is_none());
+    if let RecordedMessageAction::PrepareAppend { reservation_id, .. } = &mut prepare.action {
+        *reservation_id = ticket.reservation_id.clone();
+    }
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, prepare.clone(), Some("foreign"))
+        .is_err());
+    f.service
+        .recorded_message_with_context(&f.installation, prepare.clone(), Some(&env))
+        .unwrap();
+    let (record, _) = bridge_frame(
+        &f,
+        RecordedMessageAction::RecordAppendStored {
+            operation_id: ticket.request.operation_id.clone(),
+            reservation_id: ticket.reservation_id.clone(),
+            native_row_id: "foreign-row".into(),
+            stored: append_stored(),
+        },
+    );
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, record, Some(&env))
+        .is_err());
+    assert!(binding
+        .message_append_checkpoint("bridge-append")
+        .unwrap()
+        .unwrap()
+        .stored
+        .is_none());
+    f.start(true).await;
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, prepare, Some(&env))
+        .is_err());
+    assert_eq!(
+        binding.message_status("bridge-append").unwrap().state,
+        MessageState::Dispatching
+    );
+}
+
+#[tokio::test]
+async fn recorded_append_bridge_reader_bounds_candidate_fields_before_journal_access() {
+    use crate::integration::{RecordedMessageAction, RecordedMessageRequest};
+    let f = bridge_fixture().await;
+    for fault in 0..4 {
+        let mut intent = append_intent("row");
+        match fault {
+            0 => intent.native_row_id = "x".repeat(257),
+            1 => intent.native_source.clear(),
+            2 => intent.framed_payload_sha256 = "G".repeat(64),
+            _ => intent.native_source.push('\0'),
+        }
+        let (frame, _) = bridge_frame(
+            &f,
+            RecordedMessageAction::PrepareAppend {
+                operation_id: "op".into(),
+                reservation_id: "attempt".into(),
+                intent,
+            },
+        );
+        assert!(
+            RecordedMessageRequest::read(serde_json::to_vec(&frame).unwrap().as_slice()).is_err()
+        );
+    }
+    let (frame, _) = bridge_frame(
+        &f,
+        RecordedMessageAction::RecordAppendStored {
+            operation_id: "op".into(),
+            reservation_id: "attempt".into(),
+            native_row_id: "row".into(),
+            stored: append_stored(),
+        },
+    );
+    assert!(RecordedMessageRequest::read(serde_json::to_vec(&frame).unwrap().as_slice()).is_ok());
+    let mut value = serde_json::to_value(frame).unwrap();
+    value["action"]["native_row_id"] = json!("row\0");
+    assert!(RecordedMessageRequest::read(value.to_string().as_bytes()).is_err());
+}
+
 fn observation(id: &str, proof: MessageProof) -> MessageObservation {
     MessageObservation {
         event_id: id.into(),

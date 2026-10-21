@@ -59,10 +59,13 @@ let stored = binding.record_message_append_stored(&reservation, &native_row_id,
 ```
 
 This illustrative embedding sequence takes native values from the adapter; it is
-not a standalone runnable example or an implemented native client. The library
-regression tests are non-CLI consumers exercising the actual methods. Wiring
-the owned module/fixed-command bridge to these checkpoints remains additional
-implementation work; today's generated client still retains raw submit returns.
+not a standalone runnable example. The library regression tests are non-CLI
+consumers exercising the actual methods. The opt-in owned Claude module now
+captures these phases through the existing fixed-command bridge; see the
+[combined native SDK run](../../examples/claude-mod-qualification/native-sdk-append-client.md).
+Raw submit returns remain separate. Normal-exit persistence is qualified only
+within that bounded Linux fixture; combined SIGKILL recovery and production
+native proof remain open.
 
 On an interrupted handoff, existing `recover_message_record` conservatively
 retains Unknown. Read the old checkpoint and independently reconcile its stable
@@ -89,6 +92,10 @@ correlation semantics. This is metadata maintenance, not an executable/hook
 update, native requalification or consumer dependency promotion.
 
 ## Executed Linux checks, 2026-10-21
+
+Follow-up wiring passed 135 integration tests, 22 generated-module tests and
+scoped Clippy; the linked combined-native report retains the later source hashes.
+The initial checkpoint-only source/results below retain their original scope.
 
 Rust 1.88.0, offline Docker with read-only dependency caches and the dedicated
 validation target volume:

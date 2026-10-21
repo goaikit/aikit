@@ -252,7 +252,7 @@ pub(super) fn render_with_message_handler(
     )
     .chain(spec.handler.arguments.clone())
     .collect();
-    let config = json!({"applicationId":spec.application_id,"installationId":spec.installation_id,"toolName":spec.tool_name,"description":spec.description,
+    let config = json!({"applicationId":spec.application_id,"installationId":spec.installation_id,"pluginName":name,"toolName":spec.tool_name,"description":spec.description,
         "schema":spec.input_schema,"instructions":spec.instructions,"contextName":format!("{name}-instructions"),
         "argv":argv,"timeoutMs":spec.timeout_ms,
         "sessionArgv": session_handler.map(|handler| std::iter::once(handler.executable.to_string_lossy().into_owned()).chain(handler.arguments.clone()).collect::<Vec<_>>()),
@@ -263,7 +263,7 @@ pub(super) fn render_with_message_handler(
         .replace("/* AIKIT_MESSAGE_START */", if messaging { "await startMessagePump($);" } else { "" })
         .replace("/* AIKIT_MESSAGE_BUSY */", if messaging { "messageActive = true;" } else { "" })
         .replace("/* AIKIT_MESSAGE_IDLE */", if messaging { "if (event.agentId === undefined && nativeTurnId === event.turnId) messageActive = false;" } else { "" })
-        .replace("/* AIKIT_MESSAGE_LIFECYCLE */", if messaging { "on('session.end', async ($, event, next) => { messageStopped = true; return next(event); });" } else { "" })
+        .replace("/* AIKIT_MESSAGE_LIFECYCLE */", if messaging { "registerMessageLifecycle(on);" } else { "" })
         .replace(
             "'AIKIT_NATIVE_TOOL_NAME'",
             &serde_json::to_string(&native_name)?,
