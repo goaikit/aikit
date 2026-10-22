@@ -21,6 +21,13 @@ detach does not advance the floor. Legacy `SessionBinding::detach()` delegates
 to the same behavior. Installed hooks, settings and historical records remain.
 There is no native command, signal, termination or managed replacement session.
 
+For coordinated installation updates, `applied_installation_guard` rechecks the
+persisted detached-binding requirement at the consumer commit boundary too. A
+handle created after apply cannot authorize a registration commit. The owner can
+release that handle without modifying the pending installation plan, then resume
+the original update. The regression covers this extra boundary; the 147-test
+suite and scoped Clippy passed again after the change.
+
 Schema **15** adds `binding_admission_floors`. Explicit 9–14 upgrades require
 settled plans and detached handles, preserve existing data, and seed floors for
 legacy detached records from the journal maximum. A malformed legacy detachment

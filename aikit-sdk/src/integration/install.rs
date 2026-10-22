@@ -1168,6 +1168,9 @@ impl IntegrationService {
                 "installation plan is not the current applied revision".into(),
             ));
         }
+        if pending.require_detached {
+            require_detached_bindings(&connection, &pending.preview.installation_id)?;
+        }
         let InstallationStatus::Configured { installation } =
             self.status_inner(&connection, &pending.preview.installation_id)?
         else {

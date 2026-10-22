@@ -392,6 +392,18 @@ fn bundled_replacement_rechecks_detach_at_plan_apply_and_recovery() {
         .execute("UPDATE session_bindings SET detached=1", [])
         .unwrap();
     f.service.apply_install(&plan.id).unwrap();
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=0", [])
+        .unwrap();
+    assert!(f.service.applied_installation_guard(&plan.id).is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    f.service.applied_installation_guard(&plan.id).unwrap();
 }
 
 #[test]
