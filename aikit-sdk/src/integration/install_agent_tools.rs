@@ -70,16 +70,7 @@ impl IntegrationService {
             Some(&installation.spec.handler),
             message_handler,
         )?;
-        let relative_root = PathBuf::from(".claude").join("skills").join(plugin.name());
-        receipt.agent_tool = Some(OwnedAgentTool {
-            invocation_env_key: Some(plugin.invocation_environment_key().into()),
-            relative_root,
-            files: plugin
-                .files()
-                .iter()
-                .map(|(name, bytes)| (name.clone(), fingerprint(Some(bytes.as_bytes()))))
-                .collect(),
-        });
+        receipt.agent_tool = Some(owned_agent_tool(&plugin));
         let before = read_config(&installation.spec.workspace, &installation.config_path)?;
         self.save_bytes_plan_with_tool(
             &connection,
@@ -89,7 +80,20 @@ impl IntegrationService {
             Some(receipt),
             &installation,
             Some(&plugin),
+            false,
         )
+    }
+}
+
+pub(super) fn owned_agent_tool(plugin: &super::super::AgentToolPlugin) -> OwnedAgentTool {
+    OwnedAgentTool {
+        invocation_env_key: Some(plugin.invocation_environment_key().into()),
+        relative_root: PathBuf::from(".claude").join("skills").join(plugin.name()),
+        files: plugin
+            .files()
+            .iter()
+            .map(|(name, bytes)| (name.clone(), fingerprint(Some(bytes.as_bytes()))))
+            .collect(),
     }
 }
 

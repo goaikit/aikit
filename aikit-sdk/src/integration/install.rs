@@ -24,7 +24,7 @@ fn migrate_message_tables(connection: &Connection) -> Result<(), IntegrationErro
         CREATE INDEX IF NOT EXISTS message_observations_by_operation ON message_observations(installation_id,operation_id,cursor);
         CREATE TABLE IF NOT EXISTS message_handoffs(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id));
         CREATE TABLE IF NOT EXISTS message_append_checkpoints(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, native_row_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id), UNIQUE(installation_id,native_row_id));
-        PRAGMA user_version=12;")?;
+        PRAGMA user_version=13;")?;
     connection.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
     Ok(())
 }
@@ -34,7 +34,9 @@ mod completion;
 pub use completion::{CompletionBlockingPolicy, SettingChange};
 #[path = "install_agent_tools.rs"]
 mod agent_tools_install;
-use agent_tools_install::{check_agent_tool, prune_removed_tool_directories, tool_file_changes};
+use agent_tools_install::{
+    check_agent_tool, owned_agent_tool, prune_removed_tool_directories, tool_file_changes,
+};
 
 #[derive(Debug)]
 pub enum IntegrationError {
@@ -246,6 +248,9 @@ struct Pending {
     delete: bool,
     #[serde(default)]
     tool_files: Vec<PendingToolFile>,
+    /// New coordinated replacements must stay detached through apply/recovery.
+    #[serde(default)]
+    require_detached: bool,
 }
 
 /// Reusable integration entry point. Construction opens metadata only; it never
@@ -347,9 +352,9 @@ impl IntegrationService {
         let mut connection = service.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous_schema: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(9..=12).contains(&previous_schema) {
+        if !(9..=13).contains(&previous_schema) {
             return Err(IntegrationError::Invalid(
-                "explicit integration upgrade supports existing schemas 9 through 12 only".into(),
+                "explicit integration upgrade supports existing schemas 9 through 13 only".into(),
             ));
         }
         // Do not turn a claimed legacy version with missing core history into
@@ -371,10 +376,10 @@ impl IntegrationService {
         if previous_schema >= 11 {
             tx.prepare("SELECT installation_id,operation_id,body FROM message_handoffs LIMIT 0")?;
         }
-        if previous_schema == 12 {
+        if previous_schema >= 12 {
             tx.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
         }
-        if previous_schema != 12 {
+        if previous_schema != 13 {
             let attached: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE detached=0)",
                 [],
@@ -400,8 +405,8 @@ impl IntegrationService {
         tx.commit()?;
         Ok(StateUpgradeReport {
             previous_schema,
-            current_schema: 12,
-            changed: previous_schema != 12,
+            current_schema: 13,
+            changed: previous_schema != 13,
         })
     }
 
@@ -410,6 +415,7 @@ impl IntegrationService {
         connection: &Connection,
         allow_create: bool,
     ) -> Result<(), IntegrationError> {
+        // Version 13 retains mandatory detach guards for coordinated plans.
         // Version 12 adds unqualified native row checkpoints before/after append;
         // version 11 retains raw handoff returns independently of qualified proof.
         // Older readers must not silently drop those journal semantics.
@@ -419,19 +425,19 @@ impl IntegrationService {
                 "existing integration journal has no supported schema".into(),
             ));
         }
-        if version > 12 {
+        if version > 13 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if !allow_create && version < 12 {
+        if !allow_create && version < 13 {
             return Err(IntegrationError::Invalid(
                 "existing integration journal requires an explicit schema upgrade".into(),
             ));
         }
-        if version < 12 {
+        if version < 13 {
             let _lock = self.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 12 {
+            if version > 13 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {
@@ -488,7 +494,7 @@ impl IntegrationService {
     /// Installation and update follow the same path. Existing owned entries must
     /// still match their receipt; unrelated settings and hooks are retained.
     pub fn plan_install(&self, spec: InstallSpec) -> Result<InstallPlan, IntegrationError> {
-        self.plan_install_inner(spec, None)
+        self.plan_install_inner(spec, None, None)
     }
 
     /// Request native completion-loop configuration through the existing owned
@@ -500,13 +506,29 @@ impl IntegrationService {
         spec: InstallSpec,
         completion_policy: CompletionBlockingPolicy,
     ) -> Result<InstallPlan, IntegrationError> {
-        self.plan_install_inner(spec, Some(completion_policy))
+        self.plan_install_inner(spec, Some(completion_policy), None)
+    }
+
+    /// Replace an existing hook installation and its generated callable in one
+    /// persisted plan. All recorded bindings for this installation must be
+    /// explicitly detached, both at planning and at apply/recovery. This never
+    /// stops the owner's agent or grants readiness. The optional message bridge
+    /// remains an explicit, unqualified opt-in.
+    pub fn plan_update_with_agent_tool(
+        &self,
+        spec: InstallSpec,
+        completion_policy: CompletionBlockingPolicy,
+        tool: super::AgentToolSpec,
+        message_handler: Option<HookCommand>,
+    ) -> Result<InstallPlan, IntegrationError> {
+        self.plan_install_inner(spec, Some(completion_policy), Some((tool, message_handler)))
     }
 
     fn plan_install_inner(
         &self,
         mut spec: InstallSpec,
         requested_policy: Option<CompletionBlockingPolicy>,
+        bundle: Option<(super::AgentToolSpec, Option<HookCommand>)>,
     ) -> Result<InstallPlan, IntegrationError> {
         validate_spec(&mut spec)?;
         if self.state.starts_with(&spec.workspace) {
@@ -521,6 +543,30 @@ impl IntegrationService {
         reject_pending(&connection, &id)?;
         reject_prepared_config(&connection, &config_path, None)?;
         let previous = receipt_json(&connection, &id)?;
+        let plugin = if let Some((tool, message_handler)) = &bundle {
+            if previous.is_none() {
+                return Err(IntegrationError::NotFound);
+            }
+            require_detached_bindings(&connection, &id)?;
+            if tool.application_id != spec.application_id || tool.installation_id != id {
+                return Err(IntegrationError::Invalid(
+                    "tool identity must match its installation".into(),
+                ));
+            }
+            if message_handler.is_some() && !spec.events.contains(&HookEvent::InputSubmitted) {
+                return Err(IntegrationError::Invalid(
+                    "message bridge requires input observations".into(),
+                ));
+            }
+            Some(super::agent_tools::render_with_message_handler(
+                &spec.agent_key,
+                tool,
+                Some(&spec.handler),
+                message_handler.as_ref(),
+            )?)
+        } else {
+            None
+        };
         let retained_tool = previous
             .as_deref()
             .map(serde_json::from_str::<Receipt>)
@@ -530,7 +576,10 @@ impl IntegrationService {
             check_agent_tool(&spec.workspace, tool)?;
             let old: Receipt =
                 serde_json::from_str(previous.as_deref().expect("retained receipt"))?;
-            if tool.invocation_env_key.is_some() && old.installation.spec.handler != spec.handler {
+            if bundle.is_none()
+                && tool.invocation_env_key.is_some()
+                && old.installation.spec.handler != spec.handler
+            {
                 return Err(IntegrationError::Conflict("owned native startup handler changed; remove/reinstall the integration while idle before replacing its command".into()));
             }
         }
@@ -620,7 +669,19 @@ impl IntegrationService {
             }
         }
         receipt.completion = completion;
-        receipt.agent_tool = retained_tool;
+        receipt.agent_tool = plugin.as_ref().map(owned_agent_tool).or(retained_tool);
+        if let Some(plugin) = &plugin {
+            return self.save_bytes_plan_with_tool(
+                &connection,
+                before,
+                Some(serde_json::to_vec_pretty(&document)?),
+                previous,
+                Some(receipt.clone()),
+                &receipt.installation,
+                Some(plugin),
+                true,
+            );
+        }
         self.save_plan(
             &connection,
             before,
@@ -706,6 +767,7 @@ impl IntegrationService {
             next_receipt,
             installation,
             None,
+            false,
         )
     }
 
@@ -719,6 +781,7 @@ impl IntegrationService {
         next_receipt: Option<Receipt>,
         installation: &Installation,
         plugin: Option<&super::AgentToolPlugin>,
+        require_detached: bool,
     ) -> Result<InstallPlan, IntegrationError> {
         if after
             .as_ref()
@@ -766,6 +829,7 @@ impl IntegrationService {
             next_receipt,
             workspace: installation.spec.workspace.clone(),
             tool_files,
+            require_detached,
         };
         connection.execute(
             "INSERT INTO install_plans VALUES (?1,?2,'planned',?3)",
@@ -813,6 +877,9 @@ impl IntegrationService {
         let pending: Pending = serde_json::from_str(&body)?;
         if phase == "applied" {
             return self.status_inner(&connection, &pending.preview.installation_id);
+        }
+        if pending.require_detached {
+            require_detached_bindings(&connection, &pending.preview.installation_id)?;
         }
         let config = &pending.preview.config_path;
         ensure_config_parent(&pending.workspace, config)?;
@@ -1204,6 +1271,18 @@ fn prepared_plan(connection: &Connection, id: &str) -> Result<Option<String>, In
         )
         .optional()?)
 }
+fn require_detached_bindings(connection: &Connection, id: &str) -> Result<(), IntegrationError> {
+    let mut query =
+        connection.prepare("SELECT reference FROM session_bindings WHERE detached=0")?;
+    for row in query.query_map([], |row| row.get::<_, String>(0))? {
+        let reference: super::SessionRef = serde_json::from_str(&row?)?;
+        if reference.installation_id == id {
+            return Err(IntegrationError::Conflict("detach recorded bindings before coordinated installation update; no agent was stopped".into()));
+        }
+    }
+    Ok(())
+}
+
 fn reject_pending(connection: &Connection, id: &str) -> Result<(), IntegrationError> {
     if let Some(plan) = prepared_plan(connection, id)? {
         Err(IntegrationError::RecoveryRequired(plan))

@@ -1,5 +1,195 @@
 use super::*;
 
+fn replacement_plan(f: &Fixture, id: &str) -> Result<InstallPlan, IntegrationError> {
+    let mut spec = f.spec.clone();
+    spec.handler.arguments.push("replacement-startup".into());
+    let mut tool = tool_spec(f, id);
+    tool.handler.arguments.push("replacement-callable".into());
+    tool.instructions.push_str(" replacement instructions");
+    f.service
+        .plan_update_with_agent_tool(spec, CompletionBlockingPolicy::NativeDefault, tool, None)
+}
+
+fn synthetic_binding(f: &Fixture, id: &str) {
+    let reference = super::super::SessionRef {
+        installation_id: id.into(),
+        installation_revision: "fixture".into(),
+        native_session_id: "fixture".into(),
+        invocation_id: None,
+        start_cursor: 1,
+    };
+    f.service
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO session_bindings VALUES ('bundle-fixture',?1,0)",
+            [serde_json::to_string(&reference).unwrap()],
+        )
+        .unwrap();
+}
+
+#[test]
+fn bundled_replacement_recovers_partial_files_and_publishes_one_consistent_receipt() {
+    let f = Fixture::new();
+    f.write(&json!({"owner":"retain"}));
+    let hooks = f.install();
+    let tool = f
+        .service
+        .plan_agent_tool(
+            &hooks.installation_id,
+            tool_spec(&f, &hooks.installation_id),
+        )
+        .unwrap();
+    f.service.apply_install(&tool.id).unwrap();
+    let before = fs::read(&f.config).unwrap();
+    let plan = replacement_plan(&f, &hooks.installation_id).unwrap();
+    assert!(!plan.removal && !plan.files.is_empty());
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    assert!(matches!(
+        f.service.apply_with_tool_fault(&plan.id, false, Some(1)),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    assert_eq!(
+        reopened
+            .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+            .unwrap()
+            .unwrap()
+            .id,
+        plan.id
+    );
+    let InstallationStatus::Configured { installation } = reopened.apply_install(&plan.id).unwrap()
+    else {
+        panic!("not configured")
+    };
+    assert!(installation
+        .spec
+        .handler
+        .arguments
+        .contains(&"replacement-startup".into()));
+    assert_eq!(f.read()["owner"], "retain");
+    let raw = receipt_json(&reopened.connection().unwrap(), &hooks.installation_id)
+        .unwrap()
+        .unwrap();
+    let receipt: Receipt = serde_json::from_str(&raw).unwrap();
+    check_agent_tool(&f.spec.workspace, receipt.agent_tool.as_ref().unwrap()).unwrap();
+    let root = f
+        .spec
+        .workspace
+        .join(&receipt.agent_tool.unwrap().relative_root);
+    assert!(fs::read_to_string(root.join("hooks/register.js"))
+        .unwrap()
+        .contains("replacement-startup"));
+    assert!(fs::read_to_string(root.join("hooks/register.js"))
+        .unwrap()
+        .contains("replacement-callable"));
+    reopened.apply_install(&plan.id).unwrap();
+}
+
+#[test]
+fn bundled_replacement_rechecks_detach_at_plan_apply_and_recovery() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    synthetic_binding(&f, &hooks.installation_id);
+    let before = fs::read(&f.config).unwrap();
+    assert!(replacement_plan(&f, &hooks.installation_id).is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    let plan = replacement_plan(&f, &hooks.installation_id).unwrap();
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=0", [])
+        .unwrap();
+    assert!(f.service.apply_install(&plan.id).is_err());
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    assert!(f
+        .service
+        .apply_with_tool_fault(&plan.id, false, Some(1))
+        .is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=0", [])
+        .unwrap();
+    assert!(f.service.apply_install(&plan.id).is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+}
+
+#[test]
+fn schema_twelve_upgrade_requires_detached_settled_state_and_retains_receipts() {
+    let f = Fixture::new();
+    let installed = f.install();
+    let bytes = fs::read(&f.config).unwrap();
+    synthetic_binding(&f, &installed.installation_id);
+    f.service
+        .connection()
+        .unwrap()
+        .pragma_update(None, "user_version", 12)
+        .unwrap();
+    assert!(IntegrationService::open_existing(&f.service.state).is_err());
+    assert!(IntegrationService::upgrade_existing(&f.service.state).is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    f.service
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO install_plans VALUES ('unsettled','fixture','planned','{}')",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    f.service
+        .connection()
+        .unwrap()
+        .execute("DELETE FROM install_plans WHERE id='unsettled'", [])
+        .unwrap();
+    let upgrade = IntegrationService::upgrade_existing(&f.service.state).unwrap();
+    assert_eq!(
+        (
+            upgrade.previous_schema,
+            upgrade.current_schema,
+            upgrade.changed
+        ),
+        (12, 13, true)
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), bytes);
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    assert_eq!(
+        reopened
+            .find_installation("review-app", "claude", &f.spec.workspace)
+            .unwrap()
+            .id,
+        installed.installation_id
+    );
+    assert!(
+        !IntegrationService::upgrade_existing(&f.service.state)
+            .unwrap()
+            .changed
+    );
+}
+
 #[test]
 fn pending_plan_lookup_recovers_only_the_scoped_interrupted_apply() {
     let f = Fixture::new();
@@ -176,7 +366,7 @@ fn existing_open_requires_explicit_upgrade_without_losing_owned_receipts() {
             .unwrap()
             .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        12
+        13
     );
 }
 
@@ -223,7 +413,7 @@ fn explicit_upgrade_never_initializes_missing_empty_or_unsupported_state() {
     ));
     assert_eq!(fs::metadata(&database).unwrap().len(), 0);
     fs::remove_file(&database).unwrap();
-    for version in [0, 8, 13] {
+    for version in [0, 8, 14] {
         let connection = Connection::open(&database).unwrap();
         connection
             .pragma_update(None, "user_version", version)
@@ -267,7 +457,7 @@ fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
         report,
         StateUpgradeReport {
             previous_schema: 9,
-            current_schema: 12,
+            current_schema: 13,
             changed: true
         }
     );
@@ -280,8 +470,8 @@ fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
     assert_eq!(
         IntegrationService::upgrade_existing(&f.service.state).unwrap(),
         StateUpgradeReport {
-            previous_schema: 12,
-            current_schema: 12,
+            previous_schema: 13,
+            current_schema: 13,
             changed: false
         }
     );
@@ -977,7 +1167,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     assert!(matches!(
         reopened.apply_install(&plan.id).unwrap(),
         InstallationStatus::Configured { .. }
@@ -988,7 +1178,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
     reopened
         .connection()
         .unwrap()
-        .execute_batch("PRAGMA user_version=13;")
+        .execute_batch("PRAGMA user_version=14;")
         .unwrap();
     assert!(matches!(
         IntegrationService::open(f._dir.path().join("private-state")),

@@ -123,13 +123,16 @@ impl IntegrationService {
         &self,
         reference: &SessionRef,
     ) -> Result<SessionBinding<'_>, IntegrationError> {
+        // Share the installation writer guard through insertion. A bundle
+        // update cannot pass its detached check while a new binding is admitted.
+        let _lock = self.state_lock()?;
+        let mut connection = self.connection()?;
         if !matches!(
-            self.installation_status(&reference.installation_id)?,
+            self.status_inner(&connection, &reference.installation_id)?,
             InstallationStatus::Configured { .. }
         ) {
             return Err(IntegrationError::StaleSession);
         }
-        let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         match reference_status(&tx, reference)? {
             SessionStatus::Observed => {}
