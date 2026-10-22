@@ -57,12 +57,19 @@ regular files were then copied and verified. No host policy/profile was changed.
 
 ## Required provider/AIKit enhancement
 
-Claude needs a non-bypassable policy command-hook path, or an attested effective
-configuration boundary excluding middleware capable of skipping it throughout
-the decision interval. AIKit must qualify that guarantee before promoting
-required repeated completion blocking. Adding another ordinary handler, trusting
-Stop Allow, observing eventual success or relaxing Codelaya rules is insufficient.
-The SDK's repeated-blocking assessment remains Unknown and fails readiness.
+The later [built-in guard comparison](managed-stop-protocol.md) demonstrates a
+protected candidate on the same native version: both a managed hook and a
+workspace hook resisted this competitor when the effective built-in guard loaded.
+An empty managed object did not load it. Effective session/configuration
+attestation and the rest of the native matrix remain unqualified; the original
+unguarded bypass remains valid and readiness stays Unknown.
+
+AIKit needs an attested effective protection boundary throughout the decision
+interval. The later native guard comparison supplies a candidate, not the full
+guarantee. AIKit must qualify it before promoting required repeated completion
+blocking. Adding another ordinary handler, trusting Stop Allow, observing eventual
+success or relaxing Codelaya rules is insufficient. The SDK's repeated-blocking
+assessment remains Unknown and fails readiness.
 
 The public capability report now includes this exact counterexample when its
 fresh probe matches interactive Linux x86-64 Claude `2.1.296 (Claude Code)`.
