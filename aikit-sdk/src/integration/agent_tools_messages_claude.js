@@ -76,7 +76,7 @@ async function observeMessageAppend($, event, next) {
     if (messageStopped || event.door !== 'prompt'
         || typeof event.uuid !== 'string' || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(event.uuid))
       throw new Error('Native append identity unavailable');
-    // Qualified on native 2.1.296 for ASCII SDK names at lengths 21–25 and 35:
+    // Qualified on native 2.1.296/2.1.308 for ASCII SDK names at lengths 21–25 and 35:
     // labels over 24 characters use the first 23 plus U+2026. Provenance stays full.
     const label = config.pluginName.length > 24 ? config.pluginName.slice(0, 23) + '…' : config.pluginName;
     const expected = `The ${label} plugin sent a message:\n${ticket.request.content}`
@@ -173,7 +173,7 @@ async function startMessagePump($) {
   messageStarted = true;
   messageContext = await publishContext($);
   const version = await $.session.version();
-  if (version?.version !== '2.1.296' || typeof config.pluginName !== 'string'
+  if (!['2.1.296', '2.1.308'].includes(version?.version) || typeof config.pluginName !== 'string'
       || !/^[a-z0-9-]{1,35}$/.test(config.pluginName))
     throw new Error('Native append framing is not qualified for this client version');
   messageProviderVersion = version.version;

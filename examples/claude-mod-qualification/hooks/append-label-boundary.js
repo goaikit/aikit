@@ -1,5 +1,5 @@
-// Opt-in native framing experiment only. Four ASCII manifest names of lengths
-// 21, 22, 23 and 35; run one command at a time against the offline fixture.
+// Opt-in native framing experiment only. ASCII manifest names of lengths
+// 21, 22, 23, 24, 25 and 35; run one command at a time against the offline fixture.
 const events = [];
 let writes = Promise.resolve(), attempted = false;
 async function record($, kind, value) {

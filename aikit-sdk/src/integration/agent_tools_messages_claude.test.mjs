@@ -244,11 +244,12 @@ test('a successful submit return without an append event remains unqualified and
 });
 
 test('unknown native framing versions refuse message-pump startup',async()=>{
-  await assert.rejects(fixture({version:'2.1.297'}),/not qualified/);
+  for(const version of ['2.1.297','2.1.309','2.2.0'])
+    await assert.rejects(fixture({version}),/not qualified/);
 });
 
-test('qualified shortened native labels keep full plugin provenance and exact payload hashing',async()=>{
-  const f=await fixture({pluginName:'aikit-sdk-example-dfc261c6',nativeLabel:'aikit-sdk-example-dfc26…'});
+for(const version of ['2.1.296','2.1.308']) test(`qualified ${version} shortened native labels keep full plugin provenance and exact payload hashing`,async()=>{
+  const f=await fixture({version,pluginName:'aikit-sdk-example-dfc261c6',nativeLabel:'aikit-sdk-example-dfc26…'});
   await f.poll();await f.poll();
   assert.equal(f.actions.filter(a=>a.kind==='prepare_append').length,1);
   assert.equal(f.actions.filter(a=>a.kind==='record_append_stored').length,1);

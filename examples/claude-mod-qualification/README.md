@@ -1,5 +1,10 @@
 # Claude mod event feasibility probe
 
+The [2.1.308 framing prerequisite](framing-308-20261023.md) checks six native ASCII
+name cases against append returns, transcript and outgoing inputs. The existing
+opt-in pump now accepts that exact version as well as 2.1.296; other versions
+still refuse. This does not qualify production delivery proof or readiness.
+
 The [2.1.308 candidate inspection](current-client-20261023.md) retains a separately
 checksum-pinned image, version-matched native API findings and actual consumer
 completion compatibility. It does not inherit 2.1.296 evidence, qualify message
