@@ -91,6 +91,49 @@ protected completion ordering or final acceptance under competing handlers.
 
 ## Required next work
 
+### Local SDK URL candidate rejected, 2026-10-22
+
+The pinned native Linux x86-64 Claude 2.1.296 executable rejects
+`claude --sdk-url ws://127.0.0.1:9` with exit status 1 before starting a
+conversation. Its diagnostic says the host is not an approved Anthropic
+endpoint and the flag is reserved for Remote Control workers connecting to
+Anthropic's backend. This rules out the proposed loopback SDK URL attachment
+on this exact executable. It does not establish behavior on other versions or
+qualify any interactive Turn, hook, failure handling or delivery capability.
+
+The executable SHA-256 is
+`24972e3bc859fab2b46ed4c1e51f7d6130f06d3bd550811a114640de3370d0de`.
+Two fresh invocations reproduced the same rejection in disposable containers
+from `aikit-claude-native-probe:2.1.296`, with `--network none`, no mounted
+owner profile, no credentials and no model request. The second invocation's
+output, exit code and a separate identity probe are retained in the consumer's
+parent workspace under `.local/sdk-url-20261022`.
+
+Reproduce without overriding endpoint restrictions:
+
+```sh
+docker run --rm --network none --entrypoint sh \
+  aikit-claude-native-probe:2.1.296 \
+  -c 'claude --sdk-url ws://127.0.0.1:9'
+# Expected: reserved-endpoint diagnostic, container exit 1.
+```
+
+The existing `runner::claude_session::open_claude_session` creates a managed
+SDK session and sends its first prompt. Its callback/control support is not
+evidence of attachment to an owner's already-running interactive terminal.
+Do not replace that required topology with this managed API or attempt to
+bypass Claude's endpoint restriction. The official
+[CLI reference](https://code.claude.com/docs/en/cli-reference) distinguishes
+interactive startup from SDK print mode; the
+[SDK hook reference](https://code.claude.com/docs/en/agent-sdk/hooks) describes
+SDK-registered callbacks, not an existing-terminal attachment contract.
+
+Next native investigation: determine whether documented in-session mod failure
+handlers can preserve a denial when the command callback fails, then qualify
+handler ordering, cancellation and process loss. The earlier command-hook
+failure result remains authoritative; a catch handler's presence alone is not
+proof of protected enforcement. No capability, schema or readiness changes.
+
 1. Use the retained Linux declarations/signatures to implement the bridge, and qualify the corresponding native Windows loading/trust and caller contracts.
 2. Extend the existing Claude adapter/installer with owned plugin configuration if this API satisfies the required contracts; preserve unrelated user hooks and the command-hook path.
 3. Normalize native Turn/generation/outcome evidence into the existing integration journal. Preserve the distinction between the application's Allow and the final observed result.
