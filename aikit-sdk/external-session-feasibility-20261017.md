@@ -128,11 +128,12 @@ interactive startup from SDK print mode; the
 [SDK hook reference](https://code.claude.com/docs/en/agent-sdk/hooks) describes
 SDK-registered callbacks, not an existing-terminal attachment contract.
 
-Next native investigation: determine whether documented in-session mod failure
-handlers can preserve a denial when the command callback fails, then qualify
-handler ordering, cancellation and process loss. The earlier command-hook
-failure result remains authoritative; a catch handler's presence alone is not
-proof of protected enforcement. No capability, schema or readiness changes.
+The subsequent [native mod catch comparison](../examples/claude-mod-qualification/stop-catch-protocol.md)
+recovers an injected throw and timeout, but injected fallback failure still
+allows completion. Qualify handler ordering, cancellation and process loss
+before production use. The earlier command-hook failure result remains
+authoritative; a catch handler's presence alone is not proof of protected
+enforcement. No capability, schema or readiness changes.
 
 1. Use the retained Linux declarations/signatures to implement the bridge, and qualify the corresponding native Windows loading/trust and caller contracts.
 2. Extend the existing Claude adapter/installer with owned plugin configuration if this API satisfies the required contracts; preserve unrelated user hooks and the command-hook path.

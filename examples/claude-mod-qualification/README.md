@@ -1,5 +1,10 @@
 # Claude mod event feasibility probe
 
+The later [native Stop mod catch comparison](stop-catch-protocol.md) recovers
+an injected throw and native timeout through a blocking fallback. An injected
+failure of the fallback itself still allows completion. This narrows one
+candidate; protected ordering, process loss and production readiness stay open.
+
 The later [guarded native Stop failure comparison](stop-failure-protocol.md)
 observes missing and timed-out managed command hooks allow successful completion
 despite the actual built-in guard and `onFailure: "block"`. This adds an exact
