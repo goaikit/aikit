@@ -17,6 +17,13 @@ command validation: an absolute existing executable, fixed bounded arguments,
 no placeholder expansion and no shell. On Windows it must be a native `.exe`.
 Keep secrets out of the spec, instructions and arguments.
 
+The optional `native_completion_bridge` boolean defaults to false in JSON (Rust
+struct literals must specify it). It opts into a Claude Stop callback only
+through an owned installation with a session handler and input/completion hooks.
+See [the completion candidate contract](native-completion-bridge.md) for binding
+guards, response translation, limits and outstanding qualification. Standalone
+export rejects this option; it does not gain an unowned completion handler.
+
 `AgentToolSpec::read` accepts at most 256 KiB of JSON. Rendering validates the
 spec, an object input schema of at most 64 KiB with no external schema retrieval,
 a nonempty description of at most 4 KiB, instructions of at most 32 KiB and a

@@ -644,6 +644,7 @@ impl IntegrationService {
                     "message bridge requires input observations".into(),
                 ));
             }
+            super::agent_tools::validate_completion_events(tool, &spec.events)?;
             Some(super::agent_tools::render_with_message_handler(
                 &spec.agent_key,
                 tool,

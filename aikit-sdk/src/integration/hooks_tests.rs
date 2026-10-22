@@ -292,6 +292,7 @@ async fn owned_module_without_inherited_generation_refuses_before_journaling_a_s
                     arguments: vec![],
                 },
                 timeout_ms: 5000,
+                native_completion_bridge: false,
             },
         )
         .unwrap();

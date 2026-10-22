@@ -604,6 +604,7 @@ async fn bridge_fixture() -> Fixture {
                     arguments: vec![],
                 },
                 timeout_ms: 1000,
+                native_completion_bridge: false,
             },
         )
         .unwrap();
@@ -1161,6 +1162,7 @@ async fn opt_in_message_module_uses_owned_file_plans_and_can_be_removed_without_
             arguments: vec![],
         },
         timeout_ms: 1000,
+        native_completion_bridge: false,
     };
     let module_path = || {
         let skills = f.workspace.join(".claude/skills");

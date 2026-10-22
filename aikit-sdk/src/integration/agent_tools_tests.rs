@@ -12,6 +12,7 @@ fn spec() -> AgentToolSpec {
             arguments: vec!["inspect".into()],
         },
         timeout_ms: 1000,
+        native_completion_bridge: false,
     }
 }
 
@@ -100,4 +101,21 @@ fn invocation_reader_bounds_versions_and_keeps_model_data_out_of_native_metadata
     assert!(AgentToolCall::read(vec![b' '; AGENT_TOOL_CALL_LIMIT + 1].as_slice()).is_err());
     let failure = AgentToolCall::read(br#"{"password":"private-fixture"}"#.as_slice()).unwrap_err();
     assert!(!failure.to_string().contains("private-fixture"));
+}
+
+#[test]
+fn native_completion_requires_owned_handler_and_is_absent_from_legacy_specs() {
+    let original = spec();
+    let encoded = serde_json::to_value(&original).unwrap();
+    assert!(encoded.get("native_completion_bridge").is_none());
+    let decoded: AgentToolSpec = serde_json::from_value(encoded).unwrap();
+    assert!(!decoded.native_completion_bridge);
+    let default = render_agent_tool_plugin("claude", &original).unwrap();
+    assert!(!default.files()["hooks/register.js"].contains("on('classic.Stop'"));
+    let mut opted_in = original;
+    opted_in.native_completion_bridge = true;
+    assert!(render_agent_tool_plugin("claude", &opted_in).is_err());
+    let plugin = render_with_session_handler("claude", &opted_in, Some(&opted_in.handler)).unwrap();
+    assert!(plugin.files()["hooks/register.js"].contains("on('classic.Stop'"));
+    assert!(plugin.files()["hooks/register.js"].contains(".catch(() => ({ block:"));
 }

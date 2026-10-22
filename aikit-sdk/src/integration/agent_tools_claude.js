@@ -56,6 +56,7 @@ async function invoke($, event) {
   } catch { return { deny: unavailable }; }
 }
 export function register(on) {
+  /* AIKIT_COMPLETION_BRIDGE */
   /* AIKIT_MESSAGE_LIFECYCLE */
   on('session.start', async ($, event, next) => {
     const native = await publishContext($);

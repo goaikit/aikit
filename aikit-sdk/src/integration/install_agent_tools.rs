@@ -37,6 +37,9 @@ impl IntegrationService {
         let raw = receipt_json(&connection, installation_id)?.ok_or(IntegrationError::NotFound)?;
         let mut receipt: Receipt = serde_json::from_str(&raw)?;
         let installation = receipt.installation.clone();
+        if spec.native_completion_bridge {
+            require_detached_bindings(&connection, installation_id)?;
+        }
         super::super::command::validate_handler(&installation.spec.handler)?;
         if spec.application_id != installation.spec.application_id
             || spec.installation_id != installation.id
@@ -64,6 +67,7 @@ impl IntegrationService {
                 "message bridge requires input observations".into(),
             ));
         }
+        super::super::agent_tools::validate_completion_events(&spec, &installation.spec.events)?;
         let plugin = super::super::agent_tools::render_with_message_handler(
             &installation.spec.agent_key,
             &spec,
@@ -80,7 +84,7 @@ impl IntegrationService {
             Some(receipt),
             &installation,
             Some(&plugin),
-            false,
+            spec.native_completion_bridge,
             None,
         )
     }

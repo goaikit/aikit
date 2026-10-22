@@ -46,6 +46,10 @@ Linux native execution are implemented. [Owned tool-file planning](owned-agent-t
 reuses the existing installer; authenticated callers and effective qualification
 remain required before application mutations can be enabled.
 
+The explicit [native completion bridge candidate](native-completion-bridge.md)
+reuses that module, the owned hook handler and installer. It defaults off and
+does not establish native ordering, caller authentication or readiness.
+
 The additive `integration` feature exposes `IntegrationService`, owned hook
 configuration and one `HookHandler::decide` callback. Construction never launches
 an agent. Claude hooks, a Cursor prompt/tool/session subset, and a Codex

@@ -901,6 +901,90 @@ fn tool_spec(f: &Fixture, id: &str) -> super::super::AgentToolSpec {
             arguments: vec!["inspect".into()],
         },
         timeout_ms: 5000,
+        native_completion_bridge: false,
+    }
+}
+
+#[test]
+fn native_completion_candidate_uses_owned_plan_and_preserves_other_hooks() {
+    let mut f = Fixture::new();
+    f.spec.events.push(HookEvent::InputSubmitted);
+    let unrelated = json!({"type":"command","command":"owner-command"});
+    f.write(&json!({"hooks":{"Stop":[{"hooks":[unrelated.clone()]}]}}));
+    let initial = f.install();
+    let before = fs::read(&f.config).unwrap();
+    let mut tool = tool_spec(&f, &initial.installation_id);
+    tool.native_completion_bridge = true;
+    let plan = f
+        .service
+        .plan_agent_tool(&initial.installation_id, tool)
+        .unwrap();
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    assert!(!plan.files.is_empty());
+    f.service.apply_install(&plan.id).unwrap();
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    let receipt: Receipt = serde_json::from_str(
+        &receipt_json(&f.service.connection().unwrap(), &initial.installation_id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let module = f
+        .spec
+        .workspace
+        .join(receipt.agent_tool.unwrap().relative_root)
+        .join("hooks/register.js");
+    assert!(fs::read_to_string(&module)
+        .unwrap()
+        .contains("on('classic.Stop'"));
+    let remove = f.service.plan_remove(&initial.installation_id).unwrap();
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), json!({"hooks":{"Stop":[{"hooks":[unrelated]}]}}));
+    assert!(!module.exists());
+}
+
+#[test]
+fn native_completion_candidate_requires_input_observation_and_detached_bindings() {
+    let mut f = Fixture::new();
+    let initial = f.install();
+    let mut tool = tool_spec(&f, &initial.installation_id);
+    tool.native_completion_bridge = true;
+    assert!(f
+        .service
+        .plan_agent_tool(&initial.installation_id, tool)
+        .is_err());
+    f.spec.events.push(HookEvent::InputSubmitted);
+    let updated = f.service.plan_install(f.spec.clone()).unwrap();
+    f.service.apply_install(&updated.id).unwrap();
+    synthetic_binding(&f, &initial.installation_id);
+    let mut tool = tool_spec(&f, &initial.installation_id);
+    tool.native_completion_bridge = true;
+    assert!(matches!(
+        f.service.plan_agent_tool(&initial.installation_id, tool),
+        Err(IntegrationError::Conflict(_))
+    ));
+}
+
+#[test]
+fn native_completion_candidate_rechecks_detachment_at_apply() {
+    let mut f = Fixture::new();
+    f.spec.events.push(HookEvent::InputSubmitted);
+    let initial = f.install();
+    let before = fs::read(&f.config).unwrap();
+    let mut tool = tool_spec(&f, &initial.installation_id);
+    tool.native_completion_bridge = true;
+    let plan = f
+        .service
+        .plan_agent_tool(&initial.installation_id, tool)
+        .unwrap();
+    synthetic_binding(&f, &initial.installation_id);
+    assert!(matches!(
+        f.service.apply_install(&plan.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    for file in plan.files {
+        assert!(!file.path.exists());
     }
 }
 

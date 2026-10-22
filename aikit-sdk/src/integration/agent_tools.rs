@@ -29,11 +29,31 @@ pub struct AgentToolSpec {
     pub instructions: String,
     pub handler: HookCommand,
     pub timeout_ms: u32,
+    /// Opt-in native Stop callback candidate. Uses the owned installation's
+    /// session handler; rendering does not establish effective mod ordering,
+    /// caller authority, native failure guarantees or integration readiness.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub native_completion_bridge: bool,
 }
 impl AgentToolSpec {
     pub fn read(reader: impl Read) -> Result<Self, IntegrationError> {
         bounded_json(reader, AGENT_TOOL_SPEC_LIMIT)
     }
+}
+
+pub(super) fn validate_completion_events(
+    spec: &AgentToolSpec,
+    events: &[super::HookEvent],
+) -> Result<(), IntegrationError> {
+    if spec.native_completion_bridge
+        && (!events.contains(&super::HookEvent::InputSubmitted)
+            || !events.contains(&super::HookEvent::CompletionProposed))
+    {
+        return Err(IntegrationError::Invalid(
+            "native completion bridge requires input and completion hooks".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn bounded_json<T: serde::de::DeserializeOwned>(
@@ -190,6 +210,11 @@ pub(super) fn render_with_message_handler(
         ));
     }
     super::command::validate_handler(&spec.handler)?;
+    if spec.native_completion_bridge && session_handler.is_none() {
+        return Err(IntegrationError::Invalid(
+            "native completion bridge requires the owned session handler".into(),
+        ));
+    }
     if let Some(handler) = message_handler {
         super::command::validate_handler(handler)?;
         if session_handler.is_none() {
@@ -259,6 +284,7 @@ pub(super) fn render_with_message_handler(
         "messageArgv": message_handler.map(|handler| std::iter::once(handler.executable.to_string_lossy().into_owned()).chain(handler.arguments.clone()).collect::<Vec<_>>())});
     let messaging = message_handler.is_some();
     let module = include_str!("agent_tools_claude.js")
+        .replace("/* AIKIT_COMPLETION_BRIDGE */", if spec.native_completion_bridge { include_str!("agent_tools_completion_claude.js") } else { "" })
         .replace("/* AIKIT_MESSAGE_HELPERS */", if messaging { include_str!("agent_tools_messages_claude.js") } else { "" })
         .replace("/* AIKIT_MESSAGE_START */", if messaging { "await startMessagePump($);" } else { "" })
         .replace("/* AIKIT_MESSAGE_BUSY */", if messaging { "messageActive = true;" } else { "" })
