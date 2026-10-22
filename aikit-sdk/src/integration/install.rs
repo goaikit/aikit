@@ -979,6 +979,44 @@ impl IntegrationService {
         self.status_inner(&self.connection()?, id)
     }
 
+    /// Inspect an interrupted apply for one owner-configured installation.
+    /// Returns only a prepared plan, never an unapplied preview or another
+    /// application's plan. This is a read, not authorization to apply it: the
+    /// consumer must inspect `removal` and retain its own lifecycle guards.
+    /// `apply_install` rechecks fingerprints and preserves conflicting edits.
+    pub fn pending_installation_plan(
+        &self,
+        application_id: &str,
+        agent_key: &str,
+        workspace: &Path,
+    ) -> Result<Option<InstallPlan>, IntegrationError> {
+        if crate::agent(agent_key).is_none() {
+            return Err(IntegrationError::UnknownAgent(agent_key.into()));
+        }
+        let workspace = fs::canonicalize(workspace)?;
+        let installation_id = installation_key(agent_key, application_id, &workspace);
+        let _lock = self.state_lock()?;
+        let connection = self.connection()?;
+        let Some(id) = prepared_plan(&connection, &installation_id)? else {
+            return Ok(None);
+        };
+        let body: String = connection.query_row(
+            "SELECT body FROM install_plans WHERE id=?1 AND installation_id=?2 AND phase='prepared'",
+            params![id, installation_id], |row| row.get(0),
+        )?;
+        let pending: Pending = serde_json::from_str(&body)?;
+        if pending.preview.id != id
+            || pending.preview.installation_id != installation_id
+            || pending.workspace != workspace
+            || pending.preview.removal != pending.next_receipt.is_none()
+        {
+            return Err(IntegrationError::Conflict(
+                "pending installation scope does not match".into(),
+            ));
+        }
+        Ok(Some(pending.preview))
+    }
+
     /// Resolve a configured installation without a circular ID-in-handler-args
     /// dependency. These are trusted process configuration values, never fields
     /// copied from a native hook payload.

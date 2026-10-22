@@ -1,6 +1,108 @@
 use super::*;
 
 #[test]
+fn pending_plan_lookup_recovers_only_the_scoped_interrupted_apply() {
+    let f = Fixture::new();
+    let original = json!({"owner":true});
+    f.write(&original);
+    let hooks = f.install();
+    let removal = f.service.plan_remove(&hooks.installation_id).unwrap();
+    assert!(f
+        .service
+        .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        f.service.apply_inner(&removal.id, true),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    let pending = reopened
+        .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.id, removal.id);
+    assert!(pending.removal);
+    assert!(reopened
+        .pending_installation_plan("other-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .is_none());
+    assert!(reopened
+        .pending_installation_plan("review-app", "codex", &f.spec.workspace)
+        .unwrap()
+        .is_none());
+    let other = f._dir.path().join("other");
+    fs::create_dir(&other).unwrap();
+    assert!(reopened
+        .pending_installation_plan("review-app", "claude", &other)
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        reopened.apply_install(&pending.id).unwrap(),
+        InstallationStatus::Absent
+    ));
+    assert_eq!(f.read(), original);
+    assert!(reopened
+        .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn pending_plan_lookup_exposes_install_kind_without_applying_and_keeps_conflicts() {
+    let f = Fixture::new();
+    let install = f.service.plan_install(f.spec.clone()).unwrap();
+    assert!(f.service.apply_inner(&install.id, true).is_err());
+    let before = fs::read(&f.config).unwrap();
+    let pending = f
+        .service
+        .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .unwrap();
+    assert!(!pending.removal);
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    f.write(&json!({"external":"preserve"}));
+    assert!(matches!(
+        f.service.apply_install(&pending.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(f.read(), json!({"external":"preserve"}));
+    assert!(f
+        .service
+        .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn pending_plan_lookup_rejects_corrupt_scope() {
+    let f = Fixture::new();
+    let install = f.service.plan_install(f.spec.clone()).unwrap();
+    assert!(f.service.apply_inner(&install.id, true).is_err());
+    let connection = f.service.connection().unwrap();
+    let raw: String = connection
+        .query_row(
+            "SELECT body FROM install_plans WHERE id=?1",
+            [&install.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut pending: Pending = serde_json::from_str(&raw).unwrap();
+    pending.preview.installation_id = "foreign".into();
+    connection
+        .execute(
+            "UPDATE install_plans SET body=?2 WHERE id=?1",
+            params![install.id, serde_json::to_string(&pending).unwrap()],
+        )
+        .unwrap();
+    assert!(matches!(
+        f.service
+            .pending_installation_plan("review-app", "claude", &f.spec.workspace),
+        Err(IntegrationError::Conflict(_))
+    ));
+}
+
+#[test]
 fn existing_open_never_creates_a_missing_or_empty_journal() {
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path().join("state");
