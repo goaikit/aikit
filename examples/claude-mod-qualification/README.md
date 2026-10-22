@@ -1,5 +1,10 @@
 # Claude mod event feasibility probe
 
+The later [native prepend comparison](prepend-stop-protocol.md) demonstrates
+the blocking catch before one short-circuit competitor in unmanaged user order
+and managed policy order. It supplies conditional ordering candidates, not
+effective-session attestation or readiness.
+
 The later [native Stop mod catch comparison](stop-catch-protocol.md) recovers
 an injected throw and native timeout through a blocking fallback. An injected
 failure of the fallback itself still allows completion. This narrows one
