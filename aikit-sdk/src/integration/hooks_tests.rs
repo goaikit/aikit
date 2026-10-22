@@ -54,6 +54,102 @@ impl Fixture {
 
 struct Fixed(Decision);
 
+#[tokio::test]
+async fn scoped_owner_pages_and_detach_require_fresh_start_without_touching_other_handles() {
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let first = f.service.observed_session(&f.id, "native-session").unwrap();
+    let a = f.service.bind_existing(&first).unwrap();
+    let mut other = f.input("SessionStart");
+    other["session_id"] = json!("other-session");
+    f.service
+        .handle_hook(&f.id, other.to_string().as_bytes(), &Never)
+        .await;
+    let second = f.service.observed_session(&f.id, "other-session").unwrap();
+    let b = f.service.bind_existing(&second).unwrap();
+    let mut unseen = f.input("SessionStart");
+    unseen["session_id"] = json!("not-yet-bound");
+    f.service
+        .handle_hook(&f.id, unseen.to_string().as_bytes(), &Never)
+        .await;
+    let old_unbound = f.service.observed_session(&f.id, "not-yet-bound").unwrap();
+    let page = f
+        .service
+        .attached_bindings("example", "claude", &f.workspace, None, 1)
+        .unwrap();
+    assert_eq!(page.records.len(), 1);
+    let next = f
+        .service
+        .attached_bindings(
+            "example",
+            "claude",
+            &f.workspace,
+            page.next_id.as_deref(),
+            1,
+        )
+        .unwrap();
+    assert_eq!(next.records.len(), 1);
+    assert_ne!(page.records[0].id, next.records[0].id);
+    assert!(f
+        .service
+        .attached_bindings("other-app", "claude", &f.workspace, None, 50)
+        .unwrap()
+        .records
+        .is_empty());
+    assert!(f
+        .service
+        .detach_recorded_binding("other-app", "claude", &f.workspace, a.id())
+        .is_err());
+    let config = std::fs::read(f.workspace.join(".claude/settings.local.json")).unwrap();
+    let receipt = f
+        .service
+        .detach_recorded_binding("example", "claude", &f.workspace, a.id())
+        .unwrap();
+    assert_eq!(a.status().unwrap(), super::super::SessionStatus::Detached);
+    assert_eq!(f.service.bind_existing(&second).unwrap().id(), b.id());
+    assert!(matches!(
+        f.service.bind_existing(&first),
+        Err(IntegrationError::Detached)
+    ));
+    assert!(matches!(
+        f.service.bind_existing(&old_unbound),
+        Err(IntegrationError::Detached)
+    ));
+    f.service
+        .handle_hook(&f.id, unseen.to_string().as_bytes(), &Never)
+        .await;
+    let fresh = f.service.observed_session(&f.id, "not-yet-bound").unwrap();
+    assert!(fresh.start_cursor > receipt.admission_after_cursor);
+    let repeated = f
+        .service
+        .detach_recorded_binding("example", "claude", &f.workspace, a.id())
+        .unwrap();
+    assert_eq!(receipt, repeated);
+    f.service.bind_existing(&fresh).unwrap();
+    assert_eq!(
+        std::fs::read(f.workspace.join(".claude/settings.local.json")).unwrap(),
+        config
+    );
+    assert_eq!(
+        f.service
+            .attached_bindings("example", "claude", &f.workspace, None, 50)
+            .unwrap()
+            .records
+            .len(),
+        2
+    );
+    assert!(f
+        .service
+        .attached_bindings("example", "claude", &f.workspace, None, 0)
+        .is_err());
+}
+
 #[test]
 fn native_turn_observations_are_typed_bounded_and_match_inherited_turn() {
     let f = Fixture::new(10);
@@ -730,10 +826,20 @@ async fn binding_replay_is_scoped_and_detach_leaves_native_hooks_and_history_int
         0
     );
     assert_eq!(f.service.events(&f.id, 0, 10).unwrap().records.len(), 4);
-    assert_ne!(
-        f.service.bind_existing(&reference).unwrap().id(),
-        binding.id()
-    );
+    assert!(matches!(
+        f.service.bind_existing(&reference),
+        Err(IntegrationError::Detached)
+    ));
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let fresh = f.service.observed_session(&f.id, "native-session").unwrap();
+    assert_ne!(fresh, reference);
+    assert_ne!(f.service.bind_existing(&fresh).unwrap().id(), binding.id());
 }
 
 #[tokio::test]

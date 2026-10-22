@@ -24,7 +24,9 @@ fn migrate_message_tables(connection: &Connection) -> Result<(), IntegrationErro
         CREATE INDEX IF NOT EXISTS message_observations_by_operation ON message_observations(installation_id,operation_id,cursor);
         CREATE TABLE IF NOT EXISTS message_handoffs(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id));
         CREATE TABLE IF NOT EXISTS message_append_checkpoints(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, native_row_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id), UNIQUE(installation_id,native_row_id));
-        PRAGMA user_version=14;")?;
+        CREATE TABLE IF NOT EXISTS binding_admission_floors(installation_id TEXT PRIMARY KEY NOT NULL, cursor INTEGER NOT NULL);
+        INSERT INTO binding_admission_floors SELECT DISTINCT json_extract(reference,'$.installation_id'), (SELECT coalesce(max(sequence),0) FROM hook_invocations) FROM session_bindings WHERE detached=1 ON CONFLICT(installation_id) DO NOTHING;
+        PRAGMA user_version=15;")?;
     connection.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
     Ok(())
 }
@@ -369,9 +371,9 @@ impl IntegrationService {
         let mut connection = service.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous_schema: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(9..=14).contains(&previous_schema) {
+        if !(9..=15).contains(&previous_schema) {
             return Err(IntegrationError::Invalid(
-                "explicit integration upgrade supports existing schemas 9 through 14 only".into(),
+                "explicit integration upgrade supports existing schemas 9 through 15 only".into(),
             ));
         }
         // Do not turn a claimed legacy version with missing core history into
@@ -396,7 +398,10 @@ impl IntegrationService {
         if previous_schema >= 12 {
             tx.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
         }
-        if previous_schema != 14 {
+        if previous_schema == 15 {
+            tx.prepare("SELECT installation_id,cursor FROM binding_admission_floors LIMIT 0")?;
+        }
+        if previous_schema != 15 {
             let attached: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE detached=0)",
                 [],
@@ -422,8 +427,8 @@ impl IntegrationService {
         tx.commit()?;
         Ok(StateUpgradeReport {
             previous_schema,
-            current_schema: 14,
-            changed: previous_schema != 14,
+            current_schema: 15,
+            changed: previous_schema != 15,
         })
     }
 
@@ -432,6 +437,7 @@ impl IntegrationService {
         connection: &Connection,
         allow_create: bool,
     ) -> Result<(), IntegrationError> {
+        // Version 15 prevents rebinding observations from before owner detachment.
         // Version 14 fences caller-owned update identity against older receipt writers.
         // Version 13 retains mandatory detach guards for coordinated plans.
         // Version 12 adds unqualified native row checkpoints before/after append;
@@ -443,19 +449,19 @@ impl IntegrationService {
                 "existing integration journal has no supported schema".into(),
             ));
         }
-        if version > 14 {
+        if version > 15 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if !allow_create && version < 14 {
+        if !allow_create && version < 15 {
             return Err(IntegrationError::Invalid(
                 "existing integration journal requires an explicit schema upgrade".into(),
             ));
         }
-        if version < 14 {
+        if version < 15 {
             let _lock = self.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 14 {
+            if version > 15 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {
@@ -1436,7 +1442,7 @@ fn config_path(spec: &InstallSpec) -> Result<PathBuf, IntegrationError> {
 fn installation_id(spec: &InstallSpec) -> String {
     installation_key(&spec.agent_key, &spec.application_id, &spec.workspace)
 }
-fn installation_key(agent_key: &str, application_id: &str, workspace: &Path) -> String {
+pub(super) fn installation_key(agent_key: &str, application_id: &str, workspace: &Path) -> String {
     let key = serde_json::to_vec(&(agent_key, application_id, workspace))
         .expect("paths and strings serialize");
     format!("{:x}", Sha256::digest(key))

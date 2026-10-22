@@ -147,6 +147,21 @@ impl IntegrationService {
                 |r| r.get(0),
             )
             .optional()?;
+        if existing.is_none() {
+            let floor: Option<i64> = tx
+                .query_row(
+                    "SELECT cursor FROM binding_admission_floors WHERE installation_id=?1",
+                    [&reference.installation_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if floor.is_some_and(|floor| floor < 0) {
+                return Err(IntegrationError::Invalid("negative admission floor".into()));
+            }
+            if floor.is_some_and(|floor| floor >= 0 && reference.start_cursor <= floor as u64) {
+                return Err(IntegrationError::Detached);
+            }
+        }
         let id = existing.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         tx.execute(
             "INSERT OR IGNORE INTO session_bindings(id,reference,detached) VALUES (?1,?2,0)",
@@ -297,14 +312,13 @@ impl SessionBinding<'_> {
         }
     }
 
-    /// Revoke only this application handle. No provider command is sent; installed
-    /// hooks and historical records remain unchanged. Repeating detach is safe.
+    /// Revoke this handle and fence new bindings to earlier observations. Other
+    /// existing handles, installed hooks and history remain unchanged. No
+    /// provider command is sent; repeating detach does not advance the floor.
     pub fn detach(&self) -> Result<(), IntegrationError> {
-        self.service.connection()?.execute(
-            "UPDATE session_bindings SET detached=1 WHERE id=?1",
-            [&self.id],
-        )?;
-        Ok(())
+        self.service
+            .detach_binding_for_installation(&self.id, &self.reference.installation_id)
+            .map(|_| ())
     }
 }
 
@@ -326,7 +340,7 @@ fn latest_start(
     Ok(cursor.map(|c| c as u64))
 }
 
-fn reference_status(
+pub(super) fn reference_status(
     connection: &Connection,
     reference: &SessionRef,
 ) -> Result<SessionStatus, IntegrationError> {

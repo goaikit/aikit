@@ -1,6 +1,67 @@
 use super::*;
 
 #[test]
+fn malformed_legacy_detachment_scope_refuses_upgrade_without_replacing_history() {
+    let f = Fixture::new();
+    f.install();
+    let config = fs::read(&f.config).unwrap();
+    let connection = f.service.connection().unwrap();
+    connection.execute_batch("INSERT INTO session_bindings VALUES ('bad-legacy','{}',1); DROP TABLE binding_admission_floors; PRAGMA user_version=14").unwrap();
+    assert!(IntegrationService::upgrade_existing(&f.service.state).is_err());
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+            .unwrap(),
+        14
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT reference FROM session_bindings WHERE id='bad-legacy'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+        "{}"
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), config);
+}
+
+#[test]
+fn schema_fourteen_upgrade_seeds_detached_binding_admission_floor() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    synthetic_binding(&f, &hooks.installation_id);
+    f.service.connection().unwrap().execute_batch("UPDATE session_bindings SET detached=1; DROP TABLE binding_admission_floors; PRAGMA user_version=14").unwrap();
+    assert!(IntegrationService::open_existing(&f.service.state).is_err());
+    let report = IntegrationService::upgrade_existing(&f.service.state).unwrap();
+    assert_eq!(
+        (
+            report.previous_schema,
+            report.current_schema,
+            report.changed
+        ),
+        (14, 15, true)
+    );
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    let floor: i64 = reopened
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT cursor FROM binding_admission_floors WHERE installation_id=?1",
+            [&hooks.installation_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(floor, 0);
+    assert!(reopened
+        .attached_bindings("review-app", "claude", &f.spec.workspace, None, 50)
+        .unwrap()
+        .records
+        .is_empty());
+}
+
+#[test]
 fn schema_thirteen_upgrade_retains_caller_update_identity_and_refuses_unsettled_work() {
     let f = Fixture::new();
     let hooks = f.install();
@@ -32,7 +93,7 @@ fn schema_thirteen_upgrade_retains_caller_update_identity_and_refuses_unsettled_
             report.current_schema,
             report.changed
         ),
-        (13, 14, true)
+        (13, 15, true)
     );
     let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
     assert_eq!(
@@ -375,7 +436,7 @@ fn schema_twelve_upgrade_requires_detached_settled_state_and_retains_receipts() 
             upgrade.current_schema,
             upgrade.changed
         ),
-        (12, 14, true)
+        (12, 15, true)
     );
     assert_eq!(fs::read(&f.config).unwrap(), bytes);
     let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
@@ -569,7 +630,7 @@ fn existing_open_requires_explicit_upgrade_without_losing_owned_receipts() {
             .unwrap()
             .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        14
+        15
     );
 }
 
@@ -616,7 +677,7 @@ fn explicit_upgrade_never_initializes_missing_empty_or_unsupported_state() {
     ));
     assert_eq!(fs::metadata(&database).unwrap().len(), 0);
     fs::remove_file(&database).unwrap();
-    for version in [0, 8, 15] {
+    for version in [0, 8, 16] {
         let connection = Connection::open(&database).unwrap();
         connection
             .pragma_update(None, "user_version", version)
@@ -660,7 +721,7 @@ fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
         report,
         StateUpgradeReport {
             previous_schema: 9,
-            current_schema: 14,
+            current_schema: 15,
             changed: true
         }
     );
@@ -673,8 +734,8 @@ fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
     assert_eq!(
         IntegrationService::upgrade_existing(&f.service.state).unwrap(),
         StateUpgradeReport {
-            previous_schema: 14,
-            current_schema: 14,
+            previous_schema: 15,
+            current_schema: 15,
             changed: false
         }
     );
@@ -684,15 +745,25 @@ fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
 #[test]
 fn explicit_upgrade_refuses_attached_bindings_and_unapplied_plans() {
     let f = Fixture::new();
-    f.install();
+    let installation = f.install();
     let config = fs::read(&f.config).unwrap();
     let connection = f.service.connection().unwrap();
     // Storage fixture only. No native session, identity or readiness is claimed.
+    let reference = serde_json::to_string(&super::super::SessionRef {
+        installation_id: installation.installation_id,
+        installation_revision: "fixture".into(),
+        native_session_id: "fixture".into(),
+        invocation_id: None,
+        start_cursor: 1,
+    })
+    .unwrap();
     connection
-        .execute_batch(
-            "INSERT INTO session_bindings VALUES ('fixture','{}',0); PRAGMA user_version=9",
+        .execute(
+            "INSERT INTO session_bindings VALUES ('fixture',?1,0)",
+            [&reference],
         )
         .unwrap();
+    connection.pragma_update(None, "user_version", 9).unwrap();
     assert!(matches!(
         IntegrationService::upgrade_existing(&f.service.state),
         Err(IntegrationError::Conflict(_))
@@ -739,7 +810,7 @@ fn explicit_upgrade_refuses_attached_bindings_and_unapplied_plans() {
                 |row| row.get(0)
             )
             .unwrap(),
-        "{}"
+        reference
     );
     assert_eq!(fs::read(&f.config).unwrap(), config);
 }
@@ -1370,7 +1441,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, 15);
     assert!(matches!(
         reopened.apply_install(&plan.id).unwrap(),
         InstallationStatus::Configured { .. }
@@ -1381,7 +1452,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
     reopened
         .connection()
         .unwrap()
-        .execute_batch("PRAGMA user_version=15;")
+        .execute_batch("PRAGMA user_version=16;")
         .unwrap();
     assert!(matches!(
         IntegrationService::open(f._dir.path().join("private-state")),

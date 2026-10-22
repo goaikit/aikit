@@ -20,6 +20,8 @@ mod install;
 mod message_append;
 mod message_bridge;
 mod messages;
+mod owner_sessions;
+pub use owner_sessions::{RecordedBinding, RecordedBindingsPage, RecordedDetachment};
 mod pi;
 mod sessions;
 mod tool_effects;
