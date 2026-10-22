@@ -1,5 +1,11 @@
 # Claude mod event feasibility probe
 
+The [2.1.308 candidate inspection](current-client-20261023.md) retains a separately
+checksum-pinned image, version-matched native API findings and actual consumer
+completion compatibility. It does not inherit 2.1.296 evidence, qualify message
+framing or promote capabilities. `Dockerfile.native` still defaults to 2.1.296;
+alternate builds must specify both `CLAUDE_VERSION` and `CLAUDE_SHA256`.
+
 The later [native origin comparison](origin-protocol.md) distinguishes plugin
 and engine tool dispatch, drives the SDK's pre-I/O origin guard, and verifies a
 foreign-plugin Deny alongside a successful engine call. It does not qualify

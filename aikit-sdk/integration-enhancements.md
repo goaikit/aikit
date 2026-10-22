@@ -4,6 +4,22 @@ These are implementation requests backed by local source inspection and bounded
 native evidence. They are not promises of supported behavior. AIKit owns native
 translation and qualification; consumer applications keep their own review rules.
 
+## Current Claude API review, 2026-10-23
+
+The [checksum-pinned 2.1.308 inspection](../examples/claude-mod-qualification/current-client-20261023.md)
+adds actual consumer completion compatibility but no protected transport proof.
+Its new `session.identity()` is account/managed-organization identity, not local
+stdio invocation authentication. Its declared settings middleware is also not
+an independent active-chain attestation. Neither is a reason to require owner
+login, install managed policy, or mark native capabilities Supported.
+
+The remaining enhancement must provide a native-host-verifiable invocation and
+effective-policy witness tied to the actual generation, plus original-session
+admission and separately correlated durable storage/actual-input evidence through
+the existing message journal. Reuse existing APIs when they supply those facts;
+do not replace absent native guarantees with caller-provided IDs or raw returns.
+New-version framing/failure/adversarial qualification remains independent work.
+
 ## Claude: competing middleware can skip command Stop policy, 2026-10-22
 
 A fresh ordinary interactive Linux 2.1.296 matched probe observed a mod returning
