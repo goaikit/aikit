@@ -1,5 +1,12 @@
 # Claude mod event feasibility probe
 
+The later [guarded native Stop failure comparison](stop-failure-protocol.md)
+observes missing and timed-out managed command hooks allow successful completion
+despite the actual built-in guard and `onFailure: "block"`. This adds an exact
+native failure diagnostic, not readiness. The preceding
+[guard comparison](managed-stop-protocol.md) resisted one short-circuit mod;
+that protection alone does not establish failure handling.
+
 The later [combined SDK crash recovery](native-sdk-append-crash.md) exercises a
 real post-storage/lost-reply SIGKILL, cold SQLite inspection, original-session
 resume under a new invocation and immutable no-resend recovery. It qualifies one
