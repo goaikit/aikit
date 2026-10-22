@@ -24,7 +24,7 @@ fn migrate_message_tables(connection: &Connection) -> Result<(), IntegrationErro
         CREATE INDEX IF NOT EXISTS message_observations_by_operation ON message_observations(installation_id,operation_id,cursor);
         CREATE TABLE IF NOT EXISTS message_handoffs(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id));
         CREATE TABLE IF NOT EXISTS message_append_checkpoints(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, native_row_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id), UNIQUE(installation_id,native_row_id));
-        PRAGMA user_version=13;")?;
+        PRAGMA user_version=14;")?;
     connection.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
     Ok(())
 }
@@ -369,9 +369,9 @@ impl IntegrationService {
         let mut connection = service.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let previous_schema: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(9..=13).contains(&previous_schema) {
+        if !(9..=14).contains(&previous_schema) {
             return Err(IntegrationError::Invalid(
-                "explicit integration upgrade supports existing schemas 9 through 13 only".into(),
+                "explicit integration upgrade supports existing schemas 9 through 14 only".into(),
             ));
         }
         // Do not turn a claimed legacy version with missing core history into
@@ -396,7 +396,7 @@ impl IntegrationService {
         if previous_schema >= 12 {
             tx.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
         }
-        if previous_schema != 13 {
+        if previous_schema != 14 {
             let attached: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE detached=0)",
                 [],
@@ -422,8 +422,8 @@ impl IntegrationService {
         tx.commit()?;
         Ok(StateUpgradeReport {
             previous_schema,
-            current_schema: 13,
-            changed: previous_schema != 13,
+            current_schema: 14,
+            changed: previous_schema != 14,
         })
     }
 
@@ -432,6 +432,7 @@ impl IntegrationService {
         connection: &Connection,
         allow_create: bool,
     ) -> Result<(), IntegrationError> {
+        // Version 14 fences caller-owned update identity against older receipt writers.
         // Version 13 retains mandatory detach guards for coordinated plans.
         // Version 12 adds unqualified native row checkpoints before/after append;
         // version 11 retains raw handoff returns independently of qualified proof.
@@ -442,19 +443,19 @@ impl IntegrationService {
                 "existing integration journal has no supported schema".into(),
             ));
         }
-        if version > 13 {
+        if version > 14 {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if !allow_create && version < 13 {
+        if !allow_create && version < 14 {
             return Err(IntegrationError::Invalid(
                 "existing integration journal requires an explicit schema upgrade".into(),
             ));
         }
-        if version < 13 {
+        if version < 14 {
             let _lock = self.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 13 {
+            if version > 14 {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
             }
             if version < 3 {

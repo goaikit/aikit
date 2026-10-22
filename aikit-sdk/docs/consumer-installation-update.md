@@ -19,20 +19,29 @@ planning, without losing or duplicating a plan across a lost reply:
   applied, legacy non-idempotent or foreign plans refuse cancellation. An absent
   intent is harmless, provided it is not the current applied revision.
 
-The existing combined-plan convenience method remains available. Schema 13 is
-unchanged: its mandatory detached guard still protects apply. The new request
-digest is additive metadata retained with the completed preview. No new runtime
-or provider transport is introduced.
+The existing combined-plan convenience method remains available. Schema **14**
+fences the retained caller request identity: older schema-13 receipt writers can
+ignore and drop that field when rewriting a completed plan, so they must refuse
+opening the newer store. Explicit 9–13 upgrades require detached bindings and
+settled installation plans and retain the original request digests. Schema 13's
+mandatory detached guard still protects apply. Stop old consumers before an
+upgrade; this is not proof that an already-running old process has terminated.
+No provider transport is introduced.
 
 ## Linux evidence, 2026-10-22
 
-On base `685b703`, **143 integration tests passed, zero failed**, using offline
-Rust 1.88 in the isolated Linux validation image. Scoped library Clippy passed
-with warnings denied and the established format-lint allowance.
+The initial transaction API passed 143 integration tests on base `685b703`.
+The final schema-14 fence on base `b359ddb` passed **144 integration tests, zero
+failed**, using offline Rust 1.88 in the isolated Linux validation image. Scoped
+library Clippy passed with warnings denied and the established format-lint
+allowance. Counts overlap.
 
 New tests exercise a lost plan reply, stable pre/post-apply retries, changed
 request rejection, partial-write recovery, a held revision guard refusing a
 writer, superseded-revision rejection, one retained plan identity, and cancellation
 before apply while rejecting foreign/prepared/applied records. These are library
 and filesystem contract tests; they do not qualify native sessions or Windows.
+The additional schema-13 fixture refuses an ordinary runtime open and unsettled
+upgrade, then preserves caller identity and its exact applied revision after an
+explicit compatible upgrade.
 Raw logs are retained in the parent workspace at `.local/update-journal-20261022`.

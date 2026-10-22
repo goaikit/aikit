@@ -1,6 +1,59 @@
 use super::*;
 
 #[test]
+fn schema_thirteen_upgrade_retains_caller_update_identity_and_refuses_unsettled_work() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    let tool = tool_spec(&f, &hooks.installation_id);
+    f.service
+        .plan_update_with_agent_tool_id(
+            "upgrade-intent",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool.clone(),
+            None,
+        )
+        .unwrap();
+    f.service
+        .connection()
+        .unwrap()
+        .pragma_update(None, "user_version", 13)
+        .unwrap();
+    assert!(IntegrationService::open_existing(&f.service.state).is_err());
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    f.service.apply_install("upgrade-intent").unwrap();
+    let report = IntegrationService::upgrade_existing(&f.service.state).unwrap();
+    assert_eq!(
+        (
+            report.previous_schema,
+            report.current_schema,
+            report.changed
+        ),
+        (13, 14, true)
+    );
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    assert_eq!(
+        reopened
+            .plan_update_with_agent_tool_id(
+                "upgrade-intent",
+                f.spec.clone(),
+                CompletionBlockingPolicy::NativeDefault,
+                tool,
+                None
+            )
+            .unwrap()
+            .id,
+        "upgrade-intent"
+    );
+    reopened
+        .applied_installation_guard("upgrade-intent")
+        .unwrap();
+}
+
+#[test]
 fn consumer_update_id_survives_lost_plan_reply_and_guard_refuses_superseded_revision() {
     let f = Fixture::new();
     let hooks = f.install();
@@ -322,7 +375,7 @@ fn schema_twelve_upgrade_requires_detached_settled_state_and_retains_receipts() 
             upgrade.current_schema,
             upgrade.changed
         ),
-        (12, 13, true)
+        (12, 14, true)
     );
     assert_eq!(fs::read(&f.config).unwrap(), bytes);
     let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
@@ -516,7 +569,7 @@ fn existing_open_requires_explicit_upgrade_without_losing_owned_receipts() {
             .unwrap()
             .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        13
+        14
     );
 }
 
@@ -563,7 +616,7 @@ fn explicit_upgrade_never_initializes_missing_empty_or_unsupported_state() {
     ));
     assert_eq!(fs::metadata(&database).unwrap().len(), 0);
     fs::remove_file(&database).unwrap();
-    for version in [0, 8, 14] {
+    for version in [0, 8, 15] {
         let connection = Connection::open(&database).unwrap();
         connection
             .pragma_update(None, "user_version", version)
@@ -607,7 +660,7 @@ fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
         report,
         StateUpgradeReport {
             previous_schema: 9,
-            current_schema: 13,
+            current_schema: 14,
             changed: true
         }
     );
@@ -620,8 +673,8 @@ fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
     assert_eq!(
         IntegrationService::upgrade_existing(&f.service.state).unwrap(),
         StateUpgradeReport {
-            previous_schema: 13,
-            current_schema: 13,
+            previous_schema: 14,
+            current_schema: 14,
             changed: false
         }
     );
@@ -1317,7 +1370,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 14);
     assert!(matches!(
         reopened.apply_install(&plan.id).unwrap(),
         InstallationStatus::Configured { .. }
@@ -1328,7 +1381,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
     reopened
         .connection()
         .unwrap()
-        .execute_batch("PRAGMA user_version=14;")
+        .execute_batch("PRAGMA user_version=15;")
         .unwrap();
     assert!(matches!(
         IntegrationService::open(f._dir.path().join("private-state")),
