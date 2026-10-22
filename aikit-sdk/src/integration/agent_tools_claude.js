@@ -95,6 +95,12 @@ export function register(on) {
     if (context.blocks.some(block => block.name === config.contextName)) throw new Error('Conflicting application instruction block');
     return { ...context, blocks: [...context.blocks, { name: config.contextName, text: config.instructions }] };
   });
-  on('tool.call', { tool: 'AIKIT_NATIVE_TOOL_NAME' }, async ($, event) => invoke($, event))
+  on('tool.call', { tool: 'AIKIT_NATIVE_TOOL_NAME' }, async ($, event, next) => {
+    // Dispatch metadata belongs to the native host, not model request JSON.
+    // This guard is not authentication of the eventual stdio child process.
+    if (next?.origin?.plugin !== 'engine' || next.origin.tier !== 'core')
+      return { deny: 'Agent operation requires a native engine tool dispatch.' };
+    return invoke($, event);
+  })
     .catch(() => ({ deny: unavailable }));
 }

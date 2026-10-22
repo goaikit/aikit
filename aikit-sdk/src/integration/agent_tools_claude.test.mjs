@@ -59,7 +59,7 @@ test('downstream failure emits no outcome and process failure is attempted only 
 });
 test('owned tool waits for an asynchronous native Turn startup without retrying',async()=>{
   const f=await fixture();
-  assert.match((await f.hooks.get('tool.call')(f.api,{request:{}})).deny,/startup/);
+  assert.match((await f.hooks.get('tool.call')(f.api,{request:{}},{origin:{plugin:'engine',tier:'core'}})).deny,/startup/);
   let release,entered,toolCalls=0;
   const ready=new Promise(resolve=>{entered=resolve;});
   const pending=new Promise(resolve=>{release=resolve;});
@@ -70,8 +70,20 @@ test('owned tool waits for an asynchronous native Turn startup without retrying'
   };
   const start=f.hooks.get('turn.start')(f.api,{turnId:'main'},async()=>({}));
   await ready;
-  const result=f.hooks.get('tool.call')(f.api,{request:{}});
+  const result=f.hooks.get('tool.call')(f.api,{request:{}},{origin:{plugin:'engine',tier:'core'}});
   await Promise.resolve();assert.equal(toolCalls,0);
   release();await start;
   assert.deepEqual(await result,{result:'{"ok":true}'});assert.equal(toolCalls,1);
+});
+test('missing or plugin-raised tool origin cannot invoke the application handler',async()=>{
+  const f=await fixture();
+  await f.hooks.get('turn.start')(f.api,{turnId:'main'},async()=>({}));
+  let calls=0;
+  f.api.process.run=async()=>{calls++;return {exitCode:0,isStdoutTruncated:false,isStderrTruncated:false,stdout:'{"ok":true}'};};
+  for(const next of [undefined,{}, {origin:{plugin:'peer',tier:'user'}},
+    {origin:{plugin:'engine',tier:'user'}},{origin:{plugin:'peer',tier:'core'}}]) {
+    const result=await f.hooks.get('tool.call')(f.api,{request:{}},next);
+    assert.match(result.deny,/native engine/);
+  }
+  assert.equal(calls,0);
 });

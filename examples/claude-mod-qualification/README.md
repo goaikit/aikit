@@ -1,5 +1,10 @@
 # Claude mod event feasibility probe
 
+The later [native origin comparison](origin-protocol.md) distinguishes plugin
+and engine tool dispatch, drives the SDK's pre-I/O origin guard, and verifies a
+foreign-plugin Deny alongside a successful engine call. It does not qualify
+physical caller authentication or active ordering; failed premises are retained.
+
 The later [generated SDK Stop comparison](generated-stop-protocol.md) executes
 the real owned module and SDK example handler. Its baseline and invalid-JSON /
 process-timeout failures retain Block, continuation and downstream command

@@ -8,6 +8,8 @@ import { randomUUID } from 'node:crypto';
 const evidence = process.argv[2];
 const fixtureKey = 'sk-ant-aikit-local-fixture-not-a-credential';
 const bridge = process.argv[3] ? JSON.parse(fs.readFileSync(process.argv[3], 'utf8')) : null;
+const port = process.argv[4] === undefined ? 8787 : Number(process.argv[4]);
+if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('bounded unprivileged loopback port required');
 const nativeTool = bridge ? bridge.tool_name : 'mcp__aikit-mod-feasibility__echo';
 const marker = bridge ? 'AIKIT_NATIVE_BRIDGE_PROBE' : 'AIKIT_NATIVE_TOOL_PROBE';
 const toolId = bridge ? 'fixture-native-bridge' : 'fixture-native-echo';
@@ -60,4 +62,4 @@ http.createServer(async (request, response) => {
   }
   if (request.method === 'GET' && request.url === '/') return json(response, 200, { fixture: true });
   return json(response, 404, { type: 'error', error: { type: 'not_found_error', message: 'unsupported fixture route' } });
-}).listen(8787, '127.0.0.1', () => console.log('fixture listening on 127.0.0.1:8787'));
+}).listen(port, '127.0.0.1', () => console.log(`fixture listening on 127.0.0.1:${port}`));

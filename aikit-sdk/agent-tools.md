@@ -7,6 +7,13 @@ AIKit renders the provider module; the CLI only reads the spec and calls the
 library. The example `agent_tool_plugin` demonstrates export and bounded decoding.
 It does not launch or install an agent.
 
+The Claude module requires a native host `engine/core` tool dispatch before
+application-handler I/O. Missing or plugin-raised origin metadata returns Deny;
+request JSON cannot select that origin. See the
+[native origin comparison](../examples/claude-mod-qualification/origin-protocol.md).
+This is an in-process dispatch check, not authentication of a physical stdio
+caller or effective-session configuration. Existing readiness limits remain.
+
 ## Contract
 
 `AgentToolSpec` contains `application_id`, `installation_id`, `tool_name`,
