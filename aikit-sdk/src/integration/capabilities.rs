@@ -195,6 +195,11 @@ fn report(
         && architecture == "x86_64"
         && mode == SessionMode::Print
         && version_output.as_deref() == Some("2026.09.02-c22c1a3");
+    let claude_stop_chain_bypass = agent_key == "claude"
+        && platform == "linux"
+        && architecture == "x86_64"
+        && mode == SessionMode::Interactive
+        && version_output.as_deref() == Some("2.1.296 (Claude Code)");
     let pi_boundary_gap = agent_key == "pi"
         && platform == "windows"
         && architecture == "x86_64"
@@ -242,6 +247,7 @@ fn report(
                 FailedCompletionObservation if qualified => (true, Support::Supported, "Bounded Windows Claude Code 2.1.269 print-mode invalid-model scenario emitted StopFailure with no Final Answer. Application projection may require durable replay."),
                 PreToolDecision if qualified => (true, Support::Unknown, "One native Write denial prevented file creation on this exact context. Edit, shell, MCP, subagent and effective-settings enforcement remain unqualified; the complete pre-tool requirement is not met."),
                 PreToolDecision => (true, Support::Unknown, "Native pre-tool blocking and all edit paths need live qualification for this context; a decoder fixture or allowed Write is insufficient."),
+                RepeatedCompletionBlocking if claude_stop_chain_bypass => (true, Support::Unknown, "Recorded Linux x86_64 Claude Code 2.1.296 interactive counterexample: competing classic.Stop mod middleware returned without next, skipped the command Stop hook, and reached native successful completion. A matched command-only Block forced continuation. Require a non-bypassable native policy path or attested effective configuration excluding bypass-capable middleware throughout the decision interval. Other versions/platforms/modes remain separately unqualified."),
                 RepeatedCompletionBlocking => (true, Support::Unknown, "Effective continuation limits and competing settings are not attested. A bounded scenario with an explicit unlimited setting does not prove unconditional enforcement."),
                 CompletionDecision | FinalAnswerCapture | FailedCompletionObservation => (true, Support::Unknown, "Adapter exists, but this version/platform/mode has no matching native qualification scenario."),
                 SuccessfulCompletionObservation => (true, Support::Unknown, "Owned Claude modules forward correlated native Turn start/outcome observations through the existing journal, retaining answer/abort/refusal/error. An application must correlate the latest authorized proposal and unchanged evidence. Native outcome delivery, competing hooks, protected caller identity and this host/version/mode remain unqualified; Stop Allow and SessionEnd are insufficient."),
@@ -268,6 +274,74 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_stop_chain_counterexample_is_scoped_and_never_promotes_enforcement() {
+        for (platform, architecture, mode, version, matches) in [
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.296 (Claude Code)",
+                true,
+            ),
+            (
+                "windows",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.296 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "aarch64",
+                SessionMode::Interactive,
+                "2.1.296 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Print,
+                "2.1.296 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Unknown,
+                "2.1.296 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.297 (Claude Code)",
+                false,
+            ),
+        ] {
+            let report = report("claude", platform, architecture, mode, Ok(version.into()));
+            let error = report
+                .require(&[IntegrationCapability::RepeatedCompletionBlocking])
+                .unwrap_err();
+            assert_eq!(error.unmet.len(), 1);
+            assert!(error.unmet[0].implemented);
+            assert_eq!(error.unmet[0].support, Support::Unknown);
+            assert_eq!(
+                error.unmet[0]
+                    .detail
+                    .contains("skipped the command Stop hook"),
+                matches
+            );
+            // A known policy bypass does not invent a transport or acceptance proof.
+            assert!(report
+                .require(&[
+                    IntegrationCapability::MessageSubmission,
+                    IntegrationCapability::SuccessfulCompletionObservation
+                ])
+                .is_err());
+        }
+    }
     #[test]
     fn cursor_dispatch_failure_is_scoped_without_inventing_an_enforcement_success() {
         for (platform, arch, mode, version, has_failure) in [
