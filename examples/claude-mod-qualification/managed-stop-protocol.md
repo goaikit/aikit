@@ -87,6 +87,11 @@ hit the debug `latest` symlink; named regular files were then copied successfull
 
 ## Consequence for the reusable integration
 
+The later [native Stop failure comparison](stop-failure-protocol.md) observes
+missing and timed-out managed commands permit successful completion even with
+this guard active and `onFailure: "block"`. Guard attestation alone therefore
+cannot close mandatory enforcement for the tested command-hook path.
+
 There is now a demonstrated protected candidate for this competitor. Another
 ordinary hook is unnecessary for this case. However, neither a version probe,
 a managed file's existence nor configuration copied to disk proves that a live

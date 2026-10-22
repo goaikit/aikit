@@ -247,12 +247,13 @@ fn report(
                 FailedCompletionObservation if qualified => (true, Support::Supported, "Bounded Windows Claude Code 2.1.269 print-mode invalid-model scenario emitted StopFailure with no Final Answer. Application projection may require durable replay."),
                 PreToolDecision if qualified => (true, Support::Unknown, "One native Write denial prevented file creation on this exact context. Edit, shell, MCP, subagent and effective-settings enforcement remain unqualified; the complete pre-tool requirement is not met."),
                 PreToolDecision => (true, Support::Unknown, "Native pre-tool blocking and all edit paths need live qualification for this context; a decoder fixture or allowed Write is insufficient."),
-                RepeatedCompletionBlocking if claude_stop_chain_bypass => (true, Support::Unknown, "Recorded Linux x86_64 Claude Code 2.1.296 interactive counterexample: competing classic.Stop mod middleware returned without next, skipped the command Stop hook, and reached native successful completion. A matched command-only Block forced continuation. Require a non-bypassable native policy path or attested effective configuration excluding bypass-capable middleware throughout the decision interval. Other versions/platforms/modes remain separately unqualified."),
+                RepeatedCompletionBlocking if claude_stop_chain_bypass => (true, Support::Unknown, "Recorded Linux x86_64 Claude Code 2.1.296 interactive counterexample: without the built-in guard, competing classic.Stop mod middleware returned without next, skipped the command Stop hook, and reached native successful completion. Guarded controls resisted this competitor for both managed and workspace hooks. Actual session/configuration protection, continuation limits and handler failures still need qualification. Guarded missing/timed-out commands also allowed native completion. Other versions/platforms/modes remain separately unqualified."),
                 RepeatedCompletionBlocking => (true, Support::Unknown, "Effective continuation limits and competing settings are not attested. A bounded scenario with an explicit unlimited setting does not prove unconditional enforcement."),
                 CompletionDecision | FinalAnswerCapture | FailedCompletionObservation => (true, Support::Unknown, "Adapter exists, but this version/platform/mode has no matching native qualification scenario."),
                 SuccessfulCompletionObservation => (true, Support::Unknown, "Owned Claude modules forward correlated native Turn start/outcome observations through the existing journal, retaining answer/abort/refusal/error. An application must correlate the latest authorized proposal and unchanged evidence. Native outcome delivery, competing hooks, protected caller identity and this host/version/mode remain unqualified; Stop Allow and SessionEnd are insufficient."),
                 MessageSubmission | MessageReconciliation => (false, Support::Unsupported, "Existing-session native message transport and receipt reconciliation are not implemented. Managed session transports are a different topology."),
                 NativeSessionIdentity => (true, Support::Unknown, "Owned Claude tool modules publish a fresh invocation ID into installation-scoped inherited process context and bootstrap a matching recorded SessionStart. Existing binding/journal checks reject observed old invocations. Controlled Linux startup matches tool/native session and recorded generation; this is not native process authentication, liveness, proof against an unseen delayed start, or Windows qualification."),
+                HardHookDeadline if claude_stop_chain_bypass => (true, Support::Unknown, "Recorded Linux x86_64 Claude Code 2.1.296 interactive counterexample with the built-in guard active: a missing command and a command cancelled at the native Stop timeout both reached successful native completion. Claude explicitly ignored onFailure:block on Stop. A matched command Block forced continuation. Guard/configuration attestation alone does not establish fail-closed native completion on handler failure. Other versions/platforms/modes remain separately unqualified."),
                 HardHookDeadline => (true, Support::Unknown, "Callback timeout reserves 250 ms for response handling; blocking workers and operating-system I/O do not establish a universal hard deadline."),
             }
         };
@@ -331,6 +332,18 @@ mod tests {
                 error.unmet[0]
                     .detail
                     .contains("skipped the command Stop hook"),
+                matches
+            );
+            let deadline = report
+                .require(&[IntegrationCapability::HardHookDeadline])
+                .unwrap_err();
+            assert_eq!(deadline.unmet.len(), 1);
+            assert!(deadline.unmet[0].implemented);
+            assert_eq!(deadline.unmet[0].support, Support::Unknown);
+            assert_eq!(
+                deadline.unmet[0]
+                    .detail
+                    .contains("ignored onFailure:block on Stop"),
                 matches
             );
             // A known policy bypass does not invent a transport or acceptance proof.
