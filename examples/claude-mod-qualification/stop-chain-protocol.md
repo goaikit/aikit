@@ -64,6 +64,13 @@ required repeated completion blocking. Adding another ordinary handler, trusting
 Stop Allow, observing eventual success or relaxing Codelaya rules is insufficient.
 The SDK's repeated-blocking assessment remains Unknown and fails readiness.
 
+The public capability report now includes this exact counterexample when its
+fresh probe matches interactive Linux x86-64 Claude `2.1.296 (Claude Code)`.
+Other modes, versions and architectures retain their own unqualified diagnostic;
+they do not inherit this native result. This adds no activation exception or
+SDK metadata migration. Eight scoped capability tests and strict library Clippy
+passed in offline Rust 1.88 Linux Docker for the diagnostic change.
+
 ## Reproduce
 
 Use [ordinary isolated onboarding](native-gateway-probe.md#reproduce) in a fresh
