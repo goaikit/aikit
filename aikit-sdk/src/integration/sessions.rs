@@ -254,8 +254,14 @@ impl SessionBinding<'_> {
         &self.reference
     }
 
+    /// Recheck recorded status, allowing a short competing journal writer to
+    /// finish. The lock-acquisition budget is 250 ms; exhausted contention still
+    /// fails closed. This is not a native idle lease or a hard hook deadline.
+    /// Recorded mutation admission continues to refuse contention immediately.
     pub fn status(&self) -> Result<SessionStatus, IntegrationError> {
-        let _lock = self.service.state_lock()?;
+        let _lock = self
+            .service
+            .state_lock_with_wait(std::time::Duration::from_millis(250))?;
         let connection = self.service.connection()?;
         self.status_inner(&connection)
     }

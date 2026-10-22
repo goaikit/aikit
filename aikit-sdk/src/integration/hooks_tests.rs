@@ -431,6 +431,71 @@ async fn recorded_admission_releases_both_existing_locks_on_unwind() {
     assert!(f.service.plan_remove(&f.id).is_ok());
 }
 
+#[tokio::test]
+async fn status_waits_for_a_short_writer_but_admission_still_refuses_immediately() {
+    use crate::integration::SessionStatus;
+    let f = Fixture::new(10);
+    assert_eq!(
+        f.service
+            .handle_hook(
+                &f.id,
+                f.input("SessionStart").to_string().as_bytes(),
+                &Never
+            )
+            .await
+            .exit_code,
+        0
+    );
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let cursor = binding.events(0, 100).unwrap().next_cursor;
+    let guard = binding.admit_recorded(cursor).unwrap();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (status_tx, status_rx) = std::sync::mpsc::channel();
+    let (admission_tx, admission_rx) = std::sync::mpsc::channel();
+    let service = IntegrationService::open_existing(f._dir.path().join("state")).unwrap();
+    let id = binding.id().to_owned();
+    let worker = std::thread::spawn(move || {
+        let binding = service.binding(&id).unwrap();
+        admission_tx
+            .send(binding.admit_recorded(cursor).is_err())
+            .unwrap();
+        started_tx.send(()).unwrap();
+        status_tx.send(binding.status()).unwrap();
+    });
+    assert!(admission_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap());
+    started_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .unwrap();
+    let early = status_rx.recv_timeout(std::time::Duration::from_millis(30));
+    drop(guard);
+    assert!(
+        matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+        "status must wait for the occupied writer"
+    );
+    assert_eq!(
+        status_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .unwrap(),
+        SessionStatus::Observed
+    );
+    worker.join().unwrap();
+
+    let guard = binding.admit_recorded(cursor).unwrap();
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        binding.status(),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert!(started.elapsed() >= std::time::Duration::from_millis(200));
+    drop(guard);
+    binding.detach().unwrap();
+    assert_eq!(binding.status().unwrap(), SessionStatus::Detached);
+}
+
 impl HookHandler for Fixed {
     fn decide<'a>(&'a self, _: &'a HookRequest) -> DecisionFuture<'a> {
         Box::pin(async { Ok(self.0.clone()) })

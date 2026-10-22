@@ -490,16 +490,19 @@ impl IntegrationService {
     }
 
     pub(super) fn state_lock(&self) -> Result<InstallationLock, IntegrationError> {
-        lock(&self.state.join("integration.lock"))
+        self.state_lock_with_wait(Duration::ZERO)
+    }
+    pub(super) fn state_lock_with_wait(
+        &self,
+        budget: Duration,
+    ) -> Result<InstallationLock, IntegrationError> {
+        lock_with_wait(&self.state.join("integration.lock"), budget)
     }
     // Retaining an already-returned native result may overlap its ensuing
     // Turn-start notification. Wait only for this local journal writer; never
     // retry the native call, semantic validation or a transaction body.
     pub(super) fn handoff_record_lock(&self) -> Result<InstallationLock, IntegrationError> {
-        lock_with_wait(
-            &self.state.join("integration.lock"),
-            Duration::from_millis(250),
-        )
+        self.state_lock_with_wait(Duration::from_millis(250))
     }
     pub(super) fn connection(&self) -> Result<Connection, IntegrationError> {
         let path = self.state.join("integration.db");

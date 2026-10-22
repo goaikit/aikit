@@ -6,6 +6,10 @@ translation and qualification; consumer applications keep their own review rules
 
 ## Current Claude API review, 2026-10-23
 
+Local journal status contention is addressed separately by a
+[bounded read-status wait](integration-status-contention.md). It neither changes
+these native requirements nor promotes any capability report.
+
 The [checksum-pinned 2.1.308 inspection](../examples/claude-mod-qualification/current-client-20261023.md)
 adds actual consumer completion compatibility but no protected transport proof.
 Its new `session.identity()` is account/managed-organization identity, not local
