@@ -81,6 +81,7 @@ impl IntegrationService {
             &installation,
             Some(&plugin),
             false,
+            None,
         )
     }
 }

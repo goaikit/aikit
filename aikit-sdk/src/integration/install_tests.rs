@@ -1,5 +1,155 @@
 use super::*;
 
+#[test]
+fn consumer_update_id_survives_lost_plan_reply_and_guard_refuses_superseded_revision() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    let mut spec = f.spec.clone();
+    spec.handler.arguments.push("new-startup".into());
+    let tool = tool_spec(&f, &hooks.installation_id);
+    let plan = f
+        .service
+        .plan_update_with_agent_tool_id(
+            "owner-update",
+            spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool.clone(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(plan.id, "owner-update");
+    assert_eq!(
+        f.service
+            .plan_update_with_agent_tool_id(
+                "owner-update",
+                spec.clone(),
+                CompletionBlockingPolicy::NativeDefault,
+                tool.clone(),
+                None
+            )
+            .unwrap()
+            .id,
+        plan.id
+    );
+    let mut changed = tool.clone();
+    changed.instructions.push_str(" changed");
+    assert!(matches!(
+        f.service.plan_update_with_agent_tool_id(
+            "owner-update",
+            spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            changed,
+            None
+        ),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert!(f.service.applied_installation_guard(&plan.id).is_err());
+    assert!(f
+        .service
+        .apply_with_tool_fault(&plan.id, false, Some(1))
+        .is_err());
+    assert_eq!(
+        f.service
+            .plan_update_with_agent_tool_id(
+                "owner-update",
+                spec.clone(),
+                CompletionBlockingPolicy::NativeDefault,
+                tool.clone(),
+                None
+            )
+            .unwrap()
+            .id,
+        plan.id
+    );
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    reopened.apply_install(&plan.id).unwrap();
+    let guard = reopened.applied_installation_guard(&plan.id).unwrap();
+    assert_eq!(guard.installation().spec, spec);
+    assert!(reopened.plan_remove(&hooks.installation_id).is_err());
+    drop(guard);
+    let next = reopened
+        .plan_agent_tool(&hooks.installation_id, tool.clone())
+        .unwrap();
+    reopened.apply_install(&next.id).unwrap();
+    assert!(reopened.applied_installation_guard(&plan.id).is_err());
+    assert_eq!(
+        reopened
+            .plan_update_with_agent_tool_id(
+                "owner-update",
+                spec,
+                CompletionBlockingPolicy::NativeDefault,
+                tool,
+                None
+            )
+            .unwrap()
+            .id,
+        plan.id
+    );
+    assert_eq!(
+        reopened
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM install_plans WHERE id='owner-update'",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn consumer_update_cancel_removes_only_an_unstarted_owned_preview() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    let tool = tool_spec(&f, &hooks.installation_id);
+    let bytes = fs::read(&f.config).unwrap();
+    f.service
+        .plan_update_with_agent_tool_id(
+            "cancel-me",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool.clone(),
+            None,
+        )
+        .unwrap();
+    assert!(f
+        .service
+        .discard_planned_update("cancel-me", "foreign", "claude", &f.spec.workspace)
+        .is_err());
+    f.service
+        .discard_planned_update("cancel-me", "review-app", "claude", &f.spec.workspace)
+        .unwrap();
+    assert!(matches!(
+        f.service.apply_install("cancel-me"),
+        Err(IntegrationError::NotFound)
+    ));
+    assert_eq!(fs::read(&f.config).unwrap(), bytes);
+    f.service
+        .discard_planned_update("absent", "review-app", "claude", &f.spec.workspace)
+        .unwrap();
+    f.service
+        .plan_update_with_agent_tool_id(
+            "begun",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool,
+            None,
+        )
+        .unwrap();
+    assert!(f.service.apply_inner("begun", true).is_err());
+    assert!(f
+        .service
+        .discard_planned_update("begun", "review-app", "claude", &f.spec.workspace)
+        .is_err());
+    f.service.apply_install("begun").unwrap();
+    assert!(f
+        .service
+        .discard_planned_update("begun", "review-app", "claude", &f.spec.workspace)
+        .is_err());
+}
+
 fn replacement_plan(f: &Fixture, id: &str) -> Result<InstallPlan, IntegrationError> {
     let mut spec = f.spec.clone();
     spec.handler.arguments.push("replacement-startup".into());

@@ -251,6 +251,8 @@ struct Pending {
     /// New coordinated replacements must stay detached through apply/recovery.
     #[serde(default)]
     require_detached: bool,
+    #[serde(default)]
+    update_request_sha256: Option<String>,
 }
 
 /// Reusable integration entry point. Construction opens metadata only; it never
@@ -259,6 +261,21 @@ struct Pending {
 pub struct IntegrationService {
     state: PathBuf,
     allow_create: bool,
+}
+
+/// Hold across a short consumer registration commit only. This pins the exact
+/// applied plan revision against cooperating installation writers. Do not await,
+/// invoke native I/O or call SDK writers/status while holding it.
+#[must_use = "hold through the consumer commit"]
+pub struct AppliedInstallationGuard {
+    installation: Installation,
+    _lock: InstallationLock,
+}
+
+impl AppliedInstallationGuard {
+    pub fn installation(&self) -> &Installation {
+        &self.installation
+    }
 }
 
 /// Local metadata migration only. This neither updates installed hooks nor
@@ -494,7 +511,7 @@ impl IntegrationService {
     /// Installation and update follow the same path. Existing owned entries must
     /// still match their receipt; unrelated settings and hooks are retained.
     pub fn plan_install(&self, spec: InstallSpec) -> Result<InstallPlan, IntegrationError> {
-        self.plan_install_inner(spec, None, None)
+        self.plan_install_inner(spec, None, None, None)
     }
 
     /// Request native completion-loop configuration through the existing owned
@@ -506,7 +523,7 @@ impl IntegrationService {
         spec: InstallSpec,
         completion_policy: CompletionBlockingPolicy,
     ) -> Result<InstallPlan, IntegrationError> {
-        self.plan_install_inner(spec, Some(completion_policy), None)
+        self.plan_install_inner(spec, Some(completion_policy), None, None)
     }
 
     /// Replace an existing hook installation and its generated callable in one
@@ -521,7 +538,41 @@ impl IntegrationService {
         tool: super::AgentToolSpec,
         message_handler: Option<HookCommand>,
     ) -> Result<InstallPlan, IntegrationError> {
-        self.plan_install_inner(spec, Some(completion_policy), Some((tool, message_handler)))
+        self.plan_install_inner(
+            spec,
+            Some(completion_policy),
+            Some((tool, message_handler)),
+            None,
+        )
+    }
+
+    /// Consumer-owned operation ID is also the plan ID. Exact canonical request
+    /// retries return the original planned/prepared/applied preview, including
+    /// after a lost reply; changed requests or scope conflict. No files are applied.
+    pub fn plan_update_with_agent_tool_id(
+        &self,
+        operation_id: &str,
+        spec: InstallSpec,
+        completion_policy: CompletionBlockingPolicy,
+        tool: super::AgentToolSpec,
+        message_handler: Option<HookCommand>,
+    ) -> Result<InstallPlan, IntegrationError> {
+        if operation_id.is_empty()
+            || operation_id.len() > 256
+            || !operation_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return Err(IntegrationError::Invalid(
+                "invalid installation operation ID".into(),
+            ));
+        }
+        self.plan_install_inner(
+            spec,
+            Some(completion_policy),
+            Some((tool, message_handler)),
+            Some(operation_id),
+        )
     }
 
     fn plan_install_inner(
@@ -529,6 +580,7 @@ impl IntegrationService {
         mut spec: InstallSpec,
         requested_policy: Option<CompletionBlockingPolicy>,
         bundle: Option<(super::AgentToolSpec, Option<HookCommand>)>,
+        operation_id: Option<&str>,
     ) -> Result<InstallPlan, IntegrationError> {
         validate_spec(&mut spec)?;
         if self.state.starts_with(&spec.workspace) {
@@ -540,6 +592,33 @@ impl IntegrationService {
         let id = installation_id(&spec);
         let _lock = self.state_lock()?;
         let connection = self.connection()?;
+        let request_hash = operation_id
+            .map(|_| {
+                serde_json::to_vec(&(&spec, requested_policy, &bundle))
+                    .map(|bytes| fingerprint(Some(&bytes)))
+            })
+            .transpose()?;
+        if let Some(operation_id) = operation_id {
+            let existing: Option<String> = connection
+                .query_row(
+                    "SELECT body FROM install_plans WHERE id=?1",
+                    [operation_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(existing) = existing {
+                let pending: Pending = serde_json::from_str(&existing)?;
+                if pending.preview.id != operation_id
+                    || pending.preview.installation_id != id
+                    || pending.update_request_sha256 != request_hash
+                {
+                    return Err(IntegrationError::Conflict(
+                        "installation operation ID already has another request".into(),
+                    ));
+                }
+                return Ok(pending.preview);
+            }
+        }
         reject_pending(&connection, &id)?;
         reject_prepared_config(&connection, &config_path, None)?;
         let previous = receipt_json(&connection, &id)?;
@@ -680,6 +759,7 @@ impl IntegrationService {
                 &receipt.installation,
                 Some(plugin),
                 true,
+                operation_id.zip(request_hash),
             );
         }
         self.save_plan(
@@ -768,6 +848,7 @@ impl IntegrationService {
             installation,
             None,
             false,
+            None,
         )
     }
 
@@ -782,6 +863,7 @@ impl IntegrationService {
         installation: &Installation,
         plugin: Option<&super::AgentToolPlugin>,
         require_detached: bool,
+        request_identity: Option<(&str, String)>,
     ) -> Result<InstallPlan, IntegrationError> {
         if after
             .as_ref()
@@ -798,7 +880,10 @@ impl IntegrationService {
             plugin,
         )?;
         let preview = InstallPlan {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: request_identity
+                .as_ref()
+                .map(|(id, _)| (*id).to_owned())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             installation_id: installation.id.clone(),
             config_path: installation.config_path.clone(),
             events: installation.spec.events.clone(),
@@ -830,6 +915,7 @@ impl IntegrationService {
             workspace: installation.spec.workspace.clone(),
             tool_files,
             require_detached,
+            update_request_sha256: request_identity.map(|(_, hash)| hash),
         };
         connection.execute(
             "INSERT INTO install_plans VALUES (?1,?2,'planned',?3)",
@@ -1044,6 +1130,105 @@ impl IntegrationService {
     pub fn installation_status(&self, id: &str) -> Result<InstallationStatus, IntegrationError> {
         let _lock = self.state_lock()?;
         self.status_inner(&self.connection()?, id)
+    }
+
+    /// Validate the exact applied revision and keep it pinned for a consumer's
+    /// short metadata commit. A superseded plan cannot authorize that commit.
+    pub fn applied_installation_guard(
+        &self,
+        plan_id: &str,
+    ) -> Result<AppliedInstallationGuard, IntegrationError> {
+        let guard = self.state_lock()?;
+        let connection = self.connection()?;
+        let (phase, body): (String, String) = connection
+            .query_row(
+                "SELECT phase,body FROM install_plans WHERE id=?1",
+                [plan_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .ok_or(IntegrationError::NotFound)?;
+        let pending: Pending = serde_json::from_str(&body)?;
+        let revision: Option<String> = connection
+            .query_row(
+                "SELECT revision FROM installation_revisions WHERE installation_id=?1",
+                [&pending.preview.installation_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if phase != "applied" || pending.preview.removal || revision.as_deref() != Some(plan_id) {
+            return Err(IntegrationError::Conflict(
+                "installation plan is not the current applied revision".into(),
+            ));
+        }
+        let InstallationStatus::Configured { installation } =
+            self.status_inner(&connection, &pending.preview.installation_id)?
+        else {
+            return Err(IntegrationError::Conflict(
+                "applied installation has drifted".into(),
+            ));
+        };
+        Ok(AppliedInstallationGuard {
+            installation,
+            _lock: guard,
+        })
+    }
+
+    /// Cancel only a caller-ID update that has never begun applying. Missing
+    /// intent is harmless; prepared/applied or foreign plans are never removed.
+    /// This deletes an unapplied preview only, without touching provider files.
+    pub fn discard_planned_update(
+        &self,
+        operation_id: &str,
+        application_id: &str,
+        agent_key: &str,
+        workspace: &Path,
+    ) -> Result<(), IntegrationError> {
+        if crate::agent(agent_key).is_none() {
+            return Err(IntegrationError::UnknownAgent(agent_key.into()));
+        }
+        let workspace = fs::canonicalize(workspace)?;
+        let id = installation_key(agent_key, application_id, &workspace);
+        let _guard = self.state_lock()?;
+        let connection = self.connection()?;
+        let current: Option<String> = connection
+            .query_row(
+                "SELECT revision FROM installation_revisions WHERE installation_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if current.as_deref() == Some(operation_id) {
+            return Err(IntegrationError::Conflict(
+                "applied update cannot be discarded".into(),
+            ));
+        }
+        let existing: Option<(String, String)> = connection
+            .query_row(
+                "SELECT phase,body FROM install_plans WHERE id=?1",
+                [operation_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((phase, body)) = existing else {
+            return Ok(());
+        };
+        let pending: Pending = serde_json::from_str(&body)?;
+        if phase != "planned"
+            || pending.preview.id != operation_id
+            || pending.preview.installation_id != id
+            || pending.workspace != workspace
+            || pending.update_request_sha256.is_none()
+        {
+            return Err(IntegrationError::Conflict(
+                "only an unstarted owned update can be discarded".into(),
+            ));
+        }
+        connection.execute(
+            "DELETE FROM install_plans WHERE id=?1 AND phase='planned'",
+            [operation_id],
+        )?;
+        Ok(())
     }
 
     /// Inspect an interrupted apply for one owner-configured installation.

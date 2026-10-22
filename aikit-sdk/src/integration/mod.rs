@@ -39,9 +39,9 @@ pub use hooks::{
     HookResponse, NativeTurn, NativeTurnOutcome, NativeTurnReason,
 };
 pub use install::{
-    AgentToolFileChange, CompletionBlockingPolicy, HookCommand, HookEvent, InstallPlan,
-    InstallSpec, Installation, InstallationStatus, IntegrationError, IntegrationService,
-    SettingChange, StateUpgradeReport,
+    AgentToolFileChange, AppliedInstallationGuard, CompletionBlockingPolicy, HookCommand,
+    HookEvent, InstallPlan, InstallSpec, Installation, InstallationStatus, IntegrationError,
+    IntegrationService, SettingChange, StateUpgradeReport,
 };
 pub use message_append::{MessageAppendCheckpoint, MessageAppendIntent, MessageAppendStored};
 pub use message_bridge::{
