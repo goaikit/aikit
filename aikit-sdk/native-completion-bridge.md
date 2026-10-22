@@ -1,5 +1,10 @@
 # Opt-in native completion bridge candidate
 
+Later [native generated-module qualification](../examples/claude-mod-qualification/generated-stop-protocol.md)
+executes the owned module with the actual SDK example handler, retained command
+hook, invalid JSON and process timeout. It closes those scoped execution gaps;
+Codelaya's handler and remaining native protection/delivery gates stay open.
+
 This extends the existing `AgentToolSpec` with
 `native_completion_bridge: bool`. JSON defaults to false and omits false on
 serialization. Rust struct literals must supply the field. No new crate,

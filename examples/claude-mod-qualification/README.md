@@ -1,5 +1,10 @@
 # Claude mod event feasibility probe
 
+The later [generated SDK Stop comparison](generated-stop-protocol.md) executes
+the real owned module and SDK example handler. Its baseline and invalid-JSON /
+process-timeout failures retain Block, continuation and downstream command
+validation. Codelaya policy and remaining native protection gates stay open.
+
 The later [native prepend comparison](prepend-stop-protocol.md) demonstrates
 the blocking catch before one short-circuit competitor in unmanaged user order
 and managed policy order. It supplies conditional ordering candidates, not
