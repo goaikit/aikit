@@ -4,6 +4,17 @@ These are implementation requests backed by local source inspection and bounded
 native evidence. They are not promises of supported behavior. AIKit owns native
 translation and qualification; consumer applications keep their own review rules.
 
+## Claude: competing middleware can skip command Stop policy, 2026-10-22
+
+A fresh ordinary interactive Linux 2.1.296 matched probe observed a mod returning
+`{}` without calling `next` skip the actual command Stop hook entirely, followed
+by successful native completion. Baseline command Block caused a second model
+request; competing case had zero command calls and one model request. This is
+provider enforcement evidence, not a decoder problem or a Codelaya policy fix.
+Require a non-bypassable native policy boundary or a verifiable effective-mod
+configuration boundary before qualifying repeated blocking. No capability is
+promoted. See [protocol, reproduction, verifier and identities](../examples/claude-mod-qualification/stop-chain-protocol.md).
+
 ## Publication status, 2026-10-09
 
 The integration corrections recorded before this date are published in merged

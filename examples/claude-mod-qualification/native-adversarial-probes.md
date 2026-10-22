@@ -1,5 +1,11 @@
 # Native abort and competing Stop probes, 2026-10-18
 
+Follow-up 2026-10-22: [the matched short-circuit probe](stop-chain-protocol.md)
+observed a competing mod skip a command Stop hook by returning without `next`,
+followed by successful native completion. The earlier denial-erasure result below
+does not establish protection against this different strategy. No readiness or
+Windows qualification is promoted.
+
 These are opt-in diagnostic mods, never loaded by the default manifest. They
 ran in fresh ordinary Claude Linux x86_64 2.1.296 terminal sessions with the
 installed Codelaya consumer (`b83c633` production source, SDK `3b22c60`). Replies
