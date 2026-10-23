@@ -12,6 +12,51 @@ struct Fixture {
     workspace: PathBuf,
 }
 impl Fixture {
+    fn owned_module(&self) {
+        let plan = self
+            .service
+            .plan_agent_tool(
+                &self.id,
+                super::super::AgentToolSpec {
+                    application_id: "example".into(),
+                    installation_id: self.id.clone(),
+                    tool_name: "review".into(),
+                    description: "Scoped fixture".into(),
+                    input_schema: json!({"type":"object"}),
+                    instructions: "Fixture".into(),
+                    handler: HookCommand {
+                        executable: std::env::current_exe().unwrap(),
+                        arguments: vec![],
+                    },
+                    timeout_ms: 1000,
+                    native_completion_bridge: false,
+                },
+            )
+            .unwrap();
+        self.service.apply_install(&plan.id).unwrap();
+    }
+
+    async fn owned_hook(
+        &self,
+        input: Value,
+        invocation: Option<&str>,
+    ) -> Result<HookResponse, IntegrationError> {
+        let context = invocation.map(|invocation| {
+            json!({"schema_version":1,
+            "installation_id":self.id,"native_context":{"session_id":"native-session",
+            "invocation_id":invocation,"cwd":self.workspace}})
+            .to_string()
+        });
+        self.service
+            .dispatch_hook_with_environment(
+                &self.id,
+                input.to_string().as_bytes(),
+                &Fixed(Decision::Allow),
+                |_| context,
+            )
+            .await
+    }
+
     fn new(timeout_seconds: u32) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let workspace = dir.path().join("workspace");
@@ -50,6 +95,127 @@ impl Fixture {
     fn input(&self, event: &str) -> Value {
         json!({"hook_event_name":event,"session_id":"native-session","cwd":self.workspace,"prompt_id":"prompt","transcript_path":"not opened or persisted"})
     }
+}
+
+#[tokio::test]
+async fn owned_claude_compaction_preserves_current_reference_without_a_synthetic_start() {
+    let f = Fixture::new(10);
+    f.owned_module();
+    let epoch = uuid::Uuid::new_v4().to_string();
+    f.owned_hook(f.input("SessionStart"), Some(&epoch))
+        .await
+        .unwrap();
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let before = f.service.events(&f.id, 0, 50).unwrap();
+    let mut compact = f.input("SessionStart");
+    compact["source"] = json!("compact");
+    for _ in 0..2 {
+        let response = f.owned_hook(compact.clone(), Some(&epoch)).await.unwrap();
+        assert_eq!(response.exit_code, 0);
+        assert!(response.stdout.is_empty());
+        assert!(response.request_id.is_none());
+        let after = f.service.events(&f.id, 0, 50).unwrap();
+        assert_eq!(after.next_cursor, before.next_cursor);
+        assert_eq!(after.records.len(), 1);
+        assert_eq!(
+            f.service.observed_session(&f.id, "native-session").unwrap(),
+            reference
+        );
+        assert_eq!(
+            binding.status().unwrap(),
+            super::super::SessionStatus::Observed
+        );
+    }
+    for source in ["startup", "resume", "clear", "fork", "unknown"] {
+        let mut input = f.input("SessionStart");
+        input["source"] = json!(source);
+        assert!(matches!(
+            f.owned_hook(input, Some(&epoch)).await,
+            Err(IntegrationError::StaleSession)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn owned_compaction_cannot_bootstrap_missing_foreign_replaced_or_ended_context() {
+    let f = Fixture::new(10);
+    f.owned_module();
+    let first = uuid::Uuid::new_v4().to_string();
+    let second = uuid::Uuid::new_v4().to_string();
+    let mut compact = f.input("SessionStart");
+    compact["source"] = json!("compact");
+    assert!(f.owned_hook(compact.clone(), None).await.is_err());
+    assert!(matches!(
+        f.owned_hook(compact.clone(), Some(&first)).await,
+        Err(IntegrationError::StaleSession)
+    ));
+    assert!(f.service.events(&f.id, 0, 50).unwrap().records.is_empty());
+    f.owned_hook(f.input("SessionStart"), Some(&first))
+        .await
+        .unwrap();
+    assert!(matches!(
+        f.owned_hook(compact.clone(), Some(&second)).await,
+        Err(IntegrationError::StaleSession)
+    ));
+    let mut foreign = compact.clone();
+    foreign["session_id"] = json!("foreign");
+    assert!(f.owned_hook(foreign, Some(&first)).await.is_err());
+    f.owned_hook(f.input("SessionStart"), Some(&second))
+        .await
+        .unwrap();
+    assert!(matches!(
+        f.owned_hook(compact.clone(), Some(&first)).await,
+        Err(IntegrationError::StaleSession)
+    ));
+    f.owned_hook(f.input("SessionEnd"), Some(&second))
+        .await
+        .unwrap();
+    let cursor = f.service.events(&f.id, 0, 50).unwrap().next_cursor;
+    assert!(matches!(
+        f.owned_hook(compact, Some(&second)).await,
+        Err(IntegrationError::SessionEnded)
+    ));
+    assert_eq!(f.service.events(&f.id, 0, 50).unwrap().next_cursor, cursor);
+}
+
+#[tokio::test]
+async fn compaction_rechecks_owned_configuration_and_keeps_legacy_start_semantics() {
+    let legacy = Fixture::new(10);
+    let mut compact = legacy.input("SessionStart");
+    compact["source"] = json!("compact");
+    let response = legacy
+        .service
+        .handle_hook(
+            &legacy.id,
+            compact.to_string().as_bytes(),
+            &Fixed(Decision::Allow),
+        )
+        .await;
+    assert_eq!(response.exit_code, 0);
+    assert_eq!(
+        legacy
+            .service
+            .events(&legacy.id, 0, 50)
+            .unwrap()
+            .records
+            .len(),
+        1
+    );
+    let f = Fixture::new(10);
+    f.owned_module();
+    let epoch = uuid::Uuid::new_v4().to_string();
+    f.owned_hook(f.input("SessionStart"), Some(&epoch))
+        .await
+        .unwrap();
+    let path = f.service.installed(&f.id).unwrap().config_path;
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    config["disableAllHooks"] = json!(true);
+    std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+    let mut input = f.input("SessionStart");
+    input["source"] = json!("compact");
+    assert!(f.owned_hook(input, Some(&epoch)).await.is_err());
+    assert_eq!(f.service.events(&f.id, 0, 50).unwrap().records.len(), 1);
 }
 
 struct Fixed(Decision);

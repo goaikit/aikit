@@ -180,16 +180,39 @@ impl IntegrationService {
         input: &[u8],
         handler: &dyn HookHandler,
     ) -> Result<HookResponse, IntegrationError> {
+        self.dispatch_hook_with_environment(installation_id, input, handler, |key| {
+            std::env::var(key).ok()
+        })
+        .await
+    }
+
+    // Keep environment lookup inside the installed boundary. The private seam
+    // permits isolated tests without mutating process-global environment.
+    async fn dispatch_hook_with_environment(
+        &self,
+        installation_id: &str,
+        input: &[u8],
+        handler: &dyn HookHandler,
+        environment: impl FnOnce(&str) -> Option<String>,
+    ) -> Result<HookResponse, IntegrationError> {
         let started = Instant::now();
         let installation = self.installed(installation_id)?;
         let installation_revision = self.installation_revision(installation_id)?;
         let mut request = decode(&installation, input)?;
+        // Claude keeps the owned module/invocation alive across /compact. Its
+        // classic SessionStart:compact is a context refresh, not a new epoch.
+        let compaction = installation.spec.agent_key == "claude"
+            && request.event == HookEvent::SessionStarted
+            && serde_json::from_slice::<Value>(input)?
+                .get("source")
+                .and_then(Value::as_str)
+                == Some("compact");
         if let Some(key) = self.agent_tool_environment_key(installation_id)? {
-            let value = std::env::var(key).ok();
+            let value = environment(&key);
             // Native classic startup precedes module session.start. Defer this
             // notification without journaling/binding; the owned module sends
             // its own start through this handler after publishing its context.
-            if value.is_none() && request.event == HookEvent::SessionStarted {
+            if value.is_none() && request.event == HookEvent::SessionStarted && !compaction {
                 return Ok(HookResponse {
                     stdout: String::new(),
                     stderr: String::new(),
@@ -226,6 +249,23 @@ impl IntegrationService {
             let tx =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             journal_write_budget(deadline)?;
+            if compaction && request.invocation_id.is_some() {
+                super::sessions::validate_current_invocation(
+                    &tx,
+                    &request,
+                    &installation_revision,
+                )?;
+                self.require_configured(&installation)?;
+                journal_write_budget(deadline)?;
+                // No synthetic SessionStart/baseline/decision is recorded. The
+                // current reference and all queued operation targets stay put.
+                return Ok(HookResponse {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    request_id: None,
+                });
+            }
             super::sessions::validate_invocation(&tx, &request, &installation_revision)?;
             tx.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,?3,?4,?5)", params![request.id, installation_id, request.session_id, journal_body, installation_revision])?;
             tx.commit()?;

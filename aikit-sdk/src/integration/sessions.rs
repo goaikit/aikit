@@ -7,8 +7,9 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 /// A journal-qualified identity, not proof of native process identity. A later
-/// SessionStart (including resume/compaction) invalidates the reference. Native
-/// Pi wire v2 adds an extension-issued invocation scope. Other adapters lack it.
+/// genuine SessionStart invalidates the reference. An owned Claude in-invocation
+/// compact refresh is acknowledged without a new journal boundary. Owned native
+/// modules may add an invocation scope to distinguish observed generations.
 /// This is not process authentication or an existing-session delivery guarantee.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRef {
@@ -404,6 +405,22 @@ pub(super) fn validate_invocation(
         }
         return Ok(());
     }
+    validate_current_invocation(connection, request, expected_revision)
+}
+
+/// Check the recorded current epoch without admitting a new SessionStart.
+/// This is correlation, not caller/process authentication or native liveness.
+pub(super) fn validate_current_invocation(
+    connection: &Connection,
+    request: &HookRequest,
+    expected_revision: &str,
+) -> Result<(), IntegrationError> {
+    if revision(connection, &request.installation_id)?.as_deref() != Some(expected_revision) {
+        return Err(IntegrationError::StaleSession);
+    }
+    let Some(invocation) = &request.invocation_id else {
+        return Err(IntegrationError::StaleSession);
+    };
     let reference = SessionRef {
         installation_id: request.installation_id.clone(),
         installation_revision: expected_revision.into(),
