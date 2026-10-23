@@ -26,7 +26,7 @@ pub struct RecordedDetachment {
     pub admission_after_cursor: u64,
 }
 
-fn scope(
+pub(super) fn scope(
     application_id: &str,
     agent_key: &str,
     workspace: &Path,

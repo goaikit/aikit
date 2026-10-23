@@ -35,7 +35,40 @@ scope refuses migration without replacing it. Older SDK opens refuse the newer
 store instead of ignoring the admission policy. Stop older consumers before
 upgrading; this does not prove an already-running native process has stopped.
 
-## Linux qualification, 2026-10-22
+## Explicit legacy owner recovery, 2026-10-23
+
+Older metadata no longer requires an old executable merely to release known
+handles before upgrade. Two additive public helpers reuse existing scoped
+references, inspection pages and the canonical migration transaction:
+
+- `IntegrationService::attached_bindings_for_upgrade(state, application_id,
+  agent_key, workspace, after_id, limit)` reads a bounded schema-9-through-15
+  snapshot without initialization/migration. Its statuses reflect journal
+  correlation only; it does not inspect active native configuration or liveness.
+  Normal `attached_bindings` retains its current-schema/configuration checks.
+- `IntegrationService::upgrade_existing_detaching(state, application_id,
+  agent_key, workspace, binding_ids)` explicitly detaches 1–500 distinct selected
+  scoped handles and upgrades in the same IMMEDIATE transaction. Missing or
+  foreign IDs, unselected attached handles, unsettled plans and migration errors
+  roll back the whole operation. The normal upgrade still refuses attached
+  handles. No configuration, messages or provider processes change.
+
+Close old runtimes first. The migration seeds existing schema-15 admission floors
+at the same journal boundary. Repeating the request after successful migration
+is read-only when all selected handles remain detached, and never advances those
+floors. It refuses new attached handles on current schema; use ordinary explicit
+owner detachment instead. Selected IDs are consent, not a native termination or
+message-consumption attestation. No new stored schema or parallel lifecycle
+registry is introduced.
+
+The Linux integration suite passes 159 tests, including the original refusal
+reproduced before implementation, schema-9-through-14 recovery, atomic rollback,
+bounded/scoped inspection and old-unbound/fresh-start admission checks. Scoped
+SDK lint retains existing warnings; native readiness and Windows acceptance do
+not change. Raw logs are retained in the parent workspace at
+`.local/legacy-owner-upgrade-20261023/`.
+
+### Earlier Linux qualification, 2026-10-22
 
 On base `daf18cf`, **147 integration tests passed, zero failed** in the isolated
 Rust 1.88 Linux environment. Scoped library Clippy passed with warnings denied

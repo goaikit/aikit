@@ -55,6 +55,84 @@ impl Fixture {
 struct Fixed(Decision);
 
 #[tokio::test]
+async fn explicit_legacy_upgrade_detachment_fences_old_unbound_starts_and_allows_fresh_start() {
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let first = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&first).unwrap();
+    let mut unseen = f.input("SessionStart");
+    unseen["session_id"] = json!("unbound");
+    f.service
+        .handle_hook(&f.id, unseen.to_string().as_bytes(), &Never)
+        .await;
+    let old_unbound = f.service.observed_session(&f.id, "unbound").unwrap();
+    f.service
+        .connection()
+        .unwrap()
+        .execute_batch("DROP TABLE binding_admission_floors; PRAGMA user_version=14")
+        .unwrap();
+    IntegrationService::upgrade_existing_detaching(
+        f._dir.path().join("state"),
+        "example",
+        "claude",
+        &f.workspace,
+        &[binding.id().into()],
+    )
+    .unwrap();
+    assert!(matches!(
+        f.service.bind_existing(&first),
+        Err(IntegrationError::Detached)
+    ));
+    assert!(matches!(
+        f.service.bind_existing(&old_unbound),
+        Err(IntegrationError::Detached)
+    ));
+    let floor: i64 = f
+        .service
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT cursor FROM binding_admission_floors WHERE installation_id=?1",
+            [&f.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(floor >= old_unbound.start_cursor as i64);
+    f.service
+        .handle_hook(&f.id, unseen.to_string().as_bytes(), &Never)
+        .await;
+    let fresh = f.service.observed_session(&f.id, "unbound").unwrap();
+    assert!(fresh.start_cursor > old_unbound.start_cursor);
+    f.service.bind_existing(&fresh).unwrap();
+    IntegrationService::upgrade_existing_detaching(
+        f._dir.path().join("state"),
+        "example",
+        "claude",
+        &f.workspace,
+        &[binding.id().into()],
+    )
+    .unwrap();
+    assert_eq!(
+        f.service
+            .connection()
+            .unwrap()
+            .query_row::<i64, _, _>(
+                "SELECT cursor FROM binding_admission_floors WHERE installation_id=?1",
+                [&f.id],
+                |r| r.get(0),
+            )
+            .unwrap(),
+        floor
+    );
+}
+
+#[tokio::test]
 async fn scoped_owner_pages_and_detach_require_fresh_start_without_touching_other_handles() {
     let f = Fixture::new(10);
     f.service

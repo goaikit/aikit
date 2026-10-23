@@ -897,6 +897,339 @@ fn explicit_upgrade_refuses_attached_bindings_and_unapplied_plans() {
 }
 
 #[test]
+fn owner_can_inspect_and_atomically_detach_selected_legacy_handles_during_upgrade() {
+    for version in 9..=14 {
+        let f = Fixture::new();
+        let installation = f.install();
+        let config = fs::read(&f.config).unwrap();
+        let connection = f.service.connection().unwrap();
+        let reference = serde_json::to_string(&super::super::SessionRef {
+            installation_id: installation.installation_id.clone(),
+            installation_revision: "retained-revision".into(),
+            native_session_id: "owner-session".into(),
+            invocation_id: None,
+            start_cursor: 1,
+        })
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_bindings VALUES ('selected',?1,0)",
+                [&reference],
+            )
+            .unwrap();
+        connection
+            .execute_batch("DROP TABLE binding_admission_floors")
+            .unwrap();
+        if version == 9 {
+            connection
+                .execute_batch("DROP TABLE outgoing_messages; DROP TABLE message_observations")
+                .unwrap();
+        }
+        if version <= 10 {
+            connection
+                .execute_batch("DROP TABLE message_handoffs")
+                .unwrap();
+        }
+        if version <= 11 {
+            connection
+                .execute_batch("DROP TABLE message_append_checkpoints")
+                .unwrap();
+        }
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        let page = IntegrationService::attached_bindings_for_upgrade(
+            &f.service.state,
+            "review-app",
+            "claude",
+            &f.spec.workspace,
+            None,
+            50,
+        )
+        .unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].id, "selected");
+        assert_eq!(
+            connection
+                .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            version
+        );
+        assert!(IntegrationService::upgrade_existing(&f.service.state).is_err());
+        let report = IntegrationService::upgrade_existing_detaching(
+            &f.service.state,
+            "review-app",
+            "claude",
+            &f.spec.workspace,
+            &["selected".into()],
+        )
+        .unwrap();
+        assert_eq!(report.previous_schema, version);
+        assert_eq!(report.current_schema, 15);
+        assert!(report.changed);
+        assert!(connection
+            .query_row::<bool, _, _>(
+                "SELECT detached FROM session_bindings WHERE id='selected'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap());
+        assert_eq!(
+            connection
+                .query_row::<String, _, _>(
+                    "SELECT reference FROM session_bindings WHERE id='selected'",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            reference
+        );
+        assert_eq!(
+            connection
+                .query_row::<i64, _, _>(
+                    "SELECT cursor FROM binding_admission_floors WHERE installation_id=?1",
+                    [&installation.installation_id],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert!(
+            !IntegrationService::upgrade_existing_detaching(
+                &f.service.state,
+                "review-app",
+                "claude",
+                &f.spec.workspace,
+                &["selected".into()],
+            )
+            .unwrap()
+            .changed
+        );
+        assert_eq!(fs::read(&f.config).unwrap(), config);
+    }
+}
+
+#[test]
+fn selected_legacy_detach_rolls_back_on_scope_selection_plans_or_migration_failure() {
+    for case in [
+        "missing",
+        "foreign",
+        "unselected",
+        "pending",
+        "sql",
+        "duplicate",
+        "current",
+    ] {
+        let f = Fixture::new();
+        let installation = f.install();
+        let config = fs::read(&f.config).unwrap();
+        let connection = f.service.connection().unwrap();
+        let reference = serde_json::to_string(&super::super::SessionRef {
+            installation_id: installation.installation_id.clone(),
+            installation_revision: "retained".into(),
+            native_session_id: "owner".into(),
+            invocation_id: None,
+            start_cursor: 1,
+        })
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_bindings VALUES ('selected',?1,0)",
+                [&reference],
+            )
+            .unwrap();
+        let mut ids = vec!["selected".to_owned()];
+        let version = if case == "current" { 15 } else { 9 };
+        if version == 9 {
+            connection
+                .execute_batch("DROP TABLE binding_admission_floors; PRAGMA user_version=9")
+                .unwrap();
+        }
+        match case {
+            "missing" => ids.push("missing".into()),
+            "foreign" | "unselected" => {
+                let mut other: super::super::SessionRef = serde_json::from_str(&reference).unwrap();
+                other.native_session_id = "other-owner".into();
+                if case == "foreign" {
+                    other.installation_id = "another-installation".into();
+                    ids.push("other".into());
+                }
+                connection
+                    .execute(
+                        "INSERT INTO session_bindings VALUES ('other',?1,0)",
+                        [serde_json::to_string(&other).unwrap()],
+                    )
+                    .unwrap();
+            }
+            "pending" => {
+                connection
+                    .execute(
+                        "INSERT INTO install_plans VALUES ('pending','fixture','prepared','{}')",
+                        [],
+                    )
+                    .unwrap();
+            }
+            "sql" => {
+                connection.execute_batch("DROP TABLE outgoing_messages; DROP TABLE message_handoffs; DROP TABLE message_observations; CREATE TABLE message_observations(broken TEXT)").unwrap();
+            }
+            "duplicate" => ids.push("selected".into()),
+            _ => {}
+        }
+        assert!(
+            IntegrationService::upgrade_existing_detaching(
+                &f.service.state,
+                "review-app",
+                "claude",
+                &f.spec.workspace,
+                &ids
+            )
+            .is_err(),
+            "{case}"
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            version,
+            "{case}"
+        );
+        assert!(
+            !connection
+                .query_row::<bool, _, _>(
+                    "SELECT detached FROM session_bindings WHERE id='selected'",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            "{case}"
+        );
+        assert_eq!(
+            connection
+                .query_row::<String, _, _>(
+                    "SELECT reference FROM session_bindings WHERE id='selected'",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            reference
+        );
+        assert_eq!(fs::read(&f.config).unwrap(), config);
+        assert_eq!(
+            connection
+                .query_row::<u32, _, _>(
+                    "SELECT count(*) FROM sqlite_master WHERE name='binding_admission_floors'",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            u32::from(version == 15)
+        );
+    }
+}
+
+#[test]
+fn legacy_owner_inspection_is_scoped_bounded_and_never_initializes_missing_or_malformed_state() {
+    let f = Fixture::new();
+    let installation = f.install();
+    let connection = f.service.connection().unwrap();
+    let reference = serde_json::to_string(&super::super::SessionRef {
+        installation_id: installation.installation_id,
+        installation_revision: "retained".into(),
+        native_session_id: "owner".into(),
+        invocation_id: None,
+        start_cursor: 1,
+    })
+    .unwrap();
+    for id in ["a", "b"] {
+        connection
+            .execute(
+                "INSERT INTO session_bindings VALUES (?1,?2,0)",
+                params![id, {
+                    let mut scoped: super::super::SessionRef =
+                        serde_json::from_str(&reference).unwrap();
+                    scoped.native_session_id = id.into();
+                    serde_json::to_string(&scoped).unwrap()
+                }],
+            )
+            .unwrap();
+    }
+    connection
+        .execute_batch("DROP TABLE binding_admission_floors; PRAGMA user_version=14")
+        .unwrap();
+    let page = IntegrationService::attached_bindings_for_upgrade(
+        &f.service.state,
+        "review-app",
+        "claude",
+        &f.spec.workspace,
+        None,
+        1,
+    )
+    .unwrap();
+    assert_eq!(page.records[0].id, "a");
+    let next = IntegrationService::attached_bindings_for_upgrade(
+        &f.service.state,
+        "review-app",
+        "claude",
+        &f.spec.workspace,
+        page.next_id.as_deref(),
+        1,
+    )
+    .unwrap();
+    assert_eq!(next.records[0].id, "b");
+    assert!(IntegrationService::attached_bindings_for_upgrade(
+        &f.service.state,
+        "other-app",
+        "claude",
+        &f.spec.workspace,
+        None,
+        50
+    )
+    .unwrap()
+    .records
+    .is_empty());
+    for limit in [0, 501] {
+        assert!(IntegrationService::attached_bindings_for_upgrade(
+            &f.service.state,
+            "review-app",
+            "claude",
+            &f.spec.workspace,
+            None,
+            limit
+        )
+        .is_err());
+    }
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+            .unwrap(),
+        14
+    );
+    connection
+        .execute_batch("DROP TABLE hook_invocations")
+        .unwrap();
+    assert!(IntegrationService::attached_bindings_for_upgrade(
+        &f.service.state,
+        "other-app",
+        "claude",
+        &f.spec.workspace,
+        None,
+        50
+    )
+    .is_err());
+    let missing = f.service.state.join("absent");
+    assert!(IntegrationService::attached_bindings_for_upgrade(
+        &missing,
+        "review-app",
+        "claude",
+        &f.spec.workspace,
+        None,
+        50
+    )
+    .is_err());
+    assert!(!missing.exists());
+}
+
+#[test]
 fn explicit_upgrade_rollback_retains_old_schema_on_late_sql_failure() {
     let f = Fixture::new();
     let connection = f.service.connection().unwrap();

@@ -289,6 +289,41 @@ pub struct StateUpgradeReport {
     pub changed: bool,
 }
 
+fn validate_upgrade_schema(tx: &Connection) -> Result<u32, IntegrationError> {
+    let previous_schema: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if !(9..=15).contains(&previous_schema) {
+        return Err(IntegrationError::Invalid(
+            "explicit integration upgrade supports existing schemas 9 through 15 only".into(),
+        ));
+    }
+    // Do not turn a claimed legacy version with missing core history into
+    // a fresh journal. Preparing these reads verifies the expected columns
+    // without parsing, modifying or dropping retained application payloads.
+    for query in [
+            "SELECT id,body FROM installations LIMIT 0",
+            "SELECT id,installation_id,phase,body FROM install_plans LIMIT 0",
+            "SELECT sequence,id,installation_id,session_id,body,decision,installation_revision FROM hook_invocations LIMIT 0",
+            "SELECT installation_id,revision FROM installation_revisions LIMIT 0",
+            "SELECT id,reference,detached FROM session_bindings LIMIT 0",
+        ] {
+            tx.prepare(query)?;
+        }
+    if previous_schema >= 10 {
+        tx.prepare("SELECT installation_id,operation_id,body FROM outgoing_messages LIMIT 0")?;
+        tx.prepare("SELECT cursor,installation_id,operation_id,event_id,body FROM message_observations LIMIT 0")?;
+    }
+    if previous_schema >= 11 {
+        tx.prepare("SELECT installation_id,operation_id,body FROM message_handoffs LIMIT 0")?;
+    }
+    if previous_schema >= 12 {
+        tx.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
+    }
+    if previous_schema == 15 {
+        tx.prepare("SELECT installation_id,cursor FROM binding_admission_floors LIMIT 0")?;
+    }
+    Ok(previous_schema)
+}
+
 impl IntegrationService {
     pub fn open(state: impl AsRef<Path>) -> Result<Self, IntegrationError> {
         Self::open_inner(state.as_ref(), true)
@@ -353,11 +388,12 @@ impl IntegrationService {
         })
     }
 
-    /// Explicitly upgrade an existing schema 9/10/11 journal to the current schema.
+    /// Explicitly upgrade an existing schema 9-14 journal to the current schema.
     /// Never creates missing state, repairs malformed tables, changes native
     /// configuration, detaches a binding or submits a message. Existing attached
     /// bindings and unapplied installation plans must first be resolved by their
-    /// owner with the compatible runtime. The installation lock and one SQLite
+    /// owner. Use upgrade_existing_detaching for exact scoped legacy consent.
+    /// The installation lock and one SQLite
     /// transaction cover preflight and the additive migration together.
     ///
     /// Current-schema calls are idempotent and do not need quiescence because
@@ -366,40 +402,41 @@ impl IntegrationService {
     pub fn upgrade_existing(
         state: impl AsRef<Path>,
     ) -> Result<StateUpgradeReport, IntegrationError> {
-        let service = Self::open_state(state.as_ref(), false)?;
+        Self::upgrade_state_inner(state.as_ref(), None)
+    }
+
+    fn upgrade_state_inner(
+        state: &Path,
+        selected: Option<(&str, &[String])>,
+    ) -> Result<StateUpgradeReport, IntegrationError> {
+        let service = Self::open_state(state, false)?;
         let _guard = service.state_lock()?;
         let mut connection = service.connection()?;
         let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let previous_schema: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if !(9..=15).contains(&previous_schema) {
-            return Err(IntegrationError::Invalid(
-                "explicit integration upgrade supports existing schemas 9 through 15 only".into(),
-            ));
-        }
-        // Do not turn a claimed legacy version with missing core history into
-        // a fresh journal. Preparing these reads verifies the expected columns
-        // without parsing, modifying or dropping retained application payloads.
-        for query in [
-            "SELECT id,body FROM installations LIMIT 0",
-            "SELECT id,installation_id,phase,body FROM install_plans LIMIT 0",
-            "SELECT sequence,id,installation_id,session_id,body,decision,installation_revision FROM hook_invocations LIMIT 0",
-            "SELECT installation_id,revision FROM installation_revisions LIMIT 0",
-            "SELECT id,reference,detached FROM session_bindings LIMIT 0",
-        ] {
-            tx.prepare(query)?;
-        }
-        if previous_schema >= 10 {
-            tx.prepare("SELECT installation_id,operation_id,body FROM outgoing_messages LIMIT 0")?;
-            tx.prepare("SELECT cursor,installation_id,operation_id,event_id,body FROM message_observations LIMIT 0")?;
-        }
-        if previous_schema >= 11 {
-            tx.prepare("SELECT installation_id,operation_id,body FROM message_handoffs LIMIT 0")?;
-        }
-        if previous_schema >= 12 {
-            tx.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
-        }
-        if previous_schema == 15 {
-            tx.prepare("SELECT installation_id,cursor FROM binding_admission_floors LIMIT 0")?;
+        let previous_schema = validate_upgrade_schema(&tx)?;
+        if let Some((installation, ids)) = selected {
+            for id in ids {
+                let (body, detached): (String, bool) = tx
+                    .query_row(
+                        "SELECT reference,detached FROM session_bindings WHERE id=?1",
+                        [id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?
+                    .ok_or(IntegrationError::NotFound)?;
+                let reference: super::SessionRef = serde_json::from_str(&body)?;
+                if reference.installation_id != installation {
+                    return Err(IntegrationError::Conflict(
+                        "selected binding belongs to another installation".into(),
+                    ));
+                }
+                if previous_schema == 15 && !detached {
+                    return Err(IntegrationError::Conflict("integration schema is current; use ordinary owner detachment for attached handles".into()));
+                }
+                if previous_schema != 15 {
+                    tx.execute("UPDATE session_bindings SET detached=1 WHERE id=?1", [id])?;
+                }
+            }
         }
         if previous_schema != 15 {
             let attached: bool = tx.query_row(
@@ -430,6 +467,82 @@ impl IntegrationService {
             current_schema: 15,
             changed: previous_schema != 15,
         })
+    }
+
+    /// Read retained schemas 9-15 without initialization or migration. The
+    /// bounded page exposes recorded correlation only, not active configuration
+    /// or native liveness. Use it to select exact IDs for upgrade_existing_detaching.
+    pub fn attached_bindings_for_upgrade(
+        state: impl AsRef<Path>,
+        application_id: &str,
+        agent_key: &str,
+        workspace: &Path,
+        after_id: Option<&str>,
+        limit: u32,
+    ) -> Result<super::RecordedBindingsPage, IntegrationError> {
+        if limit == 0
+            || limit > 500
+            || after_id.is_some_and(|id| id.len() > 256 || id.contains('\0'))
+        {
+            return Err(IntegrationError::Invalid(
+                "binding page requires a valid cursor and limit 1-500".into(),
+            ));
+        }
+        let installation = super::owner_sessions::scope(application_id, agent_key, workspace)?;
+        let service = Self::open_state(state.as_ref(), false)?;
+        let _guard = service.state_lock()?;
+        let mut connection = Connection::open_with_flags(
+            service.state.join("integration.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+        validate_upgrade_schema(&tx)?;
+        let mut query = tx.prepare("SELECT id,reference FROM session_bindings WHERE detached=0 AND json_extract(reference,'$.installation_id')=?1 AND id>?2 ORDER BY id LIMIT ?3")?;
+        let mut records = Vec::new();
+        for row in query.query_map(params![installation, after_id.unwrap_or(""), limit], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })? {
+            let (id, body) = row?;
+            let reference = serde_json::from_str(&body)?;
+            let status = super::sessions::reference_status(&tx, &reference)?;
+            records.push(super::RecordedBinding {
+                id,
+                reference,
+                status,
+            });
+        }
+        Ok(super::RecordedBindingsPage {
+            next_id: records.last().map(|r| r.id.clone()),
+            records,
+        })
+    }
+
+    /// Detach exact owner-selected scoped handles and migrate in one existing
+    /// SQLite transaction. Other attached handles or pending plans refuse the
+    /// entire operation. Rollback retains old schema and every detachment bit.
+    /// No hooks, native process or messages change. Close old runtimes first.
+    /// Current-schema replay succeeds only for IDs already detached; use the
+    /// ordinary lifecycle API for new current-schema detachments.
+    pub fn upgrade_existing_detaching(
+        state: impl AsRef<Path>,
+        application_id: &str,
+        agent_key: &str,
+        workspace: &Path,
+        binding_ids: &[String],
+    ) -> Result<StateUpgradeReport, IntegrationError> {
+        if binding_ids.is_empty()
+            || binding_ids.len() > 500
+            || binding_ids
+                .iter()
+                .any(|id| id.is_empty() || id.len() > 256 || id.contains('\0'))
+            || binding_ids.iter().collect::<BTreeSet<_>>().len() != binding_ids.len()
+        {
+            return Err(IntegrationError::Invalid(
+                "select 1-500 distinct recorded binding IDs".into(),
+            ));
+        }
+        let installation = super::owner_sessions::scope(application_id, agent_key, workspace)?;
+        Self::upgrade_state_inner(state.as_ref(), Some((&installation, binding_ids)))
     }
 
     fn initialize_schema(
