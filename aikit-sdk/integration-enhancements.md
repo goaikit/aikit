@@ -6,6 +6,24 @@ translation and qualification; consumer applications keep their own review rules
 
 ## Current Claude API review, 2026-10-23
 
+Two downstream ordinary interactive Linux x86_64 2.1.308 trials now distinguish
+directory discovery from protected ordering. The existing SDK-generated directory
+under `.claude/skills` loads automatically as `@skills-dir`, at native **user**
+tier, without a marketplace, profile settings or `--plugin-dir`. Actual model
+inputs contain its callable schema and instructions; repeated missing-name/note
+Blocks are repaired and native accepted completion survives normal exit.
+A separate project-settings marketplace trial loads the same module, also at
+user tier, even with project `prependPlugins` requested. Neither trial attests
+protected precedence, competing middleware, handler failures/deadlines or native
+identity. These are bounded observations, not capability promotions.
+
+Do not add a new marketplace/profile installation surface solely for ordinary
+directory loading in this context. Reuse the owned module planner. The missing
+reusable surface remains a trustworthy effective-policy/invocation witness and
+original-session admission/receipt evidence, as described below. Project loader
+fields and successful loading cannot substitute for those native facts. Other
+versions/platforms/modes, including Windows, remain separately unqualified.
+
 Local journal status contention is addressed separately by a
 [bounded read-status wait](integration-status-contention.md). It neither changes
 these native requirements nor promotes any capability report.
