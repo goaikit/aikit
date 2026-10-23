@@ -515,6 +515,75 @@ fn pending_plan_lookup_recovers_only_the_scoped_interrupted_apply() {
 }
 
 #[test]
+fn repeated_unstarted_removal_reuses_its_original_plan() {
+    let f = Fixture::new();
+    f.write(&json!({"owner": true}));
+    let hooks = f.install();
+    let first = f.service.plan_remove(&hooks.installation_id).unwrap();
+    let before = fs::read(&f.config).unwrap();
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    let repeated = reopened.plan_remove(&hooks.installation_id).unwrap();
+    assert_eq!(
+        first.id, repeated.id,
+        "a lost planning reply must not orphan another removal"
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    let connection = reopened.connection().unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM install_plans WHERE installation_id=?1 AND phase!='applied'",
+                [&hooks.installation_id],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        1
+    );
+    reopened.apply_install(&repeated.id).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM install_plans WHERE installation_id=?1 AND phase!='applied'",
+                [&hooks.installation_id],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&f.config).unwrap()).unwrap(),
+        json!({"owner": true})
+    );
+}
+
+#[test]
+fn unstarted_removal_does_not_retarget_after_owner_configuration_changes() {
+    let f = Fixture::new();
+    f.write(&json!({"owner": true}));
+    let hooks = f.install();
+    let first = f.service.plan_remove(&hooks.installation_id).unwrap();
+    let mut changed: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    changed["owner"] = json!("edited after removal intent");
+    f.write(&changed);
+    let before = fs::read(&f.config).unwrap();
+    assert!(
+        matches!(f.service.plan_remove(&hooks.installation_id), Err(IntegrationError::Conflict(message)) if message.contains(&first.id))
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    let connection = f.service.connection().unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM install_plans WHERE installation_id=?1 AND phase!='applied'",
+                [&hooks.installation_id],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
 fn pending_plan_lookup_exposes_install_kind_without_applying_and_keeps_conflicts() {
     let f = Fixture::new();
     let install = f.service.plan_install(f.spec.clone()).unwrap();

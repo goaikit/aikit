@@ -160,7 +160,7 @@ pub struct Installation {
     pub completion_policy: CompletionBlockingPolicy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentToolFileChange {
     pub path: PathBuf,
     pub before_fingerprint: String,
@@ -168,7 +168,7 @@ pub struct AgentToolFileChange {
 }
 
 /// Safe preview: deliberately excludes unrelated configuration contents.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstallPlan {
     pub id: String,
     pub installation_id: String,
@@ -232,7 +232,7 @@ struct OwnedAgentTool {
     #[serde(default)]
     invocation_env_key: Option<String>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PendingToolFile {
     path: PathBuf,
     before: String,
@@ -783,6 +783,9 @@ impl IntegrationService {
         )
     }
 
+    /// Reuse an unstarted removal's original ID only for the exact same recipe.
+    /// A lost planning reply must not leave another unfinished removal behind.
+    /// Changed configuration requires inspection, never silent retargeting.
     pub fn plan_remove(&self, id: &str) -> Result<InstallPlan, IntegrationError> {
         let _lock = self.state_lock()?;
         let connection = self.connection()?;
@@ -928,6 +931,50 @@ impl IntegrationService {
             require_detached,
             update_request_sha256: request_identity.map(|(_, hash)| hash),
         };
+        if preview.removal {
+            let mut statement = connection.prepare(
+                "SELECT id,body FROM install_plans WHERE installation_id=?1 AND phase='planned' ORDER BY id",
+            )?;
+            let rows = statement.query_map([&preview.installation_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut retained = None;
+            for row in rows {
+                let (id, body) = row?;
+                let previous: Pending = serde_json::from_str(&body)?;
+                if !previous.preview.removal {
+                    continue;
+                }
+                if retained.is_some() {
+                    return Err(IntegrationError::Conflict(
+                        "multiple unstarted removal plans require inspection; no plan was replaced"
+                            .into(),
+                    ));
+                }
+                let mut comparable = previous.preview.clone();
+                comparable.id = preview.id.clone();
+                if previous.preview.id != id
+                    || comparable != preview
+                    || previous.before != pending.before
+                    || previous.after != pending.after
+                    || previous.delete != pending.delete
+                    || previous.previous_receipt != pending.previous_receipt
+                    || previous.next_receipt.is_some()
+                    || previous.workspace != pending.workspace
+                    || previous.tool_files != pending.tool_files
+                    || previous.require_detached != pending.require_detached
+                    || previous.update_request_sha256 != pending.update_request_sha256
+                {
+                    return Err(IntegrationError::Conflict(format!(
+                        "unstarted removal plan {id} differs from the current request; preserve it and inspect configuration"
+                    )));
+                }
+                retained = Some(previous.preview);
+            }
+            if let Some(previous) = retained {
+                return Ok(previous);
+            }
+        }
         connection.execute(
             "INSERT INTO install_plans VALUES (?1,?2,'planned',?3)",
             params![
