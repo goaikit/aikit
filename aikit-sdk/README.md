@@ -205,6 +205,17 @@ does not provide exclusive workspace admission, a transport or permission to sen
 
 ### Library-only example
 
+Native hook failures keep empty stdout and exit status 2. Their stderr includes
+a bounded fixed diagnostic code, for example `owned_context_invalid`, `state_busy`,
+`configuration_conflict` or `session_replaced`. These codes identify a local
+failure category; they do not establish caller authenticity or authorize replay.
+Raw error details, caller payloads and database messages are not included.
+Callback failure/timeout still returns the existing blocking decision.
+
+The diagnostic change has 162 passing Linux SDK integration tests, including
+fixed-code privacy and failure-status checks. SDK library Clippy completes with
+101 existing warnings; this is not a strict clean lint pass or new native proof.
+
 Build `cargo build -p aikit-sdk --no-default-features --features integration --example integration_hooks`.
 The resulting executable offers these operations:
 

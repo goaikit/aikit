@@ -95,11 +95,38 @@ pub struct HookResponse {
     pub request_id: Option<String>,
 }
 impl HookResponse {
-    fn failure() -> Self {
+    fn failure(error: &IntegrationError) -> Self {
+        // Only fixed diagnostic codes cross the native boundary. Error details
+        // can contain caller data, paths or database contents and stay private.
+        let code = match error {
+            IntegrationError::Invalid(detail)
+                if detail == "owned native invocation context is missing or inconsistent" =>
+            {
+                "owned_context_invalid"
+            }
+            IntegrationError::Invalid(_) | IntegrationError::Json(_) => "native_input_invalid",
+            IntegrationError::Conflict(_) => "configuration_conflict",
+            IntegrationError::Sql(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                "state_busy"
+            }
+            IntegrationError::Sql(_) => "state_storage_error",
+            IntegrationError::Io(_) => "local_io_error",
+            IntegrationError::NotFound => "record_missing",
+            IntegrationError::RecoveryRequired(_) => "installation_recovery_required",
+            IntegrationError::StaleSession => "session_replaced",
+            IntegrationError::Detached => "binding_detached",
+            IntegrationError::SessionEnded => "session_ended",
+            IntegrationError::UnknownAgent(_) | IntegrationError::Unsupported(_) => "unsupported",
+            IntegrationError::RequirementsUnmet(_) => "requirements_unmet",
+        };
         Self {
             stdout: String::new(),
-            stderr: "Integration validation unavailable; retry after restoring the local handler."
-                .into(),
+            stderr: format!("Integration validation unavailable [{code}]; inspect the installed integration before retrying."),
             exit_code: 2,
             request_id: None,
         }
@@ -136,7 +163,7 @@ impl IntegrationService {
     ) -> HookResponse {
         self.dispatch_hook(installation_id, input, handler)
             .await
-            .unwrap_or_else(|_| HookResponse::failure())
+            .unwrap_or_else(|error| HookResponse::failure(&error))
     }
 
     async fn dispatch_hook(

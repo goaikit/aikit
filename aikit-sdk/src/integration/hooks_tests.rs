@@ -54,6 +54,66 @@ impl Fixture {
 
 struct Fixed(Decision);
 
+#[test]
+fn hook_failure_diagnostics_are_bounded_fixed_codes_and_still_fail_closed() {
+    let secret = "PRIVATE_CALLER_CONTENT_DO_NOT_PRINT";
+    for (error, code) in [
+        (
+            IntegrationError::Invalid(
+                "owned native invocation context is missing or inconsistent".into(),
+            ),
+            "owned_context_invalid",
+        ),
+        (
+            IntegrationError::Invalid(secret.into()),
+            "native_input_invalid",
+        ),
+        (
+            IntegrationError::Conflict(secret.into()),
+            "configuration_conflict",
+        ),
+        (
+            IntegrationError::Sql(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some(secret.into()),
+            )),
+            "state_busy",
+        ),
+        (
+            IntegrationError::Sql(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_LOCKED),
+                Some(secret.into()),
+            )),
+            "state_busy",
+        ),
+        (
+            IntegrationError::Sql(rusqlite::Error::InvalidParameterName(secret.into())),
+            "state_storage_error",
+        ),
+        (
+            IntegrationError::Io(std::io::Error::other(secret)),
+            "local_io_error",
+        ),
+        (
+            IntegrationError::RecoveryRequired(secret.into()),
+            "installation_recovery_required",
+        ),
+        (IntegrationError::NotFound, "record_missing"),
+        (IntegrationError::StaleSession, "session_replaced"),
+        (IntegrationError::Detached, "binding_detached"),
+        (IntegrationError::SessionEnded, "session_ended"),
+        (IntegrationError::Unsupported(secret.into()), "unsupported"),
+    ] {
+        let response = HookResponse::failure(&error);
+        assert_eq!(response.exit_code, 2);
+        assert!(response.stdout.is_empty());
+        assert!(response.request_id.is_none());
+        assert!(response.stderr.contains(&format!("[{code}]")));
+        assert!(!response.stderr.contains(secret));
+        assert!(response.stderr.len() < 256);
+    }
+}
+
 #[tokio::test]
 async fn explicit_legacy_upgrade_detachment_fences_old_unbound_starts_and_allows_fresh_start() {
     let f = Fixture::new(10);
