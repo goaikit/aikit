@@ -384,8 +384,13 @@ fn start_invocation(
 pub(super) fn validate_invocation(
     connection: &Connection,
     request: &HookRequest,
-    revision: &str,
+    expected_revision: &str,
 ) -> Result<(), IntegrationError> {
+    // Even legacy requests without invocation claims must not append a prepared
+    // decision under a revision replaced while journal acquisition waited.
+    if revision(connection, &request.installation_id)?.as_deref() != Some(expected_revision) {
+        return Err(IntegrationError::StaleSession);
+    }
     let Some(invocation) = &request.invocation_id else {
         return Ok(());
     };
@@ -401,7 +406,7 @@ pub(super) fn validate_invocation(
     }
     let reference = SessionRef {
         installation_id: request.installation_id.clone(),
-        installation_revision: revision.into(),
+        installation_revision: expected_revision.into(),
         native_session_id: request.session_id.clone(),
         invocation_id: Some(invocation.clone()),
         start_cursor: 0,

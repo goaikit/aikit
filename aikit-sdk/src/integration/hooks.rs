@@ -104,6 +104,14 @@ impl HookResponse {
             {
                 "owned_context_invalid"
             }
+            IntegrationError::Invalid(detail)
+                if matches!(
+                    detail.as_str(),
+                    "hook journal deadline expired" | "decision expired before delivery"
+                ) =>
+            {
+                "request_expired"
+            }
             IntegrationError::Invalid(_) | IntegrationError::Json(_) => "native_input_invalid",
             IntegrationError::Conflict(_) => "configuration_conflict",
             IntegrationError::Sql(rusqlite::Error::SqliteFailure(error, _))
@@ -214,9 +222,10 @@ impl IntegrationService {
             + Duration::from_millis(u64::from(installation.spec.timeout_seconds) * 1000 - 250);
         {
             let mut connection = self.connection()?;
-            connection.busy_timeout(Duration::from_millis(100))?;
+            connection.busy_timeout(journal_write_budget(deadline)?)?;
             let tx =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            journal_write_budget(deadline)?;
             super::sessions::validate_invocation(&tx, &request, &installation_revision)?;
             tx.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,?3,?4,?5)", params![request.id, installation_id, request.session_id, journal_body, installation_revision])?;
             tx.commit()?;
@@ -277,11 +286,23 @@ impl IntegrationService {
             self.require_configured(&installation)?;
         }
         if let Some(decision) = &decision {
+            // A timeout must still be able to publish the existing Block
+            // response in reserved commit/response time. Allow never gets it.
+            let decision_deadline = if matches!(decision, Decision::Allow) {
+                deadline
+            } else {
+                deadline + Duration::from_millis(250)
+            };
             let mut connection = self.connection()?;
-            connection.busy_timeout(Duration::from_millis(100))?;
+            connection.busy_timeout(journal_write_budget(decision_deadline)?)?;
             let tx =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            journal_write_budget(decision_deadline)?;
             super::sessions::validate_invocation(&tx, &request, &installation_revision)?;
+            // The acquisition can overlap an owned configuration edit. Recheck
+            // after it, without repeating application policy or the native call.
+            self.require_configured(&installation)?;
+            journal_write_budget(decision_deadline)?;
             // Append, never update an already visible cursor: a consumer may have
             // checkpointed the observation while the callback was still running.
             tx.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,decision,installation_revision) VALUES (?1,?2,?3,?4,?5,?6)", params![format!("{}:decision", request.id), installation_id, request.session_id, journal_body, serde_json::to_string(decision)?, installation_revision])?;
@@ -382,6 +403,19 @@ impl IntegrationService {
             next_cursor,
         })
     }
+}
+
+// Only SQLite writer acquisition waits. No transaction body, policy callback or
+// native action is retried. The original deadline and reserved response time
+// remain authoritative; admission guards retain their immediate-refusal policy.
+fn journal_write_budget(deadline: Instant) -> Result<Duration, IntegrationError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(IntegrationError::Invalid(
+            "hook journal deadline expired".into(),
+        ));
+    }
+    Ok(remaining.min(Duration::from_secs(1)))
 }
 
 fn is_decision(event: HookEvent) -> bool {

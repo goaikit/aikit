@@ -205,6 +205,10 @@ does not provide exclusive workspace admission, a transport or permission to sen
 
 ### Library-only example
 
+Hook journal acquisition tolerates a brief writer within a bounded remaining
+request budget, with fresh configuration/revision checks and no callback or native
+replay. [Contract, red/green tests and remaining scope](integration-hook-writer-budget.md).
+
 Native hook failures keep empty stdout and exit status 2. Their stderr includes
 a bounded fixed diagnostic code, for example `owned_context_invalid`, `state_busy`,
 `configuration_conflict` or `session_replaced`. These codes identify a local

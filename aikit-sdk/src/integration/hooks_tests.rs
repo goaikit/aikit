@@ -54,10 +54,159 @@ impl Fixture {
 
 struct Fixed(Decision);
 
+struct CommitWriter {
+    database: PathBuf,
+    hold: Duration,
+    disable_config: Option<PathBuf>,
+    replace_revision: bool,
+    calls: AtomicUsize,
+    worker: std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+impl HookHandler for CommitWriter {
+    fn decide<'a>(&'a self, _: &'a HookRequest) -> DecisionFuture<'a> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let database = self.database.clone();
+            let hold = self.hold;
+            let disable_config = self.disable_config.clone();
+            let replace_revision = self.replace_revision;
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let db = rusqlite::Connection::open(database).unwrap();
+                db.busy_timeout(Duration::from_secs(1)).unwrap();
+                db.execute_batch("BEGIN IMMEDIATE").unwrap();
+                ready_tx.send(()).unwrap();
+                if let Some(config) = disable_config {
+                    std::thread::sleep(Duration::from_millis(150));
+                    let mut value: Value =
+                        serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+                    value["disableAllHooks"] = json!(true);
+                    std::fs::write(config, serde_json::to_vec(&value).unwrap()).unwrap();
+                    std::thread::sleep(hold.saturating_sub(Duration::from_millis(150)));
+                } else {
+                    std::thread::sleep(hold);
+                }
+                if replace_revision {
+                    db.execute_batch("UPDATE installation_revisions SET revision='11111111-1111-4111-8111-111111111111'; COMMIT;").unwrap();
+                } else {
+                    db.execute_batch("ROLLBACK").unwrap();
+                }
+            });
+            *self.worker.lock().unwrap() = Some(worker);
+            ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            Ok(Decision::Allow)
+        })
+    }
+}
+
+#[tokio::test]
+async fn short_journal_writer_after_policy_does_not_discard_a_valid_decision() {
+    let f = Fixture::new(10);
+    let handler = CommitWriter {
+        database: f._dir.path().join("state/integration.db"),
+        hold: Duration::from_millis(300),
+        disable_config: None,
+        replace_revision: false,
+        calls: AtomicUsize::new(0),
+        worker: std::sync::Mutex::new(None),
+    };
+    let response = f
+        .service
+        .handle_hook(&f.id, f.input("Stop").to_string().as_bytes(), &handler)
+        .await;
+    handler
+        .worker
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(response.exit_code, 0, "{}", response.stderr);
+    assert_eq!(response.stdout, "{}");
+    let events = f.service.events(&f.id, 0, 100).unwrap().records;
+    assert_eq!(events.len(), 2);
+    assert!(events[0].decision.is_none());
+    assert!(matches!(events[1].decision, Some(Decision::Allow)));
+    assert_eq!(events[0].request.id, events[1].request.id);
+}
+
+#[tokio::test]
+async fn expired_journal_wait_never_commits_or_returns_allow() {
+    let f = Fixture::new(1);
+    let handler = CommitWriter {
+        database: f._dir.path().join("state/integration.db"),
+        hold: Duration::from_secs(2),
+        disable_config: None,
+        replace_revision: false,
+        calls: AtomicUsize::new(0),
+        worker: std::sync::Mutex::new(None),
+    };
+    let started = Instant::now();
+    let response = f
+        .service
+        .handle_hook(&f.id, f.input("Stop").to_string().as_bytes(), &handler)
+        .await;
+    let elapsed = started.elapsed();
+    handler
+        .worker
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(response.exit_code, 2);
+    assert!(response.stdout.is_empty());
+    assert!(response.stderr.contains("[state_busy]"));
+    assert!(elapsed < Duration::from_millis(1250), "{elapsed:?}");
+    let events = f.service.events(&f.id, 0, 100).unwrap().records;
+    assert_eq!(events.len(), 1);
+    assert!(events[0].decision.is_none());
+}
+
+#[tokio::test]
+async fn config_disabled_while_waiting_for_decision_writer_never_allows() {
+    let f = Fixture::new(10);
+    let handler = CommitWriter {
+        database: f._dir.path().join("state/integration.db"),
+        hold: Duration::from_millis(300),
+        disable_config: Some(f.workspace.join(".claude/settings.local.json")),
+        replace_revision: false,
+        calls: AtomicUsize::new(0),
+        worker: std::sync::Mutex::new(None),
+    };
+    let response = f
+        .service
+        .handle_hook(&f.id, f.input("Stop").to_string().as_bytes(), &handler)
+        .await;
+    handler
+        .worker
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(response.exit_code, 2);
+    assert!(response.stdout.is_empty());
+    assert!(response.stderr.contains("[configuration_conflict]"));
+    let events = f.service.events(&f.id, 0, 100).unwrap().records;
+    assert_eq!(events.len(), 1);
+    assert!(events[0].decision.is_none());
+}
+
 #[test]
 fn hook_failure_diagnostics_are_bounded_fixed_codes_and_still_fail_closed() {
     let secret = "PRIVATE_CALLER_CONTENT_DO_NOT_PRINT";
     for (error, code) in [
+        (
+            IntegrationError::Invalid("hook journal deadline expired".into()),
+            "request_expired",
+        ),
         (
             IntegrationError::Invalid(
                 "owned native invocation context is missing or inconsistent".into(),
@@ -112,6 +261,38 @@ fn hook_failure_diagnostics_are_bounded_fixed_codes_and_still_fail_closed() {
         assert!(!response.stderr.contains(secret));
         assert!(response.stderr.len() < 256);
     }
+}
+
+#[tokio::test]
+async fn replacement_during_decision_writer_wait_refuses_even_without_invocation_claims() {
+    let f = Fixture::new(10);
+    let handler = CommitWriter {
+        database: f._dir.path().join("state/integration.db"),
+        hold: Duration::from_millis(300),
+        disable_config: None,
+        replace_revision: true,
+        calls: AtomicUsize::new(0),
+        worker: std::sync::Mutex::new(None),
+    };
+    let response = f
+        .service
+        .handle_hook(&f.id, f.input("Stop").to_string().as_bytes(), &handler)
+        .await;
+    handler
+        .worker
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .join()
+        .unwrap();
+    assert_eq!(handler.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(response.exit_code, 2);
+    assert!(response.stdout.is_empty());
+    assert!(response.stderr.contains("[session_replaced]"));
+    let events = f.service.events(&f.id, 0, 100).unwrap().records;
+    assert_eq!(events.len(), 1);
+    assert!(events[0].decision.is_none());
 }
 
 #[tokio::test]
