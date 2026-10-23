@@ -90,6 +90,55 @@ fn valid(value: &str, limit: usize) -> bool {
 fn conflict() -> IntegrationError {
     IntegrationError::Conflict("message operation/evidence conflicts".into())
 }
+fn validate_observation(observation: &MessageObservation) -> Result<(), IntegrationError> {
+    if !valid(&observation.event_id, 256) || !valid(&observation.source, 1024) {
+        return Err(IntegrationError::Invalid(
+            "invalid message observation identity/source".into(),
+        ));
+    }
+    let references = match &observation.proof {
+        MessageProof::Acknowledgement { receipt_reference } => vec![receipt_reference],
+        MessageProof::Consumption {
+            input_reference,
+            event_reference,
+        } => vec![input_reference, event_reference],
+        MessageProof::Failure { failure_reference } => vec![failure_reference],
+    };
+    if references.iter().any(|reference| !valid(reference, 4096)) {
+        return Err(IntegrationError::Invalid(
+            "invalid native message evidence reference".into(),
+        ));
+    }
+    Ok(())
+}
+fn decode_evidence(
+    cursor: i64,
+    event_id: &str,
+    body: &str,
+) -> Result<MessageEvidence, IntegrationError> {
+    let evidence: MessageEvidence = serde_json::from_str(body)?;
+    if cursor <= 0
+        || evidence.cursor != cursor as u64
+        || evidence.recorded_at_unix_ms == 0
+        || evidence.observation.event_id != event_id
+    {
+        return Err(IntegrationError::Invalid(
+            "message evidence differs from its journal row".into(),
+        ));
+    }
+    validate_observation(&evidence.observation)?;
+    Ok(evidence)
+}
+fn referenced_evidence<'a>(
+    receipt: &'a MessageReceipt,
+    proof: &MessageProof,
+) -> Option<&'a MessageEvidence> {
+    match proof {
+        MessageProof::Acknowledgement { .. } => receipt.acknowledgement.as_ref(),
+        MessageProof::Consumption { .. } => receipt.consumption.as_ref(),
+        MessageProof::Failure { .. } => receipt.failure.as_ref(),
+    }
+}
 fn load(
     connection: &Connection,
     installation: &str,
@@ -133,6 +182,40 @@ fn load(
             return Err(IntegrationError::Invalid(
                 "invalid stored message schema/scope/state/digest".into(),
             ));
+        }
+        for (kind, field) in [&value.acknowledgement, &value.consumption, &value.failure]
+            .into_iter()
+            .enumerate()
+        {
+            let Some(evidence) = field else {
+                continue;
+            };
+            // Resolve every projected field to this operation's immutable journal
+            // row. JSON cursor/kind/reference claims cannot stand in for storage.
+            if evidence.cursor > i64::MAX as u64
+                || !matches!(
+                    (kind, &evidence.observation.proof),
+                    (0, MessageProof::Acknowledgement { .. })
+                        | (1, MessageProof::Consumption { .. })
+                        | (2, MessageProof::Failure { .. })
+                )
+            {
+                return Err(IntegrationError::Invalid(
+                    "message receipt evidence has the wrong field or cursor".into(),
+                ));
+            }
+            let stored: Option<(i64,String,String)> = connection.query_row(
+                "SELECT cursor,event_id,body FROM message_observations WHERE installation_id=?1 AND operation_id=?2 AND cursor=?3",
+                params![installation,operation,evidence.cursor as i64], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            ).optional()?;
+            let (cursor, event_id, body) = stored.ok_or_else(|| {
+                IntegrationError::Invalid("message receipt evidence journal row is missing".into())
+            })?;
+            if decode_evidence(cursor, &event_id, &body)? != *evidence {
+                return Err(IntegrationError::Invalid(
+                    "message receipt evidence differs from its journal row".into(),
+                ));
+            }
         }
     }
     Ok(receipt)
@@ -215,7 +298,9 @@ impl SessionBinding<'_> {
     /// Historical local lookup; never follows a replacement or sends anything.
     /// Remains available for the original binding after detach/end/replacement.
     pub fn message_status(&self, operation: &str) -> Result<MessageReceipt, IntegrationError> {
-        self.message_status_record(&self.service.connection()?, operation)
+        let mut connection = self.service.connection()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        self.message_status_record(&tx, operation)
     }
     pub(super) fn message_status_record(
         &self,
@@ -300,24 +385,7 @@ impl SessionBinding<'_> {
         reservation: &MessageReservation,
         observation: MessageObservation,
     ) -> Result<MessageReceipt, IntegrationError> {
-        if !valid(&observation.event_id, 256) || !valid(&observation.source, 1024) {
-            return Err(IntegrationError::Invalid(
-                "invalid message observation identity/source".into(),
-            ));
-        }
-        let refs = match &observation.proof {
-            MessageProof::Acknowledgement { receipt_reference } => vec![receipt_reference],
-            MessageProof::Consumption {
-                input_reference,
-                event_reference,
-            } => vec![input_reference, event_reference],
-            MessageProof::Failure { failure_reference } => vec![failure_reference],
-        };
-        if refs.iter().any(|value| !valid(value, 4096)) {
-            return Err(IntegrationError::Invalid(
-                "invalid native message evidence reference".into(),
-            ));
-        }
+        validate_observation(&observation)?;
         let _lock = self.service.state_lock()?;
         let mut connection = self.service.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -337,12 +405,17 @@ impl SessionBinding<'_> {
         {
             return Err(conflict());
         }
-        let replay: Option<(String,String)> = tx.query_row("SELECT operation_id,body FROM message_observations WHERE installation_id=?1 AND event_id=?2",
-            params![self.reference.installation_id,observation.event_id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
-        if let Some((operation, body)) = replay {
-            let evidence: MessageEvidence = serde_json::from_str(&body)?;
+        let replay: Option<(String,i64,String)> = tx.query_row("SELECT operation_id,cursor,body FROM message_observations WHERE installation_id=?1 AND event_id=?2",
+            params![self.reference.installation_id,observation.event_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        if let Some((operation, cursor, body)) = replay {
+            let evidence = decode_evidence(cursor, &observation.event_id, &body)?;
             if operation != receipt.request.operation_id || evidence.observation != observation {
                 return Err(conflict());
+            }
+            if referenced_evidence(&receipt, &evidence.observation.proof) != Some(&evidence) {
+                return Err(IntegrationError::Invalid(
+                    "message journal evidence is absent from its receipt".into(),
+                ));
             }
             return Ok(receipt);
         }
@@ -410,9 +483,10 @@ impl SessionBinding<'_> {
                 "invalid message observation cursor/limit".into(),
             ));
         }
-        self.message_status(operation)?;
-        let connection = self.service.connection()?;
-        let mut statement = connection.prepare("SELECT body FROM message_observations WHERE installation_id=?1 AND operation_id=?2 AND cursor>?3 ORDER BY cursor LIMIT ?4")?;
+        let mut connection = self.service.connection()?;
+        let tx = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let receipt = self.message_status_record(&tx, operation)?;
+        let mut statement = tx.prepare("SELECT cursor,event_id,body FROM message_observations WHERE installation_id=?1 AND operation_id=?2 AND cursor>?3 ORDER BY cursor LIMIT ?4")?;
         let bodies = statement.query_map(
             params![
                 self.reference.installation_id,
@@ -420,11 +494,24 @@ impl SessionBinding<'_> {
                 after as i64,
                 limit
             ],
-            |r| r.get::<_, String>(0),
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
         )?;
         let mut records = Vec::new();
         for body in bodies {
-            records.push(serde_json::from_str::<MessageEvidence>(&body?)?);
+            let (cursor, event_id, body) = body?;
+            let evidence = decode_evidence(cursor, &event_id, &body)?;
+            if referenced_evidence(&receipt, &evidence.observation.proof) != Some(&evidence) {
+                return Err(IntegrationError::Invalid(
+                    "message journal evidence is absent from its receipt".into(),
+                ));
+            }
+            records.push(evidence);
         }
         Ok(MessagePage {
             next_cursor: records.last().map_or(after, |e| e.cursor),

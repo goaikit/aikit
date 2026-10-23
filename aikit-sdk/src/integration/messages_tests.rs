@@ -582,6 +582,78 @@ fn ack(id: &str) -> MessageObservation {
     )
 }
 
+#[tokio::test]
+async fn corrupted_message_cursor_cannot_skip_later_durable_consumption() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("cursor-op")).unwrap();
+    let reservation = binding.reserve_message("cursor-op").unwrap();
+    let acknowledged = binding
+        .record_message_observation(&reservation, ack("cursor-ack"))
+        .unwrap();
+    binding
+        .record_message_observation(
+            &reservation,
+            observation(
+                "cursor-input",
+                MessageProof::Consumption {
+                    input_reference: "native-input".into(),
+                    event_reference: "native-input-event".into(),
+                },
+            ),
+        )
+        .unwrap();
+    let connection = f.service.connection().unwrap();
+    let cursor = acknowledged.acknowledgement.unwrap().cursor as i64;
+    connection.execute("UPDATE message_observations SET body=json_set(body,'$.cursor',9000000000) WHERE cursor=?1", [cursor]).unwrap();
+    let corrupt: String = connection
+        .query_row(
+            "SELECT body FROM message_observations WHERE cursor=?1",
+            [cursor],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        binding.message_observations("cursor-op", 0, 1).is_err(),
+        "a forged JSON cursor must not become the next replay cursor"
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT body FROM message_observations WHERE cursor=?1",
+                [cursor],
+                |r| r.get(0)
+            )
+            .unwrap(),
+        corrupt
+    );
+}
+
+#[tokio::test]
+async fn message_receipt_rejects_evidence_that_no_longer_resolves_to_its_own_journal_row() {
+    for fault in ["event", "source", "reference", "kind", "missing", "receipt"] {
+        let f = Fixture::new().await;
+        let binding = f.binding();
+        binding.stage_message(request("proof-op")).unwrap();
+        let reservation = binding.reserve_message("proof-op").unwrap();
+        binding
+            .record_message_observation(&reservation, ack("proof-ack"))
+            .unwrap();
+        let connection = f.service.connection().unwrap();
+        match fault {
+            "event" => connection.execute("UPDATE message_observations SET event_id='foreign'", []).unwrap(),
+            "source" => connection.execute("UPDATE message_observations SET body=json_set(body,'$.observation.source','')", []).unwrap(),
+            "reference" => connection.execute("UPDATE message_observations SET body=json_set(body,'$.observation.proof.receipt_reference','')", []).unwrap(),
+            "kind" => connection.execute("UPDATE outgoing_messages SET body=json_set(body,'$.acknowledgement.observation.proof',json('{\"kind\":\"failure\",\"failure_reference\":\"wrong-kind\"}'))", []).unwrap(),
+            "missing" => connection.execute("DELETE FROM message_observations", []).unwrap(),
+            "receipt" => connection.execute("UPDATE outgoing_messages SET body=json_set(body,'$.acknowledgement.cursor',9000000000)", []).unwrap(),
+            _ => unreachable!(),
+        };
+        assert!(binding.message_status("proof-op").is_err(), "{fault}");
+        assert!(binding.reserve_message("proof-op").is_err(), "{fault}");
+    }
+}
+
 async fn bridge_fixture() -> Fixture {
     let f = Fixture::new().await;
     let mut hook_spec = f.service.installed(&f.installation).unwrap().spec;
