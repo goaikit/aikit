@@ -4,6 +4,12 @@ These are implementation requests backed by local source inspection and bounded
 native evidence. They are not promises of supported behavior. AIKit owns native
 translation and qualification; consumer applications keep their own review rules.
 
+Use the concise [required native contracts](native-integration-required-contracts.md)
+for the current implementation request: reuse the existing public service,
+binding, message receipt and generated modules; close N1 invocation/configuration,
+N2 protected completion and N3 native admission/acknowledgement/consumption.
+The detailed historical evidence below retains its exact source/version scope.
+
 ## Current Claude API review, 2026-10-23
 
 Two downstream ordinary interactive Linux x86_64 2.1.308 trials now distinguish
