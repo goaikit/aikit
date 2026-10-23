@@ -634,7 +634,7 @@ impl IntegrationService {
     /// Installation and update follow the same path. Existing owned entries must
     /// still match their receipt; unrelated settings and hooks are retained.
     pub fn plan_install(&self, spec: InstallSpec) -> Result<InstallPlan, IntegrationError> {
-        self.plan_install_inner(spec, None, None, None)
+        self.plan_install_inner(spec, None, None, None, false)
     }
 
     /// Request native completion-loop configuration through the existing owned
@@ -646,7 +646,7 @@ impl IntegrationService {
         spec: InstallSpec,
         completion_policy: CompletionBlockingPolicy,
     ) -> Result<InstallPlan, IntegrationError> {
-        self.plan_install_inner(spec, Some(completion_policy), None, None)
+        self.plan_install_inner(spec, Some(completion_policy), None, None, false)
     }
 
     /// Replace an existing hook installation and its generated callable in one
@@ -666,6 +666,7 @@ impl IntegrationService {
             Some(completion_policy),
             Some((tool, message_handler)),
             None,
+            false,
         )
     }
 
@@ -680,21 +681,49 @@ impl IntegrationService {
         tool: super::AgentToolSpec,
         message_handler: Option<HookCommand>,
     ) -> Result<InstallPlan, IntegrationError> {
-        if operation_id.is_empty()
-            || operation_id.len() > 256
-            || !operation_id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            return Err(IntegrationError::Invalid(
-                "invalid installation operation ID".into(),
-            ));
-        }
+        validate_operation_id(operation_id)?;
         self.plan_install_inner(
             spec,
             Some(completion_policy),
             Some((tool, message_handler)),
             Some(operation_id),
+            false,
+        )
+    }
+
+    /// Return the canonical installation identity without creating a plan or
+    /// modifying configuration. Use this identity in a generated callable spec.
+    /// This validates the recipe, not native readiness or effective policy.
+    pub fn installation_identity(&self, spec: &InstallSpec) -> Result<String, IntegrationError> {
+        let mut spec = spec.clone();
+        validate_spec(&mut spec)?;
+        if self.state.starts_with(&spec.workspace) {
+            return Err(IntegrationError::Invalid(
+                "integration state must be outside the reviewed workspace".into(),
+            ));
+        }
+        Ok(installation_id(&spec))
+    }
+
+    /// Plan the first hooks, completion policy, callable and instructions as one
+    /// recoverable installation. A new operation refuses an existing installation;
+    /// exact retries return the original preview even after apply or a lost reply.
+    /// No files are applied and no native readiness or activation is granted.
+    pub fn plan_initial_with_agent_tool_id(
+        &self,
+        operation_id: &str,
+        spec: InstallSpec,
+        completion_policy: CompletionBlockingPolicy,
+        tool: super::AgentToolSpec,
+        message_handler: Option<HookCommand>,
+    ) -> Result<InstallPlan, IntegrationError> {
+        validate_operation_id(operation_id)?;
+        self.plan_install_inner(
+            spec,
+            Some(completion_policy),
+            Some((tool, message_handler)),
+            Some(operation_id),
+            true,
         )
     }
 
@@ -704,6 +733,7 @@ impl IntegrationService {
         requested_policy: Option<CompletionBlockingPolicy>,
         bundle: Option<(super::AgentToolSpec, Option<HookCommand>)>,
         operation_id: Option<&str>,
+        initial_bundle: bool,
     ) -> Result<InstallPlan, IntegrationError> {
         validate_spec(&mut spec)?;
         if self.state.starts_with(&spec.workspace) {
@@ -717,8 +747,13 @@ impl IntegrationService {
         let connection = self.connection()?;
         let request_hash = operation_id
             .map(|_| {
-                serde_json::to_vec(&(&spec, requested_policy, &bundle))
-                    .map(|bytes| fingerprint(Some(&bytes)))
+                // Preserve the existing update request digest for durable retries.
+                let bytes = if initial_bundle {
+                    serde_json::to_vec(&(&spec, requested_policy, &bundle, "initial"))
+                } else {
+                    serde_json::to_vec(&(&spec, requested_policy, &bundle))
+                }?;
+                Ok::<_, serde_json::Error>(fingerprint(Some(&bytes)))
             })
             .transpose()?;
         if let Some(operation_id) = operation_id {
@@ -746,7 +781,12 @@ impl IntegrationService {
         reject_prepared_config(&connection, &config_path, None)?;
         let previous = receipt_json(&connection, &id)?;
         let plugin = if let Some((tool, message_handler)) = &bundle {
-            if previous.is_none() {
+            if initial_bundle && previous.is_some() {
+                return Err(IntegrationError::Conflict(
+                    "initial installation already exists; use the update operation".into(),
+                ));
+            }
+            if !initial_bundle && previous.is_none() {
                 return Err(IntegrationError::NotFound);
             }
             require_detached_bindings(&connection, &id)?;
@@ -1516,6 +1556,20 @@ impl IntegrationService {
             }),
         }
     }
+}
+
+fn validate_operation_id(operation_id: &str) -> Result<(), IntegrationError> {
+    if operation_id.is_empty()
+        || operation_id.len() > 256
+        || !operation_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(IntegrationError::Invalid(
+            "invalid installation operation ID".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_spec(spec: &mut InstallSpec) -> Result<(), IntegrationError> {
