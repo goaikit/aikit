@@ -22,6 +22,8 @@ mod install;
 mod message_append;
 mod message_bridge;
 mod messages;
+mod native_boundary;
+pub use native_boundary::NativeCallerPolicy;
 #[cfg(target_os = "linux")]
 mod native_caller;
 #[cfg(target_os = "linux")]

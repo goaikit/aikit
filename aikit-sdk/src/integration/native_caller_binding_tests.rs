@@ -209,3 +209,52 @@ async fn schema_15_upgrade_requires_quiescence_preserves_unknown_and_advances_fl
     assert!(reopened.bind_existing(binding.reference()).is_err());
     assert!(historical.recorded_linux_native_caller().unwrap().is_none());
 }
+
+#[tokio::test]
+async fn native_boundary_refuses_missing_policy_and_unsupported_provider_without_journaling() {
+    use crate::integration::NativeCallerPolicy;
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    assert!(binding.check_native_caller(None).is_ok());
+    binding.bind_inspected_caller(snapshot(&binding)).unwrap();
+    assert!(binding.check_native_caller(None).is_err());
+    assert!(binding
+        .admit_recorded_for_native_caller(f.cursor(), Duration::ZERO, None)
+        .is_err());
+    let policy = NativeCallerPolicy::LinuxExecutable {
+        sha256: "a".repeat(64),
+    };
+    assert!(binding.check_native_caller(Some(&policy)).is_err());
+    let before = f.cursor();
+    let input = json!({"aikit_hook_version":2,"hook_event_name":"session_start","session_id":"other-native","invocation_id":"22222222-2222-4222-8222-222222222222","cwd":f.workspace});
+    let response = f
+        .sdk
+        .handle_hook_with_native_caller(
+            &f.installation,
+            input.to_string().as_bytes(),
+            &Allow,
+            Some(&policy),
+        )
+        .await;
+    assert_ne!(response.exit_code, 0);
+    assert_eq!(f.cursor(), before);
+    assert!(f
+        .sdk
+        .observed_session(&f.installation, "other-native")
+        .is_err());
+    assert_eq!(binding.status().unwrap(), SessionStatus::Observed);
+}
+
+#[test]
+fn native_policy_is_bounded_and_rejects_malformed_or_extra_fields() {
+    use crate::integration::NativeCallerPolicy;
+    let valid = json!({"kind":"linux_executable","sha256":"a".repeat(64)}).to_string();
+    assert!(NativeCallerPolicy::read(valid.as_bytes()).is_ok());
+    for value in [
+        json!({"kind":"linux_executable","sha256":"A".repeat(64)}),
+        json!({"kind":"linux_executable","sha256":"a".repeat(64),"socket":"forged"}),
+    ] {
+        assert!(NativeCallerPolicy::read(value.to_string().as_bytes()).is_err());
+    }
+    assert!(NativeCallerPolicy::read(vec![b' '; 4097].as_slice()).is_err());
+}

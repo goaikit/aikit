@@ -95,7 +95,7 @@ pub struct HookResponse {
     pub request_id: Option<String>,
 }
 impl HookResponse {
-    fn failure(error: &IntegrationError) -> Self {
+    pub(super) fn failure(error: &IntegrationError) -> Self {
         // Only fixed diagnostic codes cross the native boundary. Error details
         // can contain caller data, paths or database contents and stay private.
         let code = match error {
@@ -186,6 +186,23 @@ impl IntegrationService {
         .await
     }
 
+    pub(super) async fn dispatch_hook_with_caller_policy(
+        &self,
+        installation_id: &str,
+        input: &[u8],
+        handler: &dyn HookHandler,
+        policy: Option<&super::NativeCallerPolicy>,
+    ) -> Result<HookResponse, IntegrationError> {
+        self.dispatch_hook_with_environment_and_policy(
+            installation_id,
+            input,
+            handler,
+            |key| std::env::var(key).ok(),
+            policy,
+        )
+        .await
+    }
+
     // Keep environment lookup inside the installed boundary. The private seam
     // permits isolated tests without mutating process-global environment.
     async fn dispatch_hook_with_environment(
@@ -194,6 +211,24 @@ impl IntegrationService {
         input: &[u8],
         handler: &dyn HookHandler,
         environment: impl FnOnce(&str) -> Option<String>,
+    ) -> Result<HookResponse, IntegrationError> {
+        self.dispatch_hook_with_environment_and_policy(
+            installation_id,
+            input,
+            handler,
+            environment,
+            None,
+        )
+        .await
+    }
+
+    async fn dispatch_hook_with_environment_and_policy(
+        &self,
+        installation_id: &str,
+        input: &[u8],
+        handler: &dyn HookHandler,
+        environment: impl FnOnce(&str) -> Option<String>,
+        policy: Option<&super::NativeCallerPolicy>,
     ) -> Result<HookResponse, IntegrationError> {
         let started = Instant::now();
         let installation = self.installed(installation_id)?;
@@ -233,6 +268,29 @@ impl IntegrationService {
                 "native Turn observations require an owned module".into(),
             ));
         }
+        // Inspect before journaling or application policy. Provider-specific
+        // environment resolution lives in AIKit, never in consumer adapters.
+        #[cfg(target_os = "linux")]
+        let caller = policy
+            .map(|policy| policy.inspect(&installation.spec.agent_key))
+            .transpose()?;
+        #[cfg(not(target_os = "linux"))]
+        if let Some(policy) = policy {
+            policy.validate()?;
+            return Err(IntegrationError::Unsupported(
+                "physical native caller policy is not implemented for this provider/platform"
+                    .into(),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(caller) = caller
+            .as_ref()
+            .filter(|_| request.event != HookEvent::SessionStarted)
+        {
+            let reference = self.session_for_hook(&request)?;
+            let binding = self.bind_existing(&reference)?;
+            binding.check_inspected_caller(&binding.snapshot_native_caller(caller.clone())?)?;
+        }
         if matches!(
             request.event,
             HookEvent::NativeTurnStarted | HookEvent::NativeTurnFinished
@@ -269,6 +327,12 @@ impl IntegrationService {
             super::sessions::validate_invocation(&tx, &request, &installation_revision)?;
             tx.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,?3,?4,?5)", params![request.id, installation_id, request.session_id, journal_body, installation_revision])?;
             tx.commit()?;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(caller) = caller.filter(|_| request.event == HookEvent::SessionStarted) {
+            let reference = self.session_for_hook(&request)?;
+            let binding = self.bind_existing(&reference)?;
+            binding.bind_inspected_caller(binding.snapshot_native_caller(caller)?)?;
         }
         let decision = if is_decision(request.event) {
             // A receipt proves what we installed, not what is still configured.

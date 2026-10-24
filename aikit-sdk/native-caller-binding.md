@@ -7,6 +7,30 @@ delivery, acknowledgement or consumption capability is promoted.
 
 ## Public surface and semantics
 
+### Provider-neutral consumer entry points
+
+The follow-up introduces `NativeCallerPolicy::LinuxExecutable { sha256 }`, with
+bounded `read`/validation. The executable identity is independently owner-selected,
+never learned from request data or copied from the inspected process. AIKit owns
+provider/environment resolution; unsupported providers/platforms refuse explicitly.
+
+`IntegrationService::handle_hook_with_native_caller(..., policy)` inspects the
+real caller before journaling, associates an actual observed SessionStart before
+application projection, and checks the retained association for later callbacks.
+It preserves the existing deferred classic-start and compaction behavior.
+`SessionBinding::check_native_caller(policy)` checks callback correlation without
+granting mutation/idle admission. `admit_recorded_for_native_caller(cursor, wait,
+policy)` combines provider resolution with the existing recorded guard. A selected
+policy requires an existing exact association; lookup never silently creates one.
+No policy cannot bypass an association. These APIs do not grant readiness.
+
+The latest locked/offline Linux gate is **196 integration tests passing**, including
+unsupported-policy refusal before hook journaling, no-policy refusal for an
+associated binding, and bounded/strict policy decoding. The earlier 194-test and
+native captures below retain their original source scope; they are not automatically
+transferred to this new hook wrapper or its Codelaya adoption. Consumer native
+qualification is the next gate.
+
 Linux, `integration` feature, on the existing `SessionBinding`:
 
 - `bind_linux_native_caller(address, expected_executable_sha256)` inspects the

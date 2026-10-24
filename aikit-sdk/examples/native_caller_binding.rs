@@ -70,7 +70,12 @@ mod linux {
             let input: serde_json::Value = serde_json::from_slice(&bytes)?;
             let installation =
                 sdk.find_installation("caller-binding-fixture", "claude", &workspace)?;
-            let response = sdk.handle_hook(&installation.id, &bytes, &Allow).await;
+            let policy = NativeCallerPolicy::LinuxExecutable {
+                sha256: HASH.into(),
+            };
+            let response = sdk
+                .handle_hook_with_native_caller(&installation.id, &bytes, &Allow, Some(&policy))
+                .await;
             if response.exit_code != 0 {
                 return Err("native journal callback failed".into());
             }
@@ -83,7 +88,9 @@ mod linux {
                 ) {
                     let binding = sdk.bind_existing(&reference)?;
                     let address = std::env::var("CLAUDE_CODE_MESSAGING_SOCKET")?;
-                    let record = binding.bind_linux_native_caller(&address, HASH)?;
+                    let record = binding
+                        .recorded_linux_native_caller()?
+                        .ok_or("checked SDK startup did not associate caller")?;
                     let cursor = sdk.events(&installation.id, 0, 500)?.next_cursor;
                     let ordinary_refused = binding.admit_recorded(cursor).is_err();
                     drop(binding.admit_recorded_with_linux_native_caller(cursor, &address, HASH)?);

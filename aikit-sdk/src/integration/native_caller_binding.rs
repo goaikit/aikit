@@ -61,6 +61,34 @@ impl SessionBinding<'_> {
         })
     }
 
+    pub(super) fn snapshot_native_caller(
+        &self,
+        process: LinuxNativeCaller,
+    ) -> Result<RecordedLinuxNativeCaller, IntegrationError> {
+        let (boot_id, pid_namespace) = boot_scope()?;
+        Ok(RecordedLinuxNativeCaller {
+            schema_version: 1,
+            binding_id: self.id().into(),
+            reference: self.reference().clone(),
+            process,
+            boot_id,
+            pid_namespace,
+        })
+    }
+
+    pub(super) fn check_inspected_caller(
+        &self,
+        inspected: &RecordedLinuxNativeCaller,
+    ) -> Result<(), IntegrationError> {
+        let stored = self
+            .recorded_linux_native_caller()?
+            .ok_or(IntegrationError::NotFound)?;
+        if &stored != inspected {
+            return Err(conflict());
+        }
+        Ok(())
+    }
+
     fn caller_record(
         &self,
         connection: &Connection,
@@ -118,7 +146,7 @@ impl SessionBinding<'_> {
         self.bind_inspected_caller(inspected)
     }
 
-    fn bind_inspected_caller(
+    pub(super) fn bind_inspected_caller(
         &self,
         inspected: RecordedLinuxNativeCaller,
     ) -> Result<RecordedLinuxNativeCaller, IntegrationError> {
@@ -188,7 +216,7 @@ impl SessionBinding<'_> {
         self.admit_inspected_caller_wait(projected_through, inspected, Duration::ZERO)
     }
 
-    fn admit_inspected_caller_wait(
+    pub(super) fn admit_inspected_caller_wait(
         &self,
         projected_through: u64,
         inspected: &RecordedLinuxNativeCaller,
