@@ -56,8 +56,21 @@ attempt incorrectly assumed the Docker source copy contained `.git`; its failure
 is retained separately from the corrected regression.
 
 The native command probe proves the API behavior, not the complete new generated
-application workflow. A fresh matching consumer run is still required. Earlier
-native input/recovery results retain their exact earlier runtime scope.
+application workflow. A [fresh matching consumer report](https://github.com/aroff/codelaya/blob/feat/windows-local-workflow/docs/native-api-view-provenance.md)
+now records two full native workflows on runtime `1fac9a4`: unchanged API view
+retains the matching input candidate; a genuine core read followed by a rewritten
+API view retains no input candidate or resend while feedback still completes.
+Thirteen retained-evidence checks pass. The unchanged control needed one extra
+feedback step after a local completion-handler failure; that failure and the
+original fixed-count verifier failure remain explicit. Earlier native
+input/recovery results retain their exact earlier runtime scope.
+
+The broader SDK run was 179/180 (empty-output Codex fixture); a serial run was
+179/180 (missing Pi observation file). Pi passed separately; Codex again failed
+separately on empty JSON output. Both fixtures use short child-process deadlines,
+but the cause is not established. **The complete SDK gate is not green.** Logs,
+the initial baseline harness failure and two existing unused-guard warnings are
+retained. No timeout, provider contract or production readiness was weakened.
 
 Installed 2.1.308 declarations also bound the API conversation view to 4096
 entries. It is a normalized view used to build input, not an exact final wire
