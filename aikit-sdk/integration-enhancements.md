@@ -12,6 +12,15 @@ The detailed historical evidence below retains its exact source/version scope.
 
 ## Current Claude API review, 2026-10-23
 
+2026-10-24 [mod failure follow-up](../examples/claude-mod-qualification/current-mod-failure-20261024.md)
+qualifies exact constant SDK fallback execution on native 10000 ms budget
+expiry and actual heartbeat-triggered hooks-worker replacement. Both Block,
+propagate exact feedback, then permit completion after a subsequent Stop.
+Existing Claude APIs therefore close those scoped primitive gaps; do not label
+them missing provider features. Qualify the full generated module's retained
+Turn/invocation behavior after replacement and effective protected ordering next.
+No new runtime, schema or readiness exception is required by these results.
+
 2026-10-24 [current managed Stop comparison](../examples/claude-mod-qualification/current-stop-failure-20261024.md)
 rechecks the actual 2.1.308 executable: the existing managed guard defeats the
 tested user-tier competitor, but a missing or timed-out managed command still

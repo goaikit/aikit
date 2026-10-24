@@ -1,5 +1,15 @@
 # Opt-in native completion bridge candidate
 
+Current 2.1.308 [mod budget and worker recovery probes](../examples/claude-mod-qualification/current-mod-failure-20261024.md)
+reuse this source's exact constant fallback. Native budget expiry and actual
+wedged-worker replacement both invoke it, propagate Block into the next request
+and complete only after a second Stop delegates. This closes those two native
+primitive questions; do not request a generic provider worker-loss fallback.
+It does not yet qualify the full generated callback's Turn/invocation context
+after replacement, protected ordering, arbitrary external kill or unload. The
+two plugin environments share one native worker; retained evidence explicitly
+accounts for the observer's reset. Capability assessments remain unchanged.
+
 Later [native generated-module qualification](../examples/claude-mod-qualification/generated-stop-protocol.md)
 executes the owned module with the actual SDK example handler, retained command
 hook, invalid JSON and process timeout. It closes those scoped execution gaps;

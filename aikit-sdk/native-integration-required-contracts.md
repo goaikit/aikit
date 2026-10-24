@@ -123,6 +123,14 @@ does, implement/qualify its adapter rather than replacing it from scratch.
 
 ## Evidence already available and its limits
 
+Current 2.1.308 [mod budget/worker recovery](../examples/claude-mod-qualification/current-mod-failure-20261024.md)
+demonstrates an existing solution for two N2 failure primitives: native timeout
+and actual wedged-worker replacement invoke the exact constant SDK fallback,
+whose Block reaches the next model request. Full generated SDK/Codelaya context
+recovery after replacement, protected execution and other failure cases remain
+to qualify. This is no longer a missing generic provider worker-loss mechanism;
+reuse it before proposing new interfaces. No N1/N2/N3 capability is promoted.
+
 Current 2.1.308 [managed Stop failure comparison](../examples/claude-mod-qualification/current-stop-failure-20261024.md)
 qualifies protection against the tested short-circuit competitor using the
 existing built-in managed guard. Corrected root-owned baseline Blocks then
