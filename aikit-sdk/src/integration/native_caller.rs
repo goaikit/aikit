@@ -6,7 +6,7 @@ use nix::{
     sys::socket::{self, sockopt, AddressFamily, SockFlag, SockType, UnixAddr},
     unistd::geteuid,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -20,7 +20,8 @@ use std::{
 
 /// Observed Linux process relationship only. No session ID, module generation,
 /// effective handler chain, idle lease or receipt authority is established.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct LinuxNativeCaller {
     pub pid: u32,
     pub uid: u32,

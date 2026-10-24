@@ -50,7 +50,7 @@ pub struct SessionBinding<'a> {
 /// this guard neither buffers their notifications nor proves native liveness.
 #[must_use = "hold the guard through the application commit or final read validation"]
 pub struct RecordedSessionGuard {
-    connection: Connection,
+    pub(super) connection: Connection,
     _installation_lock: super::install::InstallationLock,
 }
 
@@ -218,6 +218,15 @@ impl SessionBinding<'_> {
         projected_through: u64,
         lock_wait_budget: std::time::Duration,
     ) -> Result<RecordedSessionGuard, IntegrationError> {
+        self.admit_recorded_inner(projected_through, lock_wait_budget, false)
+    }
+
+    pub(super) fn admit_recorded_inner(
+        &self,
+        projected_through: u64,
+        lock_wait_budget: std::time::Duration,
+        inspected_caller: bool,
+    ) -> Result<RecordedSessionGuard, IntegrationError> {
         if lock_wait_budget > std::time::Duration::from_millis(250) {
             return Err(IntegrationError::Invalid(
                 "recorded admission lock wait exceeds 250 ms".into(),
@@ -241,6 +250,12 @@ impl SessionBinding<'_> {
             SessionStatus::Ended => return Err(IntegrationError::SessionEnded),
             SessionStatus::Detached => return Err(IntegrationError::Detached),
             SessionStatus::Stale => return Err(IntegrationError::StaleSession),
+        }
+        if !inspected_caller && guard.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM linux_native_callers WHERE binding_id=?1)",
+            [&self.id], |row| row.get::<_, bool>(0),
+        )? {
+            return Err(IntegrationError::Invalid("binding requires current Linux native caller inspection".into()));
         }
         let maximum: i64 = guard.connection.query_row(
             "SELECT coalesce(max(sequence),0) FROM hook_invocations",

@@ -623,7 +623,7 @@ async fn append_schema_eleven_upgrade_retains_unknown_handoff_and_never_reserves
             report.current_schema,
             report.changed
         ),
-        (11, 15, true)
+        (11, 16, true)
     );
     assert!(
         !IntegrationService::upgrade_existing(f.dir.path().join("state"))
@@ -1837,7 +1837,7 @@ async fn explicit_upgrade_retains_unknown_receipt_and_detached_binding_without_r
         .unwrap();
     let report = IntegrationService::upgrade_existing(f.dir.path().join("state")).unwrap();
     assert_eq!(report.previous_schema, 10);
-    assert_eq!(report.current_schema, 15);
+    assert_eq!(report.current_schema, 16);
     assert!(report.changed);
     let upgraded = IntegrationService::open_existing(f.dir.path().join("state")).unwrap();
     let historical = upgraded.binding(binding.id()).unwrap();

@@ -103,6 +103,10 @@ name = "native_caller_inspect"
 required-features = ["integration"]
 
 [[example]]
+name = "native_caller_binding"
+required-features = ["integration"]
+
+[[example]]
 name = "inspect_message_history"
 required-features = ["integration", "history"]
 

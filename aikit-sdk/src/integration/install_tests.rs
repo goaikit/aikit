@@ -385,7 +385,7 @@ fn schema_fourteen_upgrade_seeds_detached_binding_admission_floor() {
             report.current_schema,
             report.changed
         ),
-        (14, 15, true)
+        (14, 16, true)
     );
     let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
     let floor: i64 = reopened
@@ -437,7 +437,7 @@ fn schema_thirteen_upgrade_retains_caller_update_identity_and_refuses_unsettled_
             report.current_schema,
             report.changed
         ),
-        (13, 15, true)
+        (13, 16, true)
     );
     let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
     assert_eq!(
@@ -792,7 +792,7 @@ fn schema_twelve_upgrade_requires_detached_settled_state_and_retains_receipts() 
             upgrade.current_schema,
             upgrade.changed
         ),
-        (12, 15, true)
+        (12, 16, true)
     );
     assert_eq!(fs::read(&f.config).unwrap(), bytes);
     let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
@@ -1055,7 +1055,7 @@ fn existing_open_requires_explicit_upgrade_without_losing_owned_receipts() {
             .unwrap()
             .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
             .unwrap(),
-        15
+        16
     );
 }
 
@@ -1102,7 +1102,7 @@ fn explicit_upgrade_never_initializes_missing_empty_or_unsupported_state() {
     ));
     assert_eq!(fs::metadata(&database).unwrap().len(), 0);
     fs::remove_file(&database).unwrap();
-    for version in [0, 8, 16] {
+    for version in [0, 8, 17] {
         let connection = Connection::open(&database).unwrap();
         connection
             .pragma_update(None, "user_version", version)
@@ -1146,7 +1146,7 @@ fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
         report,
         StateUpgradeReport {
             previous_schema: 9,
-            current_schema: 15,
+            current_schema: 16,
             changed: true
         }
     );
@@ -1159,8 +1159,8 @@ fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
     assert_eq!(
         IntegrationService::upgrade_existing(&f.service.state).unwrap(),
         StateUpgradeReport {
-            previous_schema: 15,
-            current_schema: 15,
+            previous_schema: 16,
+            current_schema: 16,
             changed: false
         }
     );
@@ -1309,7 +1309,7 @@ fn owner_can_inspect_and_atomically_detach_selected_legacy_handles_during_upgrad
         )
         .unwrap();
         assert_eq!(report.previous_schema, version);
-        assert_eq!(report.current_schema, 15);
+        assert_eq!(report.current_schema, 16);
         assert!(report.changed);
         assert!(connection
             .query_row::<bool, _, _>(
@@ -1383,7 +1383,7 @@ fn selected_legacy_detach_rolls_back_on_scope_selection_plans_or_migration_failu
             )
             .unwrap();
         let mut ids = vec!["selected".to_owned()];
-        let version = if case == "current" { 15 } else { 9 };
+        let version = if case == "current" { 16 } else { 9 };
         if version == 9 {
             connection
                 .execute_batch("DROP TABLE binding_admission_floors; PRAGMA user_version=9")
@@ -1466,7 +1466,7 @@ fn selected_legacy_detach_rolls_back_on_scope_selection_plans_or_migration_failu
                     |r| r.get(0)
                 )
                 .unwrap(),
-            u32::from(version == 15)
+            u32::from(version == 16)
         );
     }
 }
@@ -2283,7 +2283,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 15);
+    assert_eq!(version, 16);
     assert!(matches!(
         reopened.apply_install(&plan.id).unwrap(),
         InstallationStatus::Configured { .. }
@@ -2294,7 +2294,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
     reopened
         .connection()
         .unwrap()
-        .execute_batch("PRAGMA user_version=16;")
+        .execute_batch("PRAGMA user_version=17;")
         .unwrap();
     assert!(matches!(
         IntegrationService::open(f._dir.path().join("private-state")),

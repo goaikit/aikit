@@ -15,6 +15,7 @@ use std::{
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const CURRENT_SCHEMA: u32 = 16;
 
 // Called only inside a transaction. The initializer and explicit owner upgrade
 // use the same additive migration; retained payloads and evidence are untouched.
@@ -25,8 +26,9 @@ fn migrate_message_tables(connection: &Connection) -> Result<(), IntegrationErro
         CREATE TABLE IF NOT EXISTS message_handoffs(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id));
         CREATE TABLE IF NOT EXISTS message_append_checkpoints(installation_id TEXT NOT NULL, operation_id TEXT NOT NULL, native_row_id TEXT NOT NULL, body TEXT NOT NULL, PRIMARY KEY(installation_id,operation_id), UNIQUE(installation_id,native_row_id));
         CREATE TABLE IF NOT EXISTS binding_admission_floors(installation_id TEXT PRIMARY KEY NOT NULL, cursor INTEGER NOT NULL);
-        INSERT INTO binding_admission_floors SELECT DISTINCT json_extract(reference,'$.installation_id'), (SELECT coalesce(max(sequence),0) FROM hook_invocations) FROM session_bindings WHERE detached=1 ON CONFLICT(installation_id) DO NOTHING;
-        PRAGMA user_version=15;")?;
+        INSERT INTO binding_admission_floors SELECT DISTINCT json_extract(reference,'$.installation_id'), (SELECT coalesce(max(sequence),0) FROM hook_invocations) FROM session_bindings WHERE detached=1 ON CONFLICT(installation_id) DO UPDATE SET cursor=max(cursor,excluded.cursor);
+        CREATE TABLE IF NOT EXISTS linux_native_callers(binding_id TEXT PRIMARY KEY NOT NULL, body TEXT NOT NULL);
+        PRAGMA user_version=16;")?;
     connection.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
     Ok(())
 }
@@ -291,9 +293,9 @@ pub struct StateUpgradeReport {
 
 fn validate_upgrade_schema(tx: &Connection) -> Result<u32, IntegrationError> {
     let previous_schema: u32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if !(9..=15).contains(&previous_schema) {
+    if !(9..=CURRENT_SCHEMA).contains(&previous_schema) {
         return Err(IntegrationError::Invalid(
-            "explicit integration upgrade supports existing schemas 9 through 15 only".into(),
+            "explicit integration upgrade supports existing schemas 9 through 16 only".into(),
         ));
     }
     // Do not turn a claimed legacy version with missing core history into
@@ -318,8 +320,11 @@ fn validate_upgrade_schema(tx: &Connection) -> Result<u32, IntegrationError> {
     if previous_schema >= 12 {
         tx.prepare("SELECT installation_id,operation_id,native_row_id,body FROM message_append_checkpoints LIMIT 0")?;
     }
-    if previous_schema == 15 {
+    if previous_schema >= 15 {
         tx.prepare("SELECT installation_id,cursor FROM binding_admission_floors LIMIT 0")?;
+    }
+    if previous_schema == CURRENT_SCHEMA {
+        tx.prepare("SELECT binding_id,body FROM linux_native_callers LIMIT 0")?;
     }
     Ok(previous_schema)
 }
@@ -388,7 +393,7 @@ impl IntegrationService {
         })
     }
 
-    /// Explicitly upgrade an existing schema 9-14 journal to the current schema.
+    /// Explicitly upgrade an existing schema 9-15 journal to the current schema.
     /// Never creates missing state, repairs malformed tables, changes native
     /// configuration, detaches a binding or submits a message. Existing attached
     /// bindings and unapplied installation plans must first be resolved by their
@@ -430,15 +435,15 @@ impl IntegrationService {
                         "selected binding belongs to another installation".into(),
                     ));
                 }
-                if previous_schema == 15 && !detached {
+                if previous_schema == CURRENT_SCHEMA && !detached {
                     return Err(IntegrationError::Conflict("integration schema is current; use ordinary owner detachment for attached handles".into()));
                 }
-                if previous_schema != 15 {
+                if previous_schema != CURRENT_SCHEMA {
                     tx.execute("UPDATE session_bindings SET detached=1 WHERE id=?1", [id])?;
                 }
             }
         }
-        if previous_schema != 15 {
+        if previous_schema != CURRENT_SCHEMA {
             let attached: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM session_bindings WHERE detached=0)",
                 [],
@@ -464,12 +469,12 @@ impl IntegrationService {
         tx.commit()?;
         Ok(StateUpgradeReport {
             previous_schema,
-            current_schema: 15,
-            changed: previous_schema != 15,
+            current_schema: CURRENT_SCHEMA,
+            changed: previous_schema != CURRENT_SCHEMA,
         })
     }
 
-    /// Read retained schemas 9-15 without initialization or migration. The
+    /// Read retained schemas 9-16 without initialization or migration. The
     /// bounded page exposes recorded correlation only, not active configuration
     /// or native liveness. Use it to select exact IDs for upgrade_existing_detaching.
     pub fn attached_bindings_for_upgrade(
@@ -550,6 +555,7 @@ impl IntegrationService {
         connection: &Connection,
         allow_create: bool,
     ) -> Result<(), IntegrationError> {
+        // Version 16 fences process-bound recorded admission from older readers.
         // Version 15 prevents rebinding observations from before owner detachment.
         // Version 14 fences caller-owned update identity against older receipt writers.
         // Version 13 retains mandatory detach guards for coordinated plans.
@@ -562,20 +568,29 @@ impl IntegrationService {
                 "existing integration journal has no supported schema".into(),
             ));
         }
-        if version > 15 {
+        if version > CURRENT_SCHEMA {
             return Err(IntegrationError::Invalid("newer integration schema".into()));
         }
-        if !allow_create && version < 15 {
+        if !allow_create && version < CURRENT_SCHEMA {
             return Err(IntegrationError::Invalid(
                 "existing integration journal requires an explicit schema upgrade".into(),
             ));
         }
-        if version < 15 {
+        if version < CURRENT_SCHEMA {
             let _lock = self.state_lock()?;
             // Recheck under the migration lock: another opener may have migrated.
             let version: u32 = connection.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > 15 {
+            if version > CURRENT_SCHEMA {
                 return Err(IntegrationError::Invalid("newer integration schema".into()));
+            }
+            if version == 15 {
+                validate_upgrade_schema(connection)?;
+                let attached: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM session_bindings WHERE detached=0)", [], |row| row.get(0))?;
+                if attached {
+                    return Err(IntegrationError::Conflict("detach recorded bindings with the compatible runtime or explicit scoped upgrade before introducing process-bound admission".into()));
+                }
+                let pending: Option<String> = connection.query_row("SELECT id FROM install_plans WHERE phase!='applied' ORDER BY id LIMIT 1", [], |row| row.get(0)).optional()?;
+                if let Some(plan) = pending { return Err(IntegrationError::RecoveryRequired(plan)); }
             }
             if version < 3 {
                 connection.execute_batch("BEGIN IMMEDIATE;
