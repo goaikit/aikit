@@ -56,6 +56,26 @@ test('unknown, mismatched and subagent outcomes cannot manufacture a main Turn r
   assert.equal(f.frames.length,2);
   assert.equal([...f.environment.values()][0].native_turn_id,'main');
 });
+
+test('a reloaded module refuses lost Turn outcomes and only observes its fresh Turn',async()=>{
+  const original=await fixture();
+  await original.hooks.get('turn.start')(original.api,{turnId:'before-worker-loss'},async()=>({}));
+  const reloaded=await fixture();
+  const oldInvocation=[...original.environment.values()][0].native_context.invocation_id;
+  const newInvocation=[...reloaded.environment.values()][0].native_context.invocation_id;
+  assert.notEqual(oldInvocation,newInvocation);
+  for(const reason of ['answer','aborted','refusal','error']) {
+    const event={turnId:'before-worker-loss',reason,isAborted:reason==='aborted',answer:'Retained proposal'};
+    await assert.rejects(reloaded.hooks.get('turn.complete')(reloaded.api,event,nativeNext(event)),/Native Turn identity changed/);
+    assert.equal(reloaded.frames.length,1,'lost context never invokes an outcome handler or invents Turn startup');
+  }
+  await reloaded.hooks.get('turn.start')(reloaded.api,{turnId:'fresh-owner-work'},async()=>({}));
+  const event={turnId:'fresh-owner-work',reason:'answer',isAborted:false,answer:'Fresh result'};
+  await reloaded.hooks.get('turn.complete')(reloaded.api,event,nativeNext(event));
+  assert.deepEqual(reloaded.frames.map(f=>f.hook_event_name),['SessionStart','AIKitNativeTurnStarted','AIKitNativeTurnFinished']);
+  assert.equal(reloaded.frames[2].native_turn.id,'fresh-owner-work');
+  assert.equal([...reloaded.environment.values()][0].native_context.invocation_id,newInvocation);
+});
 test('downstream failure emits no outcome and process failure is attempted only once',async()=>{
   const f=await fixture();
   await f.hooks.get('turn.start')(f.api,{turnId:'main'},async()=>({}));

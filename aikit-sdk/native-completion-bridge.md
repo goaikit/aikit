@@ -1,5 +1,19 @@
 # Opt-in native completion bridge candidate
 
+## Lost context safety audit, 2026-10-24
+
+The consumer handoff requires Incomplete when identity/acceptance is lost
+(lifecycle rule 5, F09 and T05). That behavior is demonstrated by the native
+worker-replacement runs below. A missing old-abort journal record remains an
+observation limit; it is not permission to reconstruct an old invocation/Turn or
+restore a prior Allow. No new recovery-authority API is justified for this case.
+The new module-reload regression rejects all four old outcome reasons without
+handler I/O or invented startup, then observes only a fresh owner Turn under the
+new invocation. The three generated-module suites pass 47 tests in Linux Node 22;
+these are engine-stub checks, separate from the retained native runs. No runtime,
+schema, capability or consumer pin changes. N1/N3 and protected execution remain
+open; this audit does not accept the full Windows target.
+
 The latest [live-session continuation](https://github.com/aroff/codelaya/blob/ac4a21d/docs/native-worker-live-recovery.md)
 qualifies fresh owner work and a new review after replacement without restarting
 the ordinary native CLI. Original work remains Incomplete; fresh work and
@@ -15,16 +29,17 @@ catch; missing in-memory Turn context blocks and the consumer preserves
 Incomplete/recovery instead of accepting the prior Allow. One earlier automatic
 loading trial failed that intended ordering premise and is retained separately.
 This closes one full-module N2 safety case. The later native abort cannot be
-journaled because the Turn identity was lost; fresh owner work and outcome
-recovery after replacement remain to qualify. Runtime/capabilities are unchanged.
+journaled because the Turn identity was lost. That run did not exercise fresh
+owner work; the live-session follow-up above does. Runtime/capabilities unchanged.
 
 Current 2.1.308 [mod budget and worker recovery probes](../examples/claude-mod-qualification/current-mod-failure-20261024.md)
 reuse this source's exact constant fallback. Native budget expiry and actual
 wedged-worker replacement both invoke it, propagate Block into the next request
 and complete only after a second Stop delegates. This closes those two native
 primitive questions; do not request a generic provider worker-loss fallback.
-It does not yet qualify the full generated callback's Turn/invocation context
-after replacement, protected ordering, arbitrary external kill or unload. The
+Those primitive probes alone do not qualify the full callback after replacement;
+the later consumer runs above narrow that scope. Protected ordering, arbitrary
+external kill and unload remain unqualified. The
 two plugin environments share one native worker; retained evidence explicitly
 accounts for the observer's reset. Capability assessments remain unchanged.
 
