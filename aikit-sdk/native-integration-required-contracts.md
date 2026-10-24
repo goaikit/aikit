@@ -18,6 +18,14 @@ trace still supplies no exact input witness or durable operation receipt in this
 capture. Extend the existing provenance primitive; do not request it as though
 no native trace API exists, or promote title input to target-Turn consumption.
 
+The consumer's [fresh current-version lost-response run](https://github.com/aroff/codelaya/blob/feat/windows-local-workflow/docs/native-feedback-recovery-current.md)
+retains the exact native row across supervised SIGKILL and recovers the original
+operation to Unknown without a new main request. In that capture, native queue
+records have no payload/operation ID. Their one-enqueue count does not reconcile
+a named operation; the original payload-correlation verifier premise fails and
+is retained separately. This qualifies one recovery window, not native receipt
+lookup, power-loss durability or acknowledgement/consumption.
+
 ## Existing public surface to reuse
 
 - `IntegrationService` installation planner/journal, capability reports,
