@@ -199,6 +199,7 @@ impl IntegrationService {
             handler,
             |key| std::env::var(key).ok(),
             policy,
+            true,
         )
         .await
     }
@@ -218,6 +219,7 @@ impl IntegrationService {
             handler,
             environment,
             None,
+            false,
         )
         .await
     }
@@ -229,10 +231,23 @@ impl IntegrationService {
         handler: &dyn HookHandler,
         environment: impl FnOnce(&str) -> Option<String>,
         policy: Option<&super::NativeCallerPolicy>,
+        require_associated_policy: bool,
     ) -> Result<HookResponse, IntegrationError> {
         let started = Instant::now();
         let installation = self.installed(installation_id)?;
         let installation_revision = self.installation_revision(installation_id)?;
+        if require_associated_policy && policy.is_none() {
+            let associated: bool = self.connection()?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM linux_native_callers c JOIN session_bindings b ON b.id=c.binding_id WHERE b.detached=0 AND json_extract(c.body,'$.reference.installation_id')=?1 AND json_extract(c.body,'$.reference.installation_revision')=?2)",
+                params![installation_id, installation_revision], |row| row.get(0),
+            )?;
+            if associated {
+                return Err(IntegrationError::Invalid(
+                    "native caller policy is required while associated handles remain attached"
+                        .into(),
+                ));
+            }
+        }
         let mut request = decode(&installation, input)?;
         // Claude keeps the owned module/invocation alive across /compact. Its
         // classic SessionStart:compact is a context refresh, not a new epoch.

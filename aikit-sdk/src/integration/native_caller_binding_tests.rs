@@ -227,6 +227,12 @@ async fn native_boundary_refuses_missing_policy_and_unsupported_provider_without
     assert!(binding.check_native_caller(Some(&policy)).is_err());
     let before = f.cursor();
     let input = json!({"aikit_hook_version":2,"hook_event_name":"session_start","session_id":"other-native","invocation_id":"22222222-2222-4222-8222-222222222222","cwd":f.workspace});
+    let downgrade = f
+        .sdk
+        .handle_hook_with_native_caller(&f.installation, input.to_string().as_bytes(), &Allow, None)
+        .await;
+    assert_ne!(downgrade.exit_code, 0);
+    assert_eq!(f.cursor(), before);
     let response = f
         .sdk
         .handle_hook_with_native_caller(
@@ -243,6 +249,12 @@ async fn native_boundary_refuses_missing_policy_and_unsupported_provider_without
         .observed_session(&f.installation, "other-native")
         .is_err());
     assert_eq!(binding.status().unwrap(), SessionStatus::Observed);
+    binding.detach().unwrap();
+    let owner_cleared = f
+        .sdk
+        .handle_hook_with_native_caller(&f.installation, input.to_string().as_bytes(), &Allow, None)
+        .await;
+    assert_eq!(owner_cleared.exit_code, 0);
 }
 
 #[test]

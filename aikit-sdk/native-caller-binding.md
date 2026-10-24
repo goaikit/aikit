@@ -24,6 +24,15 @@ policy)` combines provider resolution with the existing recorded guard. A select
 policy requires an existing exact association; lookup never silently creates one.
 No policy cannot bypass an association. These APIs do not grant readiness.
 
+The checked hook entry also refuses a missing policy before journaling any new
+startup while an associated handle for that installation revision is attached.
+This prevents a fresh invocation from silently dropping the physical boundary.
+Explicit owner detachment permits later recorded-only startup; retained historical
+associations remain untouched. The legacy raw hook API retains its observation
+semantics, so consumers selecting physical checks must use the checked entry.
+The added downgrade/detachment assertions are undergoing the final Linux gate;
+the 196-pass result below predates this additional guard until recorded otherwise.
+
 The latest locked/offline Linux gate is **196 integration tests passing**, including
 unsupported-policy refusal before hook journaling, no-policy refusal for an
 associated binding, and bounded/strict policy decoding. The earlier 194-test and
