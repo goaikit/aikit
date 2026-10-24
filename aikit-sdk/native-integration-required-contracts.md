@@ -7,6 +7,14 @@ new application policy framework. Nothing here promotes a capability.
 
 ## Current API investigation, 2026-10-24
 
+[Linux native caller inspection](linux-native-caller.md) now implements a reusable
+kernel peer/ancestor check using the existing socket. Fresh ordinary Claude
+qualification accepts its real child and rejects a wrong executable hash,
+independent same-user caller and ended peer. This closes a physical inspection
+primitive, not N1 as a whole: session/module generation and effective mandatory
+policy remain separate, and the helper is not yet wired into required admission.
+No capability is promoted; Windows has no qualified equivalent in this change.
+
 The [earlier-handler native comparison](claude-request-snapshot-boundary.md)
 demonstrates a pre-delegation API snapshot containing a real stored row absent
 from that exact main request, despite genuine core dispatch. Pre/post snapshot

@@ -1,5 +1,10 @@
 # External-session integration gaps
 
+Reusable Linux [kernel peer/ancestor inspection](linux-native-caller.md) now
+supplies a qualified local process relationship through existing native/OS APIs.
+Native session/module-generation binding and effective-policy admission remain
+unfinished; do not promote process facts to N1 or Windows support.
+
 Current native input finding: [request snapshot boundary](claude-request-snapshot-boundary.md).
 An earlier handler's stored row appears in the pre-read API view but not that
 main request. Extend/fix the existing request-bound read contract before treating

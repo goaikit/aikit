@@ -22,6 +22,10 @@ mod install;
 mod message_append;
 mod message_bridge;
 mod messages;
+#[cfg(target_os = "linux")]
+mod native_caller;
+#[cfg(target_os = "linux")]
+pub use native_caller::{inspect_linux_native_caller, LinuxNativeCaller};
 mod owner_sessions;
 pub use owner_sessions::{RecordedBinding, RecordedBindingsPage, RecordedDetachment};
 mod pi;
