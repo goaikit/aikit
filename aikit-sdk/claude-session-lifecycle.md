@@ -4,6 +4,38 @@
 Windows checks remain deferred. This closes an AIKit lifecycle implementation
 gap using existing Claude APIs; no provider enhancement is required for it.
 
+## Registered consumer follow-up
+
+2026-10-25 runtime `0907525b316adb30a0d3142f36548d2823184b6d` fixes a second
+issue found through actual Codelaya: the classic clear/resume notification could
+try to record startup after the owned module had already done so. The existing
+hook boundary now defers known classic startup/clear/resume notifications with
+no journal row, binding or operation authority. Source-less owned module starts
+still enforce invocation reuse checks; compact and ordinary decision validation
+are unchanged. Source extraction remains Claude-start-only, preserving other
+providers' native input parsing (including Cursor BOM).
+
+All **199 SDK integration tests** pass, including non-authority deferral and
+legacy/input/replay regressions. Codelaya runtime `8e68554` pins this source;
+25 consumer tests and actual ordinary Linux Claude 2.1.308 qualification pass:
+initial repair, one original-session review, clear, new work, resume initial
+session ID, new work, normal exit and cold retention. Four Completed Turns,
+three invocations/bindings, eighteen main/twenty total scripted requests. The
+full frozen feedback frame appears in the three feedback requests and original
+stored row. Delivered review stays Unknown; a second review for the ended
+binding stays Queued without retarget, resend or model-input leak. No native
+hook errors remain; an unrelated caller is refused without app changes.
+
+Existing baseline and independent lifecycle verifiers pass, with eight altered-
+evidence controls (not eight native trials). Retained failed trials and exact
+hashes are in the [consumer report](https://github.com/aroff/codelaya/blob/feat/windows-local-workflow/docs/registered-session-lifecycle.md).
+These are healthy scripted-model Linux results with actual journals and explicit
+marked-fixture permissions. Effective mandatory handler/module authority and
+independently durable acknowledgement/consumption remain unqualified. No new
+provider API or Windows qualification is claimed.
+
+## Initial generated-module-only qualification
+
 ## Implementation
 
 The generated module previously initialized only on `session.start` and stopped
