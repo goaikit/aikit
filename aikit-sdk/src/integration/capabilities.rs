@@ -259,7 +259,7 @@ fn report(
                 MessageReconciliation if claude_dispatch_provenance_gap => (false, Support::Unsupported, "Recorded Linux x86_64 Claude Code 2.1.308 interactive experiment: a turn.step handler supplied text and usage without a main-loop model request. Native core traces distinguished that omission, but the observed core trace supplied no exact input witness or durable operation receipt. Separate title requests also carried the prompt and are not consumption by the target Turn. Existing append/handoff records remain candidates; qualified acknowledgement, consumption and lookup-only reconciliation are unavailable. Other versions/platforms/modes remain separately unqualified."),
                 MessageSubmission | MessageReconciliation => (false, Support::Unsupported, "Existing-session native message transport and receipt reconciliation are not implemented. Managed session transports are a different topology."),
                 NativeSessionIdentity => (true, Support::Unknown, "Owned Claude tool modules publish a fresh invocation ID into installation-scoped inherited process context and bootstrap a matching recorded SessionStart. Existing binding/journal checks reject observed old invocations. Controlled Linux startup matches tool/native session and recorded generation; this is not native process authentication, liveness, proof against an unseen delayed start, or Windows qualification."),
-                HardHookDeadline if claude_stop_chain_bypass => (true, Support::Unknown, "Recorded Linux x86_64 Claude Code 2.1.296 interactive counterexample with the built-in guard active: a missing command and a command cancelled at the native Stop timeout both reached successful native completion. Claude explicitly ignored onFailure:block on Stop. A matched command Block forced continuation. Guard/configuration attestation alone does not establish fail-closed native completion on handler failure. Other versions/platforms/modes remain separately unqualified."),
+                HardHookDeadline if claude_stop_chain_bypass || claude_dispatch_provenance_gap => (true, Support::Unknown, "Recorded Linux x86_64 Claude Code 2.1.296 and 2.1.308 interactive counterexamples with the built-in guard active: a missing command and a command cancelled at the native Stop timeout both reached successful native completion. Claude explicitly ignored onFailure:block on Stop. Matched command Block and missing-validator fallback forced continuation. Prompt/tool onFailure:block protection does not establish fail-closed native completion on handler failure. Other versions/platforms/modes remain separately unqualified."),
                 HardHookDeadline => (true, Support::Unknown, "Callback timeout reserves 250 ms for response handling; blocking workers and operating-system I/O do not establish a universal hard deadline."),
             }
         };
@@ -355,6 +355,14 @@ mod tests {
             assert!(report
                 .require(&[IntegrationCapability::MessageSubmission])
                 .is_err());
+            let deadline = report
+                .require(&[IntegrationCapability::HardHookDeadline])
+                .unwrap_err();
+            assert_eq!(deadline.unmet[0].support, Support::Unknown);
+            assert_eq!(
+                deadline.unmet[0].detail.contains("2.1.308 interactive counterexamples"),
+                matches || version == "2.1.296 (Claude Code)"
+            );
         }
         let unavailable = report(
             "claude",

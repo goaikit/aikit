@@ -1793,7 +1793,14 @@ fn add_owned(
         } else if installation.spec.agent_key == "codex" {
             json!({"hooks":[{"type":"command","command":super::command::command(&installation.spec.handler)?,"timeout":installation.spec.timeout_seconds}]})
         } else {
-            json!({"hooks":[{"type":"command","command":installation.spec.handler.executable,"args":installation.spec.handler.arguments,"timeout":installation.spec.timeout_seconds}]})
+            let mut handler = json!({"type":"command","command":installation.spec.handler.executable,"args":installation.spec.handler.arguments,"timeout":installation.spec.timeout_seconds});
+            // Claude >= 2.1.295 can block these actions even when the handler
+            // cannot start or times out. Stop explicitly ignores this setting:
+            // never represent it as mandatory completion enforcement.
+            if matches!(event, "UserPromptSubmit" | "PreToolUse") {
+                handler["onFailure"] = json!("block");
+            }
+            json!({"hooks":[handler]})
         };
         if entries.iter().any(|existing| existing == &entry) {
             return Err(IntegrationError::Conflict(format!(

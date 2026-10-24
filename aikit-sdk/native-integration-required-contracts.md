@@ -7,6 +7,15 @@ new application policy framework. Nothing here promotes a capability.
 
 ## Current API investigation, 2026-10-24
 
+2026-10-25 follow-up: [13 ordinary native policy cases](claude-policy-qualification-20261025.md)
+verify existing plugin admission, managed settings and built-in guard behavior.
+AIKit now emits the existing `onFailure: block` setting for prompt/tool command
+hooks; matched native cases block a missing validator. Stop explicitly ignores
+the setting on 2.1.308 and can accept after a managed timeout or missing command.
+A command fallback closes the tested missing-validator path but not the outer
+timeout. This narrows N1 investigation; mandatory completion and N3 remain
+unqualified. No blanket missing-provider-API claim or Windows promotion follows.
+
 [Linux native caller inspection](linux-native-caller.md) now implements a reusable
 kernel peer/ancestor check using the existing socket. Fresh ordinary Claude
 qualification accepts its real child and rejects a wrong executable hash,

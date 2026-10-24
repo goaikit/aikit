@@ -1,6 +1,117 @@
 use super::*;
 
 #[test]
+fn legacy_claude_receipt_upgrades_action_failure_protection_without_adopting_other_hooks() {
+    let mut f = Fixture::new();
+    f.spec.events = vec![HookEvent::BeforeTool, HookEvent::InputSubmitted];
+    let unrelated = json!({"hooks":{"UserPromptSubmit":[{"hooks":[
+        {"type":"command","command":"owner-prompt"}]}]}});
+    f.write(&unrelated);
+    let initial = f.install();
+    // Retain a prior-release receipt and exactly matching prior configuration.
+    let connection = f.service.connection().unwrap();
+    let mut receipt: Receipt = serde_json::from_str(
+        &receipt_json(&connection, &initial.installation_id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut document = f.read();
+    for owned in &mut receipt.owned {
+        let entries = document["hooks"][&owned.event].as_array_mut().unwrap();
+        let entry = entries
+            .iter_mut()
+            .find(|entry| **entry == owned.entry)
+            .unwrap();
+        owned.entry["hooks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("onFailure");
+        *entry = owned.entry.clone();
+    }
+    connection
+        .execute(
+            "UPDATE installations SET body=?1 WHERE id=?2",
+            params![
+                serde_json::to_string(&receipt).unwrap(),
+                initial.installation_id
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    f.write(&document);
+    assert!(matches!(
+        f.service
+            .installation_status(&initial.installation_id)
+            .unwrap(),
+        InstallationStatus::Configured { .. }
+    ));
+    let update = f.service.plan_install(f.spec.clone()).unwrap();
+    assert_eq!(
+        f.read(),
+        document,
+        "preview must not mutate legacy settings"
+    );
+    f.service.apply_install(&update.id).unwrap();
+    assert_eq!(
+        f.read()["hooks"]["UserPromptSubmit"][1]["hooks"][0]["onFailure"],
+        "block"
+    );
+    assert_eq!(
+        f.read()["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"],
+        "block"
+    );
+    let remove = f.service.plan_remove(&initial.installation_id).unwrap();
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), unrelated);
+}
+
+#[test]
+fn claude_action_failure_protection_is_owned_and_drift_checked() {
+    let mut f = Fixture::new();
+    f.spec.events = vec![
+        HookEvent::InputSubmitted,
+        HookEvent::BeforeTool,
+        HookEvent::CompletionProposed,
+        HookEvent::SessionStarted,
+        HookEvent::SessionEnded,
+    ];
+    let unrelated = json!({"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[
+        {"type":"command","command":"owner-validator","onFailure":"block"}]}]},"owner":"retain"});
+    f.write(&unrelated);
+    let installed = f.install();
+    let document = f.read();
+    assert_eq!(
+        document["hooks"]["UserPromptSubmit"][0]["hooks"][0]["onFailure"],
+        "block"
+    );
+    assert_eq!(
+        document["hooks"]["PreToolUse"][1]["hooks"][0]["onFailure"],
+        "block"
+    );
+    for event in ["Stop", "SessionStart", "SessionEnd"] {
+        assert!(document["hooks"][event][0]["hooks"][0]
+            .get("onFailure")
+            .is_none());
+    }
+    let mut edited = document.clone();
+    edited["hooks"]["PreToolUse"][1]["hooks"][0]["onFailure"] = json!("warn");
+    f.write(&edited);
+    assert!(matches!(
+        f.service
+            .installation_status(&installed.installation_id)
+            .unwrap(),
+        InstallationStatus::Drifted { .. }
+    ));
+    assert!(f.service.plan_remove(&installed.installation_id).is_err());
+    assert_eq!(f.read(), edited);
+    f.write(&document);
+    let remove = f.service.plan_remove(&installed.installation_id).unwrap();
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), unrelated);
+}
+
+#[test]
 fn initial_bundle_recovers_lost_replies_and_partial_writes_then_removes_only_owned_files() {
     let f = Fixture::new();
     let unrelated = json!({"owner":"retain","hooks":{"Stop":[{"matcher":"", "hooks":[{"type":"command","command":"owner-hook"}]}]}});
