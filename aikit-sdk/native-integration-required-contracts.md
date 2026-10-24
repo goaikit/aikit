@@ -7,6 +7,13 @@ new application policy framework. Nothing here promotes a capability.
 
 ## Current API investigation, 2026-10-24
 
+The [installed API-view review and guard](claude-api-view-provenance.md) identifies
+another SDK implementation gap that existing native core traces can close.
+Hookable conversation reads now require one matching core result and an unchanged
+final API value. This scoped check does not attest final model input, effective
+policy or durable receipt lookup. Do not classify its API availability as a
+provider blocker or promote N1-N3 on the strength of a plain returned array.
+
 The [continued-work follow-on](message-input-checkpoint.md#continued-work-and-distinct-new-feedback-after-recovery)
 verifies current binding admission for explicit new owner work and a distinct new
 review in the recovered native session. Original history and uncertain target

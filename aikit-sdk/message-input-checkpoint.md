@@ -1,5 +1,9 @@
 # Operation-correlated native input candidates
 
+Current follow-up: [API-view provenance guard](claude-api-view-provenance.md)
+requires a matching genuine core read before using an API snapshot. Earlier
+native results below retain their original runtime scope.
+
 2026-10-24, parent SDK `669e893`. This extends the existing append checkpoint;
 it does not add a daemon, delivery state, native transport or capability grant.
 

@@ -12,6 +12,12 @@ The detailed historical evidence below retains its exact source/version scope.
 
 ## Current Claude API review, 2026-10-23
 
+2026-10-24 installed-version review: [API-view provenance](claude-api-view-provenance.md)
+finds an AIKit gap that existing native traces can close: another mod can rewrite
+`session.messages` results. The generated observer now checks the genuine core
+read and the final returned view. Queueing/credential APIs are not durable
+consumption or effective-policy evidence; remaining contracts stay unqualified.
+
 2026-10-24 follow-up: the [main-input snapshot comparison](../examples/claude-input-qualification/README.md)
 retains a genuine later append that appears after dispatch but not in that main
 request. Pre-dispatch API snapshot/core correlation remains a concrete candidate

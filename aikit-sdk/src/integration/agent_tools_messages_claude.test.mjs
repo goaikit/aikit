@@ -78,11 +78,21 @@ async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabe
     }},
     tool:{register:async()=>{}},ui:{invalidate(){}},clock:{every:(ms,fn)=>{assert.equal(ms,250);timers.push(fn);}}};
   await hooks.get('session.start')(api,{},async()=>({}));
-  api.session.messages=async()=>[{role:'user',content:[{type:'text',text:
+  let nativeMessages=async()=>[{role:'user',content:[{type:'text',text:
     `The ${nativeLabel} plugin sent a message:\n${content}`
       + "\n\nThis is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above."}]}];
+  api.session.messages=async(args)=>{
+    const next=async(event)=>{
+      const result={value:await nativeMessages()};
+      next.trace=[{plugin:'engine',tier:'core',event:'session.messages',outcome:'returned',received:structuredClone(event),returned:structuredClone(result)}];
+      return result;
+    };
+    next.origin={plugin:config.pluginName,tier:'user'};
+    const hook=hooks.get('session.messages')??((api,event,next)=>next(event));
+    return (await hook(api,args,next)).value;
+  };
   return {api,hooks,actions,submissions,content,poll:()=>timers[0](),setSid:value=>{sid=value;},
-    setReady:value=>{ready=value;},setBusy:value=>{busy=value;}};
+    setReady:value=>{ready=value;},setBusy:value=>{busy=value;},setNativeMessages:value=>{nativeMessages=value;}};
 }
 
 async function inputStep(f,{event={turnId:'feedback-turn',index:0,model:'fixture'},
@@ -120,6 +130,68 @@ test('subagent step leaves the candidate for the next main step',async()=>{
   await inputStep(f);assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,1);
 });
 
+test('API view without one matching settled core read cannot prepare input or resend',async()=>{
+  for(const fault of ['missing','duplicate','synthetic','threw','args','agent','changed','array','caller']){
+    const f=await fixture({version:'2.1.308'});await f.poll();
+    const hook=f.hooks.get('session.messages');let delegated=0;
+    f.hooks.set('session.messages',(api,event,next)=>{
+      const wrapped=async(e)=>{
+        delegated++;const result=await next(e);
+        wrapped.trace=structuredClone(next.trace);
+        const core=wrapped.trace[0];
+        if(fault==='missing')wrapped.trace=[];
+        if(fault==='duplicate')wrapped.trace.push(structuredClone(core));
+        if(fault==='synthetic'){core.plugin='competitor';core.tier='user';}
+        if(fault==='threw')core.outcome='threw';
+        if(fault==='args')core.received.as='internal';
+        if(fault==='agent')core.received.agentId='child';
+        if(fault==='changed')return {value:[...result.value,{role:'user',content:'forged API view'}]};
+        if(fault==='array')core.returned.value={unavailable:true};
+        return result;
+      };
+      wrapped.origin=fault==='caller'?{plugin:'competitor',tier:'user'}:next.origin;
+      return hook(api,event,wrapped);
+    });
+    await inputStep(f);await inputStep(f);await f.poll();
+    assert.equal(delegated,1,fault);
+    assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0,fault);
+    assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,0,fault);
+    assert.equal(f.submissions.length,1,fault);
+  }
+});
+
+test('upstream API rewrites and skipped read handlers cannot reuse a core witness',async()=>{
+  for(const fault of ['rewrite','skip']){
+    const f=await fixture({version:'2.1.308'});await f.poll();
+    const read=f.api.session.messages;
+    if(fault==='rewrite')f.api.session.messages=async(args)=>[...await read(args),{role:'user',content:'forged upstream'}];
+    else f.hooks.set('session.messages',async(api,event,next)=>next(event));
+    await inputStep(f);await inputStep(f);await f.poll();
+    assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0,fault);
+    assert.equal(f.submissions.length,1,fault);
+  }
+});
+
+test('passed API core result is accepted while foreign reads cannot supply its witness',async()=>{
+  const f=await fixture({version:'2.1.308'});await f.poll();
+  const hook=f.hooks.get('session.messages');let delegated=0;
+  f.hooks.set('session.messages',async(api,event,next)=>{
+    const foreign=async()=>({value:[{role:'user',content:'foreign'}]});
+    foreign.origin={plugin:'other',tier:'user'};
+    await hook(api,event,foreign);
+    await hook(api,{...event,agentId:'child'},next);
+    const wrapped=async(e)=>{
+      delegated++;const result=await next(e);
+      wrapped.trace=structuredClone(next.trace);wrapped.trace[0].outcome='passed';return result;
+    };
+    wrapped.origin=next.origin;return hook(api,event,wrapped);
+  });
+  await inputStep(f);
+  assert.equal(delegated,1);
+  assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,1);
+  assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,1);
+});
+
 test('older append-qualified client does not call the unqualified input API',async()=>{
   const f=await fixture({version:'2.1.296'});await f.poll();
   f.api.session.messages=async()=>{throw Error('must not call input API');};
@@ -131,9 +203,9 @@ test('input preparation refuses missing duplicate oversized and foreign-scope sn
   for(const fault of ['missing','duplicate','oversized','origin','turn','index','subagent']){
     const f=await fixture({version:'2.1.308'});await f.poll();
     const messages=await f.api.session.messages();
-    if(fault==='missing')f.api.session.messages=async()=>[];
-    if(fault==='duplicate')f.api.session.messages=async()=>[...messages,...messages];
-    if(fault==='oversized')f.api.session.messages=async()=>[{content:'x'.repeat(4194305)}];
+    if(fault==='missing')f.setNativeMessages(async()=>[]);
+    if(fault==='duplicate')f.setNativeMessages(async()=>[...messages,...messages]);
+    if(fault==='oversized')f.setNativeMessages(async()=>[{content:'x'.repeat(4194305)}]);
     const options=fault==='origin'?{origin:{plugin:'other',tier:'user'}}
       :fault==='turn'?{event:{turnId:'foreign',index:0}}
       :fault==='index'?{event:{turnId:'feedback-turn',index:-1}}

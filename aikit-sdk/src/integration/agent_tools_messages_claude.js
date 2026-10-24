@@ -4,6 +4,7 @@ let messageActive = true, messageStopped = false, messageStarted = false, messag
 let messageContext, messageTicket;
 let messageInFlight, messageAppendSeen = false, messageProviderVersion;
 let messageInputCandidate;
+let messageApiRead;
 const messageAttempts = new Set();
 const messageBytes = value => new TextEncoder().encode(value);
 async function messageDigest(value) {
@@ -133,6 +134,32 @@ async function observeMessageAppend($, event, next) {
 function registerMessageLifecycle(on) {
   on('session.end', async ($, event, next) => { messageStopped = true; return next(event); });
   on('session.append', {door: 'prompt'}, async ($, event, next) => observeMessageAppend($, event, next));
+  // API reads are hookable too. Bind this one read to the genuine core result,
+  // then compare again at the API caller to catch rewrites on either side.
+  // This is local trace correlation, not authenticated caller/consumption proof.
+  on('session.messages', async ($, event, next) => {
+    const read = messageApiRead;
+    if (!read || event.as !== 'api' || event.agentId !== undefined || next?.origin?.plugin !== config.pluginName)
+      return next(event);
+    const result = await next(event);
+    try {
+      const core = Array.isArray(next.trace) ? next.trace.filter(entry =>
+        entry?.plugin === 'engine' && entry.tier === 'core' && entry.event === 'session.messages') : [];
+      if (core.length !== 1 || !['returned', 'passed'].includes(core[0].outcome)
+          || messageCanonical(core[0].received) !== messageCanonical({as: 'api'})
+          || !Array.isArray(result?.value) || !Array.isArray(core[0].returned?.value))
+        throw new Error('Native API view core trace unavailable');
+      for (const value of [result.value, core[0].returned.value])
+        if (messageBytes(JSON.stringify(value)).length > 4194304)
+          throw new Error('Native API view exceeds candidate limit');
+      const canonical = messageCanonical(result.value);
+      if (canonical !== messageCanonical(core[0].returned.value))
+        throw new Error('Native API view changed after core');
+      if (messageApiRead !== read) throw new Error('Native API read scope changed');
+      read.canonical = canonical;
+    } catch { messageStopped = true; }
+    return result;
+  });
   on('turn.step', async function* ($, event, next) {
     const candidate = messageInputCandidate;
     if (!candidate || event.agentId !== undefined) return yield* next(event);
@@ -145,10 +172,16 @@ function registerMessageLifecycle(on) {
           || event.turnId !== nativeTurnId || typeof event.turnId !== 'string' || !event.turnId
           || event.turnId.length > 256 || !Number.isSafeInteger(event.index) || event.index < 0)
         throw new Error('Native input step scope unavailable');
-      const snapshot = await $.session.messages({as: 'api'});
+      const read = {};
+      messageApiRead = read;
+      let snapshot;
+      try { snapshot = await $.session.messages({as: 'api'}); }
+      finally { if (messageApiRead === read) messageApiRead = undefined; else read.canonical = undefined; }
       const serialized = JSON.stringify(snapshot);
       if (!Array.isArray(snapshot) || typeof serialized !== 'string' || messageBytes(serialized).length > 4194304)
         throw new Error('Native API snapshot unavailable or oversized');
+      if (read.canonical === undefined || read.canonical !== messageCanonical(snapshot))
+        throw new Error('Native API snapshot lacks a matching core read');
       const occurrences = snapshot.flatMap(message => typeof message.content === 'string' ? [message.content]
         : Array.isArray(message.content) ? message.content.filter(block => block?.type === 'text').map(block => block.text) : [])
         .filter(text => text === candidate.frame).length;
