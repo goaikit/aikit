@@ -11,6 +11,46 @@ struct Fixture {
     id: String,
     workspace: PathBuf,
 }
+
+#[test]
+fn native_configuration_check_waits_for_short_local_writer_then_checks_fresh_receipt() {
+    let f = Fixture::new(10);
+    let installed = f.service.installed(&f.id).unwrap();
+    let held = f.service.state_lock().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(40));
+        drop(held);
+    });
+    f.service.require_configured(&installed).unwrap();
+    release.join().unwrap();
+}
+
+#[test]
+fn native_configuration_change_while_waiting_is_not_accepted() {
+    let f = Fixture::new(10);
+    let installed = f.service.installed(&f.id).unwrap();
+    let held = f.service.state_lock().unwrap();
+    let config = installed.config_path.clone();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(40));
+        let mut value: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        value["disableAllHooks"] = json!(true);
+        std::fs::write(config, value.to_string()).unwrap();
+        drop(held);
+    });
+    assert!(f.service.require_configured(&installed).is_err());
+    release.join().unwrap();
+}
+
+#[test]
+fn native_configuration_lock_budget_exhaustion_does_not_change_configuration() {
+    let f = Fixture::new(10);
+    let installed = f.service.installed(&f.id).unwrap();
+    let held = f.service.state_lock().unwrap();
+    assert!(f.service.require_configured(&installed).is_err());
+    drop(held);
+    f.service.require_configured(&installed).unwrap();
+}
 impl Fixture {
     fn owned_module(&self) {
         let plan = self

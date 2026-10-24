@@ -279,6 +279,9 @@ async function pollMessages($) {
     let outcome;
     try {
       const result = await $.prompt.submit({text: ticket.request.content});
+      // A native claimed refusal is not permission to associate this review
+      // with a later owner's Turn. Retain the raw return as Unknown; no resend.
+      if (typeof result?.drop === 'string') messageInputCandidate = undefined;
       const raw = JSON.stringify(result);
       if (typeof raw !== 'string' || messageBytes(raw).length > config.messageResultLimit)
         outcome = {kind: 'uncertain', reason: 'native_receipt_unavailable'};

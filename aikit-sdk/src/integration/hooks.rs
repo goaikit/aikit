@@ -370,7 +370,12 @@ impl IntegrationService {
     }
 
     fn require_configured(&self, expected: &Installation) -> Result<(), IntegrationError> {
-        match self.installation_status(&expected.id)? {
+        // A returned message may still be committing while its native Turn
+        // starts. Wait only for the local file lock, then check fresh policy;
+        // never retry a callback, transaction body or native action. Original
+        // request/decision deadlines still account for this elapsed time.
+        let _lock = self.state_lock_with_wait(Duration::from_millis(250))?;
+        match self.status_inner(&self.connection()?, &expected.id)? {
             InstallationStatus::Configured { installation } if installation == *expected => Ok(()),
             _ => Err(IntegrationError::Conflict(
                 "owned hook configuration changed; restore or reconfigure the installation".into(),

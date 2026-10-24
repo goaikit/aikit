@@ -292,6 +292,16 @@ test('genuinely oversized native results retain uncertainty and cannot resend',a
   assert.deepEqual(handoff.outcome,{kind:'uncertain',reason:'native_receipt_unavailable'});
   assert.equal(f.submissions.length,1);
 });
+
+test('native drop return cannot associate an appended review with a later owner Turn',async()=>{
+  const f=await fixture({version:'2.1.308'}),submit=f.api.prompt.submit;
+  f.api.prompt.submit=async(value)=>{await submit(value);return {drop:'Native input blocked'};};
+  await f.poll();await inputStep(f);await f.poll();
+  assert.equal(f.actions.filter(action=>action.kind==='prepare_append').length,1);
+  assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0);
+  assert.deepEqual(f.actions.find(action=>action.kind==='record_handoff').outcome,{kind:'returned',result:{drop:'Native input blocked'}});
+  assert.equal(f.submissions.length,1);
+});
 test('uncertain native call is never retried, even after more ticks',async()=>{
   const f=await fixture();let calls=0;
   f.api.prompt.submit=async()=>{calls++;throw Error('lost native reply');};

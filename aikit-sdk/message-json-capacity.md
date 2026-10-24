@@ -60,3 +60,34 @@ native policy requirement was relaxed. Existing Rust guard/rustfmt warnings rema
 Fresh matching consumer/native qualification of the fix is still required;
 the baseline above uses the old limits. Native Windows checks remain deferred.
 Local consumer evidence/logs: `.local/payload-native-20261024/`.
+
+## Admission follow-up after retained consumer failures
+
+A first matching native trial retains the complete large return but fails a
+separate Turn-start callback and ends Incomplete after owner interruption. A
+diagnostic trial receives a native core `{drop: ...}` after input policy refuses
+admission: Unknown is preserved, with no feedback Turn or model request. Neither
+is counted as a full workflow pass. The diagnostic initially misread the API's
+wrapped process result and logged successful polls; its extra I/O makes it an
+intrusive diagnostic, not a clean positive comparison. Its filter is corrected
+for the next fresh trial. All submitted trials remain unchanged.
+
+The code audit also reproduces an immediate configuration-check refusal while
+a local handoff writer holds the SDK file lock. Hook configuration checks now
+wait at most 250 ms for that local lock and validate the current receipt/files
+after acquisition. Existing request/decision deadlines still include that time.
+Configuration changes and exhausted lock budgets still refuse; public status
+reads retain their existing behavior. There is no native action or callback retry.
+Three new tests cover release, configuration change while waiting and exhaustion.
+
+A native claimed `drop` return now clears the pending input candidate, so a later
+owner Turn cannot be associated with that refused review. Its complete return
+still stays Unknown; a claimed refusal does not become authoritative failure or
+permission to resend. A generated-module regression checks this exact boundary.
+
+Final follow-up gates: **185 SDK integration / 42 generated-module tests pass**.
+The consumer separately reuses its existing bounded workspace-writer acquisition
+for policy callbacks; its two new tests cover short contention without input
+replay and budget exhaustion without a Turn. Fresh combined native qualification
+remains required. These local contention fixes are not a claim that the earlier
+native failures' exact causes have all been established.
