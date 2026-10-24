@@ -17,6 +17,13 @@ function sameMessageReference(left, right) {
   return ['installation_id', 'installation_revision', 'native_session_id', 'invocation_id', 'start_cursor']
     .every(key => left?.[key] === right?.[key]);
 }
+function sameMessageReservation(left, right) {
+  return left?.binding_id === right.binding_id && left?.reservation_id === right.reservation_id
+    && left?.payload_sha256 === right.payload_sha256
+    && left?.request?.operation_id === right.request.operation_id
+    && left?.request?.content === right.request.content
+    && sameMessageReference(left?.target, right.target);
+}
 function validateMessageReply(reply) {
   const ref = reply?.reference;
   if (reply?.schema_version !== 1 || typeof reply.recorded_idle !== 'boolean'
@@ -155,6 +162,8 @@ async function pollMessages($) {
     if (!check.recorded_idle || !check.recorded_ready || messageActive || messageStopped) return;
     if (!sameMessageReference(check.reference, ticket.target))
       throw new Error('Message target changed');
+    if (!sameMessageReservation(check.reservation, ticket))
+      throw new Error('Message recheck did not confirm the exact reservation');
     if (messageAttempts.has(ticket.reservation_id)) throw new Error('Message attempt already used');
     // No await between the last local busy check, attempt marker and native call.
     // Native queuing/admission across competing handlers is still a qualification gate.

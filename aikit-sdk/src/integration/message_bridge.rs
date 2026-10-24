@@ -73,6 +73,9 @@ pub struct RecordedMessageReply {
     pub recorded_idle: bool,
     /// A recorded check, never authorization for native I/O by itself.
     pub recorded_ready: bool,
+    /// Poll's newly reserved operation, or the exact existing reservation
+    /// confirmed by a ready Recheck. None when no dispatch is authorized by
+    /// the recorded check; this is still not a native admission lease.
     pub reservation: Option<MessageReservation>,
     /// Exact rechecked operation state. Terminal/Unknown retires the local
     /// ticket without resending, so one uncertain operation need not block others.
@@ -372,6 +375,11 @@ impl IntegrationService {
                     reply.recorded_state = Some(receipt.state);
                     reply.recorded_ready = receipt.state == MessageState::Dispatching
                         && receipt.reservation_id.as_deref() == Some(reservation_id.as_str());
+                    if reply.recorded_ready {
+                        // Return the immutable operation actually checked. A
+                        // same-session ready boolean cannot identify its bytes.
+                        reply.reservation = Some(reservation_from_receipt(&receipt)?);
+                    }
                 }
                 RecordedMessageAction::RecordHandoff { .. }
                 | RecordedMessageAction::PrepareAppend { .. }

@@ -885,12 +885,12 @@ async fn recorded_bridge_defers_busy_reserves_once_and_rechecks_without_sending(
             reservation_id: ticket.reservation_id.clone(),
         },
     );
-    assert!(
-        f.service
-            .recorded_message_with_context(&f.installation, recheck.clone(), Some(&env))
-            .unwrap()
-            .recorded_ready
-    );
+    let confirmed = f
+        .service
+        .recorded_message_with_context(&f.installation, recheck.clone(), Some(&env))
+        .unwrap();
+    assert!(confirmed.recorded_ready);
+    assert_eq!(confirmed.reservation, Some(ticket));
     synthetic_bridge_event(&f, HookEvent::InputSubmitted);
     let busy = f
         .service
@@ -898,6 +898,7 @@ async fn recorded_bridge_defers_busy_reserves_once_and_rechecks_without_sending(
         .unwrap();
     assert!(!busy.recorded_idle);
     assert!(!busy.recorded_ready);
+    assert!(busy.reservation.is_none());
     binding.recover_message_record("op").unwrap();
     assert!(
         !f.service

@@ -12,6 +12,14 @@ The detailed historical evidence below retains its exact source/version scope.
 
 ## Current Claude API review, 2026-10-23
 
+2026-10-24 follow-up: the [main-input snapshot comparison](../examples/claude-input-qualification/README.md)
+retains a genuine later append that appears after dispatch but not in that main
+request. Pre-dispatch API snapshot/core correlation remains a concrete candidate
+to implement and qualify, not a proven unavailable provider feature. The
+[exact reservation confirmation](message-reservation-confirmation.md) closes an
+SDK handoff check now. The required-contract document distinguishes these
+unfinished investigations from native counterexamples.
+
 Two downstream ordinary interactive Linux x86_64 2.1.308 trials now distinguish
 directory discovery from protected ordering. The existing SDK-generated directory
 under `.claude/skills` loads automatically as `@skills-dir`, at native **user**

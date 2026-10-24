@@ -34,6 +34,9 @@ async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabe
       const reply={schema_version:1,reference,recorded_idle:!busy,recorded_ready:frame.action.kind==='recheck' && ready && !busy,reservation:null};
       if(frame.action.kind==='poll' && !pending){pending=true;reply.reservation={binding_id:'binding',target:reference,
         reservation_id:'attempt',request:{operation_id:'review',content},payload_sha256:createHash('sha256').update(content).digest('hex')};}
+      if(frame.action.kind==='recheck' && reply.recorded_ready) reply.reservation={binding_id:'binding',target:reference,
+        reservation_id:frame.action.reservation_id,request:{operation_id:frame.action.operation_id,content},
+        payload_sha256:createHash('sha256').update(content).digest('hex')};
       if(frame.action.kind==='prepare_append') {
         const submitted=submissions.at(-1).text;
         checkpoint={schema_version:1,reservation:{binding_id:'binding',target:reference,
@@ -137,6 +140,31 @@ test('changed session, corrupt digest, foreign ticket and truncated RPC fail clo
     await f.poll();await f.poll();assert.equal(f.submissions.length,0,fault);
   }
 });
+test('a ready recheck must confirm the exact immutable reservation before native I/O',async()=>{
+  for(const fault of ['missing','binding','reservation','operation','content','digest','target']){
+    const f=await fixture(),run=f.api.process.run;
+    f.api.process.run=async(argv,opts)=>{
+      const result=await run(argv,opts);
+      if(JSON.parse(opts.stdin).action?.kind==='recheck'){
+        const reply=JSON.parse(result.stdout),ticket=reply.reservation;
+        if(fault==='missing')reply.reservation=null;
+        if(fault==='binding')ticket.binding_id='foreign';
+        if(fault==='reservation')ticket.reservation_id='foreign';
+        if(fault==='operation')ticket.request.operation_id='foreign';
+        if(fault==='content')ticket.request.content+=' changed';
+        if(fault==='digest')ticket.payload_sha256='0'.repeat(64);
+        if(fault==='target')ticket.target={...ticket.target,invocation_id:'foreign'};
+        result.stdout=JSON.stringify(reply);
+      }
+      return result;
+    };
+    await f.poll();await f.poll();
+    assert.equal(f.submissions.length,0,fault);
+    assert.equal(f.actions.filter(action=>action.kind==='recheck').length,1,fault);
+    assert.equal(f.actions.some(action=>['prepare_append','record_handoff'].includes(action.kind)),false,fault);
+  }
+});
+
 test('overlapping timer ticks cannot create a second submission',async()=>{
   const f=await fixture();let release,entered;
   const ready=new Promise(resolve=>{entered=resolve;});
@@ -147,16 +175,18 @@ test('overlapping timer ticks cannot create a second submission',async()=>{
 
 test('retired exact attempts are never sent and do not block a later review',async()=>{
   for(const state of ['unknown','failed','acknowledged']){
-    const f=await fixture(),run=f.api.process.run;let polls=0,checks=0;
+    const f=await fixture(),run=f.api.process.run;let polls=0,checks=0,nextTicket;
     f.api.process.run=async(argv,opts)=>{
       const result=await run(argv,opts),action=JSON.parse(opts.stdin).action;
       if(!action)return result;
       const reply=JSON.parse(result.stdout);
       if(action.kind==='recheck')reply.recorded_state=++checks===1?state:'dispatching';
+      if(action.kind==='recheck' && checks>1)reply.reservation=structuredClone(nextTicket);
       if(action.kind==='poll' && ++polls===2){
         const content='Second immutable review 雪';
         reply.reservation={binding_id:'binding',target:reply.reference,reservation_id:'next-attempt',
           request:{operation_id:'next-review',content},payload_sha256:createHash('sha256').update(content).digest('hex')};
+        nextTicket=structuredClone(reply.reservation);
       }
       result.stdout=JSON.stringify(reply);return result;
     };

@@ -5,6 +5,23 @@ Track under [draft PR #196](https://github.com/goaikit/aikit/pull/196); this
 repository has issues disabled. This requests reusable SDK/provider work, not a
 new application policy framework. Nothing here promotes a capability.
 
+## Current API investigation, 2026-10-24
+
+The work packages below are remaining integration/qualification requirements,
+not proof that Claude lacks each primitive. The [new native input comparison](../examples/claude-input-qualification/README.md)
+shows that an API snapshot **after** a real dispatch can contain an appended row
+that was absent from that request. A pre-dispatch snapshot agreed in this case.
+Implement and qualify that existing API/core-trace path before requesting a new
+input-witness API. Its full framing, race, compaction and recovery matrix remains
+unfinished; durable receipt/lookup is separately unresolved.
+
+AIKit now [confirms the exact reservation on Recheck](message-reservation-confirmation.md)
+before native handoff. This closes an SDK consistency gap without claiming a
+native lease. Claude's documented inbox socket/token is also an existing delivery
+and process-context candidate; it does not by itself attest the mandatory handler
+chain. Preserve the distinction between SDK work, unqualified native behavior and
+a demonstrated native counterexample. No new provider blocker is asserted here.
+
 The [completion trace implementation](native-completion-trace.md) now uses an
 existing native primitive to reject downstream short-circuit/contradictory core
 outcomes before forwarding them. This closes a concrete observer code gap; it
