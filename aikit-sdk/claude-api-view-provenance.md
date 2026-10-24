@@ -1,5 +1,12 @@
 # Claude API-view provenance, 2026-10-24
 
+Gate follow-up: a diagnostic-only Codex fixture change retains nonzero response
+details. Its isolated test passes; a subsequent complete integration gate,
+serially without concurrent builds, passes **180/180** in 30.24 seconds. No
+production code, timeout or assertion was relaxed. Earlier failed runs below are
+retained; their cause is not established. Logs in the consumer chat:
+`.local/payload-bound-20261024/{codex-diagnostic,sdk-idle-serial}.log`.
+
 Parent SDK `a7e3f5f`, latest runtime parent `8ff3d89`. Linux Docker only;
 native Windows checks remain deferred. This extends the existing generated
 message observer; it introduces no service, public Rust API, table or receipt.
@@ -68,7 +75,8 @@ input/recovery results retain their exact earlier runtime scope.
 The broader SDK run was 179/180 (empty-output Codex fixture); a serial run was
 179/180 (missing Pi observation file). Pi passed separately; Codex again failed
 separately on empty JSON output. Both fixtures use short child-process deadlines,
-but the cause is not established. **The complete SDK gate is not green.** Logs,
+but the cause is not established. **Those complete SDK runs were not green**;
+the subsequent idle serial follow-up at the top supersedes their gate status. Logs,
 the initial baseline harness failure and two existing unused-guard warnings are
 retained. No timeout, provider contract or production readiness was weakened.
 
