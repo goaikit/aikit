@@ -67,11 +67,29 @@ native APIs and do not qualify live dispatch or native recovery.
 
 The earlier [actual native pre-dispatch comparison](recorded-admission-wait.md#fresh-consumer-comparison)
 remains at SDK `de7e171`; its acceptance does not transfer to this new generated
-observer. A fresh matching consumer/native run is still required, followed by
-late mutation, clipping/size, competing handler and interruption qualification.
+observer. A fresh matching consumer/native run is recorded below; late mutation,
+clipping/size, competing handler and interruption qualification remain required.
 Windows checks remain deferred. Local logs: consumer workspace
 `.local/input-checkpoint-20261024/sdk-integration.log` and `generated-module.log`.
 
 Native API references: [hook chaining and streaming](https://code.claude.com/docs/en/plugins/mods/events),
 [mods API](https://code.claude.com/docs/en/plugins/mods/api). Their availability is
 not a guarantee of durable, operation-correlated native consumption.
+
+## Fresh matching native consumer comparison
+
+Codelaya [source `39e706a`](https://github.com/aroff/codelaya/commit/39e706a)
+pins runtime `8ff3d89`. Nineteen scoped callback/delivery/completion tests and
+matching binaries pass. A fresh ordinary interactive native Claude 2.1.308
+session completes authoring, idle compaction, one frozen owner review and
+same-session feedback. Version-two intent/dispatch records match the independent
+pre-dispatch API snapshot and actual settled core event/trace, and remain exact
+after ordinary native/sidecar shutdown. Fourteen altered-evidence checks pass.
+
+[Exact consumer protocol, hashes, retained failures and limits](https://github.com/aroff/codelaya/blob/39e706a/docs/native-input-checkpoint.md).
+An empty hello handshake invalidated the old fixed request-count assumption;
+the final verifier explicitly retains it separately from nine main, one title
+and one compact request. The corresponding stale-index mutation-helper failure
+is also retained and corrected. No native submitted state was repaired.
+These are still candidates: app/SDK remain Unknown with no acknowledgement,
+consumption, native receipt qualification, readiness or Windows promotion.
