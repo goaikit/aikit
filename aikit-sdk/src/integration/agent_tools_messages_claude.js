@@ -1,5 +1,8 @@
 // Opt-in native handoff candidate. Recorded checks are not a native lease.
 // Returned receipts remain unqualified; no acknowledgement/consumption is inferred.
+let messageBridge, messageTimerStarted = false;
+function createMessageBridge($, epoch) {
+const invocationId = epoch.invocationId;
 let messageActive = true, messageStopped = false, messageStarted = false, messagePolling = false;
 let messageContext, messageTicket;
 let messageInFlight, messageAppendSeen = false, messageProviderVersion;
@@ -36,13 +39,14 @@ function validateMessageReply(reply) {
       || ref?.native_session_id !== messageContext.session_id || ref?.invocation_id !== invocationId)
     throw new Error('Recorded message context unavailable');
 }
-async function messageRpc($, action) {
-  const native = await publishContext($);
+async function messageRpc(action) {
+  const native = await publishContext($, epoch);
   if (!sameMessageContext(native)) throw new Error('Native message context changed');
   const stdin = JSON.stringify({schema_version: 1, application_id: config.applicationId,
     installation_id: config.installationId, agent_key: 'claude', native_context: native, action});
   if (messageBytes(stdin).length > config.messageEnvelopeLimit) throw new Error('Message envelope exceeds limit');
   const result = await $.process.run(config.messageArgv, {stdin, timeoutMs: config.timeoutMs});
+  assertSession(epoch);
   if (result.exitCode !== 0 || result.isStdoutTruncated !== false || result.isStderrTruncated !== false
       || typeof result.stdout !== 'string' || messageBytes(result.stdout).length > 1048576)
     throw new Error('Message journal unavailable');
@@ -74,7 +78,7 @@ function validateAppendReply(reply, ticket, intent, stored) {
   } else if (checkpoint.stored !== null || checkpoint.stored_at_unix_ms !== null)
     throw new Error('Native append intent already has a storage observation');
 }
-async function observeMessageAppend($, event, next) {
+async function observeMessageAppend(event, next) {
   const ticket = messageInFlight;
   if (!ticket || event.agentId !== undefined || event.origin?.kind !== 'plugin'
       || event.origin.name !== config.pluginName) return next(event);
@@ -93,7 +97,7 @@ async function observeMessageAppend($, event, next) {
     if (appendText(event.message) !== expected) throw new Error('Unknown or rewritten native framing');
     intent = {native_row_id: event.uuid, native_source: `claude-code/${messageProviderVersion}/session.append`,
       framed_payload_sha256: await messageDigest(expected)};
-    const reply = await messageRpc($, {kind: 'prepare_append', operation_id: ticket.request.operation_id,
+    const reply = await messageRpc({kind: 'prepare_append', operation_id: ticket.request.operation_id,
       reservation_id: ticket.reservation_id, intent});
     validateAppendReply(reply, ticket, intent);
     prepared = true;
@@ -120,7 +124,7 @@ async function observeMessageAppend($, event, next) {
       throw new Error('Native append engine row changed');
     const stored = {stored_payload_sha256: await messageDigest(appendText(result.message)),
       evidence_reference: `claude-code:session:${messageContext.session_id}:row:${intent.native_row_id}`};
-    const reply = await messageRpc($, {kind: 'record_append_stored', operation_id: ticket.request.operation_id,
+    const reply = await messageRpc({kind: 'record_append_stored', operation_id: ticket.request.operation_id,
       reservation_id: ticket.reservation_id, native_row_id: intent.native_row_id, stored});
     validateAppendReply(reply, ticket, intent, stored);
     if (stored.stored_payload_sha256 !== intent.framed_payload_sha256) messageStopped = true;
@@ -131,13 +135,10 @@ async function observeMessageAppend($, event, next) {
   } catch { messageStopped = true; }
   return result;
 }
-function registerMessageLifecycle(on) {
-  on('session.end', async ($, event, next) => { messageStopped = true; return next(event); });
-  on('session.append', {door: 'prompt'}, async ($, event, next) => observeMessageAppend($, event, next));
   // API reads are hookable too. Bind this one read to the genuine core result,
   // then compare again at the API caller to catch rewrites on either side.
   // This is local trace correlation, not authenticated caller/consumption proof.
-  on('session.messages', async ($, event, next) => {
+  async function observeApiMessages(event, next) {
     const read = messageApiRead;
     if (!read || event.as !== 'api' || event.agentId !== undefined || next?.origin?.plugin !== config.pluginName)
       return next(event);
@@ -159,8 +160,8 @@ function registerMessageLifecycle(on) {
       read.canonical = canonical;
     } catch { messageStopped = true; }
     return result;
-  });
-  on('turn.step', async function* ($, event, next) {
+  }
+  async function* observeInputStep(event, next) {
     const candidate = messageInputCandidate;
     if (!candidate || event.agentId !== undefined) return yield* next(event);
     // Take one step only; missing/uncertain evidence is retained, never retried
@@ -190,7 +191,7 @@ function registerMessageLifecycle(on) {
         api_snapshot_sha256: await messageDigest(serialized),
         framed_payload_sha256: candidate.appendIntent.framed_payload_sha256,
         step_event_sha256: await messageDigest(messageCanonical(event))};
-      const reply = await messageRpc($, {kind: 'prepare_input', operation_id: candidate.ticket.request.operation_id,
+      const reply = await messageRpc({kind: 'prepare_input', operation_id: candidate.ticket.request.operation_id,
         reservation_id: candidate.ticket.reservation_id, intent});
       validateInputReply(reply, candidate, intent);
       prepared = true;
@@ -207,13 +208,12 @@ function registerMessageLifecycle(on) {
       const dispatched = {core_received_sha256: intent.step_event_sha256,
         core_trace_sha256: await messageDigest(trace),
         evidence_reference: `claude-code:session:${messageContext.session_id}:turn:${intent.native_turn_id}:step:${intent.step_index}`};
-      const reply = await messageRpc($, {kind: 'record_input_dispatched', operation_id: candidate.ticket.request.operation_id,
+      const reply = await messageRpc({kind: 'record_input_dispatched', operation_id: candidate.ticket.request.operation_id,
         reservation_id: candidate.ticket.reservation_id, intent, dispatched});
       validateInputReply(reply, candidate, intent, dispatched);
     } catch { messageStopped = true; }
     return result;
-  });
-}
+  }
 function messageCanonical(value) {
   const sort = value => Array.isArray(value) ? value.map(sort) : value && typeof value === 'object'
     ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sort(value[key])])) : value;
@@ -235,12 +235,12 @@ function validateInputReply(reply, candidate, intent, dispatched) {
   } else if (input.dispatched !== null || input.dispatched_at_unix_ms !== null)
     throw new Error('Native input intent already has a dispatch observation');
 }
-async function pollMessages($) {
+async function pollMessages() {
   if (messageActive || messageStopped || messagePolling) return;
   messagePolling = true;
   try {
     if (!messageTicket) {
-      const reply = await messageRpc($, {kind: 'poll'});
+      const reply = await messageRpc({kind: 'poll'});
       if (!reply.reservation) return;
       messageTicket = reply.reservation;
       const ticket = messageTicket, target = ticket.target;
@@ -254,7 +254,7 @@ async function pollMessages($) {
         throw new Error('Message reservation unavailable');
     }
     const ticket = messageTicket;
-    const check = await messageRpc($, {kind: 'recheck', operation_id: ticket.request.operation_id,
+    const check = await messageRpc({kind: 'recheck', operation_id: ticket.request.operation_id,
       reservation_id: ticket.reservation_id});
     if (['unknown', 'failed', 'acknowledged'].includes(check.recorded_state)) {
       // Retire this exact ticket, never reset/resend it. The SDK's immutable
@@ -292,7 +292,7 @@ async function pollMessages($) {
     // A return without the native append event supplies no candidate row identity.
     if (!messageAppendSeen) messageStopped = true;
     // Storing the raw return does not turn it into qualified delivery proof.
-    await messageRpc($, {kind: 'record_handoff', operation_id: ticket.request.operation_id,
+    await messageRpc({kind: 'record_handoff', operation_id: ticket.request.operation_id,
       reservation_id: ticket.reservation_id, outcome});
     messageTicket = undefined;
   } catch {
@@ -301,11 +301,12 @@ async function pollMessages($) {
     messageStopped = true;
   } finally { messagePolling = false; }
 }
-async function startMessagePump($) {
+async function start() {
   if (messageStarted) { messageStopped = true; throw new Error('Message module already started'); }
   messageStarted = true;
-  messageContext = await publishContext($);
+  messageContext = await publishContext($, epoch);
   const version = await $.session.version();
+  assertSession(epoch);
   if (!['2.1.296', '2.1.308'].includes(version?.version) || typeof config.pluginName !== 'string'
       || !/^[a-z0-9-]{1,35}$/.test(config.pluginName))
     throw new Error('Native append framing is not qualified for this client version');
@@ -314,5 +315,32 @@ async function startMessagePump($) {
     throw new Error('Message transport bounds are not qualified');
   messageProviderVersion = version.version;
   messageActive = false;
-  $.clock.every(250, async () => pollMessages($));
+}
+epoch.stop = () => {messageStopped = true;};
+return {start, poll: pollMessages, append: observeMessageAppend, messages: observeApiMessages, step: observeInputStep,
+  busy: () => {messageActive = true;}, idle: () => {messageActive = false;}};
+}
+async function startMessagePump($) {
+  const bridge = createMessageBridge($, sessionEpoch);
+  messageBridge = bridge;
+  await bridge.start();
+  if (!messageTimerStarted) {
+    messageTimerStarted = true;
+    $.clock.every(250, async () => {
+      // Reuse the opted-in timer; authoring-only modules start no polling loop.
+      // A failed startup stays failed, never automatically retried.
+      try {await resumePendingSession($);} catch {return;}
+      return messageBridge?.poll();
+    });
+  }
+}
+function registerMessageLifecycle(on) {
+  on('session.append', {door: 'prompt'}, async ($, event, next) =>
+    messageBridge ? messageBridge.append(event, next) : next(event));
+  on('session.messages', async ($, event, next) =>
+    messageBridge ? messageBridge.messages(event, next) : next(event));
+  on('turn.step', async function* ($, event, next) {
+    if (messageBridge) return yield* messageBridge.step(event, next);
+    return yield* next(event);
+  });
 }

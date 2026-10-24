@@ -18,8 +18,8 @@ async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabe
   const source=base.replace('/* AIKIT_MESSAGE_HELPERS */',helper)
     .replace('/* AIKIT_MESSAGE_LIFECYCLE */','registerMessageLifecycle(on);')
     .replace('/* AIKIT_MESSAGE_START */','await startMessagePump($);')
-    .replace('/* AIKIT_MESSAGE_BUSY */','messageActive=true;')
-    .replace('/* AIKIT_MESSAGE_IDLE */','if(event.agentId===undefined && nativeTurnId===event.turnId) messageActive=false;')
+    .replace('/* AIKIT_MESSAGE_BUSY */','messageBridge?.busy();')
+    .replace('/* AIKIT_MESSAGE_IDLE */','if(event.agentId===undefined && nativeTurnId===event.turnId) messageBridge?.idle();')
     .replace('/* AIKIT_CONFIG */null',JSON.stringify(config));
   const module=await import('data:text/javascript,'+encodeURIComponent(source)+`#${++sequence}`);
   module.register((name,...args)=>{hooks.set(name,args.at(-1));return {catch(){}};});
@@ -29,8 +29,8 @@ async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabe
       if(argv[0]==='session-handler') return {exitCode:0,isStdoutTruncated:false,isStderrTruncated:false};
       assert.deepEqual(argv,config.messageArgv);
       const frame=JSON.parse(opts.stdin);actions.push(frame.action);
-      assert.equal(frame.native_context.session_id,'native');
-      const reference={installation_id:'install',installation_revision:'revision',native_session_id:'native',invocation_id:invocation,start_cursor:1};
+      assert.equal(frame.native_context.session_id,sid);
+      const reference={installation_id:'install',installation_revision:'revision',native_session_id:sid,invocation_id:invocation,start_cursor:1};
       const reply={schema_version:1,reference,recorded_idle:!busy,recorded_ready:frame.action.kind==='recheck' && ready && !busy,reservation:null};
       if(frame.action.kind==='poll' && !pending){pending=true;reply.reservation={binding_id:'binding',target:reference,
         reservation_id:'attempt',request:{operation_id:'review',content},payload_sha256:createHash('sha256').update(content).digest('hex')};}
@@ -92,6 +92,7 @@ async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabe
     return (await hook(api,args,next)).value;
   };
   return {api,hooks,actions,submissions,content,poll:()=>timers[0](),setSid:value=>{sid=value;},
+    timerCount:()=>timers.length,allowFreshReview:()=>{pending=false;},
     setReady:value=>{ready=value;},setBusy:value=>{busy=value;},setNativeMessages:value=>{nativeMessages=value;}};
 }
 
@@ -121,6 +122,46 @@ test('input checkpoint retains exact pre-snapshot and a separate settled core ca
   assert.equal(prepared[0].intent.api_snapshot_sha256,createHash('sha256')
     .update(JSON.stringify(await f.api.session.messages({as:'api'}))).digest('hex'));
   assert.equal(f.submissions.length,1);
+});
+
+test('clear and resume restart one timer with a fresh message context',async()=>{
+  for(const source of ['clear','resume']) {
+    const f=await fixture();await f.poll();assert.equal(f.submissions.length,1);
+    await f.hooks.get('session.end')(f.api,{reason:source},async()=>({}));
+    f.setSid('replacement');f.allowFreshReview();
+    await f.hooks.get('classic.SessionStart')(f.api,{source,session_id:'replacement',cwd:'/workspace'},async()=>({}));
+    await f.poll();assert.equal(f.submissions.length,2);
+    assert.equal(f.timerCount(),1,'do not accumulate a timer for every cleared session');
+  }
+});
+
+test('a delayed old poll cannot submit or stop the replacement message pump',async()=>{
+  const f=await fixture(),run=f.api.process.run;
+  let entered,release;const waiting=new Promise(resolve=>{entered=resolve;});
+  const delay=new Promise(resolve=>{release=resolve;});let held=false;
+  f.api.process.run=async(argv,options)=>{
+    const result=await run(argv,options);
+    if(JSON.parse(options.stdin).action?.kind==='poll' && !held){held=true;entered();await delay;}
+    return result;
+  };
+  const stale=f.poll();await waiting;
+  await f.hooks.get('session.end')(f.api,{reason:'clear'},async()=>({}));
+  f.setSid('replacement');f.allowFreshReview();
+  await f.hooks.get('classic.SessionStart')(f.api,{source:'clear',session_id:'replacement',cwd:'/workspace'},async()=>({}));
+  release();await stale;assert.equal(f.submissions.length,0);
+  await f.poll();assert.equal(f.submissions.length,1);
+  assert.equal(f.actions.filter(action=>action.kind==='record_handoff').length,1);
+});
+
+test('the existing opted-in timer resumes polling only after the native session switch',async()=>{
+  const f=await fixture();await f.poll();
+  await f.hooks.get('session.end')(f.api,{reason:'resume'},async()=>({}));
+  await f.hooks.get('classic.SessionStart')(f.api,{source:'resume',session_id:'replacement',cwd:'/workspace'},async()=>({}));
+  await f.poll();assert.equal(f.submissions.length,1);
+  f.setSid('replacement');f.allowFreshReview();
+  await Promise.all([f.poll(),f.poll()]);
+  assert.equal(f.submissions.length,2);
+  assert.equal(f.timerCount(),1);
 });
 
 test('subagent step leaves the candidate for the next main step',async()=>{

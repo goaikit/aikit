@@ -290,8 +290,8 @@ pub(super) fn render_with_message_handler(
         .replace("/* AIKIT_COMPLETION_BRIDGE */", if spec.native_completion_bridge { include_str!("agent_tools_completion_claude.js") } else { "" })
         .replace("/* AIKIT_MESSAGE_HELPERS */", if messaging { include_str!("agent_tools_messages_claude.js") } else { "" })
         .replace("/* AIKIT_MESSAGE_START */", if messaging { "await startMessagePump($);" } else { "" })
-        .replace("/* AIKIT_MESSAGE_BUSY */", if messaging { "messageActive = true;" } else { "" })
-        .replace("/* AIKIT_MESSAGE_IDLE */", if messaging { "if (event.agentId === undefined && nativeTurnId === event.turnId) messageActive = false;" } else { "" })
+        .replace("/* AIKIT_MESSAGE_BUSY */", if messaging { "messageBridge?.busy();" } else { "" })
+        .replace("/* AIKIT_MESSAGE_IDLE */", if messaging { "if (event.agentId === undefined && nativeTurnId === event.turnId) messageBridge?.idle();" } else { "" })
         .replace("/* AIKIT_MESSAGE_LIFECYCLE */", if messaging { "registerMessageLifecycle(on);" } else { "" })
         .replace(
             "'AIKIT_NATIVE_TOOL_NAME'",

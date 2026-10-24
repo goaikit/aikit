@@ -32,6 +32,8 @@ async function fixture() {
   const controller = new AbortController();
   next.signal = controller.signal;
   const start = () => hooks.get('turn.start')(api, { turnId: 'turn' }, async () => ({}));
+  await hooks.get('session.start')(api, {}, async () => ({}));
+  frames.length = 0;
   return { api, hooks, catches, frames, event, next, controller, start, delegated: () => delegated };
 }
 test('Allow delegates unchanged; Block preserves exact reason and does not skip into downstream', async () => {
@@ -75,14 +77,20 @@ test('failed, truncated and unsupported responses cannot Allow; parse and proces
   assert.equal(f.delegated(), 0);
 });
 test('cancellation or a new Turn while the callback runs cannot delegate stale Allow', async () => {
-  for (const change of ['abort', 'new-turn']) {
+  for (const change of ['abort', 'new-turn', 'clear']) {
     const f = await fixture();
     await f.start();
     f.api.process.run = async () => {
       if (change === 'abort') f.controller.abort();
-      else {
+      else if (change === 'new-turn') {
         f.api.process.run = async () => ({ exitCode: 0, isStdoutTruncated: false, isStderrTruncated: false, stdout: '{}' });
         await f.hooks.get('turn.start')(f.api, { turnId: 'replacement' }, async () => ({}));
+      } else {
+        f.api.process.run = async () => ({exitCode: 0, isStdoutTruncated: false, isStderrTruncated: false, stdout: '{}'});
+        await f.hooks.get('session.end')(f.api, {reason: 'clear'}, async () => ({}));
+        f.api.session.id = async () => 'replacement';
+        await f.hooks.get('classic.SessionStart')(f.api,
+          {source: 'clear', session_id: 'replacement', cwd: '/workspace'}, async () => ({}));
       }
       return { exitCode: 0, isStdoutTruncated: false, isStderrTruncated: false, stdout: '{}' };
     };

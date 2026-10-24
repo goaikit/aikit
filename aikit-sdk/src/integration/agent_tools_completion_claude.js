@@ -2,12 +2,14 @@
 on('classic.Stop', async ($, event, next) => {
   const turn = nativeTurnId;
   const startup = turnStartObservation;
-  const unavailable = () => next.signal?.aborted || turn !== nativeTurnId || startup !== turnStartObservation;
+  const epoch = sessionEpoch;
+  const unavailable = () => next.signal?.aborted || !epoch?.active || epoch !== sessionEpoch
+    || turn !== nativeTurnId || startup !== turnStartObservation;
   if (event.agent_id !== undefined || !turnStartObservation || !nativeTurnId)
     return { block: 'Completion validation unavailable: native Turn context is missing.' };
   await turnStartObservation;
   if (unavailable()) return { block: 'Completion validation unavailable: native Turn changed or was cancelled.' };
-  const native = await publishContext($);
+  const native = await publishContext($, epoch);
   if (unavailable()) return { block: 'Completion validation unavailable: native Turn changed or was cancelled.' };
   if (event.session_id !== native.session_id || event.cwd !== native.cwd)
     return { block: 'Completion validation unavailable: native session context changed.' };

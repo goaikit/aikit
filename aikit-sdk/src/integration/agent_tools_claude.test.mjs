@@ -143,3 +143,97 @@ test('foreign completion dispatch is refused before delegation or handler I/O',a
     assert.equal(delegated,0);assert.equal(f.frames.length,2);
   }
 });
+
+test('clear and resume renew context without reloading the module or retaining the old Turn',async()=>{
+  for(const source of ['clear','resume']) {
+    const f=await fixture(), first=[...f.environment.values()][0].native_context.invocation_id;
+    await f.hooks.get('turn.start')(f.api,{turnId:'before'},async()=>({}));
+    await f.hooks.get('session.end')(f.api,{reason:source},async()=>({}));
+    f.api.session.id=async()=>'replacement';
+    await f.hooks.get('classic.SessionStart')(f.api,{source,session_id:'replacement',cwd:'/workspace'},async()=>({}));
+    const context=[...f.environment.values()][0];
+    assert.notEqual(context.native_context.invocation_id,first);
+    assert.equal(context.native_context.session_id,'replacement');
+    assert.equal(context.native_turn_id,undefined);
+    const old={turnId:'before',reason:'answer',isAborted:false,answer:'old'};
+    await assert.rejects(f.hooks.get('turn.complete')(f.api,old,nativeNext(old)),/Turn identity/);
+    assert.match((await f.hooks.get('tool.call')(f.api,{request:{}},{origin:{plugin:'engine',tier:'core'}})).deny,/startup/);
+    await f.hooks.get('turn.start')(f.api,{turnId:'after'},async()=>({}));
+    const fresh={...old,turnId:'after',answer:'new'};
+    await f.hooks.get('turn.complete')(f.api,fresh,nativeNext(fresh));
+    assert.deepEqual(f.frames.map(frame=>frame.hook_event_name),
+      ['SessionStart','AIKitNativeTurnStarted','SessionStart','AIKitNativeTurnStarted','AIKitNativeTurnFinished']);
+  }
+});
+
+test('a delayed old completion cannot publish into a replacement session',async()=>{
+  const f=await fixture();await f.hooks.get('turn.start')(f.api,{turnId:'before'},async()=>({}));
+  let release,entered;const waiting=new Promise(resolve=>{entered=resolve;});
+  const pending=new Promise(resolve=>{release=resolve;});
+  const event={turnId:'before',reason:'answer',isAborted:false,answer:'old'};
+  const completion=f.hooks.get('turn.complete')(f.api,event,nativeNext(event,async()=>{entered();await pending;return {};}));
+  const rejected=assert.rejects(completion,/session context/);await waiting;
+  await f.hooks.get('session.end')(f.api,{reason:'clear'},async()=>({}));
+  f.api.session.id=async()=>'replacement';
+  await f.hooks.get('classic.SessionStart')(f.api,{source:'clear',session_id:'replacement',cwd:'/workspace'},async()=>({}));
+  release();await rejected;
+  assert.equal(f.frames.filter(frame=>frame.hook_event_name==='AIKitNativeTurnFinished').length,0);
+  assert.equal([...f.environment.values()][0].native_context.session_id,'replacement');
+});
+
+test('session startup refuses mismatched context and duplicate transitions',async()=>{
+  const f=await fixture();
+  await assert.rejects(f.hooks.get('classic.SessionStart')(f.api,{source:'clear'},async()=>({})),/already started/);
+  await f.hooks.get('session.end')(f.api,{},async()=>({}));
+  await assert.rejects(f.hooks.get('classic.SessionStart')(f.api,{source:'resume',cwd:'/workspace'},async()=>({})),/startup context/);
+  assert.equal(f.frames.length,1);
+});
+
+test('authoring-only resume waits for the native identity switch and starts no timer',async()=>{
+  const f=await fixture();
+  await f.hooks.get('session.end')(f.api,{reason:'resume'},async()=>({}));
+  await f.hooks.get('classic.SessionStart')(f.api,{source:'resume',session_id:'replacement',cwd:'/workspace'},async()=>({}));
+  await assert.rejects(f.hooks.get('turn.start')(f.api,{turnId:'too-early'},async()=>({})),/session context/);
+  assert.equal(f.frames.length,1,'no startup under the departing native identity');
+  f.api.session.id=async()=>'replacement';
+  await f.hooks.get('turn.start')(f.api,{turnId:'after'},async()=>({}));
+  assert.equal(f.frames.length,3);
+  assert.equal(f.frames[1].session_id,'replacement');
+});
+
+test('a pending resume abandoned by another session end cannot initialize later',async()=>{
+  const f=await fixture();
+  await f.hooks.get('session.end')(f.api,{},async()=>({}));
+  await f.hooks.get('classic.SessionStart')(f.api,{source:'resume',session_id:'replacement',cwd:'/workspace'},async()=>({}));
+  await f.hooks.get('session.end')(f.api,{},async()=>({}));
+  f.api.session.id=async()=>'replacement';
+  await assert.rejects(f.hooks.get('turn.start')(f.api,{turnId:'after'},async()=>({})),/session context/);
+  assert.equal(f.frames.length,1);
+});
+
+test('a delayed environment publication settles before the replacement can publish',async()=>{
+  const f=await fixture(),set=f.api.env.set;
+  let entered,release;const waiting=new Promise(resolve=>{entered=resolve;});
+  const delay=new Promise(resolve=>{release=resolve;});let held=false;
+  f.api.env.set=async(key,value)=>{if(!held){held=true;entered();await delay;}await set(key,value);};
+  const start=f.hooks.get('turn.start')(f.api,{turnId:'before'},async()=>({}));
+  const rejected=assert.rejects(start,/session context/);await waiting;
+  await f.hooks.get('session.end')(f.api,{},async()=>({}));
+  f.api.session.id=async()=>'replacement';
+  const replacement=f.hooks.get('classic.SessionStart')(f.api,{source:'clear',session_id:'replacement',cwd:'/workspace'},async()=>({}));
+  release();await rejected;await replacement;
+  assert.equal([...f.environment.values()][0].native_context.session_id,'replacement');
+  assert.equal([...f.environment.values()][0].native_turn_id,undefined);
+  assert.deepEqual(f.frames.map(frame=>frame.hook_event_name),['SessionStart','SessionStart']);
+});
+
+test('session end during startup identity reads prevents a later revival',async()=>{
+  const f=await fixture();await f.hooks.get('session.end')(f.api,{},async()=>({}));
+  let entered,release;const waiting=new Promise(resolve=>{entered=resolve;});
+  const delay=new Promise(resolve=>{release=resolve;});
+  f.api.session.id=async()=>{entered();await delay;return 'replacement';};
+  const startup=f.hooks.get('session.start')(f.api,{},async()=>({}));
+  const rejected=assert.rejects(startup,/startup was abandoned/);await waiting;
+  await f.hooks.get('session.end')(f.api,{},async()=>({}));release();await rejected;
+  assert.equal(f.frames.length,1);
+});
