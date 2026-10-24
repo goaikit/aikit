@@ -12,6 +12,16 @@ The detailed historical evidence below retains its exact source/version scope.
 
 ## Current Claude API review, 2026-10-23
 
+2026-10-24 [native API and history reuse](native-api-reuse-20261024.md) closes a
+concrete dependency implementation bug, not a provider gap: existing HistoryReader
+now finds a real stored review by native UUID/full frame after the Claude SDK
+leaf fix (`57ad0ec`, dependency draft #5). The SDK pins that revision. Reuse this
+path for scoped reconciliation work rather than adding a parser or requesting
+a new transport. Codelaya still has its prior integration-only pin; wiring and
+provenance/consumption validation remain. The inbox OS peer is observable, but
+auth-only Linux connections supply no observed explicit acknowledgement. No
+receipt, native-identity or other readiness capability is promoted.
+
 2026-10-24 [full-module consumer follow-up](https://github.com/aroff/codelaya/blob/8b52ff0/docs/native-worker-replacement.md)
 qualifies worker replacement after actual application Allow: the existing SDK
 catch answers, the reloaded module blocks missing Turn context, and recovery

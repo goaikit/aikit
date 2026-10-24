@@ -7,6 +7,16 @@ new application policy framework. Nothing here promotes a capability.
 
 ## Current API investigation, 2026-10-24
 
+[Actual native API/history reuse](native-api-reuse-20261024.md) verifies a kernel
+socket peer fact, a durable append UUID and an existing stored-review lookup
+path. AIKit already has a HistoryReader; its Claude dependency had a leaf-selector
+bug returning zero messages behind control rows. Dependency `57ad0ec` fixes it:
+the unchanged adapter reads 32 messages and the exact review UUID/full frame.
+Do not invent another parser or classify stored-row lookup as absent. This is
+not yet Codelaya receipt-reconciliation wiring or authoritative consumption.
+Canonical history omits ingress provenance; live generation/configuration and
+N1/N3 qualification remain. No public API/schema/capability is added or promoted.
+
 The [installed API-view review and guard](claude-api-view-provenance.md) identifies
 another SDK implementation gap that existing native core traces can close.
 Hookable conversation reads now require one matching core result and an unchanged
