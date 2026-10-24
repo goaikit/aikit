@@ -57,10 +57,10 @@ cargo +1.88.0 test -p aikit-sdk --lib --no-default-features --features integrati
 Use the dependency-lock reproduction in [completion-policy.md](completion-policy.md).
 These suites use contract fixtures, not real native caller authentication or
 interactive Windows sessions.
-# Bounded-wait follow-up
+
+## Bounded-wait follow-up
 
 The additive [bounded local admission wait](recorded-admission-wait.md) lets an
 explicit caller wait up to 250 ms for the existing file lock before the same
 cursor/lifecycle checks. The original nonblocking method and the guarantees
-described below remain unchanged. Neither method is a native admission lease.
-
+described above remain unchanged. Neither method is a native admission lease.

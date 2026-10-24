@@ -7,6 +7,14 @@ new application policy framework. Nothing here promotes a capability.
 
 ## Current API investigation, 2026-10-24
 
+The [fresh complete frozen-review comparison](recorded-admission-wait.md#fresh-consumer-comparison)
+now verifies full framing in pre-dispatch snapshots and three actual feedback
+main requests after compaction, in the original Claude 2.1.308 session. AIKit
+adds an opt-in bounded wait before unchanged recorded admission checks. The
+first consumer failure is retained; the fresh trial completes both Turns.
+Production receipt/reconciliation and the competing-handler matrix remain
+unfinished implementation and qualification work, not demonstrated absent APIs.
+
 The work packages below are remaining integration/qualification requirements,
 not proof that Claude lacks each primitive. The [new native input comparison](../examples/claude-input-qualification/README.md)
 shows that an API snapshot **after** a real dispatch can contain an appended row

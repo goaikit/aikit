@@ -32,3 +32,21 @@ strict lint qualification is claimed. No schema/dependency/capability changes.
 
 Local source/test logs: `.local/feedback-input-snapshot-20261024/` in the consumer
 qualification workspace. Consumer native results are reported separately.
+
+## Fresh consumer comparison
+
+Codelaya [source `526077a`](https://github.com/aroff/codelaya/commit/526077a)
+pins this SDK runtime `de7e171`. Twenty-four scoped consumer tests and matching
+CLI/fixture builds pass. A separate fresh ordinary Claude 2.1.308 session
+completes authoring, manual compaction, one frozen owner review and feedback in
+the original session, preserving the original Completed Turn. Complete native
+framing appears in the pre-dispatch API snapshots and all three feedback main
+requests. Seven altered-evidence cases are rejected.
+
+The [consumer report](https://github.com/aroff/codelaya/blob/526077a/docs/native-feedback-input-snapshot.md)
+retains the first failed admission trial, request-classification premise failures,
+exact binary identities, evidence archive hashes and limits. The positive path
+supports further use of existing native APIs; it does not prove the original
+failure was lock contention or establish a general production receipt.
+App/SDK delivery remains Unknown, with no acknowledgement/consumption or
+production readiness promotion. Windows checks remain deferred.
