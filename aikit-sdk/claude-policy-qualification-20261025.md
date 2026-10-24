@@ -4,6 +4,13 @@
 Windows checks deferred. This follows the healthy Codelaya clear/resume workflow
 at SDK `0907525` and investigates mandatory-policy failure separately.
 
+Runtime change: `609668d7d33264ae4b687b14e18d89934468af6d`.
+Linux Rust 1.88 locked/offline regression gates pass: 198 integration cases with
+SDK defaults disabled, and 201 with `integration,claude-sdk` (the consumer's
+feature combination), both serial. The latter includes the two new ownership/
+legacy-update tests and scoped capability assertions. These are library gates,
+not Windows, workspace-wide CI or another full native application run.
+
 ## Implemented in the existing installer
 
 AIKit's owned Claude hook renderer now adds `onFailure: "block"` to
