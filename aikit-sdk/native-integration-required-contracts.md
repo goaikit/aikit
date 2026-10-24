@@ -7,6 +7,13 @@ new application policy framework. Nothing here promotes a capability.
 
 ## Current API investigation, 2026-10-24
 
+The [operation-correlated input candidate implementation](message-input-checkpoint.md)
+now reuses the existing append record and public message bridge to retain a
+pre-dispatch snapshot digest and a separate matching settled-core observation.
+Record version 2 is explicit; SQLite schema remains 15. These candidates do not
+advance delivery, acknowledge or consume. Fresh matching native qualification
+and the failure matrix remain required before this can close N3.
+
 The [fresh complete frozen-review comparison](recorded-admission-wait.md#fresh-consumer-comparison)
 now verifies full framing in pre-dispatch snapshots and three actual feedback
 main requests after compaction, in the original Claude 2.1.308 session. AIKit

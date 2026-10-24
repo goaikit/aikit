@@ -118,6 +118,277 @@ fn append_stored() -> crate::integration::MessageAppendStored {
     }
 }
 
+fn input_intent() -> crate::integration::MessageInputIntent {
+    crate::integration::MessageInputIntent {
+        native_turn_id: "feedback-turn".into(),
+        step_index: 0,
+        api_snapshot_sha256: "b".repeat(64),
+        framed_payload_sha256: "a".repeat(64),
+        step_event_sha256: "c".repeat(64),
+    }
+}
+fn input_dispatched() -> crate::integration::MessageInputDispatched {
+    crate::integration::MessageInputDispatched {
+        core_received_sha256: "c".repeat(64),
+        core_trace_sha256: "d".repeat(64),
+        evidence_reference: "retained-input-core-trace".into(),
+    }
+}
+
+#[tokio::test]
+async fn input_checkpoint_preserves_unknown_across_reopen_detach_and_late_dispatch_without_resend()
+{
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("input")).unwrap();
+    let ticket = binding.reserve_message("input").unwrap();
+    binding
+        .prepare_message_append(&ticket, append_intent("input-row"))
+        .unwrap();
+    binding
+        .record_message_append_stored(&ticket, "input-row", append_stored())
+        .unwrap();
+    let unknown = binding.recover_message_record("input").unwrap();
+    let prepared = binding
+        .prepare_message_input(&ticket, input_intent())
+        .unwrap();
+    assert_eq!(prepared.schema_version, 2);
+    assert!(prepared.input.as_ref().unwrap().dispatched.is_none());
+    assert_eq!(
+        binding
+            .prepare_message_input(&ticket, input_intent())
+            .unwrap(),
+        prepared
+    );
+    // Older append readers check schema == 1 and therefore refuse this record.
+    assert_ne!(
+        serde_json::to_value(&prepared).unwrap()["schema_version"],
+        1
+    );
+    let reopened = IntegrationService::open_existing(f.dir.path().join("state")).unwrap();
+    let historical = reopened.binding(binding.id()).unwrap();
+    assert_eq!(
+        historical.message_append_checkpoint("input").unwrap(),
+        Some(prepared.clone())
+    );
+    historical.detach().unwrap();
+    let dispatched = historical
+        .record_message_input_dispatched(&ticket, &input_intent(), input_dispatched())
+        .unwrap();
+    assert!(dispatched
+        .input
+        .as_ref()
+        .unwrap()
+        .dispatched_at_unix_ms
+        .is_some());
+    assert_eq!(
+        historical
+            .record_message_input_dispatched(&ticket, &input_intent(), input_dispatched())
+            .unwrap(),
+        dispatched
+    );
+    assert_eq!(
+        historical
+            .prepare_message_input(&ticket, input_intent())
+            .unwrap(),
+        dispatched
+    );
+    assert_eq!(historical.message_status("input").unwrap(), unknown);
+    assert!(historical
+        .message_observations("input", 0, 10)
+        .unwrap()
+        .records
+        .is_empty());
+    assert!(historical.reserve_message("input").is_err());
+}
+
+#[tokio::test]
+async fn input_checkpoint_requires_exact_stored_row_and_immutable_step_and_core_digests() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("input")).unwrap();
+    let ticket = binding.reserve_message("input").unwrap();
+    assert!(binding
+        .prepare_message_input(&ticket, input_intent())
+        .is_err());
+    binding
+        .prepare_message_append(&ticket, append_intent("row"))
+        .unwrap();
+    assert!(binding
+        .prepare_message_input(&ticket, input_intent())
+        .is_err());
+    binding
+        .record_message_append_stored(&ticket, "row", append_stored())
+        .unwrap();
+    assert!(binding
+        .record_message_input_dispatched(&ticket, &input_intent(), input_dispatched())
+        .is_err());
+    for case in 0..7 {
+        let mut intent = input_intent();
+        match case {
+            0 => intent.native_turn_id.clear(),
+            1 => intent.step_index = u64::MAX,
+            2 => intent.api_snapshot_sha256 = "B".repeat(64),
+            3 => intent.framed_payload_sha256 = "f".repeat(64),
+            4 => intent.step_event_sha256.clear(),
+            5 => intent.native_turn_id = "x\0y".into(),
+            _ => intent.native_turn_id = "x".repeat(257),
+        }
+        assert!(binding.prepare_message_input(&ticket, intent).is_err());
+    }
+    let mut foreign = ticket.clone();
+    foreign.reservation_id = "foreign".into();
+    assert!(binding
+        .prepare_message_input(&foreign, input_intent())
+        .is_err());
+    let prepared = binding
+        .prepare_message_input(&ticket, input_intent())
+        .unwrap();
+    for case in 0..5 {
+        let mut changed = input_intent();
+        match case {
+            0 => changed.native_turn_id = "other".into(),
+            1 => changed.step_index = 1,
+            2 => changed.api_snapshot_sha256 = "e".repeat(64),
+            3 => changed.step_event_sha256 = "e".repeat(64),
+            _ => changed.framed_payload_sha256 = "e".repeat(64),
+        }
+        assert!(binding
+            .prepare_message_input(&ticket, changed.clone())
+            .is_err());
+        assert!(binding
+            .record_message_input_dispatched(&ticket, &changed, input_dispatched())
+            .is_err());
+    }
+    let mut changed = input_dispatched();
+    changed.core_received_sha256 = "e".repeat(64);
+    assert!(binding
+        .record_message_input_dispatched(&ticket, &input_intent(), changed)
+        .is_err());
+    assert_eq!(
+        binding.message_append_checkpoint("input").unwrap(),
+        Some(prepared)
+    );
+    let completed = binding
+        .record_message_input_dispatched(&ticket, &input_intent(), input_dispatched())
+        .unwrap();
+    let mut changed = input_dispatched();
+    changed.core_trace_sha256 = "e".repeat(64);
+    assert!(binding
+        .record_message_input_dispatched(&ticket, &input_intent(), changed)
+        .is_err());
+    assert_eq!(
+        binding.message_append_checkpoint("input").unwrap(),
+        Some(completed)
+    );
+}
+
+#[tokio::test]
+async fn input_checkpoint_rejects_rewritten_storage_new_detached_intents_and_corrupt_records() {
+    let f = Fixture::new().await;
+    let binding = f.binding();
+    binding.stage_message(request("input")).unwrap();
+    let ticket = binding.reserve_message("input").unwrap();
+    binding
+        .prepare_message_append(&ticket, append_intent("row"))
+        .unwrap();
+    let mut changed = append_stored();
+    changed.stored_payload_sha256 = "e".repeat(64);
+    binding
+        .record_message_append_stored(&ticket, "row", changed)
+        .unwrap();
+    assert!(binding
+        .prepare_message_input(&ticket, input_intent())
+        .is_err());
+    binding.detach().unwrap();
+    assert!(binding
+        .prepare_message_input(&ticket, input_intent())
+        .is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE message_append_checkpoints SET body=json_set(body,'$.schema_version',2)",
+            [],
+        )
+        .unwrap();
+    assert!(binding.message_append_checkpoint("input").is_err());
+}
+
+#[tokio::test]
+async fn recorded_input_bridge_retains_candidates_but_rejects_foreign_scope_and_bad_decode() {
+    use crate::integration::RecordedMessageAction;
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    binding.stage_message(request("input")).unwrap();
+    let ticket = binding.reserve_message("input").unwrap();
+    binding
+        .prepare_message_append(&ticket, append_intent("row"))
+        .unwrap();
+    binding
+        .record_message_append_stored(&ticket, "row", append_stored())
+        .unwrap();
+    let (prepare, env) = bridge_frame(
+        &f,
+        RecordedMessageAction::PrepareInput {
+            operation_id: "input".into(),
+            reservation_id: ticket.reservation_id.clone(),
+            intent: input_intent(),
+        },
+    );
+    let decoded = crate::integration::RecordedMessageRequest::read(
+        serde_json::to_vec(&prepare).unwrap().as_slice(),
+    )
+    .unwrap();
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, decoded.clone(), Some("foreign"))
+        .is_err());
+    let mut foreign = decoded.clone();
+    if let RecordedMessageAction::PrepareInput { reservation_id, .. } = &mut foreign.action {
+        *reservation_id = "foreign".into();
+    }
+    assert!(f
+        .service
+        .recorded_message_with_context(&f.installation, foreign, Some(&env))
+        .is_err());
+    let prepared = f
+        .service
+        .recorded_message_with_context(&f.installation, decoded, Some(&env))
+        .unwrap()
+        .append_checkpoint
+        .unwrap();
+    assert_eq!(prepared.schema_version, 2);
+    let mut bad = serde_json::to_value(prepare).unwrap();
+    bad["action"]["intent"]["step_index"] = json!(u64::MAX);
+    assert!(crate::integration::RecordedMessageRequest::read(
+        serde_json::to_vec(&bad).unwrap().as_slice()
+    )
+    .is_err());
+    let (dispatch, _) = bridge_frame(
+        &f,
+        RecordedMessageAction::RecordInputDispatched {
+            operation_id: "input".into(),
+            reservation_id: ticket.reservation_id.clone(),
+            intent: input_intent(),
+            dispatched: input_dispatched(),
+        },
+    );
+    let decoded = crate::integration::RecordedMessageRequest::read(
+        serde_json::to_vec(&dispatch).unwrap().as_slice(),
+    )
+    .unwrap();
+    let value = f
+        .service
+        .recorded_message_with_context(&f.installation, decoded, Some(&env))
+        .unwrap()
+        .append_checkpoint
+        .unwrap();
+    assert!(value.input.unwrap().dispatched.is_some());
+    let receipt = binding.message_status("input").unwrap();
+    assert!(receipt.acknowledgement.is_none() && receipt.consumption.is_none());
+}
+
 #[tokio::test]
 async fn append_checkpoint_survives_lost_return_and_reopen_without_ack_or_resend() {
     let f = Fixture::new().await;

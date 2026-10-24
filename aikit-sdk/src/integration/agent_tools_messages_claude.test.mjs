@@ -49,6 +49,16 @@ async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabe
         checkpoint.stored=structuredClone(frame.action.stored);checkpoint.stored_at_unix_ms=2;
         reply.append_checkpoint=structuredClone(checkpoint);
       }
+      if(frame.action.kind==='prepare_input') {
+        checkpoint.schema_version=2;
+        checkpoint.input={intent:structuredClone(frame.action.intent),prepared_at_unix_ms:3,
+          dispatched:null,dispatched_at_unix_ms:null};
+        reply.append_checkpoint=structuredClone(checkpoint);
+      }
+      if(frame.action.kind==='record_input_dispatched') {
+        checkpoint.input.dispatched=structuredClone(frame.action.dispatched);
+        checkpoint.input.dispatched_at_unix_ms=4;reply.append_checkpoint=structuredClone(checkpoint);
+      }
       return {exitCode:0,isStdoutTruncated:false,isStderrTruncated:false,stdout:JSON.stringify(reply)};
     }},
     prompt:{submit:async(value)=>{
@@ -68,9 +78,119 @@ async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabe
     }},
     tool:{register:async()=>{}},ui:{invalidate(){}},clock:{every:(ms,fn)=>{assert.equal(ms,250);timers.push(fn);}}};
   await hooks.get('session.start')(api,{},async()=>({}));
+  api.session.messages=async()=>[{role:'user',content:[{type:'text',text:
+    `The ${nativeLabel} plugin sent a message:\n${content}`
+      + "\n\nThis is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above."}]}];
   return {api,hooks,actions,submissions,content,poll:()=>timers[0](),setSid:value=>{sid=value;},
     setReady:value=>{ready=value;},setBusy:value=>{busy=value;}};
 }
+
+async function inputStep(f,{event={turnId:'feedback-turn',index:0,model:'fixture'},
+    origin={plugin:'engine',tier:'core'},trace}={}) {
+  await f.hooks.get('turn.start')(f.api,{turnId:'feedback-turn'},async()=>({}));
+  let delegated=0;
+  const next=async function*(value){
+    delegated++;yield {text:'streamed'};
+    next.trace=trace??[{plugin:'engine',tier:'core',event:'turn.step',outcome:'returned',received:structuredClone(value)}];
+    return {text:'result'};
+  };
+  next.origin=origin;
+  const iterator=f.hooks.get('turn.step')(f.api,event,next),chunks=[];
+  let current;
+  do {current=await iterator.next();if(!current.done)chunks.push(current.value);}while(!current.done);
+  assert.deepEqual(chunks,[{text:'streamed'}]);assert.deepEqual(current.value,{text:'result'});
+  assert.equal(delegated,1);
+}
+
+test('input checkpoint retains exact pre-snapshot and a separate settled core candidate once',async()=>{
+  const f=await fixture({version:'2.1.308'});await f.poll();await inputStep(f);await inputStep(f);
+  const prepared=f.actions.filter(action=>action.kind==='prepare_input');assert.equal(prepared.length,1);
+  const dispatched=f.actions.filter(action=>action.kind==='record_input_dispatched');assert.equal(dispatched.length,1);
+  assert.deepEqual(prepared[0].intent,dispatched[0].intent);
+  assert.equal(dispatched[0].dispatched.core_received_sha256,prepared[0].intent.step_event_sha256);
+  assert.equal(prepared[0].intent.api_snapshot_sha256,createHash('sha256')
+    .update(JSON.stringify(await f.api.session.messages({as:'api'}))).digest('hex'));
+  assert.equal(f.submissions.length,1);
+});
+
+test('subagent step leaves the candidate for the next main step',async()=>{
+  const f=await fixture({version:'2.1.308'});await f.poll();
+  await inputStep(f,{event:{turnId:'child',index:0,agentId:'child'}});
+  assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0);
+  await inputStep(f);assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,1);
+});
+
+test('older append-qualified client does not call the unqualified input API',async()=>{
+  const f=await fixture({version:'2.1.296'});await f.poll();
+  f.api.session.messages=async()=>{throw Error('must not call input API');};
+  await inputStep(f);assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0);
+  assert.equal(f.submissions.length,1);
+});
+
+test('input preparation refuses missing duplicate oversized and foreign-scope snapshots without resending',async()=>{
+  for(const fault of ['missing','duplicate','oversized','origin','turn','index','subagent']){
+    const f=await fixture({version:'2.1.308'});await f.poll();
+    const messages=await f.api.session.messages();
+    if(fault==='missing')f.api.session.messages=async()=>[];
+    if(fault==='duplicate')f.api.session.messages=async()=>[...messages,...messages];
+    if(fault==='oversized')f.api.session.messages=async()=>[{content:'x'.repeat(4194305)}];
+    const options=fault==='origin'?{origin:{plugin:'other',tier:'user'}}
+      :fault==='turn'?{event:{turnId:'foreign',index:0}}
+      :fault==='index'?{event:{turnId:'feedback-turn',index:-1}}
+      :fault==='subagent'?{event:{turnId:'child-turn',index:0,agentId:'child'}}:{};
+    await inputStep(f,options);
+    assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0,fault);
+    assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,0,fault);
+    await f.poll();assert.equal(f.submissions.length,1,fault);
+  }
+});
+
+test('missing synthetic changed and duplicate core traces cannot create input dispatch observations',async()=>{
+  const core={plugin:'engine',tier:'core',event:'turn.step',outcome:'returned',
+    received:{turnId:'feedback-turn',index:0,model:'fixture'}};
+  for(const trace of [[],[{...core,plugin:'other',tier:'user'}],[{...core,received:{...core.received,index:1}}],
+      [core,core],[{...core,outcome:'threw'}]]){
+    const f=await fixture({version:'2.1.308'});await f.poll();await inputStep(f,{trace});
+    assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,1);
+    assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,0);
+    await inputStep(f);await f.poll();assert.equal(f.submissions.length,1);
+  }
+});
+
+test('lost input checkpoint replies delegate once and never retry a native review or candidate',async()=>{
+  for(const lost of ['prepare_input','record_input_dispatched']){
+    const f=await fixture({version:'2.1.308'});await f.poll();const run=f.api.process.run;
+    f.api.process.run=async(argv,options)=>{
+      const result=await run(argv,options);
+      if(JSON.parse(options.stdin).action?.kind===lost)throw Error('lost committed checkpoint reply');
+      return result;
+    };
+    await inputStep(f);await inputStep(f);await f.poll();
+    assert.equal(f.actions.filter(action=>action.kind===lost).length,1,lost);
+    assert.equal(f.submissions.length,1,lost);
+    assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,lost==='prepare_input'?0:1,lost);
+  }
+});
+
+test('changed input checkpoint reply is not accepted as the requested operation',async()=>{
+  for(const field of ['intent','reservation','stored','schema','dispatched']){
+    const f=await fixture({version:'2.1.308'});await f.poll();const run=f.api.process.run;
+    f.api.process.run=async(argv,options)=>{
+      const result=await run(argv,options),action=JSON.parse(options.stdin).action;
+      if(action?.kind==='prepare_input'){
+        const reply=JSON.parse(result.stdout),checkpoint=reply.append_checkpoint;
+        if(field==='intent')checkpoint.input.intent.native_turn_id='foreign';
+        if(field==='reservation')checkpoint.reservation.reservation_id='foreign';
+        if(field==='stored')checkpoint.stored.stored_payload_sha256='0'.repeat(64);
+        if(field==='schema')checkpoint.schema_version=1;
+        if(field==='dispatched')checkpoint.input.dispatched={invented:true};
+        result.stdout=JSON.stringify(reply);
+      }
+      return result;
+    };
+    await inputStep(f);assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,0,field);
+  }
+});
 test('one exact native call retains raw return without consumption or resend',async()=>{
   const f=await fixture();await f.poll();await f.poll();
   assert.deepEqual(f.submissions,[{text:f.content}]);

@@ -1,0 +1,77 @@
+# Operation-correlated native input candidates
+
+2026-10-24, parent SDK `669e893`. This extends the existing append checkpoint;
+it does not add a daemon, delivery state, native transport or capability grant.
+
+## Public surface
+
+- `SessionBinding::prepare_message_input(reservation, MessageInputIntent)` retains
+  the first exact pre-dispatch step against an already stored, unchanged native
+  append row. Fields: native Turn, safe-integer step index, complete API snapshot
+  SHA-256, exact native frame SHA-256 and canonical step-event SHA-256.
+- `record_message_input_dispatched(reservation, intent, MessageInputDispatched)`
+  retains a separate candidate matching the same step-event digest, with core
+  trace digest and a reference to separately retained native evidence.
+- Existing `message_append_checkpoint(operation_id)` retrieves both records,
+  including after reopen/detach. Exact repeats are idempotent; changed reservation,
+  Turn, step, snapshot, frame or dispatch evidence conflicts. A new preparation
+  requires the original observed binding. A late exact dispatch can be retained
+  after detach through the binding API; it never revives a target or sends.
+- Existing recorded-message bridge adds `prepare_input` and
+  `record_input_dispatched` actions; replies reuse `append_checkpoint`. The live
+  bridge continues to require the current observed inherited context.
+
+The stored append body becomes **record version 2** only when input is prepared.
+Version 1 records remain readable and serialize without a new empty field.
+Version 2 requires its input and unchanged stored frame; old readers explicitly
+require version 1 and therefore refuse it instead of silently rewriting away
+input evidence. Update the SDK handler and generated module together. The SQLite
+schema remains 15 and uses the same table/transaction/lock. No migration or new
+dependency is introduced.
+
+## Generated Claude observer
+
+For pinned native Claude 2.1.308 only, after the generated sender observes exact
+core storage it retains one pending candidate. Its first main `turn.step`:
+
+1. Requires engine/core origin, the current main Turn and a valid step index.
+2. Reads `$.session.messages({as: 'api'})`; requires one exact complete frame and
+   a serialized snapshot of at most 4 MiB. Stores hashes before delegation.
+3. Streams `yield* next(event)` exactly once and preserves its result.
+4. Requires one matching settled engine/core `turn.step` trace, with returned or
+   passed outcome and unchanged canonical received event. Retains its digest
+   (trace bound 256 KiB) separately after delegation.
+
+No post-dispatch API snapshot is used to infer the original input. A capture or
+commit-response failure stops future message pumping; it never redelegates,
+resends, or substitutes a later step. Subagent steps do not consume the pending
+main candidate. Unsupported older clients retain their existing append behavior.
+
+These are **adapter claims/candidates**, not authenticated acknowledgement or
+consumption. The API view can differ from later model input; other handlers may
+mutate context after this observer. A core trace alone is not an exact input
+witness. Hashes require separately retained source evidence; the evidence URI
+does not create a native durable lookup API. Production readiness stays refused.
+The same operation's delivery/observation records remain unchanged.
+
+## Scoped qualification
+
+Linux Docker Rust 1.88 locked/offline: 180 integration tests pass. The four new
+tests cover reopen, Unknown preservation, detach/late dispatch, unchanged ticket,
+stored rewrite, input/dispatch conflicts, corrupt record refusal and actual
+recorded bridge decoding/scope checks. Existing two unused-guard warnings remain.
+Thirty-six generated module tests pass, including seven new input fault tests
+for missing/duplicate/oversized frames, foreign scope, synthetic/changed/duplicate
+core traces, lost commit replies and changed RPC responses. These use synthetic
+native APIs and do not qualify live dispatch or native recovery.
+
+The earlier [actual native pre-dispatch comparison](recorded-admission-wait.md#fresh-consumer-comparison)
+remains at SDK `de7e171`; its acceptance does not transfer to this new generated
+observer. A fresh matching consumer/native run is still required, followed by
+late mutation, clipping/size, competing handler and interruption qualification.
+Windows checks remain deferred. Local logs: consumer workspace
+`.local/input-checkpoint-20261024/sdk-integration.log` and `generated-module.log`.
+
+Native API references: [hook chaining and streaming](https://code.claude.com/docs/en/plugins/mods/events),
+[mods API](https://code.claude.com/docs/en/plugins/mods/api). Their availability is
+not a guarantee of durable, operation-correlated native consumption.

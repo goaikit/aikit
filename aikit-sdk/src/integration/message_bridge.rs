@@ -2,8 +2,9 @@
 //! native API is called and no admission lease or provider proof is supplied.
 use super::{
     AgentToolCall, HookEvent, HookRequest, IntegrationError, IntegrationService,
-    MessageAppendCheckpoint, MessageAppendIntent, MessageAppendStored, MessageReservation,
-    MessageState, NativeToolContext, SessionBinding, SessionRef,
+    MessageAppendCheckpoint, MessageAppendIntent, MessageAppendStored, MessageInputDispatched,
+    MessageInputIntent, MessageReservation, MessageState, NativeToolContext, SessionBinding,
+    SessionRef,
 };
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -64,6 +65,17 @@ pub enum RecordedMessageAction {
         reservation_id: String,
         native_row_id: String,
         stored: MessageAppendStored,
+    },
+    PrepareInput {
+        operation_id: String,
+        reservation_id: String,
+        intent: MessageInputIntent,
+    },
+    RecordInputDispatched {
+        operation_id: String,
+        reservation_id: String,
+        intent: MessageInputIntent,
+        dispatched: MessageInputDispatched,
     },
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -130,6 +142,16 @@ impl RecordedMessageRequest {
             operation_id,
             reservation_id,
             ..
+        }
+        | RecordedMessageAction::PrepareInput {
+            operation_id,
+            reservation_id,
+            ..
+        }
+        | RecordedMessageAction::RecordInputDispatched {
+            operation_id,
+            reservation_id,
+            ..
         } = &frame.action
         {
             if [operation_id, reservation_id]
@@ -145,6 +167,15 @@ impl RecordedMessageRequest {
             validate_handoff(outcome)?;
         }
         match &frame.action {
+            RecordedMessageAction::PrepareInput { intent, .. } => {
+                super::message_append::validate_input_intent(intent)?;
+            }
+            RecordedMessageAction::RecordInputDispatched {
+                intent, dispatched, ..
+            } => {
+                super::message_append::validate_input_intent(intent)?;
+                super::message_append::validate_input_dispatched(dispatched)?;
+            }
             RecordedMessageAction::PrepareAppend { intent, .. } => {
                 super::message_append::validate_intent(intent)?
             }
@@ -274,6 +305,8 @@ impl IntegrationService {
             RecordedMessageAction::RecordHandoff { .. }
                 | RecordedMessageAction::PrepareAppend { .. }
                 | RecordedMessageAction::RecordAppendStored { .. }
+                | RecordedMessageAction::PrepareInput { .. }
+                | RecordedMessageAction::RecordInputDispatched { .. }
         ) {
             Some(self.handoff_record_lock()?)
         } else {
@@ -298,7 +331,39 @@ impl IntegrationService {
             recorded_state: None,
             append_checkpoint: None,
         };
-        if let RecordedMessageAction::RecordHandoff {
+        if let RecordedMessageAction::PrepareInput {
+            operation_id,
+            reservation_id,
+            intent,
+        }
+        | RecordedMessageAction::RecordInputDispatched {
+            operation_id,
+            reservation_id,
+            intent,
+            ..
+        } = &frame.action
+        {
+            let reservation =
+                reservation_from_receipt(&binding.message_status_record(&tx, operation_id)?)?;
+            if reservation.reservation_id != *reservation_id {
+                return Err(IntegrationError::Conflict(
+                    "input reservation does not match".into(),
+                ));
+            }
+            reply.append_checkpoint = Some(match &frame.action {
+                RecordedMessageAction::PrepareInput { .. } => {
+                    binding.prepare_message_input_record(&tx, &reservation, intent.clone())?
+                }
+                RecordedMessageAction::RecordInputDispatched { dispatched, .. } => binding
+                    .record_message_input_dispatched_record(
+                        &tx,
+                        &reservation,
+                        intent,
+                        dispatched.clone(),
+                    )?,
+                _ => unreachable!(),
+            });
+        } else if let RecordedMessageAction::RecordHandoff {
             operation_id,
             reservation_id,
             outcome,
@@ -383,7 +448,11 @@ impl IntegrationService {
                 }
                 RecordedMessageAction::RecordHandoff { .. }
                 | RecordedMessageAction::PrepareAppend { .. }
-                | RecordedMessageAction::RecordAppendStored { .. } => unreachable!("handled above"),
+                | RecordedMessageAction::RecordAppendStored { .. }
+                | RecordedMessageAction::PrepareInput { .. }
+                | RecordedMessageAction::RecordInputDispatched { .. } => {
+                    unreachable!("handled above")
+                }
             }
         }
         tx.commit()?;

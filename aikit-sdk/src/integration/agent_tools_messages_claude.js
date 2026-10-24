@@ -3,6 +3,7 @@
 let messageActive = true, messageStopped = false, messageStarted = false, messagePolling = false;
 let messageContext, messageTicket;
 let messageInFlight, messageAppendSeen = false, messageProviderVersion;
+let messageInputCandidate;
 const messageAttempts = new Set();
 const messageBytes = value => new TextEncoder().encode(value);
 async function messageDigest(value) {
@@ -122,12 +123,84 @@ async function observeMessageAppend($, event, next) {
       reservation_id: ticket.reservation_id, native_row_id: intent.native_row_id, stored});
     validateAppendReply(reply, ticket, intent, stored);
     if (stored.stored_payload_sha256 !== intent.framed_payload_sha256) messageStopped = true;
+    else if (!messageStopped && messageProviderVersion === '2.1.308') {
+      if (messageInputCandidate) throw new Error('Unsettled input candidate already exists');
+      messageInputCandidate = {ticket, appendIntent: intent, stored, frame: appendText(result.message)};
+    }
   } catch { messageStopped = true; }
   return result;
 }
 function registerMessageLifecycle(on) {
   on('session.end', async ($, event, next) => { messageStopped = true; return next(event); });
   on('session.append', {door: 'prompt'}, async ($, event, next) => observeMessageAppend($, event, next));
+  on('turn.step', async function* ($, event, next) {
+    const candidate = messageInputCandidate;
+    if (!candidate || event.agentId !== undefined) return yield* next(event);
+    // Take one step only; missing/uncertain evidence is retained, never retried
+    // on another step and never permission to resubmit the owner review.
+    messageInputCandidate = undefined;
+    let intent, prepared = false;
+    try {
+      if (messageStopped || next?.origin?.plugin !== 'engine' || next.origin.tier !== 'core'
+          || event.turnId !== nativeTurnId || typeof event.turnId !== 'string' || !event.turnId
+          || event.turnId.length > 256 || !Number.isSafeInteger(event.index) || event.index < 0)
+        throw new Error('Native input step scope unavailable');
+      const snapshot = await $.session.messages({as: 'api'});
+      const serialized = JSON.stringify(snapshot);
+      if (!Array.isArray(snapshot) || typeof serialized !== 'string' || messageBytes(serialized).length > 4194304)
+        throw new Error('Native API snapshot unavailable or oversized');
+      const occurrences = snapshot.flatMap(message => typeof message.content === 'string' ? [message.content]
+        : Array.isArray(message.content) ? message.content.filter(block => block?.type === 'text').map(block => block.text) : [])
+        .filter(text => text === candidate.frame).length;
+      if (occurrences !== 1) throw new Error('Exact native feedback frame missing or duplicated');
+      intent = {native_turn_id: event.turnId, step_index: event.index,
+        api_snapshot_sha256: await messageDigest(serialized),
+        framed_payload_sha256: candidate.appendIntent.framed_payload_sha256,
+        step_event_sha256: await messageDigest(messageCanonical(event))};
+      const reply = await messageRpc($, {kind: 'prepare_input', operation_id: candidate.ticket.request.operation_id,
+        reservation_id: candidate.ticket.reservation_id, intent});
+      validateInputReply(reply, candidate, intent);
+      prepared = true;
+    } catch { messageStopped = true; }
+    const result = yield* next(event);
+    if (prepared) try {
+      const core = Array.isArray(next.trace) ? next.trace.filter(entry =>
+        entry?.plugin === 'engine' && entry.tier === 'core' && entry.event === 'turn.step') : [];
+      if (core.length !== 1 || !['returned', 'passed'].includes(core[0].outcome)
+          || await messageDigest(messageCanonical(core[0].received)) !== intent.step_event_sha256)
+        throw new Error('Matching native input core dispatch unavailable');
+      const trace = messageCanonical(core[0]);
+      if (messageBytes(trace).length > 262144) throw new Error('Native core trace exceeds candidate limit');
+      const dispatched = {core_received_sha256: intent.step_event_sha256,
+        core_trace_sha256: await messageDigest(trace),
+        evidence_reference: `claude-code:session:${messageContext.session_id}:turn:${intent.native_turn_id}:step:${intent.step_index}`};
+      const reply = await messageRpc($, {kind: 'record_input_dispatched', operation_id: candidate.ticket.request.operation_id,
+        reservation_id: candidate.ticket.reservation_id, intent, dispatched});
+      validateInputReply(reply, candidate, intent, dispatched);
+    } catch { messageStopped = true; }
+    return result;
+  });
+}
+function messageCanonical(value) {
+  const sort = value => Array.isArray(value) ? value.map(sort) : value && typeof value === 'object'
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, sort(value[key])])) : value;
+  return JSON.stringify(sort(value));
+}
+function validateInputReply(reply, candidate, intent, dispatched) {
+  const checkpoint = reply.append_checkpoint, input = checkpoint?.input;
+  if (checkpoint?.schema_version !== 2 || !sameMessageReference(reply.reference, candidate.ticket.target)
+      || !sameMessageReservation(checkpoint.reservation, candidate.ticket)
+      || messageCanonical(checkpoint.intent) !== messageCanonical(candidate.appendIntent)
+      || messageCanonical(checkpoint.stored) !== messageCanonical(candidate.stored)
+      || messageCanonical(input?.intent) !== messageCanonical(intent)
+      || !Number.isSafeInteger(input?.prepared_at_unix_ms) || input.prepared_at_unix_ms <= 0)
+    throw new Error('Native input checkpoint scope unavailable');
+  if (dispatched) {
+    if (messageCanonical(input.dispatched) !== messageCanonical(dispatched)
+        || !Number.isSafeInteger(input.dispatched_at_unix_ms) || input.dispatched_at_unix_ms <= 0)
+      throw new Error('Native input dispatch checkpoint unavailable');
+  } else if (input.dispatched !== null || input.dispatched_at_unix_ms !== null)
+    throw new Error('Native input intent already has a dispatch observation');
 }
 async function pollMessages($) {
   if (messageActive || messageStopped || messagePolling) return;

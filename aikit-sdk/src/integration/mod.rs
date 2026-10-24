@@ -45,7 +45,10 @@ pub use install::{
     HookEvent, InstallPlan, InstallSpec, Installation, InstallationStatus, IntegrationError,
     IntegrationService, SettingChange, StateUpgradeReport,
 };
-pub use message_append::{MessageAppendCheckpoint, MessageAppendIntent, MessageAppendStored};
+pub use message_append::{
+    MessageAppendCheckpoint, MessageAppendIntent, MessageAppendStored, MessageInputCheckpoint,
+    MessageInputDispatched, MessageInputIntent,
+};
 pub use message_bridge::{
     MessageHandoffOutcome, MessageHandoffRecord, RecordedMessageAction, RecordedMessageReply,
     RecordedMessageRequest, MESSAGE_BRIDGE_PAYLOAD_LIMIT,
