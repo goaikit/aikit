@@ -140,6 +140,47 @@ pub fn inspect_linux_native_caller(
         return Err(invalid());
     }
     let native = process(peer.pid() as u32)?;
+    inspect_ancestor(native, uid, expected_executable_sha256)
+}
+
+// Discovery needs a live native inbox. Later callbacks already have an immutable
+// kernel-qualified process record, so revalidate that original process directly.
+// In particular native shutdown may close the inbox before invoking SessionEnd.
+pub(super) fn inspect_recorded_ancestor(
+    expected: &LinuxNativeCaller,
+    expected_hash: &str,
+) -> Result<LinuxNativeCaller, IntegrationError> {
+    let uid = geteuid().as_raw();
+    if expected.uid != uid
+        || expected.pid == 0
+        || expected.start_ticks == 0
+        || expected.executable_sha256 != expected_hash
+    {
+        return Err(invalid());
+    }
+    let native = process(expected.pid)?;
+    if native.start != expected.start_ticks {
+        return Err(invalid());
+    }
+    let actual = inspect_ancestor(native, uid, expected_hash)?;
+    if &actual != expected {
+        return Err(invalid());
+    }
+    Ok(actual)
+}
+
+fn inspect_ancestor(
+    native: Process,
+    uid: u32,
+    expected_executable_sha256: &str,
+) -> Result<LinuxNativeCaller, IntegrationError> {
+    if fs::metadata(format!("/proc/{}", native.pid))
+        .map_err(|_| invalid())?
+        .uid()
+        != uid
+    {
+        return Err(invalid());
+    }
     let mut chain = Vec::new();
     let mut current = std::process::id();
     for _ in 0..32 {
@@ -178,6 +219,10 @@ pub fn inspect_linux_native_caller(
     let after_executable =
         fs::metadata(format!("/proc/{}/exe", native.pid)).map_err(|_| invalid())?;
     if actual_hash != expected_executable_sha256
+        || fs::metadata(format!("/proc/{}", native.pid))
+            .map_err(|_| invalid())?
+            .uid()
+            != uid
         || before_executable.dev() != after_executable.dev()
         || before_executable.ino() != after_executable.ino()
         || chain
@@ -222,5 +267,19 @@ mod tests {
         assert!(
             inspect_linux_native_caller("/tmp/absent-aikit-native-peer", "unqualified").is_err()
         );
+    }
+
+    #[test]
+    fn recorded_ancestor_refuses_changed_birth_or_uid_before_hashing() {
+        let mut expected = LinuxNativeCaller {
+            pid: std::process::id(),
+            uid: geteuid().as_raw(),
+            start_ticks: process(std::process::id()).unwrap().start + 1,
+            executable_sha256: "a".repeat(64),
+        };
+        assert!(inspect_recorded_ancestor(&expected, &"a".repeat(64)).is_err());
+        expected.start_ticks -= 1;
+        expected.uid = expected.uid.wrapping_add(1);
+        assert!(inspect_recorded_ancestor(&expected, &"a".repeat(64)).is_err());
     }
 }

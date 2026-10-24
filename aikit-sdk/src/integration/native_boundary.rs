@@ -55,6 +55,25 @@ impl NativeCallerPolicy {
         })?;
         super::inspect_linux_native_caller(&address, sha256)
     }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn inspect_binding(
+        &self,
+        binding: &SessionBinding<'_>,
+    ) -> Result<super::RecordedLinuxNativeCaller, IntegrationError> {
+        self.validate()?;
+        if binding
+            .service
+            .installed(&binding.reference().installation_id)?
+            .spec
+            .agent_key
+            != "claude"
+        {
+            return Err(unsupported());
+        }
+        let Self::LinuxExecutable { sha256 } = self;
+        binding.reinspect_recorded_caller(sha256)
+    }
 }
 
 fn unsupported() -> IntegrationError {
@@ -88,13 +107,7 @@ impl SessionBinding<'_> {
         policy.validate()?;
         #[cfg(target_os = "linux")]
         {
-            let agent = self
-                .service
-                .installed(&self.reference().installation_id)?
-                .spec
-                .agent_key;
-            let process = policy.inspect(&agent)?;
-            self.check_inspected_caller(&self.snapshot_native_caller(process)?)
+            self.check_inspected_caller(&policy.inspect_binding(self)?)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -122,13 +135,7 @@ impl SessionBinding<'_> {
         policy.validate()?;
         #[cfg(target_os = "linux")]
         {
-            let agent = self
-                .service
-                .installed(&self.reference().installation_id)?
-                .spec
-                .agent_key;
-            let process = policy.inspect(&agent)?;
-            let inspected = self.snapshot_native_caller(process)?;
+            let inspected = policy.inspect_binding(self)?;
             self.admit_inspected_caller_wait(projected, &inspected, wait)
         }
         #[cfg(not(target_os = "linux"))]

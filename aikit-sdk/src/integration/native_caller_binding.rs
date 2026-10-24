@@ -41,6 +41,25 @@ fn boot_scope() -> Result<(String, u64), IntegrationError> {
 }
 
 impl SessionBinding<'_> {
+    pub(super) fn reinspect_recorded_caller(
+        &self,
+        expected_hash: &str,
+    ) -> Result<RecordedLinuxNativeCaller, IntegrationError> {
+        let stored = self
+            .recorded_linux_native_caller()?
+            .ok_or(IntegrationError::NotFound)?;
+        let before = boot_scope()?;
+        if before != (stored.boot_id.clone(), stored.pid_namespace) {
+            return Err(conflict());
+        }
+        let actual =
+            super::native_caller::inspect_recorded_ancestor(&stored.process, expected_hash)?;
+        let inspected = self.snapshot_native_caller(actual)?;
+        if inspected != stored || boot_scope()? != before {
+            return Err(conflict());
+        }
+        Ok(inspected)
+    }
     fn inspect_caller(
         &self,
         address: &str,

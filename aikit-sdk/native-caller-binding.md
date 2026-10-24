@@ -30,8 +30,8 @@ This prevents a fresh invocation from silently dropping the physical boundary.
 Explicit owner detachment permits later recorded-only startup; retained historical
 associations remain untouched. The legacy raw hook API retains its observation
 semantics, so consumers selecting physical checks must use the checked entry.
-The added downgrade/detachment assertions are undergoing the final Linux gate;
-the 196-pass result below predates this additional guard until recorded otherwise.
+The final locked/offline Linux gate passes all 196 integration tests, including
+these additional downgrade/detachment assertions, at source `9ffb3f8`.
 
 The latest locked/offline Linux gate is **196 integration tests passing**, including
 unsupported-policy refusal before hook journaling, no-policy refusal for an
@@ -126,6 +126,25 @@ those yielded 194/194. Neither is called a provider blocker. No callback budget
 or readiness requirement was weakened to obtain a pass.
 
 ## Existing Claude APIs and remaining gaps
+
+### Shutdown correction under qualification
+
+The first Codelaya consumer trial at `9ffb3f8` passes completion repair, automatic
+same-session feedback and independent-caller refusal, but rejects normal
+SessionEnd and leaves no End observation. That trial is unaccepted. The checked
+boundary incorrectly requires fresh inbox discovery on every callback, including
+shutdown. Do not weaken the End requirement or synthesize an observation.
+
+The correction uses the inbox only to discover a genuinely new startup. Later
+callbacks revalidate the immutable original process directly: actual ancestry,
+PID/birth, current UID, executable digest, boot and PID namespace. A copied
+record or socket address cannot manufacture that ancestry. Missing/changed facts,
+old generation and detached bindings still refuse; there is no recorded-only
+fallback. The explicit socket-inspection APIs retain their original behavior.
+No lifetime/idle or module-generation authority is granted. Nine focused Linux
+caller/binding tests pass; the earlier 196-pass gate retains its `9ffb3f8` scope.
+A fresh ordinary consumer run will independently trace inbox availability at End
+while delegating every decision to the actual CLI. Native qualification is pending.
 
 Official docs rechecked on 2026-10-24:
 

@@ -287,6 +287,7 @@ impl IntegrationService {
         // environment resolution lives in AIKit, never in consumer adapters.
         #[cfg(target_os = "linux")]
         let caller = policy
+            .filter(|_| request.event == HookEvent::SessionStarted && !compaction)
             .map(|policy| policy.inspect(&installation.spec.agent_key))
             .transpose()?;
         #[cfg(not(target_os = "linux"))]
@@ -298,13 +299,12 @@ impl IntegrationService {
             ));
         }
         #[cfg(target_os = "linux")]
-        if let Some(caller) = caller
-            .as_ref()
-            .filter(|_| request.event != HookEvent::SessionStarted)
+        if let Some(policy) =
+            policy.filter(|_| request.event != HookEvent::SessionStarted || compaction)
         {
             let reference = self.session_for_hook(&request)?;
             let binding = self.bind_existing(&reference)?;
-            binding.check_inspected_caller(&binding.snapshot_native_caller(caller.clone())?)?;
+            binding.check_inspected_caller(&policy.inspect_binding(&binding)?)?;
         }
         if matches!(
             request.event,
