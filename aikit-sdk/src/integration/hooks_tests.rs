@@ -917,6 +917,67 @@ async fn recorded_admission_releases_both_existing_locks_on_unwind() {
 }
 
 #[tokio::test]
+async fn bounded_recorded_admission_waits_only_before_admission_and_preserves_fences() {
+    use std::time::{Duration, Instant};
+    let f = Fixture::new(10);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("SessionStart").to_string().as_bytes(),
+            &Never,
+        )
+        .await;
+    let reference = f.service.observed_session(&f.id, "native-session").unwrap();
+    let binding = f.service.bind_existing(&reference).unwrap();
+    let cursor = binding.events(0, 100).unwrap().next_cursor;
+    assert!(matches!(
+        binding.admit_recorded_with_wait(cursor, Duration::from_millis(251)),
+        Err(IntegrationError::Invalid(_))
+    ));
+    let held = binding.admit_recorded(cursor).unwrap();
+    assert!(binding.admit_recorded(cursor).is_err());
+    let started = Instant::now();
+    assert!(matches!(
+        binding.admit_recorded_with_wait(cursor, Duration::from_millis(30)),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert!(started.elapsed() >= Duration::from_millis(25));
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(30));
+        drop(held);
+    });
+    let admitted = binding
+        .admit_recorded_with_wait(cursor, Duration::from_millis(250))
+        .unwrap();
+    release.join().unwrap();
+    assert!(binding.admit_recorded(cursor).is_err());
+    drop(admitted);
+    assert_eq!(binding.events(0, 100).unwrap().next_cursor, cursor);
+    f.service
+        .handle_hook(
+            &f.id,
+            f.input("UserPromptSubmit").to_string().as_bytes(),
+            &Fixed(Decision::Allow),
+        )
+        .await;
+    assert!(matches!(
+        binding.admit_recorded_with_wait(cursor, Duration::from_millis(250)),
+        Err(IntegrationError::Conflict(_))
+    ));
+    let projected = binding.events(cursor, 100).unwrap().next_cursor;
+    drop(
+        binding
+            .admit_recorded_with_wait(projected, Duration::from_millis(250))
+            .unwrap(),
+    );
+    binding.detach().unwrap();
+    assert!(matches!(
+        binding.admit_recorded_with_wait(projected, Duration::from_millis(250)),
+        Err(IntegrationError::Detached)
+    ));
+}
+
+#[tokio::test]
 async fn status_waits_for_a_short_writer_but_admission_still_refuses_immediately() {
     use crate::integration::SessionStatus;
     let f = Fixture::new(10);

@@ -205,12 +205,30 @@ impl SessionBinding<'_> {
         &self,
         projected_through: u64,
     ) -> Result<RecordedSessionGuard, IntegrationError> {
+        self.admit_recorded_with_wait(projected_through, std::time::Duration::ZERO)
+    }
+
+    /// Wait briefly for a competing local journal writer before checking the
+    /// same recorded admission invariants. The budget is at most 250 ms and
+    /// applies only to file-lock acquisition, not reconciliation or native I/O.
+    /// Pending observations, replacement and revocation are still refused.
+    /// This never retries an application mutation or native message handoff.
+    pub fn admit_recorded_with_wait(
+        &self,
+        projected_through: u64,
+        lock_wait_budget: std::time::Duration,
+    ) -> Result<RecordedSessionGuard, IntegrationError> {
+        if lock_wait_budget > std::time::Duration::from_millis(250) {
+            return Err(IntegrationError::Invalid(
+                "recorded admission lock wait exceeds 250 ms".into(),
+            ));
+        }
         if projected_through > i64::MAX as u64 {
             return Err(IntegrationError::Invalid(
                 "invalid projection cursor".into(),
             ));
         }
-        let installation_lock = self.service.state_lock()?;
+        let installation_lock = self.service.state_lock_with_wait(lock_wait_budget)?;
         let connection = self.service.connection()?;
         connection.busy_timeout(std::time::Duration::ZERO)?;
         connection.execute_batch("BEGIN IMMEDIATE")?;
