@@ -1,7 +1,9 @@
-# Claude feedback storage trace: unqualified implementation
+# Claude feedback storage trace
 
-Status, 2026-10-24: **WIP; Linux execution and native qualification pending.**
-Do not consume this change as a qualified consumer pin or promote readiness.
+Status, 2026-10-24: Linux module/SDK checks and one actual native consumer
+feedback session pass on runtime `1efbcd2`. This qualifies the healthy candidate
+capture path only. Production acknowledgement, consumption and readiness remain
+unqualified; Windows checks remain deferred.
 
 ## Concrete implementation gap
 
@@ -25,23 +27,31 @@ return, retains handoff uncertainty, and never resubmits the reserved review.
 No Rust API, schema, new transport or acknowledgement/consumption promotion is
 introduced. Existing historical checkpoints remain candidates.
 
-## Validation to run
+## Validation
 
-Run the three generated module test files with Node 22 in Linux Docker, then
-the SDK integration suite on Rust 1.88. New engine-stub cases cover 14 malformed
-core observations, matching `passed`, and existing rewrite/lost-commit behavior.
-These are fault cases in tests, not executed native sessions.
+Linux Docker Node 22 passes all 32 generated module tests. Against the previous
+helper, the new storage fault test fails because an unverified return creates a
+stored checkpoint. Rust 1.88 passes all 174 SDK integration tests. New engine-stub
+cases cover 14 malformed core observations, matching `passed`, and existing
+rewrite/lost-commit behavior. These are test cases, not native fault sessions.
 
-Next run a fresh ordinary interactive Claude 2.1.308 consumer session using the
-actual rendered module: native file edit, enforced name/note repair, completed
-first Turn, owner-submitted immutable review, same-session follow-up and normal
-exit. Retain raw core-trace shape as well as independent transcript, actual
-outgoing input, app/SDK records and package/source identities. Require candidate
-row and bytes to correlate; acknowledgement/consumption must remain absent.
-If the native trace does not supply the declared shape, retain the failure and
-adapt the implementation before claiming compatibility. Qualify a competing
-append handler separately; do not infer its effective native behavior from an
-engine stub or the earlier completion-chain experiment.
+A fresh ordinary interactive Claude 2.1.308 session used the real Codelaya
+CLI/library and exact generated module: native UTF-8 Write, two name/note Blocks
+and repair, completed initial Turn, one actual owner CLI review, same-session
+follow-up and normal exit. Twelve main requests (13 total) passed independent
+input/transcript/app/SDK verification. One matching candidate append checkpoint
+survived exit, both Turns remained Completed and the original Turn/Git/file
+bytes were preserved. App/SDK stayed Unknown with no acknowledgement or
+consumption. Raw trace entries were not separately archived; the unchanged
+generated guard and its successfully stored checkpoint establish only that its
+checks passed. Do not infer a broader native trace contract from this run.
+
+Session: `2ddddeb1-5920-44c9-bd01-fb39b3e67e77`. Same native image/executable as
+the previous 2.1.308 reports. The consumer report retains exact source/binary
+identities, preliminary setup/startup and verifier failures, corrected automatic
+user-tier loader checks, offline onboarding fixture, and 21 altered-evidence
+checks. Qualify competing append handlers and restart/consumption separately;
+do not infer their behavior from an engine stub or completion-chain experiment.
 
 ## Concrete remaining Claude contracts
 
@@ -63,11 +73,12 @@ dispatch identifying inclusion of the exact review bytes/digest. First qualify
 existing native trace behavior before concluding a provider API change is
 required. See [N1–N3](native-integration-required-contracts.md).
 
-## Environment interruption
+## Earlier environment interruption
 
 Docker Desktop was stopped when this work resumed. Authorized startup failed:
 `initializing Inference manager` could not remove/access the `dockerInference`
 socket in the owner's Docker run directory. The engine pipe never became
 available. No Docker data, socket, permissions, configuration or provider policy
-was changed to repair it. The owner has been asked to start Docker normally;
-Windows provider checks remain deferred. No execution result is claimed here.
+was changed to repair it. A subsequent live check found Docker running and
+accessible through the approved pipe access. All results above then ran inside
+Linux containers. No Windows provider qualification or Docker repair is claimed.
