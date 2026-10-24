@@ -7,8 +7,9 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 /// A journal-qualified identity, not proof of native process identity. A later
-/// SessionStart (including resume/compaction) invalidates the reference. Native
-/// Pi wire v2 adds an extension-issued invocation scope. Other adapters lack it.
+/// genuine SessionStart invalidates the reference. An owned Claude in-invocation
+/// compact refresh is acknowledged without a new journal boundary. Owned native
+/// modules may add an invocation scope to distinguish observed generations.
 /// This is not process authentication or an existing-session delivery guarantee.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionRef {
@@ -33,9 +34,32 @@ pub enum SessionStatus {
 /// reopen it with `binding(id)`. Explicit detach revokes all handles for its ID.
 /// There are no subscriptions or native resources to release on Drop.
 pub struct SessionBinding<'a> {
-    service: &'a IntegrationService,
-    id: String,
-    reference: SessionRef,
+    pub(super) service: &'a IntegrationService,
+    pub(super) id: String,
+    pub(super) reference: SessionRef,
+}
+
+/// Holds the existing installation writer lock and a read-only SQLite write
+/// reservation. Recorded generation, detach and journal writes cannot advance
+/// until this guard drops. This is not authentication of a native caller.
+///
+/// Acquire after projecting observations. Keep only across a short application
+/// commit or final read validation: do not await, perform Git work, invoke hooks,
+/// or call SDK writers/installation status while holding it. Native writers
+/// retain their deadlines;
+/// this guard neither buffers their notifications nor proves native liveness.
+#[must_use = "hold the guard through the application commit or final read validation"]
+pub struct RecordedSessionGuard {
+    pub(super) connection: Connection,
+    _installation_lock: super::install::InstallationLock,
+}
+
+impl Drop for RecordedSessionGuard {
+    fn drop(&mut self) {
+        // Explicit rollback releases the journal reservation before the
+        // installation lock. Closing the connection also rolls back on failure.
+        let _ = self.connection.execute_batch("ROLLBACK");
+    }
 }
 
 impl IntegrationService {
@@ -100,13 +124,16 @@ impl IntegrationService {
         &self,
         reference: &SessionRef,
     ) -> Result<SessionBinding<'_>, IntegrationError> {
+        // Share the installation writer guard through insertion. A bundle
+        // update cannot pass its detached check while a new binding is admitted.
+        let _lock = self.state_lock()?;
+        let mut connection = self.connection()?;
         if !matches!(
-            self.installation_status(&reference.installation_id)?,
+            self.status_inner(&connection, &reference.installation_id)?,
             InstallationStatus::Configured { .. }
         ) {
             return Err(IntegrationError::StaleSession);
         }
-        let mut connection = self.connection()?;
         let tx = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         match reference_status(&tx, reference)? {
             SessionStatus::Observed => {}
@@ -121,6 +148,21 @@ impl IntegrationService {
                 |r| r.get(0),
             )
             .optional()?;
+        if existing.is_none() {
+            let floor: Option<i64> = tx
+                .query_row(
+                    "SELECT cursor FROM binding_admission_floors WHERE installation_id=?1",
+                    [&reference.installation_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if floor.is_some_and(|floor| floor < 0) {
+                return Err(IntegrationError::Invalid("negative admission floor".into()));
+            }
+            if floor.is_some_and(|floor| floor >= 0 && reference.start_cursor <= floor as u64) {
+                return Err(IntegrationError::Detached);
+            }
+        }
         let id = existing.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         tx.execute(
             "INSERT OR IGNORE INTO session_bindings(id,reference,detached) VALUES (?1,?2,0)",
@@ -155,6 +197,90 @@ impl IntegrationService {
 }
 
 impl SessionBinding<'_> {
+    /// Admit a fully projected recorded session without a check/commit race.
+    /// The cursor is the last observation the application has projected. New
+    /// relevant observations cause refusal and must be reconciled before retry.
+    /// Busy writers are refused immediately; this never waits for a callback.
+    pub fn admit_recorded(
+        &self,
+        projected_through: u64,
+    ) -> Result<RecordedSessionGuard, IntegrationError> {
+        self.admit_recorded_with_wait(projected_through, std::time::Duration::ZERO)
+    }
+
+    /// Wait briefly for a competing local journal writer before checking the
+    /// same recorded admission invariants. The budget is at most 250 ms and
+    /// applies only to file-lock acquisition, not reconciliation or native I/O.
+    /// Pending observations, replacement and revocation are still refused.
+    /// This never retries an application mutation or native message handoff.
+    pub fn admit_recorded_with_wait(
+        &self,
+        projected_through: u64,
+        lock_wait_budget: std::time::Duration,
+    ) -> Result<RecordedSessionGuard, IntegrationError> {
+        self.admit_recorded_inner(projected_through, lock_wait_budget, false)
+    }
+
+    pub(super) fn admit_recorded_inner(
+        &self,
+        projected_through: u64,
+        lock_wait_budget: std::time::Duration,
+        inspected_caller: bool,
+    ) -> Result<RecordedSessionGuard, IntegrationError> {
+        if lock_wait_budget > std::time::Duration::from_millis(250) {
+            return Err(IntegrationError::Invalid(
+                "recorded admission lock wait exceeds 250 ms".into(),
+            ));
+        }
+        if projected_through > i64::MAX as u64 {
+            return Err(IntegrationError::Invalid(
+                "invalid projection cursor".into(),
+            ));
+        }
+        let installation_lock = self.service.state_lock_with_wait(lock_wait_budget)?;
+        let connection = self.service.connection()?;
+        connection.busy_timeout(std::time::Duration::ZERO)?;
+        connection.execute_batch("BEGIN IMMEDIATE")?;
+        let guard = RecordedSessionGuard {
+            connection,
+            _installation_lock: installation_lock,
+        };
+        match self.status_inner(&guard.connection)? {
+            SessionStatus::Observed => {}
+            SessionStatus::Ended => return Err(IntegrationError::SessionEnded),
+            SessionStatus::Detached => return Err(IntegrationError::Detached),
+            SessionStatus::Stale => return Err(IntegrationError::StaleSession),
+        }
+        if !inspected_caller && guard.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM linux_native_callers WHERE binding_id=?1)",
+            [&self.id], |row| row.get::<_, bool>(0),
+        )? {
+            return Err(IntegrationError::Invalid("binding requires current Linux native caller inspection".into()));
+        }
+        let maximum: i64 = guard.connection.query_row(
+            "SELECT coalesce(max(sequence),0) FROM hook_invocations",
+            [],
+            |row| row.get(0),
+        )?;
+        if projected_through as i64 > maximum {
+            return Err(IntegrationError::Invalid(
+                "projection cursor is ahead of the journal".into(),
+            ));
+        }
+        let latest: i64 = guard.connection.query_row(
+            "SELECT coalesce(max(sequence),0) FROM hook_invocations WHERE installation_id=?1 AND installation_revision=?2 AND session_id=?3 AND json_extract(body,'$.invocation_id') IS ?4",
+            params![self.reference.installation_id, self.reference.installation_revision,
+                self.reference.native_session_id, self.reference.invocation_id],
+            |row| row.get(0),
+        )?;
+        if latest > projected_through as i64 {
+            return Err(IntegrationError::Conflict(
+                "recorded session observations require reconciliation before admission".into(),
+            ));
+        }
+        Ok(guard)
+    }
+
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -162,8 +288,22 @@ impl SessionBinding<'_> {
         &self.reference
     }
 
+    /// Recheck recorded status, allowing a short competing journal writer to
+    /// finish. The lock-acquisition budget is 250 ms; exhausted contention still
+    /// fails closed. This is not a native idle lease or a hard hook deadline.
+    /// Recorded mutation admission continues to refuse contention immediately.
     pub fn status(&self) -> Result<SessionStatus, IntegrationError> {
+        let _lock = self
+            .service
+            .state_lock_with_wait(std::time::Duration::from_millis(250))?;
         let connection = self.service.connection()?;
+        self.status_inner(&connection)
+    }
+
+    pub(super) fn status_inner(
+        &self,
+        connection: &Connection,
+    ) -> Result<SessionStatus, IntegrationError> {
         let detached: bool = connection.query_row(
             "SELECT detached FROM session_bindings WHERE id=?1",
             [&self.id],
@@ -174,12 +314,12 @@ impl SessionBinding<'_> {
         }
         if !matches!(
             self.service
-                .installation_status(&self.reference.installation_id)?,
+                .status_inner(connection, &self.reference.installation_id)?,
             InstallationStatus::Configured { .. }
         ) {
             return Ok(SessionStatus::Stale);
         }
-        reference_status(&connection, &self.reference)
+        reference_status(connection, &self.reference)
     }
 
     /// Reuse the installation journal and its immutable cursors. `limit` bounds
@@ -212,14 +352,13 @@ impl SessionBinding<'_> {
         }
     }
 
-    /// Revoke only this application handle. No provider command is sent; installed
-    /// hooks and historical records remain unchanged. Repeating detach is safe.
+    /// Revoke this handle and fence new bindings to earlier observations. Other
+    /// existing handles, installed hooks and history remain unchanged. No
+    /// provider command is sent; repeating detach does not advance the floor.
     pub fn detach(&self) -> Result<(), IntegrationError> {
-        self.service.connection()?.execute(
-            "UPDATE session_bindings SET detached=1 WHERE id=?1",
-            [&self.id],
-        )?;
-        Ok(())
+        self.service
+            .detach_binding_for_installation(&self.id, &self.reference.installation_id)
+            .map(|_| ())
     }
 }
 
@@ -241,7 +380,7 @@ fn latest_start(
     Ok(cursor.map(|c| c as u64))
 }
 
-fn reference_status(
+pub(super) fn reference_status(
     connection: &Connection,
     reference: &SessionRef,
 ) -> Result<SessionStatus, IntegrationError> {
@@ -279,8 +418,13 @@ fn start_invocation(
 pub(super) fn validate_invocation(
     connection: &Connection,
     request: &HookRequest,
-    revision: &str,
+    expected_revision: &str,
 ) -> Result<(), IntegrationError> {
+    // Even legacy requests without invocation claims must not append a prepared
+    // decision under a revision replaced while journal acquisition waited.
+    if revision(connection, &request.installation_id)?.as_deref() != Some(expected_revision) {
+        return Err(IntegrationError::StaleSession);
+    }
     let Some(invocation) = &request.invocation_id else {
         return Ok(());
     };
@@ -294,9 +438,25 @@ pub(super) fn validate_invocation(
         }
         return Ok(());
     }
+    validate_current_invocation(connection, request, expected_revision)
+}
+
+/// Check the recorded current epoch without admitting a new SessionStart.
+/// This is correlation, not caller/process authentication or native liveness.
+pub(super) fn validate_current_invocation(
+    connection: &Connection,
+    request: &HookRequest,
+    expected_revision: &str,
+) -> Result<(), IntegrationError> {
+    if revision(connection, &request.installation_id)?.as_deref() != Some(expected_revision) {
+        return Err(IntegrationError::StaleSession);
+    }
+    let Some(invocation) = &request.invocation_id else {
+        return Err(IntegrationError::StaleSession);
+    };
     let reference = SessionRef {
         installation_id: request.installation_id.clone(),
-        installation_revision: revision.into(),
+        installation_revision: expected_revision.into(),
         native_session_id: request.session_id.clone(),
         invocation_id: Some(invocation.clone()),
         start_cursor: 0,

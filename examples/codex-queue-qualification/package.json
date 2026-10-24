@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "type": "module",
+  "dependencies": {
+    "ws": "8.22.0"
+  },
+  "name": "aikit-codex-queue-qualification",
+  "private": true
+}

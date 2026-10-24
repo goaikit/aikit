@@ -40,6 +40,16 @@ from each external hook invocation. User-started hooks use the separate
 
 ## User-started agent hooks (integration feature)
 
+The same feature provides a reusable [native application tool bridge](agent-tools.md)
+for selected JSON operations and instructions. Claude rendering and controlled
+Linux native execution are implemented. [Owned tool-file planning](owned-agent-tools.md)
+reuses the existing installer; authenticated callers and effective qualification
+remain required before application mutations can be enabled.
+
+The explicit [native completion bridge candidate](native-completion-bridge.md)
+reuses that module, the owned hook handler and installer. It defaults off and
+does not establish native ordering, caller authentication or readiness.
+
 The additive `integration` feature exposes `IntegrationService`, owned hook
 configuration and one `HookHandler::decide` callback. Construction never launches
 an agent. Claude hooks, a Cursor prompt/tool/session subset, and a Codex
@@ -68,6 +78,15 @@ ambiguous recovery refuse mutation. Unrelated hooks/settings survive update/remo
 Retry the same plan ID after interruption; do not synthesize a replacement plan.
 Pending journals may contain existing configuration values; completed plans discard
 their config bodies. `Configured` means matching config, not qualified enforcement.
+
+`plan_install_with_completion_policy(spec, CompletionBlockingPolicy::RequireUnbounded)`
+explicitly requests owned native continuation-limit configuration. Currently Claude
+configures `env.CLAUDE_CODE_STOP_HOOK_BLOCK_CAP="0"`; unsupported adapters fail
+explicitly. The preview includes exact setting changes; update/removal preserve
+the previous value and refuse unsafe restoration under dependent Stop hooks.
+Ordinary updates retain a previously selected policy. See
+[completion-policy.md](completion-policy.md) for schema compatibility, native
+qualification limits and reproducible checks. This does not promote capabilities.
 
 `handle_hook(installation_id, input, handler).await` consumes bounded native bytes
 and returns stdout, stderr and an exit code. The provider comes from the receipt.
@@ -142,6 +161,13 @@ explicit install update to subscribe to this additional event.
 
 ### Existing-session observation binding
 
+`SessionBinding::admit_recorded(projected_through)` supplies a short-lived
+`RecordedSessionGuard` over the existing installation lock and journal database.
+Applications can stage their transaction, refuse new/revoked recorded generations
+and retain this guard through commit. This is recorded-state coordination, not
+native caller authentication or a capability promotion. See
+[consumer order and qualification limits](recorded-session-admission.md).
+
 Resolve `observed_session(installation_id, native_session_id)` after a SessionStart
 hook, then call `bind_existing(&reference)`. Repeating the bind returns the same
 active binding ID. `binding(id)` reopens it after application restart. The handle
@@ -179,11 +205,27 @@ does not provide exclusive workspace admission, a transport or permission to sen
 
 ### Library-only example
 
+Hook journal acquisition tolerates a brief writer within a bounded remaining
+request budget, with fresh configuration/revision checks and no callback or native
+replay. [Contract, red/green tests and remaining scope](integration-hook-writer-budget.md).
+
+Native hook failures keep empty stdout and exit status 2. Their stderr includes
+a bounded fixed diagnostic code, for example `owned_context_invalid`, `state_busy`,
+`configuration_conflict` or `session_replaced`. These codes identify a local
+failure category; they do not establish caller authenticity or authorize replay.
+Raw error details, caller payloads and database messages are not included.
+Callback failure/timeout still returns the existing blocking decision.
+
+The diagnostic change has 162 passing Linux SDK integration tests, including
+fixed-code privacy and failure-status checks. SDK library Clippy completes with
+101 existing warnings; this is not a strict clean lint pass or new native proof.
+
 Build `cargo build -p aikit-sdk --no-default-features --features integration --example integration_hooks`.
 The resulting executable offers these operations:
 
 ```text
 integration_hooks plan STATE                   # InstallSpec JSON on stdin
+integration_hooks plan-unbounded STATE         # same spec; explicit completion policy
 integration_hooks apply STATE PLAN_ID
 integration_hooks remove-plan STATE INSTALLATION_ID
 integration_hooks status STATE INSTALLATION_ID
@@ -216,6 +258,12 @@ only an unchanged owned file. Unrelated extensions/settings remain untouched.
 Schema 4 protects generated-source receipts and deletion plans from older readers;
 existing JSON installation plans and receipts migrate without losing ownership.
 Do not downgrade the integration state database.
+Owner maintenance can use the explicit, existing-only
+[`IntegrationService::upgrade_existing`](docs/integration-state-upgrade.md)
+for schemas 9/10/11 to 12. Runtime `open_existing` still refuses implicit upgrades;
+metadata migration neither qualifies native capabilities nor updates hooks.
+Schema 12 adds [candidate native append checkpoints](docs/message-append-checkpoints.md)
+to retain stable pre-storage row identities independently of qualified receipts.
 
 Pi loads this extension through its own project-trust/resource lifecycle. Reload
 or restart explicitly between sessions after installation/update/removal; removing

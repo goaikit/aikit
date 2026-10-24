@@ -1,0 +1,15 @@
+{
+  "application_id": "native-bridge-fixture",
+  "installation_id": "fixture-installation",
+  "tool_name": "review",
+  "description": "Selected application JSON operations",
+  "input_schema": {
+    "type": "object",
+    "properties": {"text": {"type": "string"}},
+    "required": ["text"],
+    "additionalProperties": false
+  },
+  "instructions": "AIKIT_NATIVE_BRIDGE_INSTRUCTIONS: use the selected review tool. Literal 'AIKIT_NATIVE_TOOL_NAME' stays data. 雪",
+  "handler": {"executable": "/generated/agent_tool_plugin", "arguments": ["inspect"]},
+  "timeout_ms": 5000
+}

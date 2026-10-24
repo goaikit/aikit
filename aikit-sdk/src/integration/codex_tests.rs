@@ -51,13 +51,21 @@ impl Fixture {
             "cwd":self.installation.spec.workspace,"transcript_path":"private-transcript"})
     }
     async fn run(&self, input: Value, decision: Decision) -> crate::integration::HookResponse {
-        self.service
+        let response = self
+            .service
             .handle_hook(
                 &self.installation.id,
                 input.to_string().as_bytes(),
                 &Fixed(decision),
             )
-            .await
+            .await;
+        if response.exit_code != 0 {
+            eprintln!(
+                "Codex fixture event {:?}: {response:?}",
+                input["hook_event_name"]
+            );
+        }
+        response
     }
 }
 struct Fixed(Decision);

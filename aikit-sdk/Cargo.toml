@@ -59,7 +59,7 @@ sha2 = "0.10"
 tempfile = "3.12"
 uuid = { version = "1", features = ["v4"] }
 aikit-agent = { path = "../aikit-agent", version = "0.1.0" }
-claude-agent-sdk = { git = "https://github.com/aroff/claude-agent-sdk-rust", rev = "aa01a48", optional = true }
+claude-agent-sdk = { git = "https://github.com/aroff/claude-agent-sdk-rust", rev = "57ad0ec71c9e1de19cc750ba6ab7591adfd13e9f", optional = true }
 aikit-agent-codex = { path = "../aikit-agent-codex", version = "0.1.0", optional = true }
 tokio = { version = "1", features = ["rt", "sync", "macros", "time"], optional = true }
 jsonschema = "0.46"
@@ -69,7 +69,7 @@ aikit-session-capture = { path = "../aikit-session-capture", version = "0.1.0", 
 # BUG-4): SIGTERM -> SIGKILL over the whole process group, not just the
 # direct child. Unix-only; Windows job-object equivalent is noted follow-up.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal", "process"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "process", "socket", "poll", "user"] }
 
 [dev-dependencies]
 insta = { version = "1.39", features = ["json"] }
@@ -80,4 +80,36 @@ tokio = { version = "1", features = ["rt", "macros"] }
 
 [[example]]
 name = "integration_hooks"
+required-features = ["integration"]
+
+[[example]]
+name = "agent_tool_plugin"
+required-features = ["integration"]
+
+[[example]]
+name = "integration_messages"
+required-features = ["integration"]
+
+[[example]]
+name = "integration_message_bridge"
+required-features = ["integration"]
+
+[[example]]
+name = "integration_history_read"
+required-features = ["claude-sdk"]
+
+[[example]]
+name = "native_caller_inspect"
+required-features = ["integration"]
+
+[[example]]
+name = "native_caller_binding"
+required-features = ["integration"]
+
+[[example]]
+name = "inspect_message_history"
+required-features = ["integration", "history"]
+
+[[example]]
+name = "inspect_codex_message"
 required-features = ["integration"]

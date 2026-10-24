@@ -8,26 +8,71 @@
 /// Existing managed-session persistence used by the HTTP gateway and embeddings.
 pub mod gateway_store;
 
+mod agent_tool_session;
+mod agent_tools;
 mod capabilities;
 mod codex;
+mod codex_messages;
 mod command;
 mod cursor;
 mod hooks;
+#[cfg(feature = "history")]
+mod history_messages;
 mod install;
+mod message_append;
+mod message_bridge;
+mod messages;
+mod native_boundary;
+pub use native_boundary::NativeCallerPolicy;
+#[cfg(target_os = "linux")]
+mod native_caller;
+#[cfg(target_os = "linux")]
+mod native_caller_binding;
+#[cfg(target_os = "linux")]
+pub use native_caller_binding::RecordedLinuxNativeCaller;
+#[cfg(target_os = "linux")]
+pub use native_caller::{inspect_linux_native_caller, LinuxNativeCaller};
+mod owner_sessions;
+pub use owner_sessions::{RecordedBinding, RecordedBindingsPage, RecordedDetachment};
 mod pi;
 mod sessions;
 mod tool_effects;
+pub use agent_tools::{
+    render_agent_tool_plugin, AgentToolCall, AgentToolPlugin, AgentToolSpec, NativeToolContext,
+    AGENT_TOOL_CALL_LIMIT, AGENT_TOOL_REQUEST_LIMIT, AGENT_TOOL_SPEC_LIMIT,
+};
 pub use capabilities::{
     CapabilityAssessment, CapabilityReport, CapabilityRequirementsError, IntegrationCapability,
     SessionMode, Support,
 };
+pub use codex_messages::{
+    inspect_codex_message_snapshot, CodexMessageInspection, CodexMessageLocation, CodexMessageMatch,
+};
 pub use hooks::{
     Decision, DecisionFuture, HandlerError, HookHandler, HookPage, HookRecord, HookRequest,
-    HookResponse,
+    HookResponse, NativeTurn, NativeTurnOutcome, NativeTurnReason,
+};
+#[cfg(feature = "history")]
+pub use history_messages::{
+    inspect_message_history_page, MessageHistoryInspection, MessageHistoryMatch,
 };
 pub use install::{
-    HookCommand, HookEvent, InstallPlan, InstallSpec, Installation, InstallationStatus,
-    IntegrationError, IntegrationService,
+    AgentToolFileChange, AppliedInstallationGuard, CompletionBlockingPolicy, HookCommand,
+    HookEvent, InstallPlan, InstallSpec, Installation, InstallationStatus, IntegrationError,
+    IntegrationService, SettingChange, StateUpgradeReport,
 };
-pub use sessions::{SessionBinding, SessionRef, SessionStatus};
+pub use message_append::{
+    MessageAppendCheckpoint, MessageAppendIntent, MessageAppendStored, MessageInputCheckpoint,
+    MessageInputDispatched, MessageInputIntent,
+};
+pub use message_bridge::{
+    MessageHandoffOutcome, MessageHandoffRecord, RecordedMessageAction, RecordedMessageReply,
+    RecordedMessageRequest, MESSAGE_BRIDGE_ENVELOPE_LIMIT, MESSAGE_BRIDGE_PAYLOAD_LIMIT,
+    MESSAGE_BRIDGE_RESULT_LIMIT,
+};
+pub use messages::{
+    MessageEvidence, MessageObservation, MessagePage, MessageProof, MessageReceipt, MessageRequest,
+    MessageReservation, MessageState, MESSAGE_CONTENT_LIMIT,
+};
+pub use sessions::{RecordedSessionGuard, SessionBinding, SessionRef, SessionStatus};
 pub use tool_effects::{TextReplacement, ToolEffect};

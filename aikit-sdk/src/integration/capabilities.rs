@@ -195,6 +195,16 @@ fn report(
         && architecture == "x86_64"
         && mode == SessionMode::Print
         && version_output.as_deref() == Some("2026.09.02-c22c1a3");
+    let claude_stop_chain_bypass = agent_key == "claude"
+        && platform == "linux"
+        && architecture == "x86_64"
+        && mode == SessionMode::Interactive
+        && version_output.as_deref() == Some("2.1.296 (Claude Code)");
+    let claude_dispatch_provenance_gap = agent_key == "claude"
+        && platform == "linux"
+        && architecture == "x86_64"
+        && mode == SessionMode::Interactive
+        && version_output.as_deref() == Some("2.1.308 (Claude Code)");
     let pi_boundary_gap = agent_key == "pi"
         && platform == "windows"
         && architecture == "x86_64"
@@ -242,11 +252,14 @@ fn report(
                 FailedCompletionObservation if qualified => (true, Support::Supported, "Bounded Windows Claude Code 2.1.269 print-mode invalid-model scenario emitted StopFailure with no Final Answer. Application projection may require durable replay."),
                 PreToolDecision if qualified => (true, Support::Unknown, "One native Write denial prevented file creation on this exact context. Edit, shell, MCP, subagent and effective-settings enforcement remain unqualified; the complete pre-tool requirement is not met."),
                 PreToolDecision => (true, Support::Unknown, "Native pre-tool blocking and all edit paths need live qualification for this context; a decoder fixture or allowed Write is insufficient."),
+                RepeatedCompletionBlocking if claude_stop_chain_bypass => (true, Support::Unknown, "Recorded Linux x86_64 Claude Code 2.1.296 interactive counterexample: without the built-in guard, competing classic.Stop mod middleware returned without next, skipped the command Stop hook, and reached native successful completion. Guarded controls resisted this competitor for both managed and workspace hooks. Actual session/configuration protection, continuation limits and handler failures still need qualification. Guarded missing/timed-out commands also allowed native completion. Other versions/platforms/modes remain separately unqualified."),
                 RepeatedCompletionBlocking => (true, Support::Unknown, "Effective continuation limits and competing settings are not attested. A bounded scenario with an explicit unlimited setting does not prove unconditional enforcement."),
                 CompletionDecision | FinalAnswerCapture | FailedCompletionObservation => (true, Support::Unknown, "Adapter exists, but this version/platform/mode has no matching native qualification scenario."),
-                SuccessfulCompletionObservation => (false, Support::Unsupported, "No accepted-completion observation is implemented for user-started sessions. Stop Allow and SessionEnd are insufficient."),
+                SuccessfulCompletionObservation => (true, Support::Unknown, "Owned Claude modules forward correlated native Turn start/outcome observations through the existing journal, retaining answer/abort/refusal/error. An application must correlate the latest authorized proposal and unchanged evidence. Native outcome delivery, competing hooks, protected caller identity and this host/version/mode remain unqualified; Stop Allow and SessionEnd are insufficient."),
+                MessageReconciliation if claude_dispatch_provenance_gap => (false, Support::Unsupported, "Recorded Linux x86_64 Claude Code 2.1.308 interactive experiment: a turn.step handler supplied text and usage without a main-loop model request. Native core traces distinguished that omission, but the observed core trace supplied no exact input witness or durable operation receipt. Separate title requests also carried the prompt and are not consumption by the target Turn. Existing append/handoff records remain candidates; qualified acknowledgement, consumption and lookup-only reconciliation are unavailable. Other versions/platforms/modes remain separately unqualified."),
                 MessageSubmission | MessageReconciliation => (false, Support::Unsupported, "Existing-session native message transport and receipt reconciliation are not implemented. Managed session transports are a different topology."),
-                NativeSessionIdentity => (false, Support::Unsupported, "No native invocation nonce or equivalent process identity is implemented; delayed hooks may reuse session IDs."),
+                NativeSessionIdentity => (true, Support::Unknown, "Owned Claude tool modules publish a fresh invocation ID into installation-scoped inherited process context and bootstrap a matching recorded SessionStart. Existing binding/journal checks reject observed old invocations. Controlled Linux startup matches tool/native session and recorded generation; this is not native process authentication, liveness, proof against an unseen delayed start, or Windows qualification."),
+                HardHookDeadline if claude_stop_chain_bypass || claude_dispatch_provenance_gap => (true, Support::Unknown, "Recorded Linux x86_64 Claude Code 2.1.296 and 2.1.308 interactive counterexamples with the built-in guard active: a missing command and a command cancelled at the native Stop timeout both reached successful native completion. Claude explicitly ignored onFailure:block on Stop. Matched command Block and missing-validator fallback forced continuation. Prompt/tool onFailure:block protection does not establish fail-closed native completion on handler failure. Other versions/platforms/modes remain separately unqualified."),
                 HardHookDeadline => (true, Support::Unknown, "Callback timeout reserves 250 ms for response handling; blocking workers and operating-system I/O do not establish a universal hard deadline."),
             }
         };
@@ -268,6 +281,181 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_dispatch_diagnostic_is_scoped_and_never_grants_reconciliation() {
+        for (platform, architecture, mode, version, matches) in [
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.308 (Claude Code)",
+                true,
+            ),
+            (
+                "windows",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.308 (Claude Code)",
+                false,
+            ),
+            (
+                "macos",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.308 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "aarch64",
+                SessionMode::Interactive,
+                "2.1.308 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Print,
+                "2.1.308 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Unknown,
+                "2.1.308 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.309 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.296 (Claude Code)",
+                false,
+            ),
+        ] {
+            let report = report("claude", platform, architecture, mode, Ok(version.into()));
+            let error = report
+                .require(&[IntegrationCapability::MessageReconciliation])
+                .unwrap_err();
+            assert_eq!(error.unmet.len(), 1);
+            assert!(!error.unmet[0].implemented);
+            assert_eq!(error.unmet[0].support, Support::Unsupported);
+            assert_eq!(
+                error.unmet[0].detail.contains("Separate title requests"),
+                matches
+            );
+            assert!(report
+                .require(&[IntegrationCapability::MessageSubmission])
+                .is_err());
+            let deadline = report
+                .require(&[IntegrationCapability::HardHookDeadline])
+                .unwrap_err();
+            assert_eq!(deadline.unmet[0].support, Support::Unknown);
+            assert_eq!(
+                deadline.unmet[0].detail.contains("2.1.308 interactive counterexamples"),
+                matches || version == "2.1.296 (Claude Code)"
+            );
+        }
+        let unavailable = report(
+            "claude",
+            "linux",
+            "x86_64",
+            SessionMode::Interactive,
+            Err("probe failed".into()),
+        );
+        let error = unavailable
+            .require(&[IntegrationCapability::MessageReconciliation])
+            .unwrap_err();
+        assert!(!error.unmet[0].detail.contains("Separate title requests"));
+    }
+    #[test]
+    fn claude_stop_chain_counterexample_is_scoped_and_never_promotes_enforcement() {
+        for (platform, architecture, mode, version, matches) in [
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.296 (Claude Code)",
+                true,
+            ),
+            (
+                "windows",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.296 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "aarch64",
+                SessionMode::Interactive,
+                "2.1.296 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Print,
+                "2.1.296 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Unknown,
+                "2.1.296 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.297 (Claude Code)",
+                false,
+            ),
+        ] {
+            let report = report("claude", platform, architecture, mode, Ok(version.into()));
+            let error = report
+                .require(&[IntegrationCapability::RepeatedCompletionBlocking])
+                .unwrap_err();
+            assert_eq!(error.unmet.len(), 1);
+            assert!(error.unmet[0].implemented);
+            assert_eq!(error.unmet[0].support, Support::Unknown);
+            assert_eq!(
+                error.unmet[0]
+                    .detail
+                    .contains("skipped the command Stop hook"),
+                matches
+            );
+            let deadline = report
+                .require(&[IntegrationCapability::HardHookDeadline])
+                .unwrap_err();
+            assert_eq!(deadline.unmet.len(), 1);
+            assert!(deadline.unmet[0].implemented);
+            assert_eq!(deadline.unmet[0].support, Support::Unknown);
+            assert_eq!(
+                deadline.unmet[0]
+                    .detail
+                    .contains("ignored onFailure:block on Stop"),
+                matches
+            );
+            // A known policy bypass does not invent a transport or acceptance proof.
+            assert!(report
+                .require(&[
+                    IntegrationCapability::MessageSubmission,
+                    IntegrationCapability::SuccessfulCompletionObservation
+                ])
+                .is_err());
+        }
+    }
     #[test]
     fn cursor_dispatch_failure_is_scoped_without_inventing_an_enforcement_success() {
         for (platform, arch, mode, version, has_failure) in [
@@ -347,7 +535,9 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.unmet.len(), 4);
         assert_eq!(error.unmet[0].support, Support::Unknown);
-        assert_eq!(error.unmet[1].support, Support::Unsupported);
+        assert_eq!(error.unmet[1].support, Support::Unknown);
+        assert!(error.unmet[1].implemented);
+        assert_eq!(error.unmet[2].support, Support::Unsupported);
         assert_eq!(error.unmet[3].support, Support::Unknown);
     }
     #[test]

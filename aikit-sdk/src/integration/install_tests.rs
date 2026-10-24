@@ -1,5 +1,1175 @@
 use super::*;
 
+#[test]
+fn legacy_claude_receipt_upgrades_action_failure_protection_without_adopting_other_hooks() {
+    let mut f = Fixture::new();
+    f.spec.events = vec![HookEvent::BeforeTool, HookEvent::InputSubmitted];
+    let unrelated = json!({"hooks":{"UserPromptSubmit":[{"hooks":[
+        {"type":"command","command":"owner-prompt"}]}]}});
+    f.write(&unrelated);
+    let initial = f.install();
+    // Retain a prior-release receipt and exactly matching prior configuration.
+    let connection = f.service.connection().unwrap();
+    let mut receipt: Receipt = serde_json::from_str(
+        &receipt_json(&connection, &initial.installation_id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut document = f.read();
+    for owned in &mut receipt.owned {
+        let entries = document["hooks"][&owned.event].as_array_mut().unwrap();
+        let entry = entries
+            .iter_mut()
+            .find(|entry| **entry == owned.entry)
+            .unwrap();
+        owned.entry["hooks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("onFailure");
+        *entry = owned.entry.clone();
+    }
+    connection
+        .execute(
+            "UPDATE installations SET body=?1 WHERE id=?2",
+            params![
+                serde_json::to_string(&receipt).unwrap(),
+                initial.installation_id
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    f.write(&document);
+    assert!(matches!(
+        f.service
+            .installation_status(&initial.installation_id)
+            .unwrap(),
+        InstallationStatus::Configured { .. }
+    ));
+    let update = f.service.plan_install(f.spec.clone()).unwrap();
+    assert_eq!(
+        f.read(),
+        document,
+        "preview must not mutate legacy settings"
+    );
+    f.service.apply_install(&update.id).unwrap();
+    assert_eq!(
+        f.read()["hooks"]["UserPromptSubmit"][1]["hooks"][0]["onFailure"],
+        "block"
+    );
+    assert_eq!(
+        f.read()["hooks"]["PreToolUse"][0]["hooks"][0]["onFailure"],
+        "block"
+    );
+    let remove = f.service.plan_remove(&initial.installation_id).unwrap();
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), unrelated);
+}
+
+#[test]
+fn claude_action_failure_protection_is_owned_and_drift_checked() {
+    let mut f = Fixture::new();
+    f.spec.events = vec![
+        HookEvent::InputSubmitted,
+        HookEvent::BeforeTool,
+        HookEvent::CompletionProposed,
+        HookEvent::SessionStarted,
+        HookEvent::SessionEnded,
+    ];
+    let unrelated = json!({"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[
+        {"type":"command","command":"owner-validator","onFailure":"block"}]}]},"owner":"retain"});
+    f.write(&unrelated);
+    let installed = f.install();
+    let document = f.read();
+    assert_eq!(
+        document["hooks"]["UserPromptSubmit"][0]["hooks"][0]["onFailure"],
+        "block"
+    );
+    assert_eq!(
+        document["hooks"]["PreToolUse"][1]["hooks"][0]["onFailure"],
+        "block"
+    );
+    for event in ["Stop", "SessionStart", "SessionEnd"] {
+        assert!(document["hooks"][event][0]["hooks"][0]
+            .get("onFailure")
+            .is_none());
+    }
+    let mut edited = document.clone();
+    edited["hooks"]["PreToolUse"][1]["hooks"][0]["onFailure"] = json!("warn");
+    f.write(&edited);
+    assert!(matches!(
+        f.service
+            .installation_status(&installed.installation_id)
+            .unwrap(),
+        InstallationStatus::Drifted { .. }
+    ));
+    assert!(f.service.plan_remove(&installed.installation_id).is_err());
+    assert_eq!(f.read(), edited);
+    f.write(&document);
+    let remove = f.service.plan_remove(&installed.installation_id).unwrap();
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), unrelated);
+}
+
+#[test]
+fn initial_bundle_recovers_lost_replies_and_partial_writes_then_removes_only_owned_files() {
+    let f = Fixture::new();
+    let unrelated = json!({"owner":"retain","hooks":{"Stop":[{"matcher":"", "hooks":[{"type":"command","command":"owner-hook"}]}]}});
+    f.write(&unrelated);
+    let original = fs::read(&f.config).unwrap();
+    let id = f.service.installation_identity(&f.spec).unwrap();
+    let tool = tool_spec(&f, &id);
+    let plan = f
+        .service
+        .plan_initial_with_agent_tool_id(
+            "initial-owner",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool.clone(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(plan.installation_id, id);
+    assert!(!plan.files.is_empty());
+    assert_eq!(fs::read(&f.config).unwrap(), original);
+    assert!(receipt_json(&f.service.connection().unwrap(), &id)
+        .unwrap()
+        .is_none());
+    for file in &plan.files {
+        // Only the pre-existing settings may exist before applying the bundle.
+        if file.path != f.config {
+            assert!(!file.path.exists());
+        }
+    }
+    assert_eq!(
+        f.service
+            .plan_initial_with_agent_tool_id(
+                "initial-owner",
+                f.spec.clone(),
+                CompletionBlockingPolicy::NativeDefault,
+                tool.clone(),
+                None,
+            )
+            .unwrap()
+            .id,
+        plan.id
+    );
+    assert!(matches!(
+        f.service.apply_with_tool_fault(&plan.id, false, Some(1)),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    assert_eq!(fs::read(&f.config).unwrap(), original);
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    assert_eq!(
+        reopened
+            .plan_initial_with_agent_tool_id(
+                "initial-owner",
+                f.spec.clone(),
+                CompletionBlockingPolicy::NativeDefault,
+                tool.clone(),
+                None,
+            )
+            .unwrap()
+            .id,
+        plan.id
+    );
+    reopened.apply_install(&plan.id).unwrap();
+    let guard = reopened.applied_installation_guard(&plan.id).unwrap();
+    assert_eq!(guard.installation().id, id);
+    drop(guard);
+    let receipt: Receipt = serde_json::from_str(
+        &receipt_json(&reopened.connection().unwrap(), &id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    check_agent_tool(&f.spec.workspace, receipt.agent_tool.as_ref().unwrap()).unwrap();
+    let root = f
+        .spec
+        .workspace
+        .join(&receipt.agent_tool.unwrap().relative_root);
+    assert!(fs::read_to_string(root.join("hooks/register.js"))
+        .unwrap()
+        .contains("hook"));
+    assert_eq!(f.read()["owner"], "retain");
+    assert_eq!(
+        reopened
+            .plan_initial_with_agent_tool_id(
+                "initial-owner",
+                f.spec.clone(),
+                CompletionBlockingPolicy::NativeDefault,
+                tool.clone(),
+                None,
+            )
+            .unwrap()
+            .id,
+        plan.id
+    );
+    let mut changed = tool.clone();
+    changed.instructions.push_str(" changed");
+    assert!(matches!(
+        reopened.plan_initial_with_agent_tool_id(
+            "initial-owner",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            changed,
+            None,
+        ),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert!(matches!(
+        reopened.plan_update_with_agent_tool_id(
+            "initial-owner",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool.clone(),
+            None,
+        ),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert!(matches!(
+        reopened.plan_initial_with_agent_tool_id(
+            "another-initial",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool,
+            None,
+        ),
+        Err(IntegrationError::Conflict(_))
+    ));
+    let remove = reopened.plan_remove(&id).unwrap();
+    reopened.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), unrelated);
+    assert!(!root.exists());
+    assert!(reopened.applied_installation_guard(&plan.id).is_err());
+}
+
+#[test]
+fn initial_bundle_refuses_invalid_identity_unsupported_provider_and_attached_binding() {
+    let f = Fixture::new();
+    let id = f.service.installation_identity(&f.spec).unwrap();
+    assert!(!f.config.exists());
+    assert_eq!(
+        f.service
+            .connection()
+            .unwrap()
+            .query_row::<u32, _, _>("SELECT count(*) FROM install_plans", [], |r| r.get(0))
+            .unwrap(),
+        0
+    );
+    let tool = tool_spec(&f, &id);
+    assert!(matches!(
+        f.service.plan_update_with_agent_tool_id(
+            "update-absent",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool.clone(),
+            None,
+        ),
+        Err(IntegrationError::NotFound)
+    ));
+    let mut bad = tool.clone();
+    bad.installation_id = "foreign".into();
+    assert!(matches!(
+        f.service.plan_initial_with_agent_tool_id(
+            "bad-identity",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            bad,
+            None,
+        ),
+        Err(IntegrationError::Invalid(_))
+    ));
+    let mut pi = f.spec.clone();
+    pi.agent_key = "pi".into();
+    pi.events.push(HookEvent::SessionStarted);
+    let pi_tool = tool_spec(&f, &f.service.installation_identity(&pi).unwrap());
+    assert!(matches!(
+        f.service.plan_initial_with_agent_tool_id(
+            "unsupported",
+            pi,
+            CompletionBlockingPolicy::NativeDefault,
+            pi_tool,
+            None,
+        ),
+        Err(IntegrationError::Unsupported(_))
+    ));
+    synthetic_binding(&f, &id);
+    assert!(f
+        .service
+        .plan_initial_with_agent_tool_id(
+            "attached",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool,
+            None,
+        )
+        .is_err());
+    assert!(!f.config.exists());
+    assert_eq!(
+        f.service
+            .connection()
+            .unwrap()
+            .query_row::<u32, _, _>("SELECT count(*) FROM install_plans", [], |r| r.get(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn initial_bundle_rechecks_attachment_during_apply_and_prepared_recovery() {
+    let f = Fixture::new();
+    let id = f.service.installation_identity(&f.spec).unwrap();
+    let plan = f
+        .service
+        .plan_initial_with_agent_tool_id(
+            "initial-detach",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool_spec(&f, &id),
+            None,
+        )
+        .unwrap();
+    synthetic_binding(&f, &id);
+    assert!(f.service.apply_install(&plan.id).is_err());
+    assert!(!f.config.exists());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    assert!(matches!(
+        f.service.apply_with_tool_fault(&plan.id, false, Some(1)),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=0", [])
+        .unwrap();
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    assert!(reopened.apply_install(&plan.id).is_err());
+    assert!(!f.config.exists());
+    reopened
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    reopened.apply_install(&plan.id).unwrap();
+    drop(reopened.applied_installation_guard(&plan.id).unwrap());
+}
+
+#[test]
+fn initial_bundle_preserves_external_edits_and_rejects_changed_scope() {
+    let f = Fixture::new();
+    let id = f.service.installation_identity(&f.spec).unwrap();
+    let tool = tool_spec(&f, &id);
+    let plan = f
+        .service
+        .plan_initial_with_agent_tool_id(
+            "initial-drift",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool.clone(),
+            None,
+        )
+        .unwrap();
+    let mut changed_scope = f.spec.clone();
+    changed_scope.application_id = "foreign".into();
+    assert!(matches!(
+        f.service.plan_initial_with_agent_tool_id(
+            "initial-drift",
+            changed_scope,
+            CompletionBlockingPolicy::NativeDefault,
+            tool,
+            None,
+        ),
+        Err(IntegrationError::Conflict(_))
+    ));
+    let owner = json!({"owner":"changed after planning"});
+    f.write(&owner);
+    assert!(matches!(
+        f.service.apply_install(&plan.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(f.read(), owner);
+    assert!(receipt_json(&f.service.connection().unwrap(), &id)
+        .unwrap()
+        .is_none());
+    for file in &plan.files {
+        assert!(!file.path.exists());
+    }
+}
+
+#[test]
+fn initial_bundle_includes_completion_policy_and_optional_feedback_in_the_same_plan() {
+    let mut f = Fixture::new();
+    let id = f.service.installation_identity(&f.spec).unwrap();
+    let tool = tool_spec(&f, &id);
+    let handler = f.spec.handler.clone();
+    assert!(matches!(
+        f.service.plan_initial_with_agent_tool_id(
+            "initial-feedback",
+            f.spec.clone(),
+            CompletionBlockingPolicy::RequireUnbounded,
+            tool.clone(),
+            Some(handler.clone()),
+        ),
+        Err(IntegrationError::Invalid(_))
+    ));
+    f.spec.events.push(HookEvent::InputSubmitted);
+    let plan = f
+        .service
+        .plan_initial_with_agent_tool_id(
+            "initial-feedback",
+            f.spec.clone(),
+            CompletionBlockingPolicy::RequireUnbounded,
+            tool,
+            Some(handler),
+        )
+        .unwrap();
+    assert_eq!(
+        plan.completion_policy,
+        CompletionBlockingPolicy::RequireUnbounded
+    );
+    assert!(!plan.settings.is_empty());
+    assert!(!f.config.exists());
+    f.service.apply_install(&plan.id).unwrap();
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "0");
+    let receipt: Receipt = serde_json::from_str(
+        &receipt_json(&f.service.connection().unwrap(), &id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    check_agent_tool(&f.spec.workspace, receipt.agent_tool.as_ref().unwrap()).unwrap();
+    let root = f
+        .spec
+        .workspace
+        .join(&receipt.agent_tool.unwrap().relative_root);
+    assert!(fs::read_to_string(root.join("hooks/register.js"))
+        .unwrap()
+        .contains("await startMessagePump($);"));
+    let remove = f.service.plan_remove(&id).unwrap();
+    f.service.apply_install(&remove.id).unwrap();
+    assert!(!root.exists());
+}
+
+#[test]
+fn malformed_legacy_detachment_scope_refuses_upgrade_without_replacing_history() {
+    let f = Fixture::new();
+    f.install();
+    let config = fs::read(&f.config).unwrap();
+    let connection = f.service.connection().unwrap();
+    connection.execute_batch("INSERT INTO session_bindings VALUES ('bad-legacy','{}',1); DROP TABLE binding_admission_floors; PRAGMA user_version=14").unwrap();
+    assert!(IntegrationService::upgrade_existing(&f.service.state).is_err());
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+            .unwrap(),
+        14
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT reference FROM session_bindings WHERE id='bad-legacy'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+        "{}"
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), config);
+}
+
+#[test]
+fn schema_fourteen_upgrade_seeds_detached_binding_admission_floor() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    synthetic_binding(&f, &hooks.installation_id);
+    f.service.connection().unwrap().execute_batch("UPDATE session_bindings SET detached=1; DROP TABLE binding_admission_floors; PRAGMA user_version=14").unwrap();
+    assert!(IntegrationService::open_existing(&f.service.state).is_err());
+    let report = IntegrationService::upgrade_existing(&f.service.state).unwrap();
+    assert_eq!(
+        (
+            report.previous_schema,
+            report.current_schema,
+            report.changed
+        ),
+        (14, 16, true)
+    );
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    let floor: i64 = reopened
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT cursor FROM binding_admission_floors WHERE installation_id=?1",
+            [&hooks.installation_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(floor, 0);
+    assert!(reopened
+        .attached_bindings("review-app", "claude", &f.spec.workspace, None, 50)
+        .unwrap()
+        .records
+        .is_empty());
+}
+
+#[test]
+fn schema_thirteen_upgrade_retains_caller_update_identity_and_refuses_unsettled_work() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    let tool = tool_spec(&f, &hooks.installation_id);
+    f.service
+        .plan_update_with_agent_tool_id(
+            "upgrade-intent",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool.clone(),
+            None,
+        )
+        .unwrap();
+    f.service
+        .connection()
+        .unwrap()
+        .pragma_update(None, "user_version", 13)
+        .unwrap();
+    assert!(IntegrationService::open_existing(&f.service.state).is_err());
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    f.service.apply_install("upgrade-intent").unwrap();
+    let report = IntegrationService::upgrade_existing(&f.service.state).unwrap();
+    assert_eq!(
+        (
+            report.previous_schema,
+            report.current_schema,
+            report.changed
+        ),
+        (13, 16, true)
+    );
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    assert_eq!(
+        reopened
+            .plan_update_with_agent_tool_id(
+                "upgrade-intent",
+                f.spec.clone(),
+                CompletionBlockingPolicy::NativeDefault,
+                tool,
+                None
+            )
+            .unwrap()
+            .id,
+        "upgrade-intent"
+    );
+    reopened
+        .applied_installation_guard("upgrade-intent")
+        .unwrap();
+}
+
+#[test]
+fn consumer_update_id_survives_lost_plan_reply_and_guard_refuses_superseded_revision() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    let mut spec = f.spec.clone();
+    spec.handler.arguments.push("new-startup".into());
+    let tool = tool_spec(&f, &hooks.installation_id);
+    let plan = f
+        .service
+        .plan_update_with_agent_tool_id(
+            "owner-update",
+            spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool.clone(),
+            None,
+        )
+        .unwrap();
+    assert_eq!(plan.id, "owner-update");
+    assert_eq!(
+        f.service
+            .plan_update_with_agent_tool_id(
+                "owner-update",
+                spec.clone(),
+                CompletionBlockingPolicy::NativeDefault,
+                tool.clone(),
+                None
+            )
+            .unwrap()
+            .id,
+        plan.id
+    );
+    let mut changed = tool.clone();
+    changed.instructions.push_str(" changed");
+    assert!(matches!(
+        f.service.plan_update_with_agent_tool_id(
+            "owner-update",
+            spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            changed,
+            None
+        ),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert!(f.service.applied_installation_guard(&plan.id).is_err());
+    assert!(f
+        .service
+        .apply_with_tool_fault(&plan.id, false, Some(1))
+        .is_err());
+    assert_eq!(
+        f.service
+            .plan_update_with_agent_tool_id(
+                "owner-update",
+                spec.clone(),
+                CompletionBlockingPolicy::NativeDefault,
+                tool.clone(),
+                None
+            )
+            .unwrap()
+            .id,
+        plan.id
+    );
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    reopened.apply_install(&plan.id).unwrap();
+    let guard = reopened.applied_installation_guard(&plan.id).unwrap();
+    assert_eq!(guard.installation().spec, spec);
+    assert!(reopened.plan_remove(&hooks.installation_id).is_err());
+    drop(guard);
+    let next = reopened
+        .plan_agent_tool(&hooks.installation_id, tool.clone())
+        .unwrap();
+    reopened.apply_install(&next.id).unwrap();
+    assert!(reopened.applied_installation_guard(&plan.id).is_err());
+    assert_eq!(
+        reopened
+            .plan_update_with_agent_tool_id(
+                "owner-update",
+                spec,
+                CompletionBlockingPolicy::NativeDefault,
+                tool,
+                None
+            )
+            .unwrap()
+            .id,
+        plan.id
+    );
+    assert_eq!(
+        reopened
+            .connection()
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM install_plans WHERE id='owner-update'",
+                [],
+                |r| r.get::<_, u32>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn consumer_update_cancel_removes_only_an_unstarted_owned_preview() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    let tool = tool_spec(&f, &hooks.installation_id);
+    let bytes = fs::read(&f.config).unwrap();
+    f.service
+        .plan_update_with_agent_tool_id(
+            "cancel-me",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool.clone(),
+            None,
+        )
+        .unwrap();
+    assert!(f
+        .service
+        .discard_planned_update("cancel-me", "foreign", "claude", &f.spec.workspace)
+        .is_err());
+    f.service
+        .discard_planned_update("cancel-me", "review-app", "claude", &f.spec.workspace)
+        .unwrap();
+    assert!(matches!(
+        f.service.apply_install("cancel-me"),
+        Err(IntegrationError::NotFound)
+    ));
+    assert_eq!(fs::read(&f.config).unwrap(), bytes);
+    f.service
+        .discard_planned_update("absent", "review-app", "claude", &f.spec.workspace)
+        .unwrap();
+    f.service
+        .plan_update_with_agent_tool_id(
+            "begun",
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+            tool,
+            None,
+        )
+        .unwrap();
+    assert!(f.service.apply_inner("begun", true).is_err());
+    assert!(f
+        .service
+        .discard_planned_update("begun", "review-app", "claude", &f.spec.workspace)
+        .is_err());
+    f.service.apply_install("begun").unwrap();
+    assert!(f
+        .service
+        .discard_planned_update("begun", "review-app", "claude", &f.spec.workspace)
+        .is_err());
+}
+
+fn replacement_plan(f: &Fixture, id: &str) -> Result<InstallPlan, IntegrationError> {
+    let mut spec = f.spec.clone();
+    spec.handler.arguments.push("replacement-startup".into());
+    let mut tool = tool_spec(f, id);
+    tool.handler.arguments.push("replacement-callable".into());
+    tool.instructions.push_str(" replacement instructions");
+    f.service
+        .plan_update_with_agent_tool(spec, CompletionBlockingPolicy::NativeDefault, tool, None)
+}
+
+fn synthetic_binding(f: &Fixture, id: &str) {
+    let reference = super::super::SessionRef {
+        installation_id: id.into(),
+        installation_revision: "fixture".into(),
+        native_session_id: "fixture".into(),
+        invocation_id: None,
+        start_cursor: 1,
+    };
+    f.service
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO session_bindings VALUES ('bundle-fixture',?1,0)",
+            [serde_json::to_string(&reference).unwrap()],
+        )
+        .unwrap();
+}
+
+#[test]
+fn bundled_replacement_recovers_partial_files_and_publishes_one_consistent_receipt() {
+    let f = Fixture::new();
+    f.write(&json!({"owner":"retain"}));
+    let hooks = f.install();
+    let tool = f
+        .service
+        .plan_agent_tool(
+            &hooks.installation_id,
+            tool_spec(&f, &hooks.installation_id),
+        )
+        .unwrap();
+    f.service.apply_install(&tool.id).unwrap();
+    let before = fs::read(&f.config).unwrap();
+    let plan = replacement_plan(&f, &hooks.installation_id).unwrap();
+    assert!(!plan.removal && !plan.files.is_empty());
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    assert!(matches!(
+        f.service.apply_with_tool_fault(&plan.id, false, Some(1)),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    assert_eq!(
+        reopened
+            .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+            .unwrap()
+            .unwrap()
+            .id,
+        plan.id
+    );
+    let InstallationStatus::Configured { installation } = reopened.apply_install(&plan.id).unwrap()
+    else {
+        panic!("not configured")
+    };
+    assert!(installation
+        .spec
+        .handler
+        .arguments
+        .contains(&"replacement-startup".into()));
+    assert_eq!(f.read()["owner"], "retain");
+    let raw = receipt_json(&reopened.connection().unwrap(), &hooks.installation_id)
+        .unwrap()
+        .unwrap();
+    let receipt: Receipt = serde_json::from_str(&raw).unwrap();
+    check_agent_tool(&f.spec.workspace, receipt.agent_tool.as_ref().unwrap()).unwrap();
+    let root = f
+        .spec
+        .workspace
+        .join(&receipt.agent_tool.unwrap().relative_root);
+    assert!(fs::read_to_string(root.join("hooks/register.js"))
+        .unwrap()
+        .contains("replacement-startup"));
+    assert!(fs::read_to_string(root.join("hooks/register.js"))
+        .unwrap()
+        .contains("replacement-callable"));
+    reopened.apply_install(&plan.id).unwrap();
+}
+
+#[test]
+fn bundled_replacement_rechecks_detach_at_plan_apply_and_recovery() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    synthetic_binding(&f, &hooks.installation_id);
+    let before = fs::read(&f.config).unwrap();
+    assert!(replacement_plan(&f, &hooks.installation_id).is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    let plan = replacement_plan(&f, &hooks.installation_id).unwrap();
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=0", [])
+        .unwrap();
+    assert!(f.service.apply_install(&plan.id).is_err());
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    assert!(f
+        .service
+        .apply_with_tool_fault(&plan.id, false, Some(1))
+        .is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=0", [])
+        .unwrap();
+    assert!(f.service.apply_install(&plan.id).is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=0", [])
+        .unwrap();
+    assert!(f.service.applied_installation_guard(&plan.id).is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    f.service.applied_installation_guard(&plan.id).unwrap();
+}
+
+#[test]
+fn schema_twelve_upgrade_requires_detached_settled_state_and_retains_receipts() {
+    let f = Fixture::new();
+    let installed = f.install();
+    let bytes = fs::read(&f.config).unwrap();
+    synthetic_binding(&f, &installed.installation_id);
+    f.service
+        .connection()
+        .unwrap()
+        .pragma_update(None, "user_version", 12)
+        .unwrap();
+    assert!(IntegrationService::open_existing(&f.service.state).is_err());
+    assert!(IntegrationService::upgrade_existing(&f.service.state).is_err());
+    f.service
+        .connection()
+        .unwrap()
+        .execute("UPDATE session_bindings SET detached=1", [])
+        .unwrap();
+    f.service
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO install_plans VALUES ('unsettled','fixture','planned','{}')",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    f.service
+        .connection()
+        .unwrap()
+        .execute("DELETE FROM install_plans WHERE id='unsettled'", [])
+        .unwrap();
+    let upgrade = IntegrationService::upgrade_existing(&f.service.state).unwrap();
+    assert_eq!(
+        (
+            upgrade.previous_schema,
+            upgrade.current_schema,
+            upgrade.changed
+        ),
+        (12, 16, true)
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), bytes);
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    assert_eq!(
+        reopened
+            .find_installation("review-app", "claude", &f.spec.workspace)
+            .unwrap()
+            .id,
+        installed.installation_id
+    );
+    assert!(
+        !IntegrationService::upgrade_existing(&f.service.state)
+            .unwrap()
+            .changed
+    );
+}
+
+#[test]
+fn pending_plan_lookup_recovers_only_the_scoped_interrupted_apply() {
+    let f = Fixture::new();
+    let original = json!({"owner":true});
+    f.write(&original);
+    let hooks = f.install();
+    let removal = f.service.plan_remove(&hooks.installation_id).unwrap();
+    assert!(f
+        .service
+        .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        f.service.apply_inner(&removal.id, true),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    let pending = reopened
+        .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending.id, removal.id);
+    assert!(pending.removal);
+    assert!(reopened
+        .pending_installation_plan("other-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .is_none());
+    assert!(reopened
+        .pending_installation_plan("review-app", "codex", &f.spec.workspace)
+        .unwrap()
+        .is_none());
+    let other = f._dir.path().join("other");
+    fs::create_dir(&other).unwrap();
+    assert!(reopened
+        .pending_installation_plan("review-app", "claude", &other)
+        .unwrap()
+        .is_none());
+    assert!(matches!(
+        reopened.apply_install(&pending.id).unwrap(),
+        InstallationStatus::Absent
+    ));
+    assert_eq!(f.read(), original);
+    assert!(reopened
+        .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn repeated_unstarted_removal_reuses_its_original_plan() {
+    let f = Fixture::new();
+    f.write(&json!({"owner": true}));
+    let hooks = f.install();
+    let first = f.service.plan_remove(&hooks.installation_id).unwrap();
+    let before = fs::read(&f.config).unwrap();
+    let reopened = IntegrationService::open_existing(&f.service.state).unwrap();
+    let repeated = reopened.plan_remove(&hooks.installation_id).unwrap();
+    assert_eq!(
+        first.id, repeated.id,
+        "a lost planning reply must not orphan another removal"
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    let connection = reopened.connection().unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM install_plans WHERE installation_id=?1 AND phase!='applied'",
+                [&hooks.installation_id],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        1
+    );
+    reopened.apply_install(&repeated.id).unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM install_plans WHERE installation_id=?1 AND phase!='applied'",
+                [&hooks.installation_id],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&f.config).unwrap()).unwrap(),
+        json!({"owner": true})
+    );
+}
+
+#[test]
+fn unstarted_removal_does_not_retarget_after_owner_configuration_changes() {
+    let f = Fixture::new();
+    f.write(&json!({"owner": true}));
+    let hooks = f.install();
+    let first = f.service.plan_remove(&hooks.installation_id).unwrap();
+    let mut changed: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
+    changed["owner"] = json!("edited after removal intent");
+    f.write(&changed);
+    let before = fs::read(&f.config).unwrap();
+    assert!(
+        matches!(f.service.plan_remove(&hooks.installation_id), Err(IntegrationError::Conflict(message)) if message.contains(&first.id))
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    let connection = f.service.connection().unwrap();
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM install_plans WHERE installation_id=?1 AND phase!='applied'",
+                [&hooks.installation_id],
+                |row| row.get::<_, u32>(0)
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn pending_plan_lookup_exposes_install_kind_without_applying_and_keeps_conflicts() {
+    let f = Fixture::new();
+    let install = f.service.plan_install(f.spec.clone()).unwrap();
+    assert!(f.service.apply_inner(&install.id, true).is_err());
+    let before = fs::read(&f.config).unwrap();
+    let pending = f
+        .service
+        .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .unwrap();
+    assert!(!pending.removal);
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    f.write(&json!({"external":"preserve"}));
+    assert!(matches!(
+        f.service.apply_install(&pending.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(f.read(), json!({"external":"preserve"}));
+    assert!(f
+        .service
+        .pending_installation_plan("review-app", "claude", &f.spec.workspace)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn pending_plan_lookup_rejects_corrupt_scope() {
+    let f = Fixture::new();
+    let install = f.service.plan_install(f.spec.clone()).unwrap();
+    assert!(f.service.apply_inner(&install.id, true).is_err());
+    let connection = f.service.connection().unwrap();
+    let raw: String = connection
+        .query_row(
+            "SELECT body FROM install_plans WHERE id=?1",
+            [&install.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut pending: Pending = serde_json::from_str(&raw).unwrap();
+    pending.preview.installation_id = "foreign".into();
+    connection
+        .execute(
+            "UPDATE install_plans SET body=?2 WHERE id=?1",
+            params![install.id, serde_json::to_string(&pending).unwrap()],
+        )
+        .unwrap();
+    assert!(matches!(
+        f.service
+            .pending_installation_plan("review-app", "claude", &f.spec.workspace),
+        Err(IntegrationError::Conflict(_))
+    ));
+}
+
+#[test]
+fn existing_open_never_creates_a_missing_or_empty_journal() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    assert!(matches!(
+        IntegrationService::open_existing(&state),
+        Err(IntegrationError::NotFound)
+    ));
+    assert!(!state.exists());
+    let created = IntegrationService::open(&state).unwrap();
+    let database = state.join("integration.db");
+    fs::remove_file(&database).unwrap();
+    assert!(matches!(
+        IntegrationService::open_existing(&state),
+        Err(IntegrationError::NotFound)
+    ));
+    assert!(!database.exists());
+    fs::write(&database, []).unwrap();
+    assert!(matches!(
+        IntegrationService::open_existing(&state),
+        Err(IntegrationError::Invalid(_))
+    ));
+    assert_eq!(fs::metadata(&database).unwrap().len(), 0);
+    drop(created);
+}
+
+#[test]
+fn existing_handle_cannot_recreate_a_journal_removed_after_open() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    IntegrationService::open(&state).unwrap();
+    let existing = IntegrationService::open_existing(&state).unwrap();
+    let database = state.join("integration.db");
+    fs::remove_file(&database).unwrap();
+    assert!(existing.connection().is_err());
+    assert!(!database.exists());
+}
+
+#[test]
+fn existing_open_requires_explicit_upgrade_without_losing_owned_receipts() {
+    let fixture = Fixture::new();
+    let installed = fixture.install();
+    fixture
+        .service
+        .connection()
+        .unwrap()
+        .pragma_update(None, "user_version", 9)
+        .unwrap();
+    assert!(matches!(
+        IntegrationService::open_existing(&fixture.service.state),
+        Err(IntegrationError::Invalid(_))
+    ));
+    assert_eq!(
+        fixture
+            .service
+            .connection()
+            .unwrap()
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        9
+    );
+    // Only the separate owner-controlled initializer performs an upgrade.
+    IntegrationService::open(&fixture.service.state).unwrap();
+    let existing = IntegrationService::open_existing(&fixture.service.state).unwrap();
+    assert_eq!(
+        existing.installed(&installed.installation_id).unwrap().id,
+        installed.installation_id
+    );
+    assert_eq!(
+        existing
+            .connection()
+            .unwrap()
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        16
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn owner_drop_releases_installation_lock_with_inherited_description() {
@@ -19,11 +1189,1149 @@ fn owner_drop_releases_installation_lock_with_inherited_description() {
     assert!(lock(&path).is_ok());
 }
 
+#[test]
+fn explicit_upgrade_never_initializes_missing_empty_or_unsupported_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = directory.path().join("state");
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&state),
+        Err(IntegrationError::NotFound)
+    ));
+    assert!(!state.exists());
+    IntegrationService::open(&state).unwrap();
+    let database = state.join("integration.db");
+    fs::remove_file(&database).unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&state),
+        Err(IntegrationError::NotFound)
+    ));
+    assert!(!database.exists());
+    fs::write(&database, []).unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&state),
+        Err(IntegrationError::Invalid(_))
+    ));
+    assert_eq!(fs::metadata(&database).unwrap().len(), 0);
+    fs::remove_file(&database).unwrap();
+    for version in [0, 8, 17] {
+        let connection = Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        drop(connection);
+        assert!(matches!(
+            IntegrationService::upgrade_existing(&state),
+            Err(IntegrationError::Invalid(_))
+        ));
+        let connection = Connection::open(&database).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            version
+        );
+        assert_eq!(
+            connection
+                .query_row::<u32, _, _>(
+                    "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+            0
+        );
+        drop(connection);
+        fs::remove_file(&database).unwrap();
+    }
+}
+
+#[test]
+fn explicit_upgrade_preserves_owned_config_receipts_and_is_idempotent() {
+    let f = Fixture::new();
+    let plan = f.install();
+    let installation = f.service.installed(&plan.installation_id).unwrap();
+    let before = fs::read(&f.config).unwrap();
+    f.service.connection().unwrap().execute_batch("DROP TABLE message_handoffs; DROP TABLE message_observations; DROP TABLE outgoing_messages; PRAGMA user_version=9").unwrap();
+    let report = IntegrationService::upgrade_existing(&f.service.state).unwrap();
+    assert_eq!(
+        report,
+        StateUpgradeReport {
+            previous_schema: 9,
+            current_schema: 16,
+            changed: true
+        }
+    );
+    let upgraded = IntegrationService::open_existing(&f.service.state).unwrap();
+    assert_eq!(
+        upgraded.installed(&plan.installation_id).unwrap().spec,
+        installation.spec
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    assert_eq!(
+        IntegrationService::upgrade_existing(&f.service.state).unwrap(),
+        StateUpgradeReport {
+            previous_schema: 16,
+            current_schema: 16,
+            changed: false
+        }
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+}
+
+#[test]
+fn explicit_upgrade_refuses_attached_bindings_and_unapplied_plans() {
+    let f = Fixture::new();
+    let installation = f.install();
+    let config = fs::read(&f.config).unwrap();
+    let connection = f.service.connection().unwrap();
+    // Storage fixture only. No native session, identity or readiness is claimed.
+    let reference = serde_json::to_string(&super::super::SessionRef {
+        installation_id: installation.installation_id,
+        installation_revision: "fixture".into(),
+        native_session_id: "fixture".into(),
+        invocation_id: None,
+        start_cursor: 1,
+    })
+    .unwrap();
+    connection
+        .execute(
+            "INSERT INTO session_bindings VALUES ('fixture',?1,0)",
+            [&reference],
+        )
+        .unwrap();
+    connection.pragma_update(None, "user_version", 9).unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        9
+    );
+    connection
+        .execute_batch("UPDATE session_bindings SET detached=1")
+        .unwrap();
+    for phase in ["planned", "prepared"] {
+        connection
+            .execute(
+                "INSERT INTO install_plans VALUES ('pending','fixture',?1,'{}')",
+                [phase],
+            )
+            .unwrap();
+        assert!(
+            matches!(IntegrationService::upgrade_existing(&f.service.state), Err(IntegrationError::RecoveryRequired(id)) if id == "pending")
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+                .unwrap(),
+            9
+        );
+        connection
+            .execute("DELETE FROM install_plans WHERE id='pending'", [])
+            .unwrap();
+    }
+    assert!(
+        IntegrationService::upgrade_existing(&f.service.state)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(
+        connection
+            .query_row::<String, _, _>(
+                "SELECT reference FROM session_bindings WHERE id='fixture'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        reference
+    );
+    assert_eq!(fs::read(&f.config).unwrap(), config);
+}
+
+#[test]
+fn owner_can_inspect_and_atomically_detach_selected_legacy_handles_during_upgrade() {
+    for version in 9..=14 {
+        let f = Fixture::new();
+        let installation = f.install();
+        let config = fs::read(&f.config).unwrap();
+        let connection = f.service.connection().unwrap();
+        let reference = serde_json::to_string(&super::super::SessionRef {
+            installation_id: installation.installation_id.clone(),
+            installation_revision: "retained-revision".into(),
+            native_session_id: "owner-session".into(),
+            invocation_id: None,
+            start_cursor: 1,
+        })
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_bindings VALUES ('selected',?1,0)",
+                [&reference],
+            )
+            .unwrap();
+        connection
+            .execute_batch("DROP TABLE binding_admission_floors")
+            .unwrap();
+        if version == 9 {
+            connection
+                .execute_batch("DROP TABLE outgoing_messages; DROP TABLE message_observations")
+                .unwrap();
+        }
+        if version <= 10 {
+            connection
+                .execute_batch("DROP TABLE message_handoffs")
+                .unwrap();
+        }
+        if version <= 11 {
+            connection
+                .execute_batch("DROP TABLE message_append_checkpoints")
+                .unwrap();
+        }
+        connection
+            .pragma_update(None, "user_version", version)
+            .unwrap();
+        let page = IntegrationService::attached_bindings_for_upgrade(
+            &f.service.state,
+            "review-app",
+            "claude",
+            &f.spec.workspace,
+            None,
+            50,
+        )
+        .unwrap();
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].id, "selected");
+        assert_eq!(
+            connection
+                .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            version
+        );
+        assert!(IntegrationService::upgrade_existing(&f.service.state).is_err());
+        let report = IntegrationService::upgrade_existing_detaching(
+            &f.service.state,
+            "review-app",
+            "claude",
+            &f.spec.workspace,
+            &["selected".into()],
+        )
+        .unwrap();
+        assert_eq!(report.previous_schema, version);
+        assert_eq!(report.current_schema, 16);
+        assert!(report.changed);
+        assert!(connection
+            .query_row::<bool, _, _>(
+                "SELECT detached FROM session_bindings WHERE id='selected'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap());
+        assert_eq!(
+            connection
+                .query_row::<String, _, _>(
+                    "SELECT reference FROM session_bindings WHERE id='selected'",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            reference
+        );
+        assert_eq!(
+            connection
+                .query_row::<i64, _, _>(
+                    "SELECT cursor FROM binding_admission_floors WHERE installation_id=?1",
+                    [&installation.installation_id],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert!(
+            !IntegrationService::upgrade_existing_detaching(
+                &f.service.state,
+                "review-app",
+                "claude",
+                &f.spec.workspace,
+                &["selected".into()],
+            )
+            .unwrap()
+            .changed
+        );
+        assert_eq!(fs::read(&f.config).unwrap(), config);
+    }
+}
+
+#[test]
+fn selected_legacy_detach_rolls_back_on_scope_selection_plans_or_migration_failure() {
+    for case in [
+        "missing",
+        "foreign",
+        "unselected",
+        "pending",
+        "sql",
+        "duplicate",
+        "current",
+    ] {
+        let f = Fixture::new();
+        let installation = f.install();
+        let config = fs::read(&f.config).unwrap();
+        let connection = f.service.connection().unwrap();
+        let reference = serde_json::to_string(&super::super::SessionRef {
+            installation_id: installation.installation_id.clone(),
+            installation_revision: "retained".into(),
+            native_session_id: "owner".into(),
+            invocation_id: None,
+            start_cursor: 1,
+        })
+        .unwrap();
+        connection
+            .execute(
+                "INSERT INTO session_bindings VALUES ('selected',?1,0)",
+                [&reference],
+            )
+            .unwrap();
+        let mut ids = vec!["selected".to_owned()];
+        let version = if case == "current" { 16 } else { 9 };
+        if version == 9 {
+            connection
+                .execute_batch("DROP TABLE binding_admission_floors; PRAGMA user_version=9")
+                .unwrap();
+        }
+        match case {
+            "missing" => ids.push("missing".into()),
+            "foreign" | "unselected" => {
+                let mut other: super::super::SessionRef = serde_json::from_str(&reference).unwrap();
+                other.native_session_id = "other-owner".into();
+                if case == "foreign" {
+                    other.installation_id = "another-installation".into();
+                    ids.push("other".into());
+                }
+                connection
+                    .execute(
+                        "INSERT INTO session_bindings VALUES ('other',?1,0)",
+                        [serde_json::to_string(&other).unwrap()],
+                    )
+                    .unwrap();
+            }
+            "pending" => {
+                connection
+                    .execute(
+                        "INSERT INTO install_plans VALUES ('pending','fixture','prepared','{}')",
+                        [],
+                    )
+                    .unwrap();
+            }
+            "sql" => {
+                connection.execute_batch("DROP TABLE outgoing_messages; DROP TABLE message_handoffs; DROP TABLE message_observations; CREATE TABLE message_observations(broken TEXT)").unwrap();
+            }
+            "duplicate" => ids.push("selected".into()),
+            _ => {}
+        }
+        assert!(
+            IntegrationService::upgrade_existing_detaching(
+                &f.service.state,
+                "review-app",
+                "claude",
+                &f.spec.workspace,
+                &ids
+            )
+            .is_err(),
+            "{case}"
+        );
+        assert_eq!(
+            connection
+                .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            version,
+            "{case}"
+        );
+        assert!(
+            !connection
+                .query_row::<bool, _, _>(
+                    "SELECT detached FROM session_bindings WHERE id='selected'",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            "{case}"
+        );
+        assert_eq!(
+            connection
+                .query_row::<String, _, _>(
+                    "SELECT reference FROM session_bindings WHERE id='selected'",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            reference
+        );
+        assert_eq!(fs::read(&f.config).unwrap(), config);
+        assert_eq!(
+            connection
+                .query_row::<u32, _, _>(
+                    "SELECT count(*) FROM sqlite_master WHERE name='binding_admission_floors'",
+                    [],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            u32::from(version == 16)
+        );
+    }
+}
+
+#[test]
+fn legacy_owner_inspection_is_scoped_bounded_and_never_initializes_missing_or_malformed_state() {
+    let f = Fixture::new();
+    let installation = f.install();
+    let connection = f.service.connection().unwrap();
+    let reference = serde_json::to_string(&super::super::SessionRef {
+        installation_id: installation.installation_id,
+        installation_revision: "retained".into(),
+        native_session_id: "owner".into(),
+        invocation_id: None,
+        start_cursor: 1,
+    })
+    .unwrap();
+    for id in ["a", "b"] {
+        connection
+            .execute(
+                "INSERT INTO session_bindings VALUES (?1,?2,0)",
+                params![id, {
+                    let mut scoped: super::super::SessionRef =
+                        serde_json::from_str(&reference).unwrap();
+                    scoped.native_session_id = id.into();
+                    serde_json::to_string(&scoped).unwrap()
+                }],
+            )
+            .unwrap();
+    }
+    connection
+        .execute_batch("DROP TABLE binding_admission_floors; PRAGMA user_version=14")
+        .unwrap();
+    let page = IntegrationService::attached_bindings_for_upgrade(
+        &f.service.state,
+        "review-app",
+        "claude",
+        &f.spec.workspace,
+        None,
+        1,
+    )
+    .unwrap();
+    assert_eq!(page.records[0].id, "a");
+    let next = IntegrationService::attached_bindings_for_upgrade(
+        &f.service.state,
+        "review-app",
+        "claude",
+        &f.spec.workspace,
+        page.next_id.as_deref(),
+        1,
+    )
+    .unwrap();
+    assert_eq!(next.records[0].id, "b");
+    assert!(IntegrationService::attached_bindings_for_upgrade(
+        &f.service.state,
+        "other-app",
+        "claude",
+        &f.spec.workspace,
+        None,
+        50
+    )
+    .unwrap()
+    .records
+    .is_empty());
+    for limit in [0, 501] {
+        assert!(IntegrationService::attached_bindings_for_upgrade(
+            &f.service.state,
+            "review-app",
+            "claude",
+            &f.spec.workspace,
+            None,
+            limit
+        )
+        .is_err());
+    }
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+            .unwrap(),
+        14
+    );
+    connection
+        .execute_batch("DROP TABLE hook_invocations")
+        .unwrap();
+    assert!(IntegrationService::attached_bindings_for_upgrade(
+        &f.service.state,
+        "other-app",
+        "claude",
+        &f.spec.workspace,
+        None,
+        50
+    )
+    .is_err());
+    let missing = f.service.state.join("absent");
+    assert!(IntegrationService::attached_bindings_for_upgrade(
+        &missing,
+        "review-app",
+        "claude",
+        &f.spec.workspace,
+        None,
+        50
+    )
+    .is_err());
+    assert!(!missing.exists());
+}
+
+#[test]
+fn explicit_upgrade_rollback_retains_old_schema_on_late_sql_failure() {
+    let f = Fixture::new();
+    let connection = f.service.connection().unwrap();
+    connection.execute_batch("DROP TABLE outgoing_messages; DROP TABLE message_handoffs; DROP TABLE message_observations; CREATE TABLE message_observations(broken TEXT); PRAGMA user_version=9").unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::Sql(_))
+    ));
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        9
+    );
+    assert_eq!(connection.query_row::<u32, _, _>("SELECT count(*) FROM sqlite_master WHERE name IN ('outgoing_messages','message_handoffs')", [], |row| row.get(0)).unwrap(), 0);
+}
+
+#[test]
+fn explicit_upgrade_refuses_missing_core_history_and_another_writer() {
+    let f = Fixture::new();
+    let connection = f.service.connection().unwrap();
+    connection.execute_batch("PRAGMA user_version=9").unwrap();
+    let guard = f.service.state_lock().unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::Conflict(_))
+    ));
+    drop(guard);
+    connection
+        .execute_batch("DROP TABLE hook_invocations")
+        .unwrap();
+    assert!(matches!(
+        IntegrationService::upgrade_existing(&f.service.state),
+        Err(IntegrationError::Sql(_))
+    ));
+    assert_eq!(
+        connection
+            .pragma_query_value::<u32, _>(None, "user_version", |row| row.get(0))
+            .unwrap(),
+        9
+    );
+    assert_eq!(
+        connection
+            .query_row::<u32, _, _>(
+                "SELECT count(*) FROM sqlite_master WHERE name='hook_invocations'",
+                [],
+                |row| row.get(0)
+            )
+            .unwrap(),
+        0
+    );
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     service: IntegrationService,
     spec: InstallSpec,
     config: PathBuf,
+}
+
+fn tool_spec(f: &Fixture, id: &str) -> super::super::AgentToolSpec {
+    super::super::AgentToolSpec {
+        application_id: f.spec.application_id.clone(),
+        installation_id: id.into(),
+        tool_name: "review".into(),
+        description: "Selected review operations".into(),
+        input_schema: json!({"type":"object"}),
+        instructions: "Keep exact 雪 instructions".into(),
+        handler: HookCommand {
+            executable: std::env::current_exe().unwrap(),
+            arguments: vec!["inspect".into()],
+        },
+        timeout_ms: 5000,
+        native_completion_bridge: false,
+    }
+}
+
+#[test]
+fn native_completion_candidate_uses_owned_plan_and_preserves_other_hooks() {
+    let mut f = Fixture::new();
+    f.spec.events.push(HookEvent::InputSubmitted);
+    let unrelated = json!({"type":"command","command":"owner-command"});
+    f.write(&json!({"hooks":{"Stop":[{"hooks":[unrelated.clone()]}]}}));
+    let initial = f.install();
+    let before = fs::read(&f.config).unwrap();
+    let mut tool = tool_spec(&f, &initial.installation_id);
+    tool.native_completion_bridge = true;
+    let plan = f
+        .service
+        .plan_agent_tool(&initial.installation_id, tool)
+        .unwrap();
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    assert!(!plan.files.is_empty());
+    f.service.apply_install(&plan.id).unwrap();
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    let receipt: Receipt = serde_json::from_str(
+        &receipt_json(&f.service.connection().unwrap(), &initial.installation_id)
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    let module = f
+        .spec
+        .workspace
+        .join(receipt.agent_tool.unwrap().relative_root)
+        .join("hooks/register.js");
+    assert!(fs::read_to_string(&module)
+        .unwrap()
+        .contains("on('classic.Stop'"));
+    let remove = f.service.plan_remove(&initial.installation_id).unwrap();
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), json!({"hooks":{"Stop":[{"hooks":[unrelated]}]}}));
+    assert!(!module.exists());
+}
+
+#[test]
+fn native_completion_candidate_requires_input_observation_and_detached_bindings() {
+    let mut f = Fixture::new();
+    let initial = f.install();
+    let mut tool = tool_spec(&f, &initial.installation_id);
+    tool.native_completion_bridge = true;
+    assert!(f
+        .service
+        .plan_agent_tool(&initial.installation_id, tool)
+        .is_err());
+    f.spec.events.push(HookEvent::InputSubmitted);
+    let updated = f.service.plan_install(f.spec.clone()).unwrap();
+    f.service.apply_install(&updated.id).unwrap();
+    synthetic_binding(&f, &initial.installation_id);
+    let mut tool = tool_spec(&f, &initial.installation_id);
+    tool.native_completion_bridge = true;
+    assert!(matches!(
+        f.service.plan_agent_tool(&initial.installation_id, tool),
+        Err(IntegrationError::Conflict(_))
+    ));
+}
+
+#[test]
+fn native_completion_candidate_rechecks_detachment_at_apply() {
+    let mut f = Fixture::new();
+    f.spec.events.push(HookEvent::InputSubmitted);
+    let initial = f.install();
+    let before = fs::read(&f.config).unwrap();
+    let mut tool = tool_spec(&f, &initial.installation_id);
+    tool.native_completion_bridge = true;
+    let plan = f
+        .service
+        .plan_agent_tool(&initial.installation_id, tool)
+        .unwrap();
+    synthetic_binding(&f, &initial.installation_id);
+    assert!(matches!(
+        f.service.apply_install(&plan.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(fs::read(&f.config).unwrap(), before);
+    for file in plan.files {
+        assert!(!file.path.exists());
+    }
+}
+
+#[test]
+fn owned_tool_preview_update_legacy_hook_update_and_removal_preserve_unrelated_files() {
+    let f = Fixture::new();
+    let original = json!({"permissions":{"deny":["Bash(rm *)"]},"env":{"OTHER":"preserve"}});
+    f.write(&original);
+    let hooks = f.install();
+    let spec = tool_spec(&f, &hooks.installation_id);
+    let plugin = super::super::render_agent_tool_plugin("claude", &spec).unwrap();
+    let root = f.spec.workspace.join(".claude/skills").join(plugin.name());
+    let tool = f
+        .service
+        .plan_agent_tool(&hooks.installation_id, spec.clone())
+        .unwrap();
+    assert_eq!(tool.files.len(), 3);
+    assert!(tool
+        .files
+        .iter()
+        .all(|file| file.before_fingerprint == "absent"));
+    assert!(!root.exists());
+    f.service.apply_install(&tool.id).unwrap();
+    assert!(root.join(".claude-plugin/plugin.json").is_file());
+    fs::write(root.join("user-file.txt"), "preserve exact").unwrap();
+    let mut updated = spec;
+    updated.instructions.push_str(" Updated instructions.");
+    let update = f
+        .service
+        .plan_agent_tool(&hooks.installation_id, updated)
+        .unwrap();
+    assert_eq!(update.files.len(), 2);
+    f.service.apply_install(&update.id).unwrap();
+    let module = fs::read(root.join("hooks/register.js")).unwrap();
+    let mut incompatible = f.spec.clone();
+    incompatible
+        .handler
+        .arguments
+        .push("changed-handler".into());
+    assert!(matches!(
+        f.service.plan_install(incompatible),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(fs::read(root.join("hooks/register.js")).unwrap(), module);
+    let hook_update = f.service.plan_install(f.spec.clone()).unwrap();
+    assert!(hook_update.files.is_empty());
+    f.service.apply_install(&hook_update.id).unwrap();
+    assert_eq!(fs::read(root.join("hooks/register.js")).unwrap(), module);
+    let remove = f.service.plan_remove(&hooks.installation_id).unwrap();
+    assert_eq!(remove.files.len(), 3);
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), original);
+    assert_eq!(
+        fs::read_to_string(root.join("user-file.txt")).unwrap(),
+        "preserve exact"
+    );
+    assert!(!root.join(".claude-plugin/plugin.json").exists());
+    assert!(!root.join("hooks/register.js").exists());
+    let (_, body): (String, String) = f
+        .service
+        .connection()
+        .unwrap()
+        .query_row(
+            "SELECT phase,body FROM install_plans WHERE id=?1",
+            [&tool.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(!body.contains("Keep exact"));
+    assert!(serde_json::from_str::<Value>(&body).unwrap()["tool_files"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn every_tool_file_recovery_boundary_resumes_same_plan_and_retires_the_manifest_first() {
+    for boundary in 1..=3 {
+        let f = Fixture::new();
+        let hooks = f.install();
+        let spec = tool_spec(&f, &hooks.installation_id);
+        let tool = f
+            .service
+            .plan_agent_tool(&hooks.installation_id, spec)
+            .unwrap();
+        let manifest = tool.files.last().unwrap().path.clone();
+        assert!(manifest.ends_with(".claude-plugin/plugin.json"));
+        assert!(matches!(
+            f.service
+                .apply_with_tool_fault(&tool.id, false, Some(boundary)),
+            Err(IntegrationError::RecoveryRequired(_))
+        ));
+        assert_eq!(manifest.exists(), boundary == 3);
+        assert!(matches!(
+            f.service
+                .installation_status(&hooks.installation_id)
+                .unwrap(),
+            InstallationStatus::RecoveryRequired { .. }
+        ));
+        assert!(matches!(
+            f.service.plan_remove(&hooks.installation_id),
+            Err(IntegrationError::RecoveryRequired(_))
+        ));
+        let reopened = IntegrationService::open(f._dir.path().join("private-state")).unwrap();
+        assert!(matches!(
+            reopened.apply_install(&tool.id).unwrap(),
+            InstallationStatus::Configured { .. }
+        ));
+        let remove = reopened.plan_remove(&hooks.installation_id).unwrap();
+        assert_eq!(remove.files.first().unwrap().path, manifest);
+        assert!(matches!(
+            reopened.apply_with_tool_fault(&remove.id, false, Some(boundary)),
+            Err(IntegrationError::RecoveryRequired(_))
+        ));
+        assert!(!manifest.exists());
+        assert!(matches!(
+            reopened.apply_install(&remove.id).unwrap(),
+            InstallationStatus::Absent
+        ));
+        let root = manifest.parent().unwrap().parent().unwrap();
+        assert!(
+            !root.exists(),
+            "empty owned directories must not prevent reinstall"
+        );
+        let hooks = reopened.plan_install(f.spec.clone()).unwrap();
+        reopened.apply_install(&hooks.id).unwrap();
+        let tool = reopened
+            .plan_agent_tool(
+                &hooks.installation_id,
+                tool_spec(&f, &hooks.installation_id),
+            )
+            .unwrap();
+        reopened.apply_install(&tool.id).unwrap();
+    }
+}
+
+#[test]
+fn tool_ownership_scope_drift_and_stale_plans_refuse_without_overwriting() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    let mut spec = tool_spec(&f, &hooks.installation_id);
+    spec.installation_id = "another-installation".into();
+    assert!(f
+        .service
+        .plan_agent_tool(&hooks.installation_id, spec)
+        .is_err());
+    let spec = tool_spec(&f, &hooks.installation_id);
+    let plugin = super::super::render_agent_tool_plugin("claude", &spec).unwrap();
+    let root = f.spec.workspace.join(".claude/skills").join(plugin.name());
+    fs::create_dir_all(&root).unwrap();
+    assert!(matches!(
+        f.service
+            .plan_agent_tool(&hooks.installation_id, spec.clone()),
+        Err(IntegrationError::Conflict(_))
+    ));
+    fs::remove_dir(&root).unwrap();
+    let tool = f
+        .service
+        .plan_agent_tool(&hooks.installation_id, spec.clone())
+        .unwrap();
+    fs::create_dir_all(&root).unwrap();
+    assert!(matches!(
+        f.service.apply_install(&tool.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert!(fs::read_dir(&root).unwrap().next().is_none());
+    fs::remove_dir(&root).unwrap();
+    let mut config = f.read();
+    config["unrelated"] = json!("edited after plan");
+    f.write(&config);
+    assert!(matches!(
+        f.service.apply_install(&tool.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert!(!root.exists());
+    let tool = f
+        .service
+        .plan_agent_tool(&hooks.installation_id, spec.clone())
+        .unwrap();
+    f.service.apply_install(&tool.id).unwrap();
+    let module = root.join("hooks/register.js");
+    let mut changed = spec.clone();
+    changed.instructions.push_str(" updated");
+    let update = f
+        .service
+        .plan_agent_tool(&hooks.installation_id, changed)
+        .unwrap();
+    let hook_file = root.join("hooks/hooks.json");
+    let saved_hook_file = fs::read(&hook_file).unwrap();
+    let saved_module = fs::read(&module).unwrap();
+    fs::write(&hook_file, "changed unchanged file").unwrap();
+    assert!(matches!(
+        f.service.apply_install(&update.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(fs::read(&module).unwrap(), saved_module);
+    fs::write(&hook_file, saved_hook_file).unwrap();
+    fs::write(&module, "user edit").unwrap();
+    assert!(matches!(
+        f.service
+            .installation_status(&hooks.installation_id)
+            .unwrap(),
+        InstallationStatus::Drifted { .. }
+    ));
+    assert!(f.service.plan_remove(&hooks.installation_id).is_err());
+    assert!(f.service.plan_install(f.spec.clone()).is_err());
+    assert!(f
+        .service
+        .plan_agent_tool(&hooks.installation_id, spec)
+        .is_err());
+    assert_eq!(fs::read_to_string(module).unwrap(), "user edit");
+}
+
+#[test]
+fn external_edit_during_partial_tool_recovery_does_not_become_owned_after_bytes() {
+    let f = Fixture::new();
+    let hooks = f.install();
+    let tool = f
+        .service
+        .plan_agent_tool(
+            &hooks.installation_id,
+            tool_spec(&f, &hooks.installation_id),
+        )
+        .unwrap();
+    assert!(f
+        .service
+        .apply_with_tool_fault(&tool.id, false, Some(1))
+        .is_err());
+    fs::write(&tool.files[0].path, "external edit").unwrap();
+    assert!(matches!(
+        f.service.apply_install(&tool.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert!(!tool.files.last().unwrap().path.exists());
+    assert_eq!(
+        fs::read_to_string(&tool.files[0].path).unwrap(),
+        "external edit"
+    );
+}
+
+#[test]
+fn completion_policy_preview_update_remove_restore_prior_value_and_preserve_other_settings() {
+    let f = Fixture::new();
+    let original = json!({"env":{"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":"12","OTHER":"retain"},"permissions":{"deny":["Bash(rm *)"]},"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user-hook"}]}]}});
+    f.write(&original);
+    let policy = CompletionBlockingPolicy::RequireUnbounded;
+    let plan = f
+        .service
+        .plan_install_with_completion_policy(f.spec.clone(), policy)
+        .unwrap();
+    assert_eq!(f.read(), original);
+    assert_eq!(plan.completion_policy, policy);
+    assert_eq!(
+        plan.settings,
+        vec![SettingChange {
+            pointer: "/env/CLAUDE_CODE_STOP_HOOK_BLOCK_CAP".into(),
+            before: Some(json!("12")),
+            after: Some(json!("0"))
+        }]
+    );
+    let status = f.service.apply_install(&plan.id).unwrap();
+    let InstallationStatus::Configured { installation } = status else {
+        panic!("expected configured")
+    };
+    assert_eq!(installation.completion_policy, policy);
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "0");
+    let mut changed = f.spec.clone();
+    changed.handler.arguments.push("updated".into());
+    let update = f.service.plan_install(changed).unwrap();
+    assert_eq!(update.completion_policy, policy);
+    assert!(update.settings.is_empty());
+    f.service.apply_install(&update.id).unwrap();
+    let remove = f.service.plan_remove(&plan.installation_id).unwrap();
+    assert_eq!(remove.settings[0].after, Some(json!("12")));
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), original);
+}
+
+#[test]
+fn completion_policy_preserves_absence_empty_environment_and_existing_zero() {
+    for original in [
+        json!({}),
+        json!({"env":{}}),
+        json!({"env":{"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":"0","OTHER":"retain"}}),
+    ] {
+        let f = Fixture::new();
+        f.write(&original);
+        let plan = f
+            .service
+            .plan_install_with_completion_policy(
+                f.spec.clone(),
+                CompletionBlockingPolicy::RequireUnbounded,
+            )
+            .unwrap();
+        f.service.apply_install(&plan.id).unwrap();
+        let remove = f.service.plan_remove(&plan.installation_id).unwrap();
+        f.service.apply_install(&remove.id).unwrap();
+        assert_eq!(f.read(), original);
+    }
+}
+
+#[test]
+fn completion_policy_drift_and_stale_plan_never_overwrite_external_changes() {
+    let f = Fixture::new();
+    f.write(&json!({"env":{"OTHER":"retain"}}));
+    let plan = f
+        .service
+        .plan_install_with_completion_policy(
+            f.spec.clone(),
+            CompletionBlockingPolicy::RequireUnbounded,
+        )
+        .unwrap();
+    f.write(&json!({"env":{"OTHER":"changed"}}));
+    assert!(matches!(
+        f.service.apply_install(&plan.id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    let plan = f
+        .service
+        .plan_install_with_completion_policy(
+            f.spec.clone(),
+            CompletionBlockingPolicy::RequireUnbounded,
+        )
+        .unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+    let mut value = f.read();
+    value["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"] = json!("1");
+    f.write(&value);
+    assert!(matches!(
+        f.service
+            .installation_status(&plan.installation_id)
+            .unwrap(),
+        InstallationStatus::Drifted { .. }
+    ));
+    assert!(matches!(
+        f.service.plan_remove(&plan.installation_id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(f.read(), value);
+}
+
+#[test]
+fn completion_policy_shared_zero_cannot_be_silently_restored_to_a_limit_under_another_hook() {
+    let f = Fixture::new();
+    f.write(&json!({"env":{"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":"8"}}));
+    let policy = CompletionBlockingPolicy::RequireUnbounded;
+    let first = f
+        .service
+        .plan_install_with_completion_policy(f.spec.clone(), policy)
+        .unwrap();
+    f.service.apply_install(&first.id).unwrap();
+    let other = IntegrationService::open(f._dir.path().join("other-state")).unwrap();
+    let mut spec = f.spec.clone();
+    spec.application_id = "other-app".into();
+    spec.handler.arguments.push("other-app".into());
+    let second = other
+        .plan_install_with_completion_policy(spec, policy)
+        .unwrap();
+    other.apply_install(&second.id).unwrap();
+    assert!(matches!(
+        f.service
+            .installation_status(&first.installation_id)
+            .unwrap(),
+        InstallationStatus::Configured { .. }
+    ));
+    let before = f.read();
+    assert!(matches!(
+        f.service.plan_remove(&first.installation_id),
+        Err(IntegrationError::Conflict(_))
+    ));
+    assert_eq!(f.read(), before);
+    let mut update = f.spec.clone();
+    update.handler.arguments.push("updated-first-app".into());
+    let update = f
+        .service
+        .plan_install_with_completion_policy(update, policy)
+        .unwrap();
+    f.service.apply_install(&update.id).unwrap();
+    let remove_second = other.plan_remove(&second.installation_id).unwrap();
+    other.apply_install(&remove_second.id).unwrap();
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "0");
+    let remove_first = f.service.plan_remove(&first.installation_id).unwrap();
+    f.service.apply_install(&remove_first.id).unwrap();
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "8");
+    assert!(f.read().pointer("/hooks/Stop").is_none());
+}
+
+#[test]
+fn completion_policy_recovers_prepared_write_and_legacy_records_default_without_new_policy() {
+    let f = Fixture::new();
+    let original = json!({"env":{"OTHER":"retain"}});
+    f.write(&original);
+    let plan = f
+        .service
+        .plan_install_with_completion_policy(
+            f.spec.clone(),
+            CompletionBlockingPolicy::RequireUnbounded,
+        )
+        .unwrap();
+    assert!(matches!(
+        f.service.apply_inner(&plan.id, true),
+        Err(IntegrationError::RecoveryRequired(_))
+    ));
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "0");
+    let reopened = IntegrationService::open(f._dir.path().join("private-state")).unwrap();
+    reopened.apply_install(&plan.id).unwrap();
+    let remove = reopened.plan_remove(&plan.installation_id).unwrap();
+    reopened.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read(), original);
+    let legacy = reopened.plan_install(f.spec.clone()).unwrap();
+    reopened.connection().unwrap().execute_batch("UPDATE install_plans SET body=json_remove(body,'$.preview.settings','$.preview.completion_policy','$.next_receipt.completion','$.next_receipt.installation.completion_policy') WHERE phase='planned';").unwrap();
+    let InstallationStatus::Configured { installation } =
+        reopened.apply_install(&legacy.id).unwrap()
+    else {
+        panic!("configured")
+    };
+    assert_eq!(
+        installation.completion_policy,
+        CompletionBlockingPolicy::NativeDefault
+    );
+    assert_eq!(f.read()["env"], original["env"]);
+}
+
+#[test]
+fn completion_policy_requires_claude_stop_and_refuses_malformed_environment() {
+    let f = Fixture::new();
+    let policy = CompletionBlockingPolicy::RequireUnbounded;
+    let mut wrong = f.spec.clone();
+    wrong.agent_key = "cursor".into();
+    assert!(matches!(
+        f.service.plan_install_with_completion_policy(wrong, policy),
+        Err(IntegrationError::Unsupported(_))
+    ));
+    let mut wrong = f.spec.clone();
+    wrong.events = vec![HookEvent::BeforeTool];
+    assert!(matches!(
+        f.service.plan_install_with_completion_policy(wrong, policy),
+        Err(IntegrationError::Invalid(_))
+    ));
+    f.write(&json!({"env":"invalid"}));
+    assert!(matches!(
+        f.service
+            .plan_install_with_completion_policy(f.spec.clone(), policy),
+        Err(IntegrationError::Invalid(_))
+    ));
+    assert_eq!(f.read(), json!({"env":"invalid"}));
+    for invalid in [Value::Null, json!(0), json!(false), json!({})] {
+        let original = json!({"env":{"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":invalid,"OTHER":"retain"}});
+        f.write(&original);
+        assert!(matches!(
+            f.service
+                .plan_install_with_completion_policy(f.spec.clone(), policy),
+            Err(IntegrationError::Invalid(_))
+        ));
+        assert_eq!(f.read(), original);
+    }
+}
+
+#[test]
+fn completion_policy_explicit_native_default_releases_control_but_legacy_updates_preserve_it() {
+    let f = Fixture::new();
+    f.write(&json!({"env":{"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP":"9"}}));
+    let plan = f
+        .service
+        .plan_install_with_completion_policy(
+            f.spec.clone(),
+            CompletionBlockingPolicy::RequireUnbounded,
+        )
+        .unwrap();
+    f.service.apply_install(&plan.id).unwrap();
+    let unchanged = f.service.plan_install(f.spec.clone()).unwrap();
+    assert_eq!(
+        unchanged.completion_policy,
+        CompletionBlockingPolicy::RequireUnbounded
+    );
+    f.service.apply_install(&unchanged.id).unwrap();
+    let release = f
+        .service
+        .plan_install_with_completion_policy(
+            f.spec.clone(),
+            CompletionBlockingPolicy::NativeDefault,
+        )
+        .unwrap();
+    assert_eq!(release.settings[0].after, Some(json!("9")));
+    f.service.apply_install(&release.id).unwrap();
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "9");
+    let remove = f.service.plan_remove(&plan.installation_id).unwrap();
+    assert!(remove.settings.is_empty());
+    f.service.apply_install(&remove.id).unwrap();
+    assert_eq!(f.read()["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"], "9");
 }
 
 #[test]
@@ -86,7 +2394,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
         .unwrap()
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 5);
+    assert_eq!(version, 16);
     assert!(matches!(
         reopened.apply_install(&plan.id).unwrap(),
         InstallationStatus::Configured { .. }
@@ -97,7 +2405,7 @@ fn source_plan_format_upgrade_preserves_v3_json_plans_and_refuses_newer_state() 
     reopened
         .connection()
         .unwrap()
-        .execute_batch("PRAGMA user_version=6;")
+        .execute_batch("PRAGMA user_version=17;")
         .unwrap();
     assert!(matches!(
         IntegrationService::open(f._dir.path().join("private-state")),

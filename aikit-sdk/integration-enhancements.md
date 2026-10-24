@@ -1,8 +1,123 @@
 # External-session integration gaps
 
+Reusable Linux [kernel peer/ancestor inspection](linux-native-caller.md) now
+supplies a qualified local process relationship through existing native/OS APIs.
+Native session/module-generation binding and effective-policy admission remain
+unfinished; do not promote process facts to N1 or Windows support.
+
+Current native input finding: [request snapshot boundary](claude-request-snapshot-boundary.md).
+An earlier handler's stored row appears in the pre-read API view but not that
+main request. Extend/fix the existing request-bound read contract before treating
+API snapshots as consumption; current records remain candidates/Unknown. This
+is a scoped limitation of tested surfaces, not blanket provider API absence.
+
 These are implementation requests backed by local source inspection and bounded
 native evidence. They are not promises of supported behavior. AIKit owns native
 translation and qualification; consumer applications keep their own review rules.
+
+Use the concise [required native contracts](native-integration-required-contracts.md)
+for the current implementation request: reuse the existing public service,
+binding, message receipt and generated modules; close N1 invocation/configuration,
+N2 protected completion and N3 native admission/acknowledgement/consumption.
+The detailed historical evidence below retains its exact source/version scope.
+
+## Current Claude API review, 2026-10-23
+
+2026-10-24 [native API and history reuse](native-api-reuse-20261024.md) closes a
+concrete dependency implementation bug, not a provider gap: existing HistoryReader
+now finds a real stored review by native UUID/full frame after the Claude SDK
+leaf fix (`57ad0ec`, dependency draft #5). The SDK pins that revision. Reuse this
+path for scoped reconciliation work rather than adding a parser or requesting
+a new transport. Codelaya still has its prior integration-only pin; wiring and
+provenance/consumption validation remain. The inbox OS peer is observable, but
+auth-only Linux connections supply no observed explicit acknowledgement. No
+receipt, native-identity or other readiness capability is promoted.
+
+2026-10-24 [full-module consumer follow-up](https://github.com/aroff/codelaya/blob/8b52ff0/docs/native-worker-replacement.md)
+qualifies worker replacement after actual application Allow: the existing SDK
+catch answers, the reloaded module blocks missing Turn context, and recovery
+preserves Incomplete. Native final-outcome journaling after context loss and
+fresh owner work remain open. This narrows the remaining integration work; no
+generic worker-recovery provider feature or new runtime interface is justified
+by these results. N1/N3 and production/Windows qualification remain unchanged.
+
+2026-10-24 [mod failure follow-up](../examples/claude-mod-qualification/current-mod-failure-20261024.md)
+qualifies exact constant SDK fallback execution on native 10000 ms budget
+expiry and actual heartbeat-triggered hooks-worker replacement. Both Block,
+propagate exact feedback, then permit completion after a subsequent Stop.
+Existing Claude APIs therefore close those scoped primitive gaps; do not label
+them missing provider features. Qualify the full generated module's retained
+Turn/invocation behavior after replacement and effective protected ordering next.
+No new runtime, schema or readiness exception is required by these results.
+
+2026-10-24 [current managed Stop comparison](../examples/claude-mod-qualification/current-stop-failure-20261024.md)
+rechecks the actual 2.1.308 executable: the existing managed guard defeats the
+tested user-tier competitor, but a missing or timed-out managed command still
+allows successful native completion. `onFailure:"block"` is explicitly ignored
+on Stop. This is a scoped N2 limitation of that path; qualify the existing mod
+fallback under worker loss and protected ordering before declaring a broader
+provider blocker. N1/N3 investigation and production readiness remain open.
+
+2026-10-24 installed-version review: [API-view provenance](claude-api-view-provenance.md)
+finds an AIKit gap that existing native traces can close: another mod can rewrite
+`session.messages` results. The generated observer now checks the genuine core
+read and the final returned view. Queueing/credential APIs are not durable
+consumption or effective-policy evidence; remaining contracts stay unqualified.
+
+2026-10-24 follow-up: the [main-input snapshot comparison](../examples/claude-input-qualification/README.md)
+retains a genuine later append that appears after dispatch but not in that main
+request. Pre-dispatch API snapshot/core correlation remains a concrete candidate
+to implement and qualify, not a proven unavailable provider feature. The
+[exact reservation confirmation](message-reservation-confirmation.md) closes an
+SDK handoff check now. The required-contract document distinguishes these
+unfinished investigations from native counterexamples.
+
+Two downstream ordinary interactive Linux x86_64 2.1.308 trials now distinguish
+directory discovery from protected ordering. The existing SDK-generated directory
+under `.claude/skills` loads automatically as `@skills-dir`, at native **user**
+tier, without a marketplace, profile settings or `--plugin-dir`. Actual model
+inputs contain its callable schema and instructions; repeated missing-name/note
+Blocks are repaired and native accepted completion survives normal exit.
+A separate project-settings marketplace trial loads the same module, also at
+user tier, even with project `prependPlugins` requested. Neither trial attests
+protected precedence, competing middleware, handler failures/deadlines or native
+identity. These are bounded observations, not capability promotions.
+
+Do not add a new marketplace/profile installation surface solely for ordinary
+directory loading in this context. Reuse the owned module planner. The missing
+reusable surface remains a trustworthy effective-policy/invocation witness and
+original-session admission/receipt evidence, as described below. Project loader
+fields and successful loading cannot substitute for those native facts. Other
+versions/platforms/modes, including Windows, remain separately unqualified.
+
+Local journal status contention is addressed separately by a
+[bounded read-status wait](integration-status-contention.md). It neither changes
+these native requirements nor promotes any capability report.
+
+The [checksum-pinned 2.1.308 inspection](../examples/claude-mod-qualification/current-client-20261023.md)
+adds actual consumer completion compatibility but no protected transport proof.
+Its new `session.identity()` is account/managed-organization identity, not local
+stdio invocation authentication. Its declared settings middleware is also not
+an independent active-chain attestation. Neither is a reason to require owner
+login, install managed policy, or mark native capabilities Supported.
+
+The remaining enhancement must provide a native-host-verifiable invocation and
+effective-policy witness tied to the actual generation, plus original-session
+admission and separately correlated durable storage/actual-input evidence through
+the existing message journal. Reuse existing APIs when they supply those facts;
+do not replace absent native guarantees with caller-provided IDs or raw returns.
+New-version framing/failure/adversarial qualification remains independent work.
+
+## Claude: competing middleware can skip command Stop policy, 2026-10-22
+
+A fresh ordinary interactive Linux 2.1.296 matched probe observed a mod returning
+`{}` without calling `next` skip the actual command Stop hook entirely, followed
+by successful native completion. Baseline command Block caused a second model
+request; competing case had zero command calls and one model request. This is
+provider enforcement evidence, not a decoder problem or a Codelaya policy fix.
+Require a non-bypassable native policy boundary or a verifiable effective-mod
+configuration boundary before qualifying repeated blocking. No capability is
+promoted. See [protocol, reproduction, verifier and identities](../examples/claude-mod-qualification/stop-chain-protocol.md).
 
 ## Publication status, 2026-10-09
 
@@ -151,6 +266,32 @@ an authoritative runtime contract and qualification. The SDK UUID is not a token
 for authentication or proof of liveness.
 
 ## Existing-session messaging
+
+### Codex native queue candidate, 2026-10-18
+
+The [native Windows fixture](../examples/codex-queue-qualification/README.md)
+now records standalone Codex 0.163.0 accepting a sole original-thread queue
+submission, exact UTF-8 input in the next recorded main request, two completed
+native Turns and post-terminal-exit history/queue lookup. Replies were scripted.
+Both terminal launches still reported native thread source `vscode`, including
+the fresh case with app identity variables cleared; topology labels remain
+unqualified. App-bundled packaging, long socket paths and proxy framing failures
+are retained separately. No owner session/profile was used.
+
+Generated experimental queue/add/list/start and retained client IDs warrant an
+existing-session adapter feasibility effort. Caller-selected ID idempotence,
+changed content, daemon/generation replacement, busy admission, uncertain handoff
+and consumption provenance are not qualified. No SDK message capability or
+production Codelaya readiness is promoted by this example.
+
+The follow-up controlled busy fixture falsified native ID idempotence: identical
+client IDs with same or changed text produced three distinct successful queue
+entries. All probes were deleted before release. A separate sole feedback entry
+then waited for idle and retained its caller ID/text after real daemon restart
+and ordinary resume, without another recorded request. Preserve the SDK's
+immutable staging/sole reservation and generation requirement; never retry a
+native add to reconcile an uncertain result. The linked report/verifier retain
+the native counterexample and distinguish it from application T13 compliance.
 
 AIKit still needs native dispatch, durable operation receipts and reconciliation
 for user-started sessions. Managed gateway transports own the processes they start

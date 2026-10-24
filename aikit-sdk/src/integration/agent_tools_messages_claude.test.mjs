@@ -1,0 +1,613 @@
+// State-machine fault tests only; no native lease, caller or receipt qualification.
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+const base = await fs.readFile(new URL('./agent_tools_claude.js',import.meta.url),'utf8');
+const helper = await fs.readFile(new URL('./agent_tools_messages_claude.js',import.meta.url),'utf8');
+let sequence=0;
+function traced(next,run) {
+  return Object.defineProperty(run,'trace',{get:()=>next.trace});
+}
+async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabel=pluginName,content='Exact\n雪\u0000feedback'}={}) {
+  const hooks=new Map(),actions=[],submissions=[],timers=[];
+  let invocation, sid='native', ready=true, pending=false, busy=false, checkpoint;
+  const config={applicationId:'fixture',installationId:'install',pluginName,toolName:'review',description:'Fixture',
+    schema:{type:'object'},instructions:'',sessionArgv:['session-handler'],argv:['tools'],messageArgv:['messages','fixed'],timeoutMs:1000,
+    messagePayloadLimit:65536,messageResultLimit:524288,messageEnvelopeLimit:1048576};
+  const source=base.replace('/* AIKIT_MESSAGE_HELPERS */',helper)
+    .replace('/* AIKIT_MESSAGE_LIFECYCLE */','registerMessageLifecycle(on);')
+    .replace('/* AIKIT_MESSAGE_START */','await startMessagePump($);')
+    .replace('/* AIKIT_MESSAGE_BUSY */','messageBridge?.busy();')
+    .replace('/* AIKIT_MESSAGE_IDLE */','if(event.agentId===undefined && nativeTurnId===event.turnId) messageBridge?.idle();')
+    .replace('/* AIKIT_CONFIG */null',JSON.stringify(config));
+  const module=await import('data:text/javascript,'+encodeURIComponent(source)+`#${++sequence}`);
+  module.register((name,...args)=>{hooks.set(name,args.at(-1));return {catch(){}};});
+  const api={session:{id:async()=>sid,cwd:async()=>'/workspace',version:async()=>({version})},
+    env:{set:async(_,value)=>{invocation=JSON.parse(value).native_context.invocation_id;}},
+    process:{run:async(argv,opts)=>{
+      if(argv[0]==='session-handler') return {exitCode:0,isStdoutTruncated:false,isStderrTruncated:false};
+      assert.deepEqual(argv,config.messageArgv);
+      const frame=JSON.parse(opts.stdin);actions.push(frame.action);
+      assert.equal(frame.native_context.session_id,sid);
+      const reference={installation_id:'install',installation_revision:'revision',native_session_id:sid,invocation_id:invocation,start_cursor:1};
+      const reply={schema_version:1,reference,recorded_idle:!busy,recorded_ready:frame.action.kind==='recheck' && ready && !busy,reservation:null};
+      if(frame.action.kind==='poll' && !pending){pending=true;reply.reservation={binding_id:'binding',target:reference,
+        reservation_id:'attempt',request:{operation_id:'review',content},payload_sha256:createHash('sha256').update(content).digest('hex')};}
+      if(frame.action.kind==='recheck' && reply.recorded_ready) reply.reservation={binding_id:'binding',target:reference,
+        reservation_id:frame.action.reservation_id,request:{operation_id:frame.action.operation_id,content},
+        payload_sha256:createHash('sha256').update(content).digest('hex')};
+      if(frame.action.kind==='prepare_append') {
+        const submitted=submissions.at(-1).text;
+        checkpoint={schema_version:1,reservation:{binding_id:'binding',target:reference,
+          reservation_id:frame.action.reservation_id,request:{operation_id:frame.action.operation_id,content:submitted},
+          payload_sha256:createHash('sha256').update(submitted).digest('hex')},
+          intent:structuredClone(frame.action.intent),prepared_at_unix_ms:1,stored:null,stored_at_unix_ms:null};
+        reply.append_checkpoint=structuredClone(checkpoint);
+      }
+      if(frame.action.kind==='record_append_stored') {
+        checkpoint.stored=structuredClone(frame.action.stored);checkpoint.stored_at_unix_ms=2;
+        reply.append_checkpoint=structuredClone(checkpoint);
+      }
+      if(frame.action.kind==='prepare_input') {
+        checkpoint.schema_version=2;
+        checkpoint.input={intent:structuredClone(frame.action.intent),prepared_at_unix_ms:3,
+          dispatched:null,dispatched_at_unix_ms:null};
+        reply.append_checkpoint=structuredClone(checkpoint);
+      }
+      if(frame.action.kind==='record_input_dispatched') {
+        checkpoint.input.dispatched=structuredClone(frame.action.dispatched);
+        checkpoint.input.dispatched_at_unix_ms=4;reply.append_checkpoint=structuredClone(checkpoint);
+      }
+      return {exitCode:0,isStdoutTruncated:false,isStderrTruncated:false,stdout:JSON.stringify(reply)};
+    }},
+    prompt:{submit:async(value)=>{
+      submissions.push(value);
+      const text=`The ${nativeLabel} plugin sent a message:\n${value.text}`
+        + "\n\nThis is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above.";
+      const event={uuid:crypto.randomUUID(),door:'prompt',origin:{kind:'plugin',name:config.pluginName},
+        message:{type:'user',role:'user',content:[{type:'text',text}]}};
+      const next=async(e)=>{
+        const result={uuid:e.uuid,message:e.message};
+        next.trace=[{plugin:'engine',tier:'core',event:'session.append',outcome:'returned',
+          received:structuredClone(e),returned:structuredClone(result)}];
+        return result;
+      };
+      await hooks.get('session.append')(api,event,next);
+      return {text:value.text,origin:{kind:'plugin',name:config.pluginName}};
+    }},
+    tool:{register:async()=>{}},ui:{invalidate(){}},clock:{every:(ms,fn)=>{assert.equal(ms,250);timers.push(fn);}}};
+  await hooks.get('session.start')(api,{},async()=>({}));
+  let nativeMessages=async()=>[{role:'user',content:[{type:'text',text:
+    `The ${nativeLabel} plugin sent a message:\n${content}`
+      + "\n\nThis is how Claude Code surfaces a prompt a plugin submits between turns — it starts this turn in the user's place. Address the message above."}]}];
+  api.session.messages=async(args)=>{
+    const next=async(event)=>{
+      const result={value:await nativeMessages()};
+      next.trace=[{plugin:'engine',tier:'core',event:'session.messages',outcome:'returned',received:structuredClone(event),returned:structuredClone(result)}];
+      return result;
+    };
+    next.origin={plugin:config.pluginName,tier:'user'};
+    const hook=hooks.get('session.messages')??((api,event,next)=>next(event));
+    return (await hook(api,args,next)).value;
+  };
+  return {api,hooks,actions,submissions,content,poll:()=>timers[0](),setSid:value=>{sid=value;},
+    timerCount:()=>timers.length,allowFreshReview:()=>{pending=false;},
+    setReady:value=>{ready=value;},setBusy:value=>{busy=value;},setNativeMessages:value=>{nativeMessages=value;}};
+}
+
+async function inputStep(f,{event={turnId:'feedback-turn',index:0,model:'fixture'},
+    origin={plugin:'engine',tier:'core'},trace}={}) {
+  await f.hooks.get('turn.start')(f.api,{turnId:'feedback-turn'},async()=>({}));
+  let delegated=0;
+  const next=async function*(value){
+    delegated++;yield {text:'streamed'};
+    next.trace=trace??[{plugin:'engine',tier:'core',event:'turn.step',outcome:'returned',received:structuredClone(value)}];
+    return {text:'result'};
+  };
+  next.origin=origin;
+  const iterator=f.hooks.get('turn.step')(f.api,event,next),chunks=[];
+  let current;
+  do {current=await iterator.next();if(!current.done)chunks.push(current.value);}while(!current.done);
+  assert.deepEqual(chunks,[{text:'streamed'}]);assert.deepEqual(current.value,{text:'result'});
+  assert.equal(delegated,1);
+}
+
+test('input checkpoint retains exact pre-snapshot and a separate settled core candidate once',async()=>{
+  const f=await fixture({version:'2.1.308'});await f.poll();await inputStep(f);await inputStep(f);
+  const prepared=f.actions.filter(action=>action.kind==='prepare_input');assert.equal(prepared.length,1);
+  const dispatched=f.actions.filter(action=>action.kind==='record_input_dispatched');assert.equal(dispatched.length,1);
+  assert.deepEqual(prepared[0].intent,dispatched[0].intent);
+  assert.equal(dispatched[0].dispatched.core_received_sha256,prepared[0].intent.step_event_sha256);
+  assert.equal(prepared[0].intent.api_snapshot_sha256,createHash('sha256')
+    .update(JSON.stringify(await f.api.session.messages({as:'api'}))).digest('hex'));
+  assert.equal(f.submissions.length,1);
+});
+
+test('clear and resume restart one timer with a fresh message context',async()=>{
+  for(const source of ['clear','resume']) {
+    const f=await fixture();await f.poll();assert.equal(f.submissions.length,1);
+    await f.hooks.get('session.end')(f.api,{reason:source},async()=>({}));
+    f.setSid('replacement');f.allowFreshReview();
+    await f.hooks.get('classic.SessionStart')(f.api,{source,session_id:'replacement',cwd:'/workspace'},async()=>({}));
+    await f.poll();assert.equal(f.submissions.length,2);
+    assert.equal(f.timerCount(),1,'do not accumulate a timer for every cleared session');
+  }
+});
+
+test('a delayed old poll cannot submit or stop the replacement message pump',async()=>{
+  const f=await fixture(),run=f.api.process.run;
+  let entered,release;const waiting=new Promise(resolve=>{entered=resolve;});
+  const delay=new Promise(resolve=>{release=resolve;});let held=false;
+  f.api.process.run=async(argv,options)=>{
+    const result=await run(argv,options);
+    if(JSON.parse(options.stdin).action?.kind==='poll' && !held){held=true;entered();await delay;}
+    return result;
+  };
+  const stale=f.poll();await waiting;
+  await f.hooks.get('session.end')(f.api,{reason:'clear'},async()=>({}));
+  f.setSid('replacement');f.allowFreshReview();
+  await f.hooks.get('classic.SessionStart')(f.api,{source:'clear',session_id:'replacement',cwd:'/workspace'},async()=>({}));
+  release();await stale;assert.equal(f.submissions.length,0);
+  await f.poll();assert.equal(f.submissions.length,1);
+  assert.equal(f.actions.filter(action=>action.kind==='record_handoff').length,1);
+});
+
+test('the existing opted-in timer resumes polling only after the native session switch',async()=>{
+  const f=await fixture();await f.poll();
+  await f.hooks.get('session.end')(f.api,{reason:'resume'},async()=>({}));
+  await f.hooks.get('classic.SessionStart')(f.api,{source:'resume',session_id:'replacement',cwd:'/workspace'},async()=>({}));
+  await f.poll();assert.equal(f.submissions.length,1);
+  f.setSid('replacement');f.allowFreshReview();
+  await Promise.all([f.poll(),f.poll()]);
+  assert.equal(f.submissions.length,2);
+  assert.equal(f.timerCount(),1);
+});
+
+test('subagent step leaves the candidate for the next main step',async()=>{
+  const f=await fixture({version:'2.1.308'});await f.poll();
+  await inputStep(f,{event:{turnId:'child',index:0,agentId:'child'}});
+  assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0);
+  await inputStep(f);assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,1);
+});
+
+test('API view without one matching settled core read cannot prepare input or resend',async()=>{
+  for(const fault of ['missing','duplicate','synthetic','threw','args','agent','changed','array','caller']){
+    const f=await fixture({version:'2.1.308'});await f.poll();
+    const hook=f.hooks.get('session.messages');let delegated=0;
+    f.hooks.set('session.messages',(api,event,next)=>{
+      const wrapped=async(e)=>{
+        delegated++;const result=await next(e);
+        wrapped.trace=structuredClone(next.trace);
+        const core=wrapped.trace[0];
+        if(fault==='missing')wrapped.trace=[];
+        if(fault==='duplicate')wrapped.trace.push(structuredClone(core));
+        if(fault==='synthetic'){core.plugin='competitor';core.tier='user';}
+        if(fault==='threw')core.outcome='threw';
+        if(fault==='args')core.received.as='internal';
+        if(fault==='agent')core.received.agentId='child';
+        if(fault==='changed')return {value:[...result.value,{role:'user',content:'forged API view'}]};
+        if(fault==='array')core.returned.value={unavailable:true};
+        return result;
+      };
+      wrapped.origin=fault==='caller'?{plugin:'competitor',tier:'user'}:next.origin;
+      return hook(api,event,wrapped);
+    });
+    await inputStep(f);await inputStep(f);await f.poll();
+    assert.equal(delegated,1,fault);
+    assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0,fault);
+    assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,0,fault);
+    assert.equal(f.submissions.length,1,fault);
+  }
+});
+
+test('upstream API rewrites and skipped read handlers cannot reuse a core witness',async()=>{
+  for(const fault of ['rewrite','skip']){
+    const f=await fixture({version:'2.1.308'});await f.poll();
+    const read=f.api.session.messages;
+    if(fault==='rewrite')f.api.session.messages=async(args)=>[...await read(args),{role:'user',content:'forged upstream'}];
+    else f.hooks.set('session.messages',async(api,event,next)=>next(event));
+    await inputStep(f);await inputStep(f);await f.poll();
+    assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0,fault);
+    assert.equal(f.submissions.length,1,fault);
+  }
+});
+
+test('passed API core result is accepted while foreign reads cannot supply its witness',async()=>{
+  const f=await fixture({version:'2.1.308'});await f.poll();
+  const hook=f.hooks.get('session.messages');let delegated=0;
+  f.hooks.set('session.messages',async(api,event,next)=>{
+    const foreign=async()=>({value:[{role:'user',content:'foreign'}]});
+    foreign.origin={plugin:'other',tier:'user'};
+    await hook(api,event,foreign);
+    await hook(api,{...event,agentId:'child'},next);
+    const wrapped=async(e)=>{
+      delegated++;const result=await next(e);
+      wrapped.trace=structuredClone(next.trace);wrapped.trace[0].outcome='passed';return result;
+    };
+    wrapped.origin=next.origin;return hook(api,event,wrapped);
+  });
+  await inputStep(f);
+  assert.equal(delegated,1);
+  assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,1);
+  assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,1);
+});
+
+test('older append-qualified client does not call the unqualified input API',async()=>{
+  const f=await fixture({version:'2.1.296'});await f.poll();
+  f.api.session.messages=async()=>{throw Error('must not call input API');};
+  await inputStep(f);assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0);
+  assert.equal(f.submissions.length,1);
+});
+
+test('input preparation refuses missing duplicate oversized and foreign-scope snapshots without resending',async()=>{
+  for(const fault of ['missing','duplicate','oversized','origin','turn','index','subagent']){
+    const f=await fixture({version:'2.1.308'});await f.poll();
+    const messages=await f.api.session.messages();
+    if(fault==='missing')f.setNativeMessages(async()=>[]);
+    if(fault==='duplicate')f.setNativeMessages(async()=>[...messages,...messages]);
+    if(fault==='oversized')f.setNativeMessages(async()=>[{content:'x'.repeat(4194305)}]);
+    const options=fault==='origin'?{origin:{plugin:'other',tier:'user'}}
+      :fault==='turn'?{event:{turnId:'foreign',index:0}}
+      :fault==='index'?{event:{turnId:'feedback-turn',index:-1}}
+      :fault==='subagent'?{event:{turnId:'child-turn',index:0,agentId:'child'}}:{};
+    await inputStep(f,options);
+    assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0,fault);
+    assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,0,fault);
+    await f.poll();assert.equal(f.submissions.length,1,fault);
+  }
+});
+
+test('missing synthetic changed and duplicate core traces cannot create input dispatch observations',async()=>{
+  const core={plugin:'engine',tier:'core',event:'turn.step',outcome:'returned',
+    received:{turnId:'feedback-turn',index:0,model:'fixture'}};
+  for(const trace of [[],[{...core,plugin:'other',tier:'user'}],[{...core,received:{...core.received,index:1}}],
+      [core,core],[{...core,outcome:'threw'}]]){
+    const f=await fixture({version:'2.1.308'});await f.poll();await inputStep(f,{trace});
+    assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,1);
+    assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,0);
+    await inputStep(f);await f.poll();assert.equal(f.submissions.length,1);
+  }
+});
+
+test('lost input checkpoint replies delegate once and never retry a native review or candidate',async()=>{
+  for(const lost of ['prepare_input','record_input_dispatched']){
+    const f=await fixture({version:'2.1.308'});await f.poll();const run=f.api.process.run;
+    f.api.process.run=async(argv,options)=>{
+      const result=await run(argv,options);
+      if(JSON.parse(options.stdin).action?.kind===lost)throw Error('lost committed checkpoint reply');
+      return result;
+    };
+    await inputStep(f);await inputStep(f);await f.poll();
+    assert.equal(f.actions.filter(action=>action.kind===lost).length,1,lost);
+    assert.equal(f.submissions.length,1,lost);
+    assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,lost==='prepare_input'?0:1,lost);
+  }
+});
+
+test('changed input checkpoint reply is not accepted as the requested operation',async()=>{
+  for(const field of ['intent','reservation','stored','schema','dispatched']){
+    const f=await fixture({version:'2.1.308'});await f.poll();const run=f.api.process.run;
+    f.api.process.run=async(argv,options)=>{
+      const result=await run(argv,options),action=JSON.parse(options.stdin).action;
+      if(action?.kind==='prepare_input'){
+        const reply=JSON.parse(result.stdout),checkpoint=reply.append_checkpoint;
+        if(field==='intent')checkpoint.input.intent.native_turn_id='foreign';
+        if(field==='reservation')checkpoint.reservation.reservation_id='foreign';
+        if(field==='stored')checkpoint.stored.stored_payload_sha256='0'.repeat(64);
+        if(field==='schema')checkpoint.schema_version=1;
+        if(field==='dispatched')checkpoint.input.dispatched={invented:true};
+        result.stdout=JSON.stringify(reply);
+      }
+      return result;
+    };
+    await inputStep(f);assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,0,field);
+  }
+});
+test('one exact native call retains raw return without consumption or resend',async()=>{
+  const f=await fixture();await f.poll();await f.poll();
+  assert.deepEqual(f.submissions,[{text:f.content}]);
+  assert.deepEqual(f.actions.map(a=>a.kind),['poll','recheck','prepare_append','record_append_stored','record_handoff','poll']);
+  const report=f.actions[4];assert.equal(report.operation_id,'review');assert.equal(report.reservation_id,'attempt');
+  assert.deepEqual(report.outcome,{kind:'returned',result:{text:f.content,origin:{kind:'plugin',name:'fixture-plugin'}}});
+});
+
+test('maximum escaped UTF-8 payload retains the full raw return and stays one attempt',async()=>{
+  for(const content of ['"'.repeat(65532)+'雪x','\0'.repeat(65536)]){
+    assert.equal(Buffer.byteLength(content),65536);
+    const f=await fixture({version:'2.1.308',content});await f.poll();await inputStep(f);await f.poll();
+    const handoffs=f.actions.filter(action=>action.kind==='record_handoff');assert.equal(handoffs.length,1);
+    assert.equal(handoffs[0].outcome.kind,'returned');assert.equal(handoffs[0].outcome.result.text,content);
+    assert(Buffer.byteLength(JSON.stringify(handoffs[0].outcome.result))>98304);
+    assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,1);
+    assert.equal(f.submissions.length,1);
+  }
+});
+
+test('genuinely oversized native results retain uncertainty and cannot resend',async()=>{
+  const f=await fixture();f.api.prompt.submit=async(value)=>{
+    f.submissions.push(value);return {text:'x'.repeat(524289)};
+  };
+  await f.poll();await f.poll();
+  const handoff=f.actions.find(action=>action.kind==='record_handoff');
+  assert.deepEqual(handoff.outcome,{kind:'uncertain',reason:'native_receipt_unavailable'});
+  assert.equal(f.submissions.length,1);
+});
+
+test('native drop return cannot associate an appended review with a later owner Turn',async()=>{
+  const f=await fixture({version:'2.1.308'}),submit=f.api.prompt.submit;
+  f.api.prompt.submit=async(value)=>{await submit(value);return {drop:'Native input blocked'};};
+  await f.poll();await inputStep(f);await f.poll();
+  assert.equal(f.actions.filter(action=>action.kind==='prepare_append').length,1);
+  assert.equal(f.actions.filter(action=>action.kind==='prepare_input').length,0);
+  assert.deepEqual(f.actions.find(action=>action.kind==='record_handoff').outcome,{kind:'returned',result:{drop:'Native input blocked'}});
+  assert.equal(f.submissions.length,1);
+});
+test('uncertain native call is never retried, even after more ticks',async()=>{
+  const f=await fixture();let calls=0;
+  f.api.prompt.submit=async()=>{calls++;throw Error('lost native reply');};
+  await f.poll();await f.poll();assert.equal(calls,1);
+  assert.deepEqual(f.actions[2].outcome,{kind:'uncertain',reason:'native_submit_threw'});
+});
+test('lost journal response stops the pump and cannot resend',async()=>{
+  const f=await fixture(),run=f.api.process.run;let reports=0;
+  f.api.process.run=async(argv,opts)=>{
+    if(JSON.parse(opts.stdin).action?.kind==='record_handoff'){reports++;throw Error('lost commit response');}
+    return run(argv,opts);
+  };
+  await f.poll();await f.poll();assert.equal(reports,1);assert.equal(f.submissions.length,1);
+});
+test('busy native interval defers a retained reservation until idle',async()=>{
+  const f=await fixture();f.setReady(false);await f.poll();assert.equal(f.submissions.length,0);
+  await f.hooks.get('turn.start')(f.api,{turnId:'human'},async()=>({}));await f.poll();
+  assert.equal(f.actions.filter(a=>a.kind==='poll').length,1);
+  f.setReady(true);
+  const event={turnId:'human',reason:'answer',isAborted:false,answer:'done'};
+  const next=async()=>{next.trace=[{plugin:'engine',tier:'core',event:'turn.complete',outcome:'returned',received:event}];return {};};
+  next.origin={plugin:'engine',tier:'core'};
+  await f.hooks.get('turn.complete')(f.api,event,next);
+  await f.poll();assert.equal(f.submissions.length,1);
+});
+test('a new main Turn during recheck prevents native I/O',async()=>{
+  const f=await fixture(),run=f.api.process.run;
+  f.api.process.run=async(argv,opts)=>{
+    const result=await run(argv,opts);
+    if(JSON.parse(opts.stdin).action?.kind==='recheck')
+      await f.hooks.get('turn.start')(f.api,{turnId:'human'},async()=>({}));
+    return result;
+  };
+  await f.poll();assert.equal(f.submissions.length,0);
+});
+test('session end during recheck prevents native I/O',async()=>{
+  const f=await fixture(),run=f.api.process.run;
+  f.api.process.run=async(argv,opts)=>{
+    const result=await run(argv,opts);
+    if(JSON.parse(opts.stdin).action?.kind==='recheck') await f.hooks.get('session.end')(f.api,{},async()=>({}));
+    return result;
+  };
+  await f.poll();await f.poll();assert.equal(f.submissions.length,0);
+});
+test('changed session, corrupt digest, foreign ticket and truncated RPC fail closed',async()=>{
+  for(const fault of ['session','digest','target','truncated']){
+    const f=await fixture(),run=f.api.process.run;
+    if(fault==='session') f.setSid('replacement');
+    else f.api.process.run=async(argv,opts)=>{
+      const result=await run(argv,opts);
+      if(JSON.parse(opts.stdin).action?.kind==='poll'){
+        const reply=JSON.parse(result.stdout);
+        if(fault==='digest') reply.reservation.payload_sha256='bad';
+        if(fault==='target') reply.reservation.target={...reply.reference,native_session_id:'foreign'};
+        if(fault==='truncated') result.isStdoutTruncated=true;
+        result.stdout=JSON.stringify(reply);
+      }
+      return result;
+    };
+    await f.poll();await f.poll();assert.equal(f.submissions.length,0,fault);
+  }
+});
+test('a ready recheck must confirm the exact immutable reservation before native I/O',async()=>{
+  for(const fault of ['missing','binding','reservation','operation','content','digest','target']){
+    const f=await fixture(),run=f.api.process.run;
+    f.api.process.run=async(argv,opts)=>{
+      const result=await run(argv,opts);
+      if(JSON.parse(opts.stdin).action?.kind==='recheck'){
+        const reply=JSON.parse(result.stdout),ticket=reply.reservation;
+        if(fault==='missing')reply.reservation=null;
+        if(fault==='binding')ticket.binding_id='foreign';
+        if(fault==='reservation')ticket.reservation_id='foreign';
+        if(fault==='operation')ticket.request.operation_id='foreign';
+        if(fault==='content')ticket.request.content+=' changed';
+        if(fault==='digest')ticket.payload_sha256='0'.repeat(64);
+        if(fault==='target')ticket.target={...ticket.target,invocation_id:'foreign'};
+        result.stdout=JSON.stringify(reply);
+      }
+      return result;
+    };
+    await f.poll();await f.poll();
+    assert.equal(f.submissions.length,0,fault);
+    assert.equal(f.actions.filter(action=>action.kind==='recheck').length,1,fault);
+    assert.equal(f.actions.some(action=>['prepare_append','record_handoff'].includes(action.kind)),false,fault);
+  }
+});
+
+test('overlapping timer ticks cannot create a second submission',async()=>{
+  const f=await fixture();let release,entered;
+  const ready=new Promise(resolve=>{entered=resolve;});
+  const pending=new Promise(resolve=>{release=resolve;});
+  f.api.prompt.submit=async(value)=>{f.submissions.push(value);entered();await pending;return {text:value.text};};
+  const first=f.poll();await ready;await f.poll();assert.equal(f.submissions.length,1);release();await first;
+});
+
+test('retired exact attempts are never sent and do not block a later review',async()=>{
+  for(const state of ['unknown','failed','acknowledged']){
+    const f=await fixture(),run=f.api.process.run;let polls=0,checks=0,nextTicket;
+    f.api.process.run=async(argv,opts)=>{
+      const result=await run(argv,opts),action=JSON.parse(opts.stdin).action;
+      if(!action)return result;
+      const reply=JSON.parse(result.stdout);
+      if(action.kind==='recheck')reply.recorded_state=++checks===1?state:'dispatching';
+      if(action.kind==='recheck' && checks>1)reply.reservation=structuredClone(nextTicket);
+      if(action.kind==='poll' && ++polls===2){
+        const content='Second immutable review 雪';
+        reply.reservation={binding_id:'binding',target:reply.reference,reservation_id:'next-attempt',
+          request:{operation_id:'next-review',content},payload_sha256:createHash('sha256').update(content).digest('hex')};
+        nextTicket=structuredClone(reply.reservation);
+      }
+      result.stdout=JSON.stringify(reply);return result;
+    };
+    await f.poll();assert.equal(f.submissions.length,0,state);
+    await f.poll();await f.poll();assert.deepEqual(f.submissions,[{text:'Second immutable review 雪'}],state);
+    assert.equal(f.actions.find(a=>a.kind==='record_handoff').operation_id,'next-review');
+  }
+});
+
+test('a reserved attempt unexpectedly reported Accepted stops without native I/O',async()=>{
+  const f=await fixture(),run=f.api.process.run;
+  f.api.process.run=async(argv,opts)=>{
+    const result=await run(argv,opts);
+    if(JSON.parse(opts.stdin).action?.kind==='recheck'){
+      const reply=JSON.parse(result.stdout);reply.recorded_state='accepted';result.stdout=JSON.stringify(reply);
+    }
+    return result;
+  };
+  await f.poll();await f.poll();assert.equal(f.submissions.length,0);assert.equal(f.actions.length,2);
+});
+
+test('append hashes correlate the exact native envelope separately from the logical payload',async()=>{
+  const f=await fixture();await f.poll();
+  const prepared=f.actions.find(a=>a.kind==='prepare_append'),stored=f.actions.find(a=>a.kind==='record_append_stored');
+  assert.equal(prepared.intent.native_row_id,stored.native_row_id);
+  assert.equal(prepared.intent.native_source,'claude-code/2.1.296/session.append');
+  assert.notEqual(prepared.intent.framed_payload_sha256,createHash('sha256').update(f.content).digest('hex'));
+  assert.equal(prepared.intent.framed_payload_sha256,stored.stored.stored_payload_sha256);
+  assert.match(stored.stored.evidence_reference,new RegExp(`^claude-code:session:native:row:${stored.native_row_id}$`));
+});
+
+test('a downstream rewrite is recorded as a mismatch and cannot trigger another native attempt',async()=>{
+  const f=await fixture(),hook=f.hooks.get('session.append');let delegated=0;
+  f.hooks.set('session.append',(api,event,next)=>hook(api,event,traced(next,async(e)=>{
+    delegated++;return next({...e,message:{...e.message,content:[{type:'text',text:'changed downstream'}]}});
+  })));
+  await f.poll();await f.poll();
+  const prepared=f.actions.find(a=>a.kind==='prepare_append'),stored=f.actions.find(a=>a.kind==='record_append_stored');
+  assert.notEqual(prepared.intent.framed_payload_sha256,stored.stored.stored_payload_sha256);
+  assert.equal(f.submissions.length,1);assert.equal(delegated,1);
+  assert.equal(f.actions.at(-1).kind,'record_handoff');
+});
+
+test('unverified core storage cannot create a stored checkpoint or resend',async()=>{
+  for(const fault of ['missing','duplicate','foreign','skipped','rejected','expired','caught','uuid','door','agent','origin','input','output','result']){
+    const f=await fixture(),hook=f.hooks.get('session.append');let delegated=0;
+    f.hooks.set('session.append',(api,event,next)=>{
+      const wrapped=async(e)=>{
+        delegated++;
+        const result=await next(e),core=structuredClone(next.trace[0]);
+        wrapped.trace=[core];
+        if(fault==='missing')wrapped.trace=[];
+        if(fault==='duplicate')wrapped.trace.push(structuredClone(core));
+        if(fault==='foreign')core.plugin='competitor';
+        if(['skipped','rejected','expired','caught'].includes(fault))core.outcome=fault;
+        if(fault==='uuid')core.received.uuid=crypto.randomUUID();
+        if(fault==='door')core.received.door='note';
+        if(fault==='agent')core.received.agentId='child';
+        if(fault==='origin')core.received.origin.name='competitor';
+        if(fault==='input')core.received.message.content[0].text='changed input';
+        if(fault==='output')core.returned.message.content[0].text='changed stored row';
+        if(fault==='result')return {...result,message:{...result.message,content:[{type:'text',text:'forged return'}]}};
+        return result;
+      };
+      return hook(api,event,wrapped);
+    });
+    await f.poll();await f.poll();
+    assert.equal(delegated,1,fault);assert.equal(f.submissions.length,1,fault);
+    assert.equal(f.actions.filter(a=>a.kind==='prepare_append').length,1,fault);
+    assert.equal(f.actions.filter(a=>a.kind==='record_append_stored').length,0,fault);
+    assert.equal(f.actions.at(-1).kind,'record_handoff',fault);
+  }
+});
+
+test('matching passed core storage preserves the candidate without delivery promotion',async()=>{
+  const f=await fixture(),hook=f.hooks.get('session.append');
+  f.hooks.set('session.append',(api,event,next)=>{
+    const wrapped=async(e)=>{
+      const result=await next(e);
+      wrapped.trace=structuredClone(next.trace);wrapped.trace[0].outcome='passed';
+      return result;
+    };
+    return hook(api,event,wrapped);
+  });
+  await f.poll();await f.poll();
+  assert.equal(f.actions.filter(a=>a.kind==='record_append_stored').length,1);
+  assert.equal(f.actions.filter(a=>a.kind==='record_handoff').length,1);
+  assert.equal(f.submissions.length,1);
+});
+
+test('lost checkpoint responses never redelegate storage or resubmit the frozen review',async()=>{
+  for(const phase of ['prepare_append','record_append_stored']){
+    const f=await fixture(),run=f.api.process.run,hook=f.hooks.get('session.append');let delegated=0;
+    f.hooks.set('session.append',(api,event,next)=>hook(api,event,traced(next,async(e)=>{delegated++;return next(e);})));
+    f.api.process.run=async(argv,opts)=>{
+      const result=await run(argv,opts);
+      if(JSON.parse(opts.stdin).action?.kind===phase)throw Error('lost checkpoint commit reply');
+      return result;
+    };
+    await f.poll();await f.poll();assert.equal(f.submissions.length,1,phase);assert.equal(delegated,1,phase);
+    assert.equal(f.actions.filter(a=>a.kind===phase).length,1,phase);
+    assert.equal(f.actions.at(-1).kind,'record_handoff',phase);
+  }
+});
+
+test('foreign checkpoint replies stop capture without claiming another reservation',async()=>{
+  for(const field of ['native_row_id','reservation_id','payload']){
+    const f=await fixture(),run=f.api.process.run;
+    f.api.process.run=async(argv,opts)=>{
+      const result=await run(argv,opts);
+      if(JSON.parse(opts.stdin).action?.kind==='prepare_append'){
+        const reply=JSON.parse(result.stdout),checkpoint=reply.append_checkpoint;
+        if(field==='native_row_id')checkpoint.intent.native_row_id='foreign';
+        if(field==='reservation_id')checkpoint.reservation.reservation_id='foreign';
+        if(field==='payload')checkpoint.reservation.request.content='foreign';
+        result.stdout=JSON.stringify(reply);
+      }
+      return result;
+    };
+    await f.poll();await f.poll();assert.equal(f.submissions.length,1,field);
+    assert.equal(f.actions.filter(a=>a.kind==='record_append_stored').length,0,field);
+  }
+});
+
+test('foreign-origin and subagent rows are not associated with the in-flight review',async()=>{
+  for(const fault of ['origin','agent','framing']){
+    const f=await fixture(),hook=f.hooks.get('session.append');let delegated=0;
+    f.hooks.set('session.append',(api,event,next)=>{
+      if(fault==='origin')event={...event,origin:{kind:'plugin',name:'different-plugin'}};
+      if(fault==='agent')event={...event,agentId:'child'};
+      if(fault==='framing')event={...event,message:{...event.message,content:[{type:'text',text:'different envelope'}]}};
+      return hook(api,event,async(e)=>{delegated++;return next(e);});
+    });
+    await f.poll();await f.poll();assert.equal(f.submissions.length,1,fault);assert.equal(delegated,1,fault);
+    assert.equal(f.actions.filter(a=>a.kind==='prepare_append').length,0,fault);
+  }
+});
+
+test('a successful submit return without an append event remains unqualified and is not retried',async()=>{
+  const f=await fixture();
+  f.api.prompt.submit=async(value)=>{f.submissions.push(value);return {text:value.text};};
+  await f.poll();await f.poll();assert.equal(f.submissions.length,1);
+  assert.deepEqual(f.actions.map(a=>a.kind),['poll','recheck','record_handoff']);
+});
+
+test('unknown native framing versions refuse message-pump startup',async()=>{
+  for(const version of ['2.1.297','2.1.309','2.2.0'])
+    await assert.rejects(fixture({version}),/not qualified/);
+});
+
+for(const version of ['2.1.296','2.1.308']) test(`qualified ${version} shortened native labels keep full plugin provenance and exact payload hashing`,async()=>{
+  const f=await fixture({version,pluginName:'aikit-sdk-example-dfc261c6',nativeLabel:'aikit-sdk-example-dfc26…'});
+  await f.poll();await f.poll();
+  assert.equal(f.actions.filter(a=>a.kind==='prepare_append').length,1);
+  assert.equal(f.actions.filter(a=>a.kind==='record_append_stored').length,1);
+  assert.equal(f.submissions.length,1);
+  const returned=f.actions.find(a=>a.kind==='record_handoff').outcome.result;
+  assert.equal(returned.origin.name,'aikit-sdk-example-dfc261c6');
+});

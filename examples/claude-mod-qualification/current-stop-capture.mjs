@@ -1,0 +1,13 @@
+import fs from 'node:fs';
+import assert from 'node:assert/strict';
+const root='/home/node/evidence';
+const events=JSON.parse(fs.readFileSync(root+'/events.json'));
+const starts=events.filter(row=>row.kind==='session_start');assert.equal(starts.length,1);
+assert.equal(events.filter(row=>row.kind==='turn_complete').length,1);
+const sid=starts[0].value.sessionId;
+fs.copyFileSync('/home/node/.claude/projects/-home-node-workspace/'+sid+'.jsonl',root+'/native-transcript.jsonl',fs.constants.COPYFILE_EXCL);
+const managed='/etc/claude-code/managed-settings.json',stat=fs.statSync(managed);
+assert.equal(stat.uid,0);assert.equal(stat.mode&0o777,0o644);
+fs.copyFileSync(managed,root+'/actual-managed-settings.json',fs.constants.COPYFILE_EXCL);
+fs.writeFileSync(root+'/managed-ownership.json',JSON.stringify({uid:stat.uid,mode:stat.mode&0o777}));
+console.log(JSON.stringify({captured:true,session:sid}));

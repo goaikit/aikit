@@ -1,0 +1,14 @@
+# Credential-free native client qualification only, not a Codelaya deployment.
+FROM node:22-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8
+ARG CLAUDE_VERSION=2.1.296
+ARG CLAUDE_SHA256=24972e3bc859fab2b46ed4c1e51f7d6130f06d3bd550811a114640de3370d0de
+# Both values must be pinned for an alternate qualification candidate. Changing
+# the client never transfers the baseline's capability or acceptance evidence.
+RUN npm install --global "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+    && printf '%s  %s\n' "$CLAUDE_SHA256" '/usr/local/lib/node_modules/@anthropic-ai/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude' | sha256sum --check \
+    && test "$(claude --version)" = "${CLAUDE_VERSION} (Claude Code)" \
+    && mkdir -p /home/node/workspace \
+    && chown node:node /home/node/workspace
+USER node
+WORKDIR /home/node/workspace
+ENTRYPOINT ["claude"]

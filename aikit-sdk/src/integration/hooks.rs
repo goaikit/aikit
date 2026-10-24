@@ -42,6 +42,9 @@ pub struct HookRequest {
     /// repeated starts of the same session. Absent for unqualified adapters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
+    /// Owned module Turn identity/outcome. These are native claims, not credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_turn: Option<NativeTurn>,
     pub prompt_id: Option<String>,
     pub agent_id: Option<String>,
     pub event: HookEvent,
@@ -49,6 +52,30 @@ pub struct HookRequest {
     pub payload: AgentEventPayload,
     pub final_answer: Option<String>,
     pub stop_hook_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTurn {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<NativeTurnOutcome>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeTurnOutcome {
+    pub reason: NativeTurnReason,
+    pub is_aborted: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeTurnReason {
+    Answer,
+    Aborted,
+    Refusal,
+    Error,
 }
 
 pub trait HookHandler: Send + Sync {
@@ -68,11 +95,46 @@ pub struct HookResponse {
     pub request_id: Option<String>,
 }
 impl HookResponse {
-    fn failure() -> Self {
+    pub(super) fn failure(error: &IntegrationError) -> Self {
+        // Only fixed diagnostic codes cross the native boundary. Error details
+        // can contain caller data, paths or database contents and stay private.
+        let code = match error {
+            IntegrationError::Invalid(detail)
+                if detail == "owned native invocation context is missing or inconsistent" =>
+            {
+                "owned_context_invalid"
+            }
+            IntegrationError::Invalid(detail)
+                if matches!(
+                    detail.as_str(),
+                    "hook journal deadline expired" | "decision expired before delivery"
+                ) =>
+            {
+                "request_expired"
+            }
+            IntegrationError::Invalid(_) | IntegrationError::Json(_) => "native_input_invalid",
+            IntegrationError::Conflict(_) => "configuration_conflict",
+            IntegrationError::Sql(rusqlite::Error::SqliteFailure(error, _))
+                if matches!(
+                    error.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                "state_busy"
+            }
+            IntegrationError::Sql(_) => "state_storage_error",
+            IntegrationError::Io(_) => "local_io_error",
+            IntegrationError::NotFound => "record_missing",
+            IntegrationError::RecoveryRequired(_) => "installation_recovery_required",
+            IntegrationError::StaleSession => "session_replaced",
+            IntegrationError::Detached => "binding_detached",
+            IntegrationError::SessionEnded => "session_ended",
+            IntegrationError::UnknownAgent(_) | IntegrationError::Unsupported(_) => "unsupported",
+            IntegrationError::RequirementsUnmet(_) => "requirements_unmet",
+        };
         Self {
             stdout: String::new(),
-            stderr: "Integration validation unavailable; retry after restoring the local handler."
-                .into(),
+            stderr: format!("Integration validation unavailable [{code}]; inspect the installed integration before retrying."),
             exit_code: 2,
             request_id: None,
         }
@@ -109,7 +171,7 @@ impl IntegrationService {
     ) -> HookResponse {
         self.dispatch_hook(installation_id, input, handler)
             .await
-            .unwrap_or_else(|_| HookResponse::failure())
+            .unwrap_or_else(|error| HookResponse::failure(&error))
     }
 
     async fn dispatch_hook(
@@ -118,22 +180,188 @@ impl IntegrationService {
         input: &[u8],
         handler: &dyn HookHandler,
     ) -> Result<HookResponse, IntegrationError> {
+        self.dispatch_hook_with_environment(installation_id, input, handler, |key| {
+            std::env::var(key).ok()
+        })
+        .await
+    }
+
+    pub(super) async fn dispatch_hook_with_caller_policy(
+        &self,
+        installation_id: &str,
+        input: &[u8],
+        handler: &dyn HookHandler,
+        policy: Option<&super::NativeCallerPolicy>,
+    ) -> Result<HookResponse, IntegrationError> {
+        self.dispatch_hook_with_environment_and_policy(
+            installation_id,
+            input,
+            handler,
+            |key| std::env::var(key).ok(),
+            policy,
+            true,
+        )
+        .await
+    }
+
+    // Keep environment lookup inside the installed boundary. The private seam
+    // permits isolated tests without mutating process-global environment.
+    async fn dispatch_hook_with_environment(
+        &self,
+        installation_id: &str,
+        input: &[u8],
+        handler: &dyn HookHandler,
+        environment: impl FnOnce(&str) -> Option<String>,
+    ) -> Result<HookResponse, IntegrationError> {
+        self.dispatch_hook_with_environment_and_policy(
+            installation_id,
+            input,
+            handler,
+            environment,
+            None,
+            false,
+        )
+        .await
+    }
+
+    async fn dispatch_hook_with_environment_and_policy(
+        &self,
+        installation_id: &str,
+        input: &[u8],
+        handler: &dyn HookHandler,
+        environment: impl FnOnce(&str) -> Option<String>,
+        policy: Option<&super::NativeCallerPolicy>,
+        require_associated_policy: bool,
+    ) -> Result<HookResponse, IntegrationError> {
         let started = Instant::now();
         let installation = self.installed(installation_id)?;
         let installation_revision = self.installation_revision(installation_id)?;
-        let request = decode(&installation, input)?;
+        if require_associated_policy && policy.is_none() {
+            let associated: bool = self.connection()?.query_row(
+                "SELECT EXISTS(SELECT 1 FROM linux_native_callers c JOIN session_bindings b ON b.id=c.binding_id WHERE b.detached=0 AND json_extract(c.body,'$.reference.installation_id')=?1 AND json_extract(c.body,'$.reference.installation_revision')=?2)",
+                params![installation_id, installation_revision], |row| row.get(0),
+            )?;
+            if associated {
+                return Err(IntegrationError::Invalid(
+                    "native caller policy is required while associated handles remain attached"
+                        .into(),
+                ));
+            }
+        }
+        let mut request = decode(&installation, input)?;
+        // Claude keeps the owned module/invocation alive across /compact. Its
+        // classic SessionStart:compact is a context refresh, not a new epoch.
+        let source = if installation.spec.agent_key == "claude"
+            && request.event == HookEvent::SessionStarted
+        {
+            serde_json::from_slice::<Value>(input)?
+                .get("source")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        let compaction = installation.spec.agent_key == "claude"
+            && request.event == HookEvent::SessionStarted
+            && source.as_deref() == Some("compact");
+        if let Some(key) = self.agent_tool_environment_key(installation_id)? {
+            let value = environment(&key);
+            // Classic notifications can precede or follow the owned module's
+            // startup (clear follows it; resume can precede the native ID switch).
+            // They never establish authority. Only the module's source-less
+            // startup journals/binds the freshly published invocation. Preserve
+            // the existing missing-context deferral and compact validation.
+            let classic_start = installation.spec.agent_key == "claude"
+                && matches!(source.as_deref(), Some("startup" | "clear" | "resume"));
+            if request.event == HookEvent::SessionStarted
+                && !compaction
+                && (value.is_none() || classic_start)
+            {
+                return Ok(HookResponse {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    request_id: None,
+                });
+            }
+            super::agent_tool_session::bind_environment(
+                &installation,
+                &mut request,
+                value.as_deref(),
+            )?;
+        } else if matches!(
+            request.event,
+            HookEvent::NativeTurnStarted | HookEvent::NativeTurnFinished
+        ) {
+            return Err(IntegrationError::Invalid(
+                "native Turn observations require an owned module".into(),
+            ));
+        }
+        // Inspect before journaling or application policy. Provider-specific
+        // environment resolution lives in AIKit, never in consumer adapters.
+        #[cfg(target_os = "linux")]
+        let caller = policy
+            .filter(|_| request.event == HookEvent::SessionStarted && !compaction)
+            .map(|policy| policy.inspect(&installation.spec.agent_key))
+            .transpose()?;
+        #[cfg(not(target_os = "linux"))]
+        if let Some(policy) = policy {
+            policy.validate()?;
+            return Err(IntegrationError::Unsupported(
+                "physical native caller policy is not implemented for this provider/platform"
+                    .into(),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(policy) =
+            policy.filter(|_| request.event != HookEvent::SessionStarted || compaction)
+        {
+            let reference = self.session_for_hook(&request)?;
+            let binding = self.bind_existing(&reference)?;
+            binding.check_inspected_caller(&policy.inspect_binding(&binding)?)?;
+        }
+        if matches!(
+            request.event,
+            HookEvent::NativeTurnStarted | HookEvent::NativeTurnFinished
+        ) {
+            self.require_configured(&installation)?;
+        }
         let journal_body = serde_json::to_string(&journal_copy(&request))?;
         // Reserve response/commit time within the configured native process limit.
         let deadline = started
             + Duration::from_millis(u64::from(installation.spec.timeout_seconds) * 1000 - 250);
         {
             let mut connection = self.connection()?;
-            connection.busy_timeout(Duration::from_millis(100))?;
+            connection.busy_timeout(journal_write_budget(deadline)?)?;
             let tx =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            journal_write_budget(deadline)?;
+            if compaction && request.invocation_id.is_some() {
+                super::sessions::validate_current_invocation(
+                    &tx,
+                    &request,
+                    &installation_revision,
+                )?;
+                self.require_configured(&installation)?;
+                journal_write_budget(deadline)?;
+                // No synthetic SessionStart/baseline/decision is recorded. The
+                // current reference and all queued operation targets stay put.
+                return Ok(HookResponse {
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                    request_id: None,
+                });
+            }
             super::sessions::validate_invocation(&tx, &request, &installation_revision)?;
             tx.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,installation_revision) VALUES (?1,?2,?3,?4,?5)", params![request.id, installation_id, request.session_id, journal_body, installation_revision])?;
             tx.commit()?;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(caller) = caller.filter(|_| request.event == HookEvent::SessionStarted) {
+            let reference = self.session_for_hook(&request)?;
+            let binding = self.bind_existing(&reference)?;
+            binding.bind_inspected_caller(binding.snapshot_native_caller(caller)?)?;
         }
         let decision = if is_decision(request.event) {
             // A receipt proves what we installed, not what is still configured.
@@ -191,11 +419,23 @@ impl IntegrationService {
             self.require_configured(&installation)?;
         }
         if let Some(decision) = &decision {
+            // A timeout must still be able to publish the existing Block
+            // response in reserved commit/response time. Allow never gets it.
+            let decision_deadline = if matches!(decision, Decision::Allow) {
+                deadline
+            } else {
+                deadline + Duration::from_millis(250)
+            };
             let mut connection = self.connection()?;
-            connection.busy_timeout(Duration::from_millis(100))?;
+            connection.busy_timeout(journal_write_budget(decision_deadline)?)?;
             let tx =
                 connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            journal_write_budget(decision_deadline)?;
             super::sessions::validate_invocation(&tx, &request, &installation_revision)?;
+            // The acquisition can overlap an owned configuration edit. Recheck
+            // after it, without repeating application policy or the native call.
+            self.require_configured(&installation)?;
+            journal_write_budget(decision_deadline)?;
             // Append, never update an already visible cursor: a consumer may have
             // checkpointed the observation while the callback was still running.
             tx.execute("INSERT INTO hook_invocations(id,installation_id,session_id,body,decision,installation_revision) VALUES (?1,?2,?3,?4,?5,?6)", params![format!("{}:decision", request.id), installation_id, request.session_id, journal_body, serde_json::to_string(decision)?, installation_revision])?;
@@ -223,7 +463,12 @@ impl IntegrationService {
     }
 
     fn require_configured(&self, expected: &Installation) -> Result<(), IntegrationError> {
-        match self.installation_status(&expected.id)? {
+        // A returned message may still be committing while its native Turn
+        // starts. Wait only for the local file lock, then check fresh policy;
+        // never retry a callback, transaction body or native action. Original
+        // request/decision deadlines still account for this elapsed time.
+        let _lock = self.state_lock_with_wait(Duration::from_millis(250))?;
+        match self.status_inner(&self.connection()?, &expected.id)? {
             InstallationStatus::Configured { installation } if installation == *expected => Ok(()),
             _ => Err(IntegrationError::Conflict(
                 "owned hook configuration changed; restore or reconfigure the installation".into(),
@@ -298,6 +543,19 @@ impl IntegrationService {
     }
 }
 
+// Only SQLite writer acquisition waits. No transaction body, policy callback or
+// native action is retried. The original deadline and reserved response time
+// remain authoritative; admission guards retain their immediate-refusal policy.
+fn journal_write_budget(deadline: Instant) -> Result<Duration, IntegrationError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(IntegrationError::Invalid(
+            "hook journal deadline expired".into(),
+        ));
+    }
+    Ok(remaining.min(Duration::from_secs(1)))
+}
+
 fn is_decision(event: HookEvent) -> bool {
     matches!(
         event,
@@ -332,14 +590,37 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
         return Err(IntegrationError::Invalid("hook input exceeds 1 MiB".into()));
     }
     let value: Value = serde_json::from_slice(input)?;
-    let event = installation
-        .spec
-        .events
-        .iter()
-        .find(|event| {
-            value.get("hook_event_name").and_then(Value::as_str) == Some(event.claude_name())
+    let native_event = match value.get("aikit_native_turn_version") {
+        None => None,
+        Some(version) if version.as_u64() == Some(1) => {
+            match value.get("hook_event_name").and_then(Value::as_str) {
+                Some("AIKitNativeTurnStarted") => Some(HookEvent::NativeTurnStarted),
+                Some("AIKitNativeTurnFinished") => Some(HookEvent::NativeTurnFinished),
+                _ => {
+                    return Err(IntegrationError::Invalid(
+                        "invalid native Turn event".into(),
+                    ))
+                }
+            }
+        }
+        Some(_) => {
+            return Err(IntegrationError::Invalid(
+                "invalid native Turn version".into(),
+            ))
+        }
+    };
+    let event = native_event
+        .or_else(|| {
+            installation
+                .spec
+                .events
+                .iter()
+                .find(|event| {
+                    value.get("hook_event_name").and_then(Value::as_str)
+                        == Some(event.claude_name())
+                })
+                .copied()
         })
-        .copied()
         .ok_or_else(|| {
             IntegrationError::Invalid("event is not registered by this installation".into())
         })?;
@@ -380,7 +661,9 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
             started_at_ms: None,
         },
         _ => AgentEventPayload::Hook {
-            phase: if event == HookEvent::InputSubmitted {
+            phase: if event == HookEvent::NativeTurnStarted {
+                HookPhase::RunStart
+            } else if event == HookEvent::InputSubmitted {
                 HookPhase::BeforeModel
             } else {
                 HookPhase::RunEnd
@@ -393,8 +676,29 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
     };
     // StopFailure's similarly named field is an API error, not conversational
     // output. Neither that text nor arbitrary error details belong in replay.
-    let final_answer = if event == HookEvent::CompletionProposed {
-        optional_string(&value, "last_assistant_message", 512 * 1024)?
+    let final_answer =
+        if event == HookEvent::CompletionProposed || event == HookEvent::NativeTurnFinished {
+            optional_string(&value, "last_assistant_message", 512 * 1024)?
+        } else {
+            None
+        };
+    let native_turn = if native_event.is_some() {
+        let native: NativeTurn = serde_json::from_value(
+            value
+                .get("native_turn")
+                .cloned()
+                .ok_or_else(|| IntegrationError::Invalid("missing native Turn".into()))?,
+        )?;
+        if native.id.trim().is_empty()
+            || native.id.len() > 256
+            || native.id.contains('\0')
+            || (event == HookEvent::NativeTurnStarted) != native.outcome.is_none()
+        {
+            return Err(IntegrationError::Invalid(
+                "invalid native Turn observation".into(),
+            ));
+        }
+        Some(native)
     } else {
         None
     };
@@ -409,6 +713,7 @@ fn decode(installation: &Installation, input: &[u8]) -> Result<HookRequest, Inte
         installation_id: installation.id.clone(),
         session_id,
         invocation_id: None,
+        native_turn,
         prompt_id,
         agent_id,
         event,
