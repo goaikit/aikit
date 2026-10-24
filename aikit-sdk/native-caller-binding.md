@@ -14,9 +14,10 @@ bounded `read`/validation. The executable identity is independently owner-select
 never learned from request data or copied from the inspected process. AIKit owns
 provider/environment resolution; unsupported providers/platforms refuse explicitly.
 
-`IntegrationService::handle_hook_with_native_caller(..., policy)` inspects the
-real caller before journaling, associates an actual observed SessionStart before
-application projection, and checks the retained association for later callbacks.
+`IntegrationService::handle_hook_with_native_caller(..., policy)` discovers the
+real caller at startup before journaling, associates the actual SessionStart
+before application projection, and revalidates the original recorded process for
+later callbacks without requiring fresh inbox discovery.
 It preserves the existing deferred classic-start and compaction behavior.
 `SessionBinding::check_native_caller(policy)` checks callback correlation without
 granting mutation/idle admission. `admit_recorded_for_native_caller(cursor, wait,
@@ -76,9 +77,10 @@ after all attached handles/plans are resolved. Advancing admission floors uses
 the maximum existing/current cursor, so old observations cannot rebound. Retained
 messages, Unknown outcomes and history are preserved; no receipt is promoted.
 
-Codelaya still pins `d2b6224`/schema 15. Adoption must handle its agent-mutation
-and native-handoff recorded-admission call sites, plus controlled setup upgrade,
-before a pin bump. Background history lookup does not use these guards. A daemon
+Codelaya runtime `b0a4550` now adopts `4efaefd` at its agent-mutation and
+native-handoff boundaries, with optional owner policy and controlled setup
+upgrade from schema 15. Its [qualified consumer report](https://github.com/aroff/codelaya/blob/9de63e5/docs/native-caller-consumer.md)
+retains exact source scope. Background history lookup does not use these guards. A daemon
 cannot impersonate a native child merely by copying its socket address: perform
 the physical check at the actual native callback boundary. Do not replace these
 requirements with a managed agent or an unrelated inspector service.
@@ -127,7 +129,7 @@ or readiness requirement was weakened to obtain a pass.
 
 ## Existing Claude APIs and remaining gaps
 
-### Shutdown correction under qualification
+### Qualified shutdown correction
 
 The first Codelaya consumer trial at `9ffb3f8` passes completion repair, automatic
 same-session feedback and independent-caller refusal, but rejects normal
@@ -141,10 +143,32 @@ PID/birth, current UID, executable digest, boot and PID namespace. A copied
 record or socket address cannot manufacture that ancestry. Missing/changed facts,
 old generation and detached bindings still refuse; there is no recorded-only
 fallback. The explicit socket-inspection APIs retain their original behavior.
-No lifetime/idle or module-generation authority is granted. Nine focused Linux
-caller/binding tests pass; the earlier 196-pass gate retains its `9ffb3f8` scope.
-A fresh ordinary consumer run will independently trace inbox availability at End
-while delegating every decision to the actual CLI. Native qualification is pending.
+No lifetime/idle or module-generation authority is granted. At `4efaefd`, all
+**197 SDK integration tests** and **25 serial consumer cases** pass. Existing
+test warnings remain; this is not a full-workspace strict-lint or Windows gate.
+
+The fresh ordinary Linux consumer run at Codelaya `b0a4550` passes all twelve
+main scripted requests: repair/accepted completion, one owner review delivered
+to the original session, accepted follow-up, independent caller refusal without
+app changes, one actual End and unchanged cold app/SDK/process records. The
+source-hash-checked diagnostic wrapper delegates every decision to the real CLI.
+At End it observes **no socket-address environment variable**, while owned context
+remains present and the recorded native process is its parent. CLI exit is zero.
+This confirms unavailable inherited address metadata, not that the socket server
+itself had necessarily closed. The first failed End trial remains unaccepted.
+
+Eight altered-evidence checks reject missing End/context, changed original
+process, foreign input scope/frame, missing dispatch candidate, implicit version
+selection and changed cold app data. These are verifier checks, not eight native
+trials. Legacy verifier assumptions are retained: explicit wrapper-source-hash
+and append-version-two modes preserve strict default checks; runtime data and
+gateway setup were unchanged. Both Turns remain Completed, the frozen review
+and SDK receipt remain Unknown, and proof observation rows remain absent.
+
+The report links the protocol, source/binary/image/package hashes and private
+archive identity. Production status still refuses readiness/activation; full
+native session-generation/effective mandatory policy and independently durable
+acknowledgement/actual-input reconciliation remain unqualified. Windows is deferred.
 
 Official docs rechecked on 2026-10-24:
 
