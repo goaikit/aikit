@@ -12,6 +12,14 @@ The detailed historical evidence below retains its exact source/version scope.
 
 ## Current Claude API review, 2026-10-23
 
+2026-10-24 [current managed Stop comparison](../examples/claude-mod-qualification/current-stop-failure-20261024.md)
+rechecks the actual 2.1.308 executable: the existing managed guard defeats the
+tested user-tier competitor, but a missing or timed-out managed command still
+allows successful native completion. `onFailure:"block"` is explicitly ignored
+on Stop. This is a scoped N2 limitation of that path; qualify the existing mod
+fallback under worker loss and protected ordering before declaring a broader
+provider blocker. N1/N3 investigation and production readiness remain open.
+
 2026-10-24 installed-version review: [API-view provenance](claude-api-view-provenance.md)
 finds an AIKit gap that existing native traces can close: another mod can rewrite
 `session.messages` results. The generated observer now checks the genuine core

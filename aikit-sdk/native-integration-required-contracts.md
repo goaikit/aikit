@@ -123,6 +123,16 @@ does, implement/qualify its adapter rather than replacing it from scratch.
 
 ## Evidence already available and its limits
 
+Current 2.1.308 [managed Stop failure comparison](../examples/claude-mod-qualification/current-stop-failure-20261024.md)
+qualifies protection against the tested short-circuit competitor using the
+existing built-in managed guard. Corrected root-owned baseline Blocks then
+Allows; missing/timed-out commands still yield settled native core completion
+despite `onFailure:"block"`. Three earlier trials failed the ownership gate and
+remain retained. N2 is not closed for this exact command path; the separate
+owned mod fallback's worker loss/protected execution remains unqualified. This
+is not a claim that every native API lacks enforcement, or that Codelaya itself
+incorrectly completed a Turn. No capability or dependency pin changes follow.
+
 Claude Linux interactive 2.1.308 automatically discovers the owned directory at
 user tier without profile/marketplace installation. Bounded native consumer
 trials demonstrate authoring, repeated name/note Blocks, accepted completion,
