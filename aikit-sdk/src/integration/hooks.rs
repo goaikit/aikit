@@ -251,18 +251,32 @@ impl IntegrationService {
         let mut request = decode(&installation, input)?;
         // Claude keeps the owned module/invocation alive across /compact. Its
         // classic SessionStart:compact is a context refresh, not a new epoch.
-        let compaction = installation.spec.agent_key == "claude"
+        let source = if installation.spec.agent_key == "claude"
             && request.event == HookEvent::SessionStarted
-            && serde_json::from_slice::<Value>(input)?
+        {
+            serde_json::from_slice::<Value>(input)?
                 .get("source")
                 .and_then(Value::as_str)
-                == Some("compact");
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        let compaction = installation.spec.agent_key == "claude"
+            && request.event == HookEvent::SessionStarted
+            && source.as_deref() == Some("compact");
         if let Some(key) = self.agent_tool_environment_key(installation_id)? {
             let value = environment(&key);
-            // Native classic startup precedes module session.start. Defer this
-            // notification without journaling/binding; the owned module sends
-            // its own start through this handler after publishing its context.
-            if value.is_none() && request.event == HookEvent::SessionStarted && !compaction {
+            // Classic notifications can precede or follow the owned module's
+            // startup (clear follows it; resume can precede the native ID switch).
+            // They never establish authority. Only the module's source-less
+            // startup journals/binds the freshly published invocation. Preserve
+            // the existing missing-context deferral and compact validation.
+            let classic_start = installation.spec.agent_key == "claude"
+                && matches!(source.as_deref(), Some("startup" | "clear" | "resume"));
+            if request.event == HookEvent::SessionStarted
+                && !compaction
+                && (value.is_none() || classic_start)
+            {
                 return Ok(HookResponse {
                     stdout: String::new(),
                     stderr: String::new(),

@@ -138,6 +138,65 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn owned_classic_start_notifications_never_duplicate_or_create_an_invocation() {
+    let f = Fixture::new(10);
+    f.owned_module();
+    let epoch = uuid::Uuid::new_v4().to_string();
+    for source in ["startup", "clear", "resume"] {
+        let mut classic = f.input("SessionStart");
+        classic["source"] = json!(source);
+        let response = f.owned_hook(classic, Some(&epoch)).await.unwrap();
+        assert_eq!(response.exit_code, 0);
+        assert!(response.stdout.is_empty() && response.request_id.is_none());
+    }
+    assert!(f.service.events(&f.id, 0, 50).unwrap().records.is_empty());
+    f.owned_hook(f.input("SessionStart"), Some(&epoch))
+        .await
+        .unwrap();
+    let original = f.service.observed_session(&f.id, "native-session").unwrap();
+    for source in ["startup", "clear", "resume"] {
+        let mut classic = f.input("SessionStart");
+        classic["source"] = json!(source);
+        let response = f.owned_hook(classic, Some(&epoch)).await.unwrap();
+        assert!(response.request_id.is_none());
+        assert_eq!(
+            f.service.observed_session(&f.id, "native-session").unwrap(),
+            original
+        );
+        assert_eq!(f.service.events(&f.id, 0, 50).unwrap().records.len(), 1);
+    }
+    // The source-less module start still refuses an already used invocation.
+    assert!(matches!(
+        f.owned_hook(f.input("SessionStart"), Some(&epoch)).await,
+        Err(IntegrationError::StaleSession)
+    ));
+}
+
+#[tokio::test]
+async fn classic_start_deferral_is_not_input_admission_or_a_legacy_adapter_bypass() {
+    let legacy = Fixture::new(10);
+    let mut classic = legacy.input("SessionStart");
+    classic["source"] = json!("clear");
+    legacy.owned_hook(classic, None).await.unwrap();
+    assert_eq!(
+        legacy
+            .service
+            .events(&legacy.id, 0, 50)
+            .unwrap()
+            .records
+            .len(),
+        1,
+        "a legacy installation without an owned module retains its original behavior"
+    );
+    let f = Fixture::new(10);
+    f.owned_module();
+    let mut input = f.input("UserPromptSubmit");
+    input["source"] = json!("resume");
+    assert!(f.owned_hook(input, None).await.is_err());
+    assert!(f.service.events(&f.id, 0, 50).unwrap().records.is_empty());
+}
+
+#[tokio::test]
 async fn owned_claude_compaction_preserves_current_reference_without_a_synthetic_start() {
     let f = Fixture::new(10);
     f.owned_module();
@@ -167,7 +226,9 @@ async fn owned_claude_compaction_preserves_current_reference_without_a_synthetic
             super::super::SessionStatus::Observed
         );
     }
-    for source in ["startup", "resume", "clear", "fork", "unknown"] {
+    // Known classic notifications are no-authority deferrals, covered above.
+    // Unrecognized source values must still refuse invocation reuse.
+    for source in ["fork", "unknown"] {
         let mut input = f.input("SessionStart");
         input["source"] = json!(source);
         assert!(matches!(
