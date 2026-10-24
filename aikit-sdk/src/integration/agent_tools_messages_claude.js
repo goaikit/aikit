@@ -94,6 +94,21 @@ async function observeMessageAppend($, event, next) {
   const result = await next(event);
   if (prepared) try {
     if (result?.uuid !== intent.native_row_id) throw new Error('Native append result identity changed');
+    // A downstream return is not evidence that the engine stored this row.
+    // Check the actual settled core execution, including both input and output;
+    // keep the original intent so real stored rewrites remain visible as such.
+    const core = Array.isArray(next.trace) ? next.trace.filter(entry =>
+      entry?.plugin === 'engine' && entry.tier === 'core' && entry.event === 'session.append') : [];
+    if (core.length !== 1 || !['returned', 'passed'].includes(core[0].outcome))
+      throw new Error('Native append engine trace unavailable');
+    const received = core[0].received, storedRow = core[0].returned;
+    if (received?.uuid !== intent.native_row_id || received.door !== 'prompt'
+        || received.agentId !== undefined || received.origin?.kind !== 'plugin'
+        || received.origin.name !== config.pluginName || storedRow?.uuid !== intent.native_row_id
+        || storedRow.deny !== undefined || result.deny !== undefined
+        || appendText(received.message) !== appendText(result.message)
+        || appendText(storedRow.message) !== appendText(result.message))
+      throw new Error('Native append engine row changed');
     const stored = {stored_payload_sha256: await messageDigest(appendText(result.message)),
       evidence_reference: `claude-code:session:${messageContext.session_id}:row:${intent.native_row_id}`};
     const reply = await messageRpc($, {kind: 'record_append_stored', operation_id: ticket.request.operation_id,
