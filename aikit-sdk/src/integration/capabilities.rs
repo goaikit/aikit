@@ -200,6 +200,11 @@ fn report(
         && architecture == "x86_64"
         && mode == SessionMode::Interactive
         && version_output.as_deref() == Some("2.1.296 (Claude Code)");
+    let claude_dispatch_provenance_gap = agent_key == "claude"
+        && platform == "linux"
+        && architecture == "x86_64"
+        && mode == SessionMode::Interactive
+        && version_output.as_deref() == Some("2.1.308 (Claude Code)");
     let pi_boundary_gap = agent_key == "pi"
         && platform == "windows"
         && architecture == "x86_64"
@@ -251,6 +256,7 @@ fn report(
                 RepeatedCompletionBlocking => (true, Support::Unknown, "Effective continuation limits and competing settings are not attested. A bounded scenario with an explicit unlimited setting does not prove unconditional enforcement."),
                 CompletionDecision | FinalAnswerCapture | FailedCompletionObservation => (true, Support::Unknown, "Adapter exists, but this version/platform/mode has no matching native qualification scenario."),
                 SuccessfulCompletionObservation => (true, Support::Unknown, "Owned Claude modules forward correlated native Turn start/outcome observations through the existing journal, retaining answer/abort/refusal/error. An application must correlate the latest authorized proposal and unchanged evidence. Native outcome delivery, competing hooks, protected caller identity and this host/version/mode remain unqualified; Stop Allow and SessionEnd are insufficient."),
+                MessageReconciliation if claude_dispatch_provenance_gap => (false, Support::Unsupported, "Recorded Linux x86_64 Claude Code 2.1.308 interactive experiment: a turn.step handler supplied text and usage without a main-loop model request. Native core traces distinguished that omission, but the observed core trace supplied no exact input witness or durable operation receipt. Separate title requests also carried the prompt and are not consumption by the target Turn. Existing append/handoff records remain candidates; qualified acknowledgement, consumption and lookup-only reconciliation are unavailable. Other versions/platforms/modes remain separately unqualified."),
                 MessageSubmission | MessageReconciliation => (false, Support::Unsupported, "Existing-session native message transport and receipt reconciliation are not implemented. Managed session transports are a different topology."),
                 NativeSessionIdentity => (true, Support::Unknown, "Owned Claude tool modules publish a fresh invocation ID into installation-scoped inherited process context and bootstrap a matching recorded SessionStart. Existing binding/journal checks reject observed old invocations. Controlled Linux startup matches tool/native session and recorded generation; this is not native process authentication, liveness, proof against an unseen delayed start, or Windows qualification."),
                 HardHookDeadline if claude_stop_chain_bypass => (true, Support::Unknown, "Recorded Linux x86_64 Claude Code 2.1.296 interactive counterexample with the built-in guard active: a missing command and a command cancelled at the native Stop timeout both reached successful native completion. Claude explicitly ignored onFailure:block on Stop. A matched command Block forced continuation. Guard/configuration attestation alone does not establish fail-closed native completion on handler failure. Other versions/platforms/modes remain separately unqualified."),
@@ -275,6 +281,93 @@ fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_dispatch_diagnostic_is_scoped_and_never_grants_reconciliation() {
+        for (platform, architecture, mode, version, matches) in [
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.308 (Claude Code)",
+                true,
+            ),
+            (
+                "windows",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.308 (Claude Code)",
+                false,
+            ),
+            (
+                "macos",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.308 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "aarch64",
+                SessionMode::Interactive,
+                "2.1.308 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Print,
+                "2.1.308 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Unknown,
+                "2.1.308 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.309 (Claude Code)",
+                false,
+            ),
+            (
+                "linux",
+                "x86_64",
+                SessionMode::Interactive,
+                "2.1.296 (Claude Code)",
+                false,
+            ),
+        ] {
+            let report = report("claude", platform, architecture, mode, Ok(version.into()));
+            let error = report
+                .require(&[IntegrationCapability::MessageReconciliation])
+                .unwrap_err();
+            assert_eq!(error.unmet.len(), 1);
+            assert!(!error.unmet[0].implemented);
+            assert_eq!(error.unmet[0].support, Support::Unsupported);
+            assert_eq!(
+                error.unmet[0].detail.contains("Separate title requests"),
+                matches
+            );
+            assert!(report
+                .require(&[IntegrationCapability::MessageSubmission])
+                .is_err());
+        }
+        let unavailable = report(
+            "claude",
+            "linux",
+            "x86_64",
+            SessionMode::Interactive,
+            Err("probe failed".into()),
+        );
+        let error = unavailable
+            .require(&[IntegrationCapability::MessageReconciliation])
+            .unwrap_err();
+        assert!(!error.unmet[0].detail.contains("Separate title requests"));
+    }
     #[test]
     fn claude_stop_chain_counterexample_is_scoped_and_never_promotes_enforcement() {
         for (platform, architecture, mode, version, matches) in [

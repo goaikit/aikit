@@ -10,6 +10,14 @@ existing native primitive to reject downstream short-circuit/contradictory core
 outcomes before forwarding them. This closes a concrete observer code gap; it
 does not supply a whole-chain configuration witness or finish N1–N3.
 
+The [current native dispatch probe](../examples/claude-dispatch-qualification/README.md)
+confirms that core traces distinguish a real main-loop request from synthetic
+handler text/usage. Its broad no-HTTP-send premise failed because separate native
+title requests contained the same prompt; that failure is retained. The core
+trace still supplies no exact input witness or durable operation receipt in this
+capture. Extend the existing provenance primitive; do not request it as though
+no native trace API exists, or promote title input to target-Turn consumption.
+
 ## Existing public surface to reuse
 
 - `IntegrationService` installation planner/journal, capability reports,
