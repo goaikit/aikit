@@ -28,6 +28,10 @@ pub struct MessageHandoffRecord {
 }
 
 pub const MESSAGE_BRIDGE_PAYLOAD_LIMIT: usize = 64 * 1024;
+/// Bounded JSON result space includes worst-case escaping of the logical payload.
+/// These are transport limits, not an increase to the 64 KiB message capacity.
+pub const MESSAGE_BRIDGE_RESULT_LIMIT: usize = 512 * 1024;
+pub const MESSAGE_BRIDGE_ENVELOPE_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,11 +106,11 @@ impl RecordedMessageRequest {
     pub fn read(reader: impl Read) -> Result<Self, IntegrationError> {
         let mut bytes = Vec::new();
         reader
-            .take(super::AGENT_TOOL_CALL_LIMIT as u64 + 1)
+            .take(MESSAGE_BRIDGE_ENVELOPE_LIMIT as u64 + 1)
             .read_to_end(&mut bytes)?;
-        if bytes.len() > super::AGENT_TOOL_CALL_LIMIT {
+        if bytes.len() > MESSAGE_BRIDGE_ENVELOPE_LIMIT {
             return Err(IntegrationError::Invalid(
-                "message bridge envelope exceeds 128 KiB".into(),
+                "message bridge envelope exceeds 1 MiB".into(),
             ));
         }
         let frame: Self = serde_json::from_slice(&bytes)?;
@@ -584,7 +588,7 @@ impl SessionBinding<'_> {
 fn validate_handoff(outcome: &MessageHandoffOutcome) -> Result<(), IntegrationError> {
     match outcome {
         MessageHandoffOutcome::Returned { result }
-            if serde_json::to_vec(result)?.len() <= 98304 =>
+            if serde_json::to_vec(result)?.len() <= MESSAGE_BRIDGE_RESULT_LIMIT =>
         {
             Ok(())
         }

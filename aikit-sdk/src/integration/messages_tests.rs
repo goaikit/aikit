@@ -1264,7 +1264,7 @@ async fn recorded_bridge_bounds_fail_before_reservation_and_frames_cannot_choose
     json["database"] = json!("arbitrary.db");
     assert!(RecordedMessageRequest::read(json.to_string().as_bytes()).is_err());
     assert!(RecordedMessageRequest::read(
-        vec![b'x'; super::super::AGENT_TOOL_CALL_LIMIT + 1].as_slice()
+        vec![b'x'; super::super::MESSAGE_BRIDGE_ENVELOPE_LIMIT + 1].as_slice()
     )
     .is_err());
     json.as_object_mut().unwrap().remove("database");
@@ -1476,7 +1476,7 @@ async fn uncertain_handoff_and_schema_ten_upgrade_preserve_original_operation() 
     );
     if let RecordedMessageAction::RecordHandoff { outcome, .. } = &mut frame.action {
         *outcome = MessageHandoffOutcome::Returned {
-            result: json!("x".repeat(98305)),
+            result: json!("x".repeat(super::super::MESSAGE_BRIDGE_RESULT_LIMIT)),
         };
     }
     assert!(RecordedMessageRequest::read(serde_json::to_vec(&frame).unwrap().as_slice()).is_err());
@@ -1489,6 +1489,93 @@ async fn uncertain_handoff_and_schema_ten_upgrade_preserve_original_operation() 
         .unwrap()
         .acknowledgement
         .is_none());
+}
+
+#[tokio::test]
+async fn escaped_maximum_message_return_crosses_stdio_and_reopens_without_delivery_promotion() {
+    use crate::integration::{
+        MessageHandoffOutcome, RecordedMessageAction, RecordedMessageRequest,
+        MESSAGE_BRIDGE_PAYLOAD_LIMIT, MESSAGE_BRIDGE_RESULT_LIMIT,
+    };
+    let f = bridge_fixture().await;
+    let binding = f.binding();
+    let content = "\0".repeat(MESSAGE_BRIDGE_PAYLOAD_LIMIT);
+    binding
+        .stage_message(MessageRequest {
+            operation_id: "escaped".into(),
+            content: content.clone(),
+        })
+        .unwrap();
+    let ticket = binding.reserve_message("escaped").unwrap();
+    let result = json!({"text":content,"origin":{"kind":"plugin","name":"fixture"}});
+    let result_bytes = serde_json::to_vec(&result).unwrap().len();
+    assert!(result_bytes > 98304 && result_bytes < MESSAGE_BRIDGE_RESULT_LIMIT);
+    let (frame, env) = bridge_frame(
+        &f,
+        RecordedMessageAction::RecordHandoff {
+            operation_id: "escaped".into(),
+            reservation_id: ticket.reservation_id.clone(),
+            outcome: MessageHandoffOutcome::Returned {
+                result: result.clone(),
+            },
+        },
+    );
+    let bytes = serde_json::to_vec(&frame).unwrap();
+    assert!(bytes.len() > 128 * 1024);
+    let decoded = RecordedMessageRequest::read(bytes.as_slice()).unwrap();
+    f.service
+        .recorded_message_with_context(&f.installation, decoded, Some(&env))
+        .unwrap();
+    let reopened = IntegrationService::open(f.dir.path().join("state")).unwrap();
+    let binding = reopened.binding(binding.id()).unwrap();
+    let handoff = binding.message_handoff("escaped").unwrap().unwrap();
+    assert_eq!(handoff.reservation, ticket);
+    assert_eq!(handoff.outcome, MessageHandoffOutcome::Returned { result });
+    let receipt = binding.message_status("escaped").unwrap();
+    assert_eq!(receipt.state, MessageState::Unknown);
+    assert!(
+        receipt.acknowledgement.is_none()
+            && receipt.consumption.is_none()
+            && receipt.failure.is_none()
+    );
+    assert!(binding
+        .message_observations("escaped", 0, 100)
+        .unwrap()
+        .records
+        .is_empty());
+    assert!(binding.reserve_message("escaped").is_err());
+}
+
+#[tokio::test]
+async fn recorded_message_json_bounds_accept_exact_limits_and_reject_the_next_byte() {
+    use crate::integration::{
+        MessageHandoffOutcome, RecordedMessageAction, RecordedMessageRequest,
+        MESSAGE_BRIDGE_ENVELOPE_LIMIT, MESSAGE_BRIDGE_RESULT_LIMIT,
+    };
+    let f = bridge_fixture().await;
+    let (mut frame, _) = bridge_frame(
+        &f,
+        RecordedMessageAction::RecordHandoff {
+            operation_id: "bound".into(),
+            reservation_id: "attempt".into(),
+            outcome: MessageHandoffOutcome::Returned {
+                result: json!("x".repeat(MESSAGE_BRIDGE_RESULT_LIMIT - 2)),
+            },
+        },
+    );
+    let encoded = serde_json::to_vec(&frame).unwrap();
+    assert!(RecordedMessageRequest::read(encoded.as_slice()).is_ok());
+    let mut exact = encoded.clone();
+    exact.resize(MESSAGE_BRIDGE_ENVELOPE_LIMIT, b' ');
+    assert!(RecordedMessageRequest::read(exact.as_slice()).is_ok());
+    exact.push(b' ');
+    assert!(RecordedMessageRequest::read(exact.as_slice()).is_err());
+    if let RecordedMessageAction::RecordHandoff { outcome, .. } = &mut frame.action {
+        *outcome = MessageHandoffOutcome::Returned {
+            result: json!("x".repeat(MESSAGE_BRIDGE_RESULT_LIMIT - 1)),
+        };
+    }
+    assert!(RecordedMessageRequest::read(serde_json::to_vec(&frame).unwrap().as_slice()).is_err());
 }
 
 #[tokio::test]

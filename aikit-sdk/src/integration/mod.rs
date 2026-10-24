@@ -51,7 +51,8 @@ pub use message_append::{
 };
 pub use message_bridge::{
     MessageHandoffOutcome, MessageHandoffRecord, RecordedMessageAction, RecordedMessageReply,
-    RecordedMessageRequest, MESSAGE_BRIDGE_PAYLOAD_LIMIT,
+    RecordedMessageRequest, MESSAGE_BRIDGE_ENVELOPE_LIMIT, MESSAGE_BRIDGE_PAYLOAD_LIMIT,
+    MESSAGE_BRIDGE_RESULT_LIMIT,
 };
 pub use messages::{
     MessageEvidence, MessageObservation, MessagePage, MessageProof, MessageReceipt, MessageRequest,

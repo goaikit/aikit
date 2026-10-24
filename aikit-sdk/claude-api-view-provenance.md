@@ -1,5 +1,9 @@
 # Claude API-view provenance, 2026-10-24
 
+Subsequent [JSON-capacity correction](message-json-capacity.md) addresses a separate
+native maximum-payload return that existing size caps discarded. Message capacity
+stays 64 KiB; bounded result/envelope capacity grows to preserve JSON escaping.
+
 Gate follow-up: a diagnostic-only Codex fixture change retains nonzero response
 details. Its isolated test passes; a subsequent complete integration gate,
 serially without concurrent builds, passes **180/180** in 30.24 seconds. No

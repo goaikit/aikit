@@ -280,6 +280,9 @@ pub(super) fn render_with_message_handler(
     let config = json!({"applicationId":spec.application_id,"installationId":spec.installation_id,"pluginName":name,"toolName":spec.tool_name,"description":spec.description,
         "schema":spec.input_schema,"instructions":spec.instructions,"contextName":format!("{name}-instructions"),
         "argv":argv,"timeoutMs":spec.timeout_ms,
+        "messagePayloadLimit":super::MESSAGE_BRIDGE_PAYLOAD_LIMIT,
+        "messageResultLimit":super::MESSAGE_BRIDGE_RESULT_LIMIT,
+        "messageEnvelopeLimit":super::MESSAGE_BRIDGE_ENVELOPE_LIMIT,
         "sessionArgv": session_handler.map(|handler| std::iter::once(handler.executable.to_string_lossy().into_owned()).chain(handler.arguments.clone()).collect::<Vec<_>>()),
         "messageArgv": message_handler.map(|handler| std::iter::once(handler.executable.to_string_lossy().into_owned()).chain(handler.arguments.clone()).collect::<Vec<_>>())});
     let messaging = message_handler.is_some();

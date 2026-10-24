@@ -9,11 +9,12 @@ let sequence=0;
 function traced(next,run) {
   return Object.defineProperty(run,'trace',{get:()=>next.trace});
 }
-async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabel=pluginName}={}) {
+async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabel=pluginName,content='Exact\n雪\u0000feedback'}={}) {
   const hooks=new Map(),actions=[],submissions=[],timers=[];
   let invocation, sid='native', ready=true, pending=false, busy=false, checkpoint;
   const config={applicationId:'fixture',installationId:'install',pluginName,toolName:'review',description:'Fixture',
-    schema:{type:'object'},instructions:'',sessionArgv:['session-handler'],argv:['tools'],messageArgv:['messages','fixed'],timeoutMs:1000};
+    schema:{type:'object'},instructions:'',sessionArgv:['session-handler'],argv:['tools'],messageArgv:['messages','fixed'],timeoutMs:1000,
+    messagePayloadLimit:65536,messageResultLimit:524288,messageEnvelopeLimit:1048576};
   const source=base.replace('/* AIKIT_MESSAGE_HELPERS */',helper)
     .replace('/* AIKIT_MESSAGE_LIFECYCLE */','registerMessageLifecycle(on);')
     .replace('/* AIKIT_MESSAGE_START */','await startMessagePump($);')
@@ -22,7 +23,6 @@ async function fixture({version='2.1.296',pluginName='fixture-plugin',nativeLabe
     .replace('/* AIKIT_CONFIG */null',JSON.stringify(config));
   const module=await import('data:text/javascript,'+encodeURIComponent(source)+`#${++sequence}`);
   module.register((name,...args)=>{hooks.set(name,args.at(-1));return {catch(){}};});
-  const content='Exact\n雪\u0000feedback';
   const api={session:{id:async()=>sid,cwd:async()=>'/workspace',version:async()=>({version})},
     env:{set:async(_,value)=>{invocation=JSON.parse(value).native_context.invocation_id;}},
     process:{run:async(argv,opts)=>{
@@ -269,6 +269,28 @@ test('one exact native call retains raw return without consumption or resend',as
   assert.deepEqual(f.actions.map(a=>a.kind),['poll','recheck','prepare_append','record_append_stored','record_handoff','poll']);
   const report=f.actions[4];assert.equal(report.operation_id,'review');assert.equal(report.reservation_id,'attempt');
   assert.deepEqual(report.outcome,{kind:'returned',result:{text:f.content,origin:{kind:'plugin',name:'fixture-plugin'}}});
+});
+
+test('maximum escaped UTF-8 payload retains the full raw return and stays one attempt',async()=>{
+  for(const content of ['"'.repeat(65532)+'雪x','\0'.repeat(65536)]){
+    assert.equal(Buffer.byteLength(content),65536);
+    const f=await fixture({version:'2.1.308',content});await f.poll();await inputStep(f);await f.poll();
+    const handoffs=f.actions.filter(action=>action.kind==='record_handoff');assert.equal(handoffs.length,1);
+    assert.equal(handoffs[0].outcome.kind,'returned');assert.equal(handoffs[0].outcome.result.text,content);
+    assert(Buffer.byteLength(JSON.stringify(handoffs[0].outcome.result))>98304);
+    assert.equal(f.actions.filter(action=>action.kind==='record_input_dispatched').length,1);
+    assert.equal(f.submissions.length,1);
+  }
+});
+
+test('genuinely oversized native results retain uncertainty and cannot resend',async()=>{
+  const f=await fixture();f.api.prompt.submit=async(value)=>{
+    f.submissions.push(value);return {text:'x'.repeat(524289)};
+  };
+  await f.poll();await f.poll();
+  const handoff=f.actions.find(action=>action.kind==='record_handoff');
+  assert.deepEqual(handoff.outcome,{kind:'uncertain',reason:'native_receipt_unavailable'});
+  assert.equal(f.submissions.length,1);
 });
 test('uncertain native call is never retried, even after more ticks',async()=>{
   const f=await fixture();let calls=0;

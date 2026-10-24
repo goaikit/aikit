@@ -41,7 +41,7 @@ async function messageRpc($, action) {
   if (!sameMessageContext(native)) throw new Error('Native message context changed');
   const stdin = JSON.stringify({schema_version: 1, application_id: config.applicationId,
     installation_id: config.installationId, agent_key: 'claude', native_context: native, action});
-  if (messageBytes(stdin).length > 131072) throw new Error('Message envelope exceeds limit');
+  if (messageBytes(stdin).length > config.messageEnvelopeLimit) throw new Error('Message envelope exceeds limit');
   const result = await $.process.run(config.messageArgv, {stdin, timeoutMs: config.timeoutMs});
   if (result.exitCode !== 0 || result.isStdoutTruncated !== false || result.isStderrTruncated !== false
       || typeof result.stdout !== 'string' || messageBytes(result.stdout).length > 1048576)
@@ -249,7 +249,7 @@ async function pollMessages($) {
           || typeof ticket.reservation_id !== 'string' || !ticket.reservation_id
           || typeof ticket.request?.operation_id !== 'string' || !ticket.request.operation_id
           || typeof ticket.request.content !== 'string' || !ticket.request.content
-          || messageBytes(ticket.request.content).length > 65536
+          || messageBytes(ticket.request.content).length > config.messagePayloadLimit
           || await messageDigest(ticket.request.content) !== ticket.payload_sha256)
         throw new Error('Message reservation unavailable');
     }
@@ -280,7 +280,7 @@ async function pollMessages($) {
     try {
       const result = await $.prompt.submit({text: ticket.request.content});
       const raw = JSON.stringify(result);
-      if (typeof raw !== 'string' || messageBytes(raw).length > 98304)
+      if (typeof raw !== 'string' || messageBytes(raw).length > config.messageResultLimit)
         outcome = {kind: 'uncertain', reason: 'native_receipt_unavailable'};
       else outcome = {kind: 'returned', result};
     } catch {
@@ -306,6 +306,9 @@ async function startMessagePump($) {
   if (!['2.1.296', '2.1.308'].includes(version?.version) || typeof config.pluginName !== 'string'
       || !/^[a-z0-9-]{1,35}$/.test(config.pluginName))
     throw new Error('Native append framing is not qualified for this client version');
+  if (config.messagePayloadLimit !== 65536 || config.messageResultLimit !== 524288
+      || config.messageEnvelopeLimit !== 1048576)
+    throw new Error('Message transport bounds are not qualified');
   messageProviderVersion = version.version;
   messageActive = false;
   $.clock.every(250, async () => pollMessages($));
