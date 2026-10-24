@@ -84,7 +84,18 @@ export function register(on) {
   on('turn.complete', async ($, event, next) => {
     // A proposal/Allow is never an outcome. Observe only the completed native
     // chain, retain abort/refusal/error, and never retry a failed observation.
+    const observed = event.agentId === undefined && config.sessionArgv;
+    if (observed && (next?.origin?.plugin !== 'engine' || next.origin.tier !== 'core'))
+      throw new Error('Native completion requires an engine dispatch');
     const result = await next(event);
+    if (observed) {
+      const core = Array.isArray(next.trace) ? next.trace.filter(entry =>
+        entry?.plugin === 'engine' && entry.tier === 'core' && entry.event === 'turn.complete') : [];
+      if (core.length !== 1 || !['returned', 'passed'].includes(core[0].outcome)
+          || !core[0].received || ['turnId', 'agentId', 'reason', 'isAborted', 'answer']
+            .some(key => core[0].received[key] !== event[key]))
+        throw new Error('Native completion engine trace is missing or changed');
+    }
     await observeTurn($, event, true);
     /* AIKIT_MESSAGE_IDLE */
     return result;

@@ -85,7 +85,10 @@ test('busy native interval defers a retained reservation until idle',async()=>{
   await f.hooks.get('turn.start')(f.api,{turnId:'human'},async()=>({}));await f.poll();
   assert.equal(f.actions.filter(a=>a.kind==='poll').length,1);
   f.setReady(true);
-  await f.hooks.get('turn.complete')(f.api,{turnId:'human',reason:'answer',isAborted:false,answer:'done'},async()=>({}));
+  const event={turnId:'human',reason:'answer',isAborted:false,answer:'done'};
+  const next=async()=>{next.trace=[{plugin:'engine',tier:'core',event:'turn.complete',outcome:'returned',received:event}];return {};};
+  next.origin={plugin:'engine',tier:'core'};
+  await f.hooks.get('turn.complete')(f.api,event,next);
   await f.poll();assert.equal(f.submissions.length,1);
 });
 test('a new main Turn during recheck prevents native I/O',async()=>{

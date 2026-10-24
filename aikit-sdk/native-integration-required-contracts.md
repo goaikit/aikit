@@ -5,6 +5,11 @@ Track under [draft PR #196](https://github.com/goaikit/aikit/pull/196); this
 repository has issues disabled. This requests reusable SDK/provider work, not a
 new application policy framework. Nothing here promotes a capability.
 
+The [completion trace implementation](native-completion-trace.md) now uses an
+existing native primitive to reject downstream short-circuit/contradictory core
+outcomes before forwarding them. This closes a concrete observer code gap; it
+does not supply a whole-chain configuration witness or finish N1–N3.
+
 ## Existing public surface to reuse
 
 - `IntegrationService` installation planner/journal, capability reports,
