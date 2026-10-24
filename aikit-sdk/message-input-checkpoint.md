@@ -117,3 +117,27 @@ Twenty-one altered-evidence checks pass. No new unit/build/Windows result is
 claimed. [Exact protocol, sessions, hashes and retained harness issues](https://github.com/aroff/codelaya/blob/5ab9259/docs/native-input-competitors.md).
 This verifies the existing guard in those cases; interruption, context-size and
 arbitrary late-mutation/effective-policy qualification remain incomplete.
+
+## In-flight input interruption and original-session resume
+
+Codelaya [qualification source `69fe14d`](https://github.com/aroff/codelaya/commit/69fe14d)
+uses the same unchanged runtime `8ff3d89` / application binaries `39e706a` in one
+fresh ordinary native 2.1.308 session. After initial authoring and manual idle
+compaction, the controlled endpoint receives the first actual feedback request,
+reads the committed version-two input preparation and holds its response. The
+verified isolated container receives SIGKILL 483 ms after that held-request marker.
+
+Cold inspection precedes all application/native restarts and retains the exact
+preparation, stored row and one already-returned handoff, with no dispatch or
+proof observation. App/SDK were already Unknown at this later boundary. The
+same native session resumes under a new invocation without a work prompt;
+unfinished work becomes Incomplete/recovery, original Completed work and all
+review/checkpoint bytes stay unchanged, and no model request or resend occurs.
+Normal exit preserves the state. Nineteen altered-evidence checks pass, including
+duplicate frozen native rows and invented dispatch/proof/replay.
+
+[Exact protocol, timing, identities, hashes and scope](https://github.com/aroff/codelaya/blob/69fe14d/docs/native-input-recovery.md).
+This is one deployment-supervised process-loss window, not arbitrary power loss,
+native receipt authority, continued new work after recovery or Windows acceptance.
+No runtime/schema/capability grant changes; acknowledgement/consumption/readiness
+remain unqualified. Context-size and effective-handler controls remain open.

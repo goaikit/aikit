@@ -7,6 +7,14 @@ new application policy framework. Nothing here promotes a capability.
 
 ## Current API investigation, 2026-10-24
 
+The [in-flight input interruption run](message-input-checkpoint.md#in-flight-input-interruption-and-original-session-resume)
+now verifies version-two preparation survives supervised process loss and
+original-session resume without an invented dispatch or resend. The already
+Unknown review stays Unknown; interrupted work becomes Incomplete/recovery.
+This qualifies one current implementation window, with acknowledgement/consumption
+and production capability still unqualified. It is not evidence of an absent
+provider API or a substitute for the remaining size/context/policy matrix.
+
 The [native competing-handler comparison](message-input-checkpoint.md#competing-handler-matrix-on-the-same-runtime)
 qualifies the candidate guard against two specific later handlers on 2.1.308:
 changed step effort and synthetic text/usage do not create a matching dispatch
