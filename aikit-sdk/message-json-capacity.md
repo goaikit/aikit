@@ -57,8 +57,9 @@ genuine oversized-result uncertainty. Existing oversized-result tests now use
 the new explicit bound, preserving their negative assertion. No timeout or
 native policy requirement was relaxed. Existing Rust guard/rustfmt warnings remain.
 
-Fresh matching consumer/native qualification of the fix is still required;
-the baseline above uses the old limits. Native Windows checks remain deferred.
+At the initial size-only checkpoint, fresh matching consumer/native qualification
+was still required; the baseline above uses the old limits. The combined native
+follow-up below completes that bounded comparison. Windows checks remain deferred.
 Local consumer evidence/logs: `.local/payload-native-20261024/`.
 
 ## Admission follow-up after retained consumer failures
@@ -91,3 +92,18 @@ for policy callbacks; its two new tests cover short contention without input
 replay and budget exhaustion without a Turn. Fresh combined native qualification
 remains required. These local contention fixes are not a claim that the earlier
 native failures' exact causes have all been established.
+
+## Fresh combined native consumer qualification
+
+Codelaya's [complete report](https://github.com/aroff/codelaya/blob/feat/windows-local-workflow/docs/native-payload-boundary.md)
+pins runtime `9cdc7ab` and reuses bounded workspace acquisition for policy. Forty
+serial scoped consumer tests and matching Linux builds pass. A fresh ordinary
+interactive native session completes authoring, compaction, the maximum frozen
+review, original-session feedback and normal exit/cold reopen. All nine main
+requests and the exact frame/input candidate correlate; the complete 130934-byte
+result survives the 131414-byte callback envelope. Unknown and absent native
+acknowledgement/consumption/proof remain unchanged. Eight final evidence mutations
+pass, sixteen with the old-limit baseline. No failed/blocked callback is recorded
+by the corrected diagnostic. Earlier native and parallel Pi test failures remain
+retained; a clean run does not establish all their causes or qualify the full
+failure/context/policy/Windows matrix. No native capability is promoted.
