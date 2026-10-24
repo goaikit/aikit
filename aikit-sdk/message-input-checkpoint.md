@@ -1,5 +1,11 @@
 # Operation-correlated native input candidates
 
+Later [native request-boundary comparison](claude-request-snapshot-boundary.md)
+shows that an earlier handler can append a row visible in the observer's pre-read
+but absent from the already-frozen main request. This is a concrete limit on
+arbitrary API-view/core correlation, not a false receipt in this candidate-only
+implementation. Do not promote these checkpoints without request-bound proof.
+
 Current follow-up: [API-view provenance guard](claude-api-view-provenance.md)
 requires a matching genuine core read before using an API snapshot. Earlier
 native results below retain their original runtime scope.

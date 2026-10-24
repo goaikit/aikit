@@ -7,6 +7,15 @@ new application policy framework. Nothing here promotes a capability.
 
 ## Current API investigation, 2026-10-24
 
+The [earlier-handler native comparison](claude-request-snapshot-boundary.md)
+demonstrates a pre-delegation API snapshot containing a real stored row absent
+from that exact main request, despite genuine core dispatch. Pre/post snapshot
+timing alone cannot qualify exact-input consumption. The existing SDK correctly
+retains candidates/Unknown. The report inspects the exact exported types and
+proposes tightening the existing read to a request-bound view; it does not claim
+all provider APIs are absent or add a replacement transport. Codelaya now wires
+the existing stored-history lookup separately; this does not resolve N1/N3.
+
 [Actual native API/history reuse](native-api-reuse-20261024.md) verifies a kernel
 socket peer fact, a durable append UUID and an existing stored-review lookup
 path. AIKit already has a HistoryReader; its Claude dependency had a leaf-selector

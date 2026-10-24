@@ -1,7 +1,7 @@
 // Independent evidence reader. Never invokes Claude or changes a saved trial.
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
-export function verify(root){
+export function verify(root,{early=false}={}){
   const read=name=>fs.readFileSync(`${root}/${name}`,'utf8');
   const json=name=>JSON.parse(read(name));
   const events=json('input-events.json');
@@ -18,7 +18,7 @@ export function verify(root){
     assert.equal(before[i].session_id,session);assert.equal(after[i].session_id,session);
     assert.deepEqual(before[i].event,after[i].event);assert.equal(before[i].event.index,0);
     assert.equal(before[i].event.agentId,undefined);
-    assert.equal(contains(before[i].messages,late),false);
+    assert.equal(contains(before[i].messages,late),early&&i===1);
     const core=after[i].trace.filter(row=>row.plugin==='engine'&&row.tier==='core'&&row.event==='turn.step');
     assert.equal(core.length,1);assert(['returned','passed'].includes(core[0].outcome));
     assert.deepEqual(core[0].received,before[i].event);
@@ -53,13 +53,14 @@ export function verify(root){
   assert.equal(rows[0].sessionId,session);assert(contains([rows[0].message],late));
   assert.deepEqual(json('settings-before.json'),json('settings-after.json'));
   const debug=read('native-debug.log');
-  assert(debug.includes('hooks module input-observer@input-qualification loaded (worker, environment 1, tier prepend)'));
-  assert(debug.includes('hooks module input-shortcut@input-qualification loaded (worker, environment 2, tier user)'));
+  const loaded=(name,tier)=>new RegExp(`hooks module ${name}@input-qualification loaded \\(worker, environment [0-9]+, tier ${tier}\\)`).test(debug);
+  assert(loaded('input-observer',early?'user':'prepend'));
+  assert(loaded('input-shortcut',early?'prepend':'user'));
   assert(!debug.includes('hook failed: input-'));assert(!debug.includes('input-shortcut: turn.step hook skipped'));
   return {passed:true,session,native_version:'2.1.308',main_requests:2,other_requests:requests.length-2,
-    pre_snapshot_excludes_late_row:true,late_row_stored:true,post_snapshot_contains_unsent_row:true,
+    pre_snapshot_excludes_late_row:!early,late_row_stored:true,post_snapshot_contains_unsent_row:true,
     late_row_sent_to_this_main_request:false,core_trace_present_for_both:true,
-    pre_snapshot_plus_core_supported_for_this_trial:true,production_consumption_qualified:false,windows_qualified:false};
+    pre_snapshot_plus_core_supported_for_this_trial:!early,production_consumption_qualified:false,windows_qualified:false};
 }
 if(process.argv[1]?.replaceAll('\\','/').endsWith('/verify.mjs'))
-  console.log(JSON.stringify(verify(process.argv[2]),null,2));
+  console.log(JSON.stringify(verify(process.argv[2],{early:process.argv[3]==='--early'}),null,2));

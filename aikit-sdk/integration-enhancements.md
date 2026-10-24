@@ -1,5 +1,11 @@
 # External-session integration gaps
 
+Current native input finding: [request snapshot boundary](claude-request-snapshot-boundary.md).
+An earlier handler's stored row appears in the pre-read API view but not that
+main request. Extend/fix the existing request-bound read contract before treating
+API snapshots as consumption; current records remain candidates/Unknown. This
+is a scoped limitation of tested surfaces, not blanket provider API absence.
+
 These are implementation requests backed by local source inspection and bounded
 native evidence. They are not promises of supported behavior. AIKit owns native
 translation and qualification; consumer applications keep their own review rules.

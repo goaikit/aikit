@@ -1,5 +1,16 @@
 # Claude main-input snapshot comparison
 
+Follow-up: [earlier-handler protocol](early-protocol.md) and
+[native result / request-bound API proposal](../../aikit-sdk/claude-request-snapshot-boundary.md).
+Reversing handler order makes the pre snapshot include the late row even though
+the same real main request excludes it. The earlier result below remains scoped
+to its own ordering; do not generalize pre-read/core correlation into proof.
+
+To reproduce the follow-up, explicitly override the image entrypoint to a shell,
+run `prepare-early.mjs` in a fresh profile, then use the same two prompts. After
+normal exit/capture, pass `--early` to both verifier scripts. The updated verifier
+also retains the original default mode.
+
 ## Observed result, 2026-10-24
 
 One fresh ordinary interactive Linux Claude 2.1.308 session:

@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import {verify} from './verify.mjs';
-const original=process.argv[2];verify(original);
+const original=process.argv[2],options={early:process.argv[3]==='--early'};verify(original,options);
 const mutateJson=(root,file,change)=>{
   const name=path.join(root,file),value=JSON.parse(fs.readFileSync(name));change(value);fs.writeFileSync(name,JSON.stringify(value));
 };
@@ -20,10 +20,20 @@ const cases={
     fs.writeFileSync(file,rows.map(row=>JSON.stringify(row)).join('\n')+'\n');
   },
   'foreign native session':root=>mutateJson(root,'input-events.json',events=>{events.find(row=>row.kind==='before').value.session_id='foreign';}),
+  'wrong pre snapshot':root=>mutateJson(root,'input-events.json',events=>{
+    const value=events.filter(row=>row.kind==='before')[1].value;
+    if(options.early)value.messages=value.messages.filter(row=>!JSON.stringify(row).includes('AIKIT_INPUT_LATE_雪'));
+    else value.messages.push({role:'user',content:'AIKIT_INPUT_LATE_雪'});
+  }),
+  'wrong native tier':root=>{
+    const file=path.join(root,'native-debug.log'),name=options.early?'input-shortcut':'input-observer';
+    const pattern=new RegExp(`(hooks module ${name}@input-qualification loaded \\(worker, environment [0-9]+, tier )prepend\\)`);
+    fs.writeFileSync(file,fs.readFileSync(file,'utf8').replace(pattern,'$1user)'));
+  },
 };
 for(const [name,change] of Object.entries(cases)){
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'aikit-input-evidence-'));
   fs.cpSync(original,root,{recursive:true,filter:source=>path.basename(source)!=='latest'});
-  change(root);assert.throws(()=>verify(root),assert.AssertionError,name);
+  change(root);assert.throws(()=>verify(root,options),assert.AssertionError,name);
 }
 console.log(JSON.stringify({passed:true,altered_evidence_checks:Object.keys(cases).length,native_trials:0}));
