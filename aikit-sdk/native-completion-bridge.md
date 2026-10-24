@@ -1,5 +1,15 @@
 # Opt-in native completion bridge candidate
 
+The subsequent full [Codelaya bridge worker-replacement run](https://github.com/aroff/codelaya/blob/8b52ff0/docs/native-worker-replacement.md)
+executes the actual generated module and application after policy Allow, with
+SDK actually seated at prepend tier. Native replacement invokes this module's
+catch; missing in-memory Turn context blocks and the consumer preserves
+Incomplete/recovery instead of accepting the prior Allow. One earlier automatic
+loading trial failed that intended ordering premise and is retained separately.
+This closes one full-module N2 safety case. The later native abort cannot be
+journaled because the Turn identity was lost; fresh owner work and outcome
+recovery after replacement remain to qualify. Runtime/capabilities are unchanged.
+
 Current 2.1.308 [mod budget and worker recovery probes](../examples/claude-mod-qualification/current-mod-failure-20261024.md)
 reuse this source's exact constant fallback. Native budget expiry and actual
 wedged-worker replacement both invoke it, propagate Block into the next request

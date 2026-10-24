@@ -123,6 +123,14 @@ does, implement/qualify its adapter rather than replacing it from scratch.
 
 ## Evidence already available and its limits
 
+The current [full consumer worker-replacement report](https://github.com/aroff/codelaya/blob/8b52ff0/docs/native-worker-replacement.md)
+adds one after-Allow N2 safety case with unchanged generated SDK/application:
+the host invokes the SDK catch after replacement, lost Turn context blocks, and
+the durable consumer Turn remains Incomplete/recoverable with no ending snapshot.
+The later abort is not journaled because the module lost Turn identity. Preserve
+that explicit outcome-observation gap; do not reconstruct completion authority
+from the retained Allow. Fresh owner work after replacement remains to qualify.
+
 Current 2.1.308 [mod budget/worker recovery](../examples/claude-mod-qualification/current-mod-failure-20261024.md)
 demonstrates an existing solution for two N2 failure primitives: native timeout
 and actual wedged-worker replacement invoke the exact constant SDK fallback,

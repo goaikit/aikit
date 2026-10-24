@@ -12,6 +12,14 @@ The detailed historical evidence below retains its exact source/version scope.
 
 ## Current Claude API review, 2026-10-23
 
+2026-10-24 [full-module consumer follow-up](https://github.com/aroff/codelaya/blob/8b52ff0/docs/native-worker-replacement.md)
+qualifies worker replacement after actual application Allow: the existing SDK
+catch answers, the reloaded module blocks missing Turn context, and recovery
+preserves Incomplete. Native final-outcome journaling after context loss and
+fresh owner work remain open. This narrows the remaining integration work; no
+generic worker-recovery provider feature or new runtime interface is justified
+by these results. N1/N3 and production/Windows qualification remain unchanged.
+
 2026-10-24 [mod failure follow-up](../examples/claude-mod-qualification/current-mod-failure-20261024.md)
 qualifies exact constant SDK fallback execution on native 10000 ms budget
 expiry and actual heartbeat-triggered hooks-worker replacement. Both Block,
