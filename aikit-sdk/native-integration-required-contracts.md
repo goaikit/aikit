@@ -7,6 +7,13 @@ new application policy framework. Nothing here promotes a capability.
 
 ## Current API investigation, 2026-10-24
 
+The [continued-work follow-on](message-input-checkpoint.md#continued-work-and-distinct-new-feedback-after-recovery)
+verifies current binding admission for explicit new owner work and a distinct new
+review in the recovered native session. Original history and uncertain target
+remain unchanged; fresh native Name/Note/completion and new feedback succeed.
+This closes a healthy functional-path gap through existing APIs without granting
+production receipt authority or changing the remaining size/policy/Windows gates.
+
 The [in-flight input interruption run](message-input-checkpoint.md#in-flight-input-interruption-and-original-session-resume)
 now verifies version-two preparation survives supervised process loss and
 original-session resume without an invented dispatch or resend. The already

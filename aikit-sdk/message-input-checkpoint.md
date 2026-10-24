@@ -141,3 +141,26 @@ This is one deployment-supervised process-loss window, not arbitrary power loss,
 native receipt authority, continued new work after recovery or Windows acceptance.
 No runtime/schema/capability grant changes; acknowledgement/consumption/readiness
 remain unqualified. Context-size and effective-handler controls remain open.
+
+## Continued work and distinct new feedback after recovery
+
+Codelaya [qualification source `0f44323`](https://github.com/aroff/codelaya/commit/0f44323)
+continues in that same recovered native session/store with unchanged SDK `8ff3d89`
+and application binaries `39e706a`. A new explicit owner prompt creates a fresh
+binding under the current invocation of the original native session. Native
+context/name/Write/fresh-note/completion succeed, then a distinct new owner CLI
+review receives complete same-session feedback and accepted completion.
+
+The original Completed and Incomplete records and old Unknown review remain
+exact, including old target/reservation/row/handoff/pending input. The new review
+has a separate target binding/current invocation and matching input candidate.
+Nine actual main requests and twelve altered-evidence checks pass. Final history
+is Completed, Incomplete, Completed, Completed; both reviews remain Unknown.
+No manual binding, authority restoration, reinstall or uncertain resend was used.
+
+[Exact protocol, identities, hashes and retained verifier-premise failure](https://github.com/aroff/codelaya/blob/0f44323/docs/continued-work-after-recovery.md).
+Normalized input events retain correlation IDs rather than raw prompt bytes;
+the verifier uses actual transcript/HTTP bytes plus the allowed event/Turn ID.
+This closes that bounded functional qualification gap. Context-size, effective
+configuration, qualified receipt/reconciliation and Windows remain incomplete.
+No runtime/schema/readiness grant or new Rust/build result is claimed.
