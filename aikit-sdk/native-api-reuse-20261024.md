@@ -63,6 +63,63 @@ matching string nor stored history is authoritative main-loop consumption.
 Preserve N1/N3 Unknown until the required facts are established. No new generic
 identity API, daemon, message state machine or provider transport is introduced.
 
+## Reusable history correlation follow-up
+
+`integration::inspect_message_history_page` now correlates an existing
+`MessageAppendCheckpoint` with typed `HistoryReader` metadata and one message
+page. It requires the original session, exact canonical workspace path and
+logical payload digest, and compares every matching preallocated row UUID with
+the full provider-frame SHA-256. Changed text, subagent lineage and a non-user
+role are reported as nonmatching candidates. Duplicate UUIDs remain separate;
+the caller must not choose the first successful-looking match. The bounded
+inspector accepts at most 1,000 rows / 16 MiB serialized per page.
+
+This reuses existing canonical history types and append checkpoints. It adds no
+native parser, transport, receipt state, storage schema or automatic resend.
+Enable `integration,history` for copied-page inspection; `claude-sdk` supplies
+the existing real Claude reader. The thin `inspect_message_history` example
+accepts the retained checkpoint and `integration_history_read` output. The
+application's pinned integration-only dependency is still not wired to this
+lookup, and this helper is not an authenticated native receipt resolver.
+
+Linux qualification: the three focused inspector regressions and all **188
+integration library tests pass**, serial, locked/offline on Rust 1.88. The thin
+example builds and finds exactly one candidate at page index 26 with the full
+frame hash in the retained native review transcript. It reads the actual
+version-two checkpoint from `worker-live-20261024/databases-cold.json`, with no
+new native prompt, send or database write. Output SHA-256:
+`04d2c2d10fa1409d2f004164e846d49c4d1f723f12b7bcef573d572934477dfe`.
+Logs and copied checkpoint remain in `.local/history-reuse-20261024`.
+Existing unused-must-use test warnings remain; no strict full-monorepo lint or
+new consumer/package qualification is claimed. An initial format invocation
+used a nonexistent config path and failed; the corrected build completed before
+the native-data inspection ran.
+
+### Existing Claude surfaces reviewed again
+
+Official documentation checked on 2026-10-24:
+
+- [Hook failures and chain ordering](https://code.claude.com/docs/en/plugins/mods/events#handle-a-hook-that-fails):
+  `.catch` supplies fallback behavior, but failure of that fallback skips the
+  hook. Ordered middleware and earlier short-circuits must still be qualified.
+  This corroborates the existing constant fallback implementation; it does not
+  prove a mandatory chain remains effective under every failure.
+- [Session events and API methods](https://code.claude.com/docs/en/plugins/mods/reference):
+  `session.append`, `session.messages`, `turn.step` and `session.authorize` are
+  existing investigation surfaces. `session.messages` retains at most the
+  newest 4,096 entries; absence there is not proof of nondelivery.
+- [Session messaging](https://code.claude.com/docs/en/plugins/mods/api#send-and-receive-messages-between-sessions):
+  `session.send` success describes queuing; `session.receive` precedes Claude
+  reading and may consume a message. Sender names are not authenticated. These
+  are useful primitives, not independent durable model-consumption receipts.
+
+The remaining items are **qualification gaps**, not a demonstrated absence of
+Claude APIs: authenticate the native invocation/configuration and correlate
+retained append/input evidence with an independent durable acceptance and
+consumption source. Inspect the exact build's types and exercise candidate APIs
+before requesting a provider enhancement. Do not relax readiness in the interim.
+Windows checks remain deferred; no owner configuration or credentials change.
+
 ## Qualification and retained preparation failures
 
 - Claude SDK Linux Rust 1.88 full tests: **187 passed / 5 live ignored**;

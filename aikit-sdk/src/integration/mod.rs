@@ -16,6 +16,8 @@ mod codex_messages;
 mod command;
 mod cursor;
 mod hooks;
+#[cfg(feature = "history")]
+mod history_messages;
 mod install;
 mod message_append;
 mod message_bridge;
@@ -39,6 +41,10 @@ pub use codex_messages::{
 pub use hooks::{
     Decision, DecisionFuture, HandlerError, HookHandler, HookPage, HookRecord, HookRequest,
     HookResponse, NativeTurn, NativeTurnOutcome, NativeTurnReason,
+};
+#[cfg(feature = "history")]
+pub use history_messages::{
+    inspect_message_history_page, MessageHistoryInspection, MessageHistoryMatch,
 };
 pub use install::{
     AgentToolFileChange, AppliedInstallationGuard, CompletionBlockingPolicy, HookCommand,

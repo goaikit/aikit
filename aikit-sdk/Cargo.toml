@@ -99,5 +99,9 @@ name = "integration_history_read"
 required-features = ["claude-sdk"]
 
 [[example]]
+name = "inspect_message_history"
+required-features = ["integration", "history"]
+
+[[example]]
 name = "inspect_codex_message"
 required-features = ["integration"]
