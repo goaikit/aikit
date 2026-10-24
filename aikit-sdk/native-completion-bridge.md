@@ -1,5 +1,13 @@
 # Opt-in native completion bridge candidate
 
+The latest [live-session continuation](https://github.com/aroff/codelaya/blob/ac4a21d/docs/native-worker-live-recovery.md)
+qualifies fresh owner work and a new review after replacement without restarting
+the ordinary native CLI. Original work remains Incomplete; fresh work and
+feedback complete under the replacement invocation. One retained handoff stays
+Unknown. HTTP projection was performed after exit, explicitly not a live UI
+settlement claim. The missing old-abort observation and N1/N3 remain open;
+runtime/capabilities are unchanged.
+
 The subsequent full [Codelaya bridge worker-replacement run](https://github.com/aroff/codelaya/blob/8b52ff0/docs/native-worker-replacement.md)
 executes the actual generated module and application after policy Allow, with
 SDK actually seated at prepend tier. Native replacement invokes this module's

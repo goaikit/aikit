@@ -123,6 +123,14 @@ does, implement/qualify its adapter rather than replacing it from scratch.
 
 ## Evidence already available and its limits
 
+The [live replacement-session follow-up](https://github.com/aroff/codelaya/blob/ac4a21d/docs/native-worker-live-recovery.md)
+adds actual fresh owner work plus one new review without a native CLI restart.
+Old Incomplete history is unchanged; two new Turns have native accepted outcomes
+under the replacement invocation. SDK retains one Unknown handoff with no proof
+promotion. Existing sidecar reconciliation after exit projects the application
+review and matching HTTP history; live UI settlement was not exercised. This
+closes the scoped fresh-work question, not missing old-outcome recovery or N1/N3.
+
 The current [full consumer worker-replacement report](https://github.com/aroff/codelaya/blob/8b52ff0/docs/native-worker-replacement.md)
 adds one after-Allow N2 safety case with unchanged generated SDK/application:
 the host invokes the SDK catch after replacement, lost Turn context blocks, and
