@@ -7,6 +7,14 @@ new application policy framework. Nothing here promotes a capability.
 
 ## Current API investigation, 2026-10-24
 
+The [native competing-handler comparison](message-input-checkpoint.md#competing-handler-matrix-on-the-same-runtime)
+qualifies the candidate guard against two specific later handlers on 2.1.308:
+changed step effort and synthetic text/usage do not create a matching dispatch
+observation. A matched unchanged control does. Synthetic unnamed completion is
+blocked and repaired normally; its later requests never replace the original
+prepared step. All operations remain Unknown. This closes scoped qualification,
+not production receipt/reconciliation or arbitrary handler-policy enforcement.
+
 The [operation-correlated input candidate implementation](message-input-checkpoint.md)
 now reuses the existing append record and public message bridge to retain a
 pre-dispatch snapshot digest and a separate matching settled-core observation.

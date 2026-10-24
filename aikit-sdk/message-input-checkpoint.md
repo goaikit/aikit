@@ -93,3 +93,27 @@ and one compact request. The corresponding stale-index mutation-helper failure
 is also retained and corrected. No native submitted state was repaired.
 These are still candidates: app/SDK remain Unknown with no acknowledgement,
 consumption, native receipt qualification, readiness or Windows promotion.
+
+## Competing-handler matrix on the same runtime
+
+Codelaya [qualification source `5ab9259`](https://github.com/aroff/codelaya/commit/5ab9259)
+uses unchanged runtime `8ff3d89` / application binaries `39e706a`. Three fresh
+ordinary native 2.1.308 sessions keep the generated SDK at user tier, independent
+observer at prepend tier and a controlled competitor at append tier. Actual
+native logs and traces verify this placement.
+
+- An unchanged delegated step retains preparation and matching dispatch.
+- A first feedback step rewritten from medium to low effort reaches real core
+  dispatch and HTTP input, but cannot attest the original prepared event. The
+  SDK retains preparation without a matching dispatch observation.
+- A synthetic first step supplies text/usage without `next`, so no main request
+  or core trace exists for it. The SDK retains only preparation. Native completion
+  blocks the unnamed answer; later genuine requests repair and complete the same
+  Turn, without substituting their dispatch for the original step-zero candidate.
+
+All reviews stay Unknown with one frozen handoff and no acknowledgement,
+consumption, proof observation or resend. Live/exit/post-shutdown records agree.
+Twenty-one altered-evidence checks pass. No new unit/build/Windows result is
+claimed. [Exact protocol, sessions, hashes and retained harness issues](https://github.com/aroff/codelaya/blob/5ab9259/docs/native-input-competitors.md).
+This verifies the existing guard in those cases; interruption, context-size and
+arbitrary late-mutation/effective-policy qualification remain incomplete.
